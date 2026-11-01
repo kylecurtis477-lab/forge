@@ -2619,10 +2619,48 @@ def compile_slice(line):
     e3("push $", str(uline(line)), "")
     call_internal("__slice", 4)
 
+def any_method(name):
+    c = 0
+    while c < nclass:
+        if method_of(c, name) >= 0:
+            return 1
+        c += 1
+    return 0
+
+def str_format_call():
+    # receiver in %rax; "(args)" -> __sfmt(recv, [key-or-0, value, ...])
+    global pos, ety
+    e("push %rax")
+    expect("(")
+    n = 0
+    while not is_op(")"):
+        if is_kwarg(pos):
+            e3("lea ", emit_str(tv[pos]), "(%rip), %rax")
+            e("push %rax")
+            pos += 2
+        else:
+            e("push $0")
+        expr()
+        e("push %rax")
+        n += 2
+        if is_op(","):
+            pos += 1
+        elif not is_op(")"):
+            die(cur_line(), "expected ',' or ')' in call")
+    pos += 1
+    build_list(n)
+    e("push %rax")
+    call_internal("__sfmt", 2)
+    ety = T_STR
+
 def method_call(name, line):
     # receiver in %rax, pos at '('
     global ety
     global argf, argskip
+    rt = ety
+    if str_eq(name, "format") and (rt == T_STR or (rt <= 10 and not any_method(name))):
+        str_format_call()
+        return 0
     rt = ety
     e("push %rax")
     f = -1
@@ -3321,6 +3359,8 @@ def stmt():
                 conflict_ret()
             if curf >= 0 and fret[curf] == T_INT and ety == T_BOOL:
                 e("and $1, %eax")
+            elif curf >= 0 and fret[curf] == T_INT and ety == 0:
+                unbool()
             try_unwind(0)
             e2("jmp ", lab(retlab))
             end_stmt()

@@ -1095,43 +1095,315 @@ def __find(s, sub, start: int) -> int:
         i += 1
     return -1
 
-def find(s, sub) -> int:
-    return __find(s, sub, 0)
+def find(s, sub, start=0) -> int:
+    if start < 0:
+        start = start + __aux(s)
+        if start < 0:
+            start = 0
+    return __find(s, sub, start)
 
-def startswith(s, p) -> int:
+def rfind(s, sub) -> int:
+    n: int = __aux(s)
+    m: int = __aux(sub)
+    i: int = n - m
+    while i >= 0:
+        j: int = 0
+        while j < m and char_at(s, i + j) == char_at(sub, j):
+            j += 1
+        if j == m:
+            return i
+        i -= 1
+    return -1
+
+def rindex(s, sub) -> int:
+    i: int = rfind(s, sub)
+    if i < 0:
+        raise ValueError("substring not found")
+    return i
+
+def partition(s, sep):
+    i: int = __find(s, sep, 0)
+    if i < 0:
+        return __tup([s, "", ""])
+    return __tup([substr(s, 0, i), sep, substr(s, i + __aux(sep), __aux(s))])
+
+def rpartition(s, sep):
+    i: int = rfind(s, sep)
+    if i < 0:
+        return __tup(["", "", s])
+    return __tup([substr(s, 0, i), sep, substr(s, i + __aux(sep), __aux(s))])
+
+def __pad(s, w: int, fill, mode: int) -> str:
+    n: int = __aux(s)
+    if w <= n:
+        return s
+    k: int = w - n
+    if mode == 0:
+        return concat(s, __strmul(fill, k))
+    if mode == 1:
+        return concat(__strmul(fill, k), s)
+    left: int = k // 2
+    if k % 2 == 1 and w % 2 == 1:
+        left += 1
+    return concat(concat(__strmul(fill, left), s), __strmul(fill, k - left))
+
+def ljust(s, w, fill=" ") -> str:
+    return __pad(s, w, fill, 0)
+
+def rjust(s, w, fill=" ") -> str:
+    return __pad(s, w, fill, 1)
+
+def center(s, w, fill=" ") -> str:
+    return __pad(s, w, fill, 2)
+
+def zfill(s, w) -> str:
+    n: int = __aux(s)
+    if w <= n:
+        return s
+    if n > 0 and (char_at(s, 0) == 45 or char_at(s, 0) == 43):
+        return concat(concat(substr(s, 0, 1), __strmul("0", w - n)), substr(s, 1, n))
+    return concat(__strmul("0", w - n), s)
+
+def __isup(c: int) -> int:
+    return c >= 65 and c <= 90
+
+def __islo(c: int) -> int:
+    return c >= 97 and c <= 122
+
+def __chcase(s, mode: int) -> str:
+    # 0 title, 1 capitalize, 2 swapcase
+    n: int = __aux(s)
+    r = substr(s, 0, n)
+    prev: int = 0
+    i: int = 0
+    while i < n:
+        c: int = char_at(r, i)
+        up: int = 0
+        lo: int = 0
+        if mode == 0:
+            up = not prev
+            lo = prev
+        elif mode == 1:
+            up = i == 0
+            lo = i > 0
+        else:
+            up = __islo(c)
+            lo = __isup(c)
+        if up and __islo(c):
+            set_byte(r, i, c - 32)
+        elif lo and __isup(c):
+            set_byte(r, i, c + 32)
+        prev = __isup(c) or __islo(c)
+        i += 1
+    return r
+
+def title(s) -> str:
+    return __chcase(s, 0)
+
+def capitalize(s) -> str:
+    return __chcase(s, 1)
+
+def swapcase(s) -> str:
+    return __chcase(s, 2)
+
+def __allc(s, k: int) -> int:
+    n: int = __aux(s)
+    if n == 0:
+        return 0
+    cased: int = 0
+    i: int = 0
+    while i < n:
+        c: int = char_at(s, i)
+        if k == 0:
+            if not (__isup(c) or __islo(c) or (c >= 48 and c <= 57)):
+                return 0
+        elif k == 1:
+            if not (__isspace(c) or c == 11 or c == 12):
+                return 0
+        elif k == 2:
+            if __islo(c):
+                return 0
+            if __isup(c):
+                cased = 1
+        else:
+            if __isup(c):
+                return 0
+            if __islo(c):
+                cased = 1
+        i += 1
+    if k >= 2:
+        return cased
+    return 1
+
+def isalnum(s) -> bool:
+    return __allc(s, 0) == 1
+
+def isspace(s) -> bool:
+    return __allc(s, 1) == 1
+
+def isupper(s) -> bool:
+    return __allc(s, 2) == 1
+
+def islower(s) -> bool:
+    return __allc(s, 3) == 1
+
+def removeprefix(s, p) -> str:
+    if startswith(s, p):
+        return substr(s, __aux(p), __aux(s))
+    return s
+
+def removesuffix(s, p) -> str:
+    if __aux(p) > 0 and endswith(s, p):
+        return substr(s, 0, __aux(s) - __aux(p))
+    return s
+
+def splitlines(s):
+    r = []
+    n: int = __aux(s)
+    a: int = 0
+    i: int = 0
+    while i < n:
+        c: int = char_at(s, i)
+        if c == 10 or c == 13:
+            append(r, substr(s, a, i))
+            if c == 13 and i + 1 < n and char_at(s, i + 1) == 10:
+                i += 1
+            a = i + 1
+        i += 1
+    if a < n:
+        append(r, substr(s, a, n))
+    return r
+
+def rsplit(s, sep=None, maxsplit=-1):
+    if sep is None:
+        return split__1(s)
+    parts = split(s, sep)
+    k: int = len(parts) - 1 - maxsplit
+    if maxsplit < 0 or k <= 0:
+        return parts
+    head = __m_join(sep, __slice(parts, 0, k + 1, 0))
+    r = [head]
+    extend(r, __slice(parts, k + 1, len(parts), 0))
+    return r
+
+def __sfmt(s, args) -> str:
+    # str.format: args = [key-or-0, value, ...]
+    pos = []
+    kw = {}
+    i: int = 0
+    while i < len(args):
+        k = args[i]
+        if __tag(k) == 1:
+            kw[k] = args[i + 1]
+        else:
+            append(pos, args[i + 1])
+        i += 2
+    out = []
+    n: int = __aux(s)
+    auto: int = 0
+    i = 0
+    a: int = 0
+    while i < n:
+        c: int = char_at(s, i)
+        if c == 123 or c == 125:
+            if i + 1 < n and char_at(s, i + 1) == c:
+                append(out, substr(s, a, i + 1))
+                i += 2
+                a = i
+                continue
+            if c == 125:
+                raise ValueError("Single '}' encountered in format string")
+            append(out, substr(s, a, i))
+            j: int = __find(s, "}", i)
+            if j < 0:
+                raise ValueError("Single '{' encountered in format string")
+            field = substr(s, i + 1, j)
+            spec = ""
+            conv: int = 0
+            ci: int = __find(field, ":", 0)
+            if ci >= 0:
+                spec = substr(field, ci + 1, __aux(field))
+                field = substr(field, 0, ci)
+            bi: int = __find(field, "!", 0)
+            if bi >= 0:
+                conv = char_at(field, bi + 1)
+                field = substr(field, 0, bi)
+            v = None
+            if __aux(field) == 0:
+                v = pos[auto]
+                auto += 1
+            elif isdigit(field):
+                v = pos[int(field)]
+            else:
+                v = kw[field]
+            if conv == 114:
+                v = repr(v)
+            elif conv == 115:
+                v = __str(v)
+            append(out, __format(v, spec))
+            i = j + 1
+            a = i
+        else:
+            i += 1
+    append(out, substr(s, a, n))
+    return __m_join("", out)
+
+def startswith(s, p) -> bool:
     m: int = __aux(p)
     if m > __aux(s):
-        return 0
+        return False
     i: int = 0
     while i < m:
         if char_at(s, i) != char_at(p, i):
-            return 0
+            return False
         i += 1
-    return 1
+    return True
 
-def endswith(s, p) -> int:
+def endswith(s, p) -> bool:
     m: int = __aux(p)
     o: int = __aux(s) - m
     if o < 0:
-        return 0
+        return False
     i: int = 0
     while i < m:
         if char_at(s, o + i) != char_at(p, i):
-            return 0
+            return False
         i += 1
-    return 1
+    return True
 
 def __isspace(c: int) -> int:
     return c == 32 or c == 10 or c == 9 or c == 13
 
-def strip(s) -> str:
+def __instr(c: int, chars) -> int:
+    if chars is None:
+        return __isspace(c) or c == 11 or c == 12
+    n: int = __aux(chars)
+    i: int = 0
+    while i < n:
+        if char_at(chars, i) == c:
+            return 1
+        i += 1
+    return 0
+
+def __strip(s, chars, mode: int) -> str:
     a: int = 0
     b: int = __aux(s)
-    while a < b and __isspace(char_at(s, a)):
-        a += 1
-    while b > a and __isspace(char_at(s, b - 1)):
-        b -= 1
+    if mode & 1:
+        while a < b and __instr(char_at(s, a), chars):
+            a += 1
+    if mode & 2:
+        while b > a and __instr(char_at(s, b - 1), chars):
+            b -= 1
     return substr(s, a, b)
+
+def strip(s, chars=None) -> str:
+    return __strip(s, chars, 3)
+
+def lstrip(s, chars=None) -> str:
+    return __strip(s, chars, 1)
+
+def rstrip(s, chars=None) -> str:
+    return __strip(s, chars, 2)
 
 def split(s, sep):
     r = []
@@ -1197,23 +1469,23 @@ def upper(s) -> str:
 def lower(s) -> str:
     return __mapcase(s, 65, 90, 32)
 
-def isdigit(s) -> int:
+def isdigit(s) -> bool:
     n: int = __aux(s)
     i: int = 0
     while i < n:
         c: int = char_at(s, i)
         if c < 48 or c > 57:
-            return 0
+            return False
         i += 1
     return n > 0
 
-def isalpha(s) -> int:
+def isalpha(s) -> bool:
     n: int = __aux(s)
     i: int = 0
     while i < n:
         c: int = char_at(s, i) | 32
         if c < 97 or c > 122:
-            return 0
+            return False
         i += 1
     return n > 0
 
@@ -1518,6 +1790,15 @@ def get__2(d, k):
 
 def count(xs, x) -> int:
     c: int = 0
+    if __tag(xs) == 1:
+        m: int = __aux(x)
+        if m == 0:
+            return __aux(xs) + 1
+        i: int = __find(xs, x, 0)
+        while i >= 0:
+            c += 1
+            i = __find(xs, x, i + m)
+        return c
     for y in xs:
         if __eq(y, x):
             c += 1
@@ -1525,6 +1806,11 @@ def count(xs, x) -> int:
 
 def index(xs, x) -> int:
     i: int = 0
+    if __tag(xs) == 1:
+        i = __find(xs, x, 0)
+        if i < 0:
+            raise ValueError("substring not found")
+        return i
     for y in xs:
         if __eq(y, x):
             return i
