@@ -1,0 +1,72 @@
+# Phase 2 features
+class Vec:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+    def norm1(self):
+        return abs(self.x) + abs(self.y)
+    def __str__(self):
+        return f"Vec({self.x}, {self.y})"
+
+class Counter:
+    name: str
+    n: int
+    def bump(self, k):
+        self.n += k
+        return self.n
+
+def describe(v):
+    return v.norm1()
+
+s = "foo" + "bar"
+s += "!"
+print(s, len(s))
+name = "Forge"
+n = 3
+print(f"hello {name}, n={n}, n*2={n * 2}, list={[1, 2]}")
+total = 0
+for x in [1, 2, 3, 4]:
+    total += x
+print(total)
+for i, w in enumerate(["a", "b"]):
+    print(i, w)
+for ch in "hi":
+    print(ch)
+print("big" if total > 5 else "small")
+v = Vec(3, -4)
+v.x += 10
+print(v.x, v.y, describe(v))
+c = Counter("c", 1)
+c.bump(5)
+print(c.name, c.n)
+xs = [1, 2, 3]
+xs[1] += 40
+xs[-1] *= 7
+print(xs)
+d = {"a": 1, "b": 2}
+d["c"] = 3
+d["a"] += 100
+print(d["a"], d["c"], len(d), "b" in d, "z" in d)
+for k in d:
+    print(k, d[k])
+print(d)
+sq = [i * i for i in range(6) if i % 2 == 0]
+print(sq)
+print(-7 // 2, -7 % 2, 7 // -2, 100 // 7, 100 % 7, 12345 // 10, -12345 % 10)
+m = 0
+for i in range(1000):
+    m += i // 3 + i % 7
+print(m)
+a, b = 1, 2
+a, b = b, a
+print(a, b)
+words = "the quick brown fox".split(" ")
+print(len(words), "-".join(words), words[1].upper())
+print(str(42) + "x", [0] * 3, "ab" * 3)
+print(sorted([5, 3, 9, 1]), max(3, 8), min([4, 2, 6]))
+print(1 < 2 and 3 > 2, not 0, 5 if 0 else 6)
+e = {}
+e[1] = "one"
+e[2] = "two"
+print(e.get(1, "?"), e.get(3, "?"), keys(e))
+print(xs[1:], "hello"[1:3])

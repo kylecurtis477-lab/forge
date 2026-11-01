@@ -1,0 +1,17 @@
+# arena: mark()/release() reclaim all allocations made in between
+def work(n):
+    acc = 0
+    for i in range(n):
+        s = str(i) + "-" + str(i * 2)
+        acc += len(s)
+    return acc
+base = mark()
+total = 0
+for round in range(2000):
+    m = mark()
+    total += work(100)
+    release(m)
+print(total)
+print(mark() - base < 4096)
+keep = [1, 2, 3]
+print(keep)
