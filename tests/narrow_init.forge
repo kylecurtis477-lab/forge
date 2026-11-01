@@ -1,0 +1,37 @@
+from typing import Optional
+
+class Base:
+    def __init__(self, x: int):
+        self.x = x
+    def show(self) -> int:
+        return self.x
+
+class Der(Base):
+    def __init__(self, x: int, y: int):
+        Base.__init__(self, x * 10)
+        self.y = y
+
+def f(a: Optional[int]) -> int:
+    if a is None:
+        return -1
+    return a + 1
+
+def g(a: Optional[int]) -> int:
+    if a is not None:
+        return a * 2
+    return 0
+
+d = Der(3, 4)
+print(d.x, d.y, d.show())
+print(f(None), f(5), g(None), g(7))
+def f2(a: Optional[int]) -> int:
+    if a is None:
+        return 0
+    b: int = a
+    return b
+def h(a: Optional[str]) -> int:
+    if a is None:
+        return 0
+    else:
+        return len(a)
+print(f2(2), h("abc"), h(None))

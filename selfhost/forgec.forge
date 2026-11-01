@@ -3145,6 +3145,21 @@ def primary():
             e3("lea ", emit_str("__main__"), "(%rip), %rax")
             ety = T_STR
             return 0
+        if is_op(".") and tk[pos + 1] == K_ID and tok_is_op(pos + 2, "(") and find(cnm, nclass, name) >= 0 and not var_ref(name):
+            # explicit Base.method(self, ...) call
+            mname = tv[pos + 1]
+            f = method_of(find(cnm, nclass, name), mname)
+            if f < 0:
+                die(line, concat(concat(concat(concat("class ", name), " has no method '"), mname), "'"))
+            pos += 2
+            argf = f
+            argskip = 0
+            n = push_args()
+            if n != fargs[f]:
+                die(line, concat(concat("wrong number of arguments to method ", mname), "()"))
+            call_f(f, n)
+            ety = ret_type(f)
+            return 0
         if is_op("("):
             c = find(cnm, nclass, name)
             if c >= 0 and not var_ref(name):
@@ -6224,8 +6239,8 @@ def assignable(d: str, s: str) -> int:
             return assignable(ty_arg(d, 0), ty_arg(s, 0))
         return assignable(ty_arg(d, 0), s)
     if str_eq(hs, "Optional"):
-        # no flow narrowing: Optional[T] is accepted where T is expected
-        return assignable(d, ty_arg(s, 0))
+        # Optional[T] is not a T: narrow it first with `is None` / `is not None`
+        return str_eq(d, "object")
     if str_eq(d, "Callable"):
         return str_eq(s, "Callable")
     if str_eq(hd, hs) and (str_eq(hd, "list") or str_eq(hd, "set") or str_eq(hd, "dict") or str_eq(hd, "tuple")):
@@ -6795,6 +6810,9 @@ def tc_binres(op, t, u, at):
     # result type of t op u; reports clearly unsupported combinations of builtin types
     if is_dyn(t) or is_dyn(u):
         return "?"
+    if str_eq(ty_head(t), "Optional") or str_eq(ty_head(u), "Optional"):
+        tc_err(at, concat(concat(concat(concat(concat(concat("unsupported operand types for ", op), ": "), t), " and "), u), " (check 'is None' first)"))
+        return "?"
     if tc_isnum(t) and tc_isnum(u):
         if str_eq(op, "/"):
             return "float"
@@ -7286,11 +7304,72 @@ def tc_body(c):
     return e + 1
 
 def tc_stmts(p, e):
+    global tc_blk_end
+    base = n_nr
+    oe = tc_blk_end
+    tc_blk_end = e
     while p < e and tk[p] != K_EOF:
         if tk[p] == K_NL or tk[p] == K_IND or tk[p] == K_DED:
             p += 1
         else:
             p = tc_stmt(p)
+    nar_pop(base)
+    tc_blk_end = oe
+
+# flow narrowing of Optional locals after `x is None` / `x is not None` tests
+nr_idx = list(4096)
+nr_old = list(4096)
+n_nr = 0
+nar_neg = 0
+tc_blk_end = 0
+
+def nar_pat(q):
+    # `NAME is [not] None :` -> env index of an Optional NAME, else -1
+    global nar_neg
+    if tk[q] != K_ID or not tok_is_id(q + 1, "is"):
+        return -1
+    if tok_is_id(q + 2, "None") and tok_is_op(q + 3, ":"):
+        nar_neg = 0
+    elif tok_is_id(q + 2, "not") and tok_is_id(q + 3, "None") and tok_is_op(q + 4, ":"):
+        nar_neg = 1
+    else:
+        return -1
+    if find(dyn_names, n_dyn, tv[q]) >= 0:
+        return -1
+    i = tc_find(tv[q])
+    if i < 0 or not str_eq(ty_head(en_ty[i]), "Optional"):
+        return -1
+    return i
+
+def nar_push(i, a, b):
+    global n_nr
+    if i < 0 or n_nr >= 4096 or assigned_in(en_name[i], a, b):
+        return 0
+    nr_idx[n_nr] = i
+    nr_old[n_nr] = en_ty[i]
+    en_ty[i] = ty_arg(en_ty[i], 0)
+    n_nr += 1
+    return 1
+
+def nar_pop(base):
+    global n_nr
+    while n_nr > base:
+        n_nr -= 1
+        en_ty[nr_idx[n_nr]] = nr_old[n_nr]
+
+def body_exits(c):
+    # does the block after header colon c always leave (return/raise/continue/break)?
+    s = c + 1
+    if tk[c + 1] == K_NL and tk[c + 2] == K_IND:
+        e = block_end(c) - 1
+        s = c + 3
+        q = s
+        while q < e:
+            s = q
+            q = skip_stmt(q)
+            while q < e and (tk[q] == K_NL or tk[q] == K_DED):
+                q += 1
+    return tok_is_id(s, "return") or tok_is_id(s, "raise") or tok_is_id(s, "continue") or tok_is_id(s, "break")
 
 def tc_has_yield(a, b):
     while a < b:
@@ -7412,7 +7491,31 @@ def tc_stmt(p):
             if tc_skipdefs:
                 return nx
             return tc_class(p)
-        if str_eq(w, "if") or str_eq(w, "while"):
+        if str_eq(w, "if"):
+            ni = nar_pat(p + 1)
+            neg = nar_neg
+            tcx(p + 1)
+            c = tc_colon(p)
+            b0 = n_nr
+            if ni >= 0 and neg:
+                nar_push(ni, c, nx)
+            q = tc_body(c)
+            nar_pop(b0)
+            seen = 0
+            while tok_is_id(q, "elif") or tok_is_id(q, "else"):
+                if tok_is_id(q, "elif"):
+                    seen = 1
+                    tcx(q + 1)
+                c2 = tc_colon(q)
+                if tok_is_id(q, "else") and not seen and ni >= 0 and not neg:
+                    nar_push(ni, c2, nx)
+                q = tc_body(c2)
+                nar_pop(b0)
+                seen = 1
+            if not seen and ni >= 0 and not neg and body_exits(c):
+                nar_push(ni, nx, tc_blk_end)
+            return nx
+        if str_eq(w, "while"):
             tcx(p + 1)
             q = tc_body(tc_colon(p))
             while tok_is_id(q, "elif") or tok_is_id(q, "else"):

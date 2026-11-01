@@ -1,0 +1,8 @@
+from typing import Optional
+
+def f(a: Optional[int]) -> int:
+    if a is None:
+        print("none")
+    return a + 1
+
+print(f(2))
