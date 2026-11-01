@@ -115,3 +115,11 @@ Best of 5 wall clock. Rust: rustc -C opt-level=3 (unstripped binaries). Phase 1 
 - `nonlocal` writes through an intermediate closure only reach the defining scope when that closure has no captured variables of its own.
 - The collector is conservative and non-moving, so an integer that looks like a heap pointer, or a stale value in a scratch register at an automatic collection, can keep an object alive.
 - Requires binutils `as`/`ld` and Linux x86-64.
+
+## Phase 5
+
+- **Static gradual type checker** (written in Forge, runs before codegen). It checks int/float/str/bool/None, list[T], dict[K,V], set[T], tuple[...], Optional[T] / T|None, class types, and Callable, and infers local types. Code without annotations is treated as dynamic. Errors look like `error: line N col M: ...` followed by the source line and a caret. Tests: 15 type-error tests and typed_basics.
+- **Optimizer additions:** self tail-call elimination, plus an accumulator transform for `return X + self(...)`. This brings fib from 0.015s to 0.008s. Constant folding, small-function inlining, unboxed typed ints and fixed field offsets were already in place.
+- **Still missing:** there is no SSA/linear IR and no linear-scan allocator (locals still go to rbx/r12-r15 first-come). List elements are not typed, so `lists` still uses tag-checked adds and bounds checks. The compiler still uses as/ld; it does not emit ELF itself. Explicit `Base.__init__(self, ...)` calls are not supported, and Optional types are not narrowed by control flow.
+
+Benchmarks (best of 5): see bench/results.md.
