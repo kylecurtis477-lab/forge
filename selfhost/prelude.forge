@@ -230,7 +230,19 @@ def __repr(x) -> str:
     if t == 5:
         return __frepr(x)
     parts = []
-    if t == 0:
+    if t == 9:
+        n: int = __ld(x, 0)
+        append(parts, "(")
+        i: int = 0
+        while i < n:
+            if i > 0:
+                append(parts, ", ")
+            append(parts, __repr(__lst(x, i)))
+            i += 1
+        if n == 1:
+            append(parts, ",")
+        append(parts, ")")
+    elif t == 0:
         n: int = __ld(x, 0)
         append(parts, "[")
         i: int = 0
@@ -312,6 +324,10 @@ def __binop(a, b, op: int, line):
             return __list_mul(a, int(b))
         if tb == 0 and __isnum(a):
             return __list_mul(b, int(a))
+        if ta == 9 and __isnum(b):
+            return __tup(__list_mul(a, int(b)))
+        if tb == 9 and __isnum(a):
+            return __tup(__list_mul(b, int(a)))
     if op == 5 and __tag(a) == 1:
         return __pctfmt(a, b, line)
     names = ["+", "-", "*", "/", "//", "%"]
@@ -761,6 +777,8 @@ def __add(a, b, line):
         return concat(a, b)
     if ta == 0 and tb == 0:
         return __list_add(a, b)
+    if ta == 9 and tb == 9:
+        return __tup(__list_add(a, b))
     __err(line, "unsupported operand types for +")
 
 def __eq(a, b) -> int:
@@ -774,7 +792,7 @@ def __eq(a, b) -> int:
         return str_eq(a, b)
     if __isnum(a) and __isnum(b):
         return a == b
-    if ta == 0 and tb == 0:
+    if (ta == 0 and tb == 0) or (ta == 9 and tb == 9):
         n: int = __ld(a, 0)
         if n != __ld(b, 0):
             return 0
@@ -793,7 +811,7 @@ def __lt(a, b) -> int:
         return __strcmp(a, b) < 0
     if __isnum(a) and __isnum(b):
         return a < b
-    if ta == 0 and tb == 0:
+    if (ta == 0 and tb == 0) or (ta == 9 and tb == 9):
         na: int = __ld(a, 0)
         nb: int = __ld(b, 0)
         i: int = 0
@@ -820,7 +838,7 @@ def __strcmp(a, b):
 
 def __getidx(o, i: int, line):
     t: int = __tag(o)
-    if t == 0:
+    if t == 0 or t == 9:
         n: int = __ld(o, 0)
         j: int = i
         if j < 0:
@@ -859,7 +877,7 @@ def __setidx(o, i: int, v, line):
 def __slice(o, a: int, b: int, line):
     t: int = __tag(o)
     n: int = 0
-    if t == 0:
+    if t == 0 or t == 9:
         n = __ld(o, 0)
     elif t == 1:
         n = __aux(o)
@@ -879,11 +897,24 @@ def __slice(o, a: int, b: int, line):
         return substr(o, a, b)
     r = list(b - a)
     __copy(__ld(r, 2), __ld(o, 2) + a * 8, (b - a) * 8)
+    if t == 9:
+        set_byte(r, -1, 9)
     return r
+
+def __tup(r):
+    set_byte(r, -1, 9)
+    return r
+
+def tuple(x=None):
+    if x is None:
+        return __tup([])
+    if __tag(x) == 9:
+        return x
+    return __tup(__listof(x))
 
 def __iter(x, line):
     t: int = __tag(x)
-    if t == 0:
+    if t == 0 or t == 9:
         return x
     if t == 3:
         return __ld(x, 5)
@@ -902,7 +933,7 @@ def __contains(c, x):
     if t == 3:
         i: int = __dfind(c, x, __hash(x))
         return __ld(__ld(c, 2), i) != 0
-    if t == 0:
+    if t == 0 or t == 9:
         n: int = __ld(c, 0)
         i: int = 0
         while i < n:
@@ -951,6 +982,15 @@ def __hash(k) -> int:
         while i < n:
             h = h * 33 + char_at(k, i)
             i += 1
+    elif t == 9:
+        h = 3430008
+        n: int = __ld(k, 0)
+        i: int = 0
+        while i < n:
+            h = (h ^ __hash(__lst(k, i))) * 1000003
+            i += 1
+    elif t == 0 or t == 3:
+        __err(0, "unhashable type")
     else:
         h = k * -7046029254386353131
         h = h ^ (h >> 29)
@@ -1037,7 +1077,7 @@ def items(d):
     i: int = 0
     while i < n:
         k = __lst(ks, i)
-        __st(__ld(r, 2), i, [k, __dget(d, k, 0)])
+        __st(__ld(r, 2), i, __tup([k, __dget(d, k, 0)]))
         i += 1
     return r
 
@@ -1226,15 +1266,37 @@ def max(a, b):
         return b
     return a
 
-def min__1(xs):
+def min__1(xs, key=None):
+    xs = __iter(xs, 0)
+    if __ld(xs, 0) == 0:
+        raise ValueError("min() arg is an empty sequence")
     m = __lst(xs, 0)
+    if key is not None:
+        km = key(m)
+        for x in xs:
+            kx = key(x)
+            if __lt(kx, km):
+                m = x
+                km = kx
+        return m
     for x in xs:
         if __lt(x, m):
             m = x
     return m
 
-def max__1(xs):
+def max__1(xs, key=None):
+    xs = __iter(xs, 0)
+    if __ld(xs, 0) == 0:
+        raise ValueError("max() arg is an empty sequence")
     m = __lst(xs, 0)
+    if key is not None:
+        km = key(m)
+        for x in xs:
+            kx = key(x)
+            if __lt(km, kx):
+                m = x
+                km = kx
+        return m
     for x in xs:
         if __lt(m, x):
             m = x
@@ -1338,7 +1400,7 @@ def sort(xs, key=None, reverse=False):
     return None
 
 def sorted(xs, key=None, reverse=False):
-    r = __slice(xs, 0, __ld(xs, 0), 0)
+    r = __listof(xs)
     sort(r, key, reverse)
     return r
 
@@ -1420,7 +1482,7 @@ def __truth(x) -> int:
         return (__fbits(x) << 1) != 0
     if t == 1:
         return __aux(x) != 0
-    if t == 0 or t == 3:
+    if t == 0 or t == 3 or t == 9:
         return __ld(x, 0) != 0
     return 1
 
@@ -1447,7 +1509,9 @@ def __listof(x):
         n: int = x
         return list(n)
     it = __iter(x, 0)
-    return __slice(it, 0, __ld(it, 0), 0)
+    r = __slice(it, 0, __ld(it, 0), 0)
+    set_byte(r, -1, 0)
+    return r
 
 def get__2(d, k):
     return get(d, k, None)
@@ -1862,7 +1926,7 @@ def __format(x, spec) -> str:
     return concat(concat(pre, __strmul(fill, pad)), body)
 
 def __pctfmt(s, args, line) -> str:
-    if __tag(args) != 0:
+    if __tag(args) != 9 and __tag(args) != 0:
         args = [args]
     out: str = ""
     n: int = len(s)
@@ -2007,3 +2071,6 @@ def __math_gcd(a: int, b: int) -> int:
 
 def bool(x) -> bool:
     return __truth(x) != 0
+
+def hash(x) -> int:
+    return __hash(x)

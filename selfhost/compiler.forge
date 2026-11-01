@@ -1399,6 +1399,18 @@ def skip_arg(p):
 def is_kwarg(p):
     return tk[p] == K_ID and tok_is_op(p + 1, "=")
 
+def count_pos(p0):
+    # number of positional (non-keyword) arguments of the call whose '(' is at p0
+    n = 0
+    p = p0 + 1
+    while not tok_is_op(p, ")") and tk[p] != K_EOF:
+        if not is_kwarg(p):
+            n += 1
+        p = skip_arg(p)
+        if tok_is_op(p, ","):
+            p += 1
+    return n
+
 def need_slots(f, sk):
     if count_args(pos) < fargs[f] - sk:
         return 1
@@ -1768,6 +1780,11 @@ def call_named(name, line):
         return 0
     n = count_args(pos)
     f = resolve_fn(name, n)
+    kp = count_pos(pos)
+    if kp < n:
+        g = fn_lookup(concat(concat(name, "__"), str(kp)), n)
+        if g >= 0:
+            f = g
     if f < 0:
         if any_fn(name):
             die(line, concat(concat(concat(concat("wrong number of arguments (", str(n)), ") to "), name), "()"))
@@ -2922,9 +2939,7 @@ def primary():
             pos += 1
             if is_op(")"):
                 pos += 1
-                e("push $0")
-                call_rt("rt_list", 1)
-                ety = T_LIST
+                build_tuple(0)
                 return 0
             expr()
             if is_op(","):
@@ -2938,7 +2953,7 @@ def primary():
                     e("push %rax")
                     n += 1
                 expect(")")
-                build_list(n)
+                build_tuple(n)
                 return 0
             expect(")")
             return 0
@@ -3004,6 +3019,12 @@ def build_list(n):
             i += 1
         e3("add $", str(8 * n), ", %rsp")
     ety = T_LIST
+
+def build_tuple(n):
+    global ety
+    build_list(n)
+    e("movb $9, -1(%rax)")
+    ety = 0
 
 def ctor_of(c):
     i = 0
@@ -3291,7 +3312,7 @@ def stmt():
                         expr()
                         e("push %rax")
                         n += 1
-                    build_list(n)
+                    build_tuple(n)
             if curf >= 0 and fint[curf] and ety != T_INT and fret[curf] == 0:
                 fint[curf] = 0
                 conflict_ret()
