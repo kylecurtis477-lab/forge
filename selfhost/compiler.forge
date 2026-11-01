@@ -896,7 +896,7 @@ def new_local(name, t, fixed):
     return i
 
 def want_reg(name):
-    if nused >= NREGS:
+    if nused >= NREGS or hyb_noreg:
         return 0
     rl = fregn[curf]
     if not rl:
@@ -4614,8 +4614,8 @@ def func_end(fi):
     if fpar[fi] > 0 or ncap[fi] > 0:
         pro = concat(pro, env_pro(fi))
         epi = concat(epi, concat(concat(concat(concat("    mov ", slot_ref(envslot)), ", %rbx\n    mov "), slot_ref(envslot + 1)), ", %r12\n"))
-    out[prolog] = pro
-    emit_raw(epi)
+    out[prolog] = concat(pro, hyb_pro)
+    emit_raw(concat(hyb_epi, epi))
     e("leave")
     e("ret")
     flush_ovf()
@@ -5014,7 +5014,13 @@ def compile_def(fi):
         elif tok_is_op(p, ")"):
             d -= 1
         p += 1
+    fmode[fi] = 0
+    fisl[fi] = 0
     if ir_compile(fi):
+        fmode[fi] = 1
+        return 0
+    if hyb_compile(fi, p, endp):
+        fmode[fi] = 2
         return 0
     pos = p
     func_begin(fi)
@@ -8323,6 +8329,26 @@ O_LOAD = 20
 O_STORE = 21
 O_RET = 22
 O_NOP = 23
+O_TSTMT = 24
+O_TCOND = 25
+O_VLD = 26
+O_VST = 27
+hyb = 0
+hH = list(1000)
+nH = 0
+hgrow = 0
+irfatal = 0
+hvn = list(40000)
+nhvn = 0
+hyb_noreg = 0
+hyb_pro = ""
+hyb_epi = ""
+ir_cslo = 5
+ir_sb = 0
+ir_stats = 0
+fmode = list(MAXF)
+fisl = list(MAXF)
+cur_isl = 0
 iop = list(IRMAX)
 idst = list(IRMAX)
 ia = list(IRMAX)
@@ -8393,10 +8419,15 @@ def o_fail(why):
         irwhy = why
     irfail = 1
 
+def o_fatal(why):
+    global irfatal
+    o_fail(why)
+    irfatal = 1
+
 def cst(k):
     global ncp
     if ncp >= IRMAX:
-        o_fail("consts")
+        o_fatal("consts")
         return -2
     cpool[ncp] = k
     ncp += 1
@@ -8418,7 +8449,7 @@ def opnd_eq(a, b):
 def new_vr(temp):
     global nvr
     if nvr >= IVMAX - 2:
-        o_fail("vregs")
+        o_fatal("vregs")
         return 0
     vtemp[nvr] = temp
     nvr += 1
@@ -8427,7 +8458,7 @@ def new_vr(temp):
 def new_lab_ir():
     global nil
     if nil >= IRMAX - 2:
-        o_fail("labels")
+        o_fatal("labels")
         return 0
     nil += 1
     return nil - 1
@@ -8435,7 +8466,7 @@ def new_lab_ir():
 def iadd(op, d, a, b):
     global nir
     if nir >= IRMAX - 4:
-        o_fail("too big")
+        o_fatal("too big")
         return 0
     iop[nir] = op
     idst[nir] = d
@@ -8495,7 +8526,7 @@ def pc_bump(name):
             return 0
         i += 1
     if npc >= IRV:
-        o_fail("names")
+        o_fatal("names")
         return 0
     pn_[npc] = name
     pc_[npc] = 1
@@ -8530,7 +8561,7 @@ def assigned_in(name, a, b):
 def add_var(name, kind, v):
     global nx
     if nx >= IRV:
-        o_fail("vars")
+        o_fatal("vars")
         return 0
     xn[nx] = name
     xk[nx] = kind
@@ -8833,6 +8864,8 @@ def var_int(name):
         o_fail("inline name")
         return cst(0)
     i = xfind(name)
+    if i < 0 and hyb:
+        return hyb_read(name)
     if i < 0:
         o_fail(concat("name ", name))
         return cst(0)
@@ -8922,7 +8955,7 @@ def x_call():
     if rp < 0:
         o_fail("call")
         return cst(0)
-    if not inl_on and xfind(name) >= 0:
+    if not inl_on and (xfind(name) >= 0 or hyb and is_lp(name)):
         o_fail("call local")
         return cst(0)
     # count args, reject keywords / stars
@@ -9028,7 +9061,7 @@ def x_call():
 def o_argpush(v):
     global nargb
     if nargb >= IRMAX:
-        o_fail("args")
+        o_fatal("args")
         return 0
     argb[nargb] = v
     nargb += 1
@@ -9069,6 +9102,142 @@ def s_block():
 BADKW = ["global", "nonlocal", "def", "class", "try", "raise", "del", "with", "yield", "import", "from", "assert", "lambda", "async", "await", "match", "print"]
 
 def s_stmt():
+    global ip, nir, nvr, ncp, nargb, nil, nx, nrf, nlp, inl_on, irfail, cur_isl
+    if not hyb:
+        s_stmt0()
+        return 0
+    if irfail:
+        return 0
+    st = ip
+    sv1 = nir
+    sv2 = nvr
+    sv3 = ncp
+    sv4 = nargb
+    sv5 = nil
+    sv6 = nx
+    sv7 = nrf
+    sv8 = nlp
+    s_stmt0()
+    if not irfail or irfatal:
+        return 0
+    nir = sv1
+    nvr = sv2
+    ncp = sv3
+    nargb = sv4
+    nil = sv5
+    nx = sv6
+    nrf = sv7
+    nlp = sv8
+    inl_on = 0
+    irfail = 0
+    if tok_is_id(st, "break") or tok_is_id(st, "continue") or tok_is_id(st, "def") or tok_is_id(st, "class"):
+        o_fatal("island kw")
+        return 0
+    en = skip_stmt(st)
+    if not (tok_is_id(st, "for") or tok_is_id(st, "while")) and has_brk(st, en):
+        o_fatal("island break")
+        return 0
+    hyb_names(st, en)
+    k = iadd(O_TSTMT, -1, -1, -1)
+    iimm[k] = st
+    cur_isl += 1
+    ip = en
+
+def has_brk(a, b):
+    q = a
+    while q < b:
+        if tok_is_id(q, "break") or tok_is_id(q, "continue"):
+            return 1
+        q += 1
+    return 0
+
+def is_lp(name):
+    return find(locs, nlocs, name) >= 0 or find(params, nparams, name) >= 0
+
+def h_home(name):
+    return find(hH, nH, name) >= 0 or not is_lp(name)
+
+def hyb_names(a, b):
+    global nH, hgrow
+    q = a
+    while q < b:
+        if tk[q] == K_ID and not tok_is_op(q - 1, "."):
+            hq = tv[q]
+            if is_lp(hq) and find(hH, nH, hq) < 0:
+                if nH >= 1000:
+                    o_fatal("homes")
+                    return 0
+                hH[nH] = hq
+                nH += 1
+                hgrow = 1
+        q += 1
+
+def hv_name(name):
+    global nhvn
+    if nhvn >= 40000:
+        o_fatal("vnames")
+        return 0
+    hvn[nhvn] = name
+    nhvn += 1
+    return nhvn - 1
+
+def hyb_read(name):
+    if h_home(name):
+        r = var_ref(name)
+        if not r or vty != T_INT or vkind == 4 or vkind == 5:
+            o_fail("home read")
+            return cst(0)
+        d = new_vr(1)
+        k = iadd(O_VLD, d, -1, -1)
+        iimm[k] = hv_name(name)
+        return d
+    i = add_var(name, 1, new_vr(0))
+    return xv[i]
+
+def hyb_write(name, x):
+    r = var_ref(name)
+    if not r or vkind == 4 or vkind == 5 or not (vty == T_INT or vty == 0):
+        o_fail("home write")
+        return 0
+    if vkind == 2:
+        lnl[vidx] = 1
+    k = iadd(O_VST, -1, x, -1)
+    iimm[k] = hv_name(name)
+
+def cond_isl(a, b, l, sense):
+    global nir, nvr, ncp, nargb, nil, nx, nrf, inl_on, irfail, cur_isl
+    if not hyb:
+        cond_range(a, b, l, sense)
+        return 0
+    if irfail:
+        return 0
+    sv1 = nir
+    sv2 = nvr
+    sv3 = ncp
+    sv4 = nargb
+    sv5 = nil
+    sv6 = nx
+    sv7 = nrf
+    cond_range(a, b, l, sense)
+    if not irfail or irfatal or not tok_is_op(b, ":"):
+        return 0
+    nir = sv1
+    nvr = sv2
+    ncp = sv3
+    nargb = sv4
+    nil = sv5
+    nx = sv6
+    nrf = sv7
+    inl_on = 0
+    irfail = 0
+    hyb_names(a, b)
+    k = iadd(O_TCOND, -1, -1, -1)
+    ix[k] = a
+    iimm[k] = sense
+    ic[k] = l
+    cur_isl += 1
+
+def s_stmt0():
     global ip, ir_line
     ir_line = tl[ip]
     if tk[ip] == K_NL:
@@ -9120,7 +9289,7 @@ def s_if():
         return 0
     x_lend = new_lab_ir()
     lf = new_lab_ir()
-    cond_range(ip, q, lf, 0)
+    cond_isl(ip, q, lf, 0)
     ip = q
     s_block()
     while tok_is_id(ip, "elif") and not irfail:
@@ -9132,7 +9301,7 @@ def s_if():
             o_fail("elif")
             return 0
         lf = new_lab_ir()
-        cond_range(ip, q, lf, 0)
+        cond_isl(ip, q, lf, 0)
         ip = q
         s_block()
     if tok_is_id(ip, "else"):
@@ -9157,7 +9326,7 @@ def s_while():
     le = new_lab_ir()
     inf = q == c0 + 1 and (tok_is_id(c0, "True") or tk[c0] == K_NUM and tv[c0] != 0)
     if not inf:
-        cond_range(c0, q, le, 0)
+        cond_isl(c0, q, le, 0)
     ilabel(top)
     lbrk[nlp] = le
     lcnt[nlp] = lc
@@ -9173,7 +9342,7 @@ def s_while():
         ibr(top)
     else:
         save = ip
-        cond_range(c0, q, top, 1)
+        cond_isl(c0, q, top, 1)
         ip = save
     ilabel(le)
 
@@ -9236,6 +9405,9 @@ def s_for():
     ip = rp + 1
     be = block_end(ip)
     i = xfind(name)
+    if i < 0 and hyb and h_home(name):
+        o_fail("for home")
+        return 0
     if i < 0:
         i = add_var(name, 1, new_vr(0))
     if xk[i] != 1:
@@ -9288,6 +9460,9 @@ def s_for():
 def s_return():
     global ip
     r = ip
+    if hyb and (line_end_tok(ip + 1) or not (fret[ir_f] == 0 or fret[ir_f] == T_INT)):
+        o_fail("hyb return")
+        return 0
     if ir_tco > 0:
         k = tco_kind(ir_f, r)
         if k == 2 and ir_tco != 2:
@@ -9336,6 +9511,9 @@ def s_return():
     iadd(O_RET, -1, x, -1)
 
 def assign_var(name, x):
+    if hyb and xfind(name) < 0 and h_home(name):
+        hyb_write(name, x)
+        return 0
     i = xfind(name)
     if i < 0:
         i = add_var(name, 1, new_vr(0))
@@ -9390,7 +9568,7 @@ def s_simple():
             if find_top_eq(q + 1) >= 0:
                 o_fail("chained =")
                 return 0
-            if tok_is_id(q + 1, "list") and tok_is_op(q + 2, "(") and xfind("list") < 0:
+            if tok_is_id(q + 1, "list") and tok_is_op(q + 2, "(") and xfind("list") < 0 and not (hyb and h_home(name)):
                 rp = match_close(q + 2)
                 if rp > q + 3 and line_end_tok(rp + 1) and (fn_lookup("list", 1) < 0 or fpre[fn_lookup("list", 1)]):
                     if pcount(name) != 1 or xfind(name) >= 0 or o_isparam(name):
@@ -9421,6 +9599,15 @@ def s_simple():
         if is_aug(q):
             op = aug_code(q)
             i = xfind(name)
+            if hyb and i < 0 and op != 0:
+                old = hyb_read(name)
+                i = xfind(name)
+                if i < 0:
+                    ip = q + 1
+                    x = x_expr()
+                    end_line()
+                    hyb_write(name, ibin(op, old, x, aug_ovf(op)))
+                    return 0
             if op == 0 or i < 0 or xk[i] != 1:
                 o_fail("aug")
                 return 0
@@ -9485,7 +9672,7 @@ def find_top_eq(p):
 # ---------------- IR utilities ----------------
 def u_n(k):
     op = iop[k]
-    if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET:
+    if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET or op == O_VST:
         return 1
     if op >= O_ADD and op <= O_MOD or op == O_CBR:
         return 2
@@ -9534,13 +9721,13 @@ def u_set(k, j, v):
 
 def has_dst(k):
     op = iop[k]
-    if op == O_LABEL or op == O_BR or op == O_CBR or op == O_STORE or op == O_RET or op == O_NOP:
+    if op == O_LABEL or op == O_BR or op == O_CBR or op == O_STORE or op == O_RET or op == O_NOP or op >= O_TSTMT and op != O_VLD:
         return 0
     return idst[k] >= 0
 
 def is_pure(k):
     op = iop[k]
-    if op == O_MOV or op == O_PARAM or op == O_AND or op == O_OR or op == O_XOR or op == O_SAR or op == O_NOT or op == O_LDATA or op == O_LNEW:
+    if op == O_MOV or op == O_PARAM or op == O_AND or op == O_OR or op == O_XOR or op == O_SAR or op == O_NOT or op == O_LDATA or op == O_LNEW or op == O_VLD:
         return 1
     if op == O_ADD or op == O_SUB or op == O_MUL or op == O_NEG:
         return not iovf[k]
@@ -9738,7 +9925,7 @@ def o_cfg():
     nb = 0
     k = 0
     while k < nir:
-        if k == 0 or iop[k] == O_LABEL or iop[k - 1] == O_BR or iop[k - 1] == O_CBR or iop[k - 1] == O_RET:
+        if k == 0 or iop[k] == O_LABEL or iop[k - 1] == O_BR or iop[k - 1] == O_CBR or iop[k - 1] == O_TCOND or iop[k - 1] == O_RET:
             if nb > 0:
                 ben[nb - 1] = k
             bst[nb] = k
@@ -9757,7 +9944,7 @@ def o_cfg():
         op = iop[last]
         if op == O_BR:
             bs1[b] = lblk[ic[last]]
-        elif op == O_CBR:
+        elif op == O_CBR or op == O_TCOND:
             bs1[b] = lblk[ic[last]]
             if b + 1 < nb:
                 bs2[b] = b + 1
@@ -9833,7 +10020,7 @@ def o_jumps():
     used = list(nil + 1)
     k = 0
     while k < nir:
-        if iop[k] == O_BR or iop[k] == O_CBR:
+        if iop[k] == O_BR or iop[k] == O_CBR or iop[k] == O_TCOND:
             used[ic[k]] = 1
         k += 1
     k = 0
@@ -10072,7 +10259,7 @@ def o_intervals():
     k = 0
     while k < nir:
         cpre[k] = c
-        if iop[k] == O_CALL or iop[k] == O_LNEW:
+        if iop[k] == O_CALL or iop[k] == O_LNEW or iop[k] == O_TSTMT or iop[k] == O_TCOND:
             c += 1
         k += 1
     cpre[nir] = c
@@ -10122,7 +10309,7 @@ def alloc_one(v, p):
     if r < 0:
         q = lo
         while q < 10 and r < 0:
-            if reg_free(q):
+            if reg_free(q) and (q < 5 or q >= ir_cslo):
                 r = q
             q += 1
     if r < 0:
@@ -10205,7 +10392,7 @@ def vl(v):
         nspill += 1
     if vloc[v] < 100:
         return RN[vloc[v]]
-    return concat(str(0 - 8 * (vloc[v] - 100 + ncs + 1)), "(%rbp)")
+    return concat(str(0 - 8 * (vloc[v] - 100 + ncs + 1 + ir_sb)), "(%rbp)")
 
 def in_reg(o):
     return o >= 0 and vloc[o] >= 0 and vloc[o] < 100
@@ -10619,6 +10806,91 @@ def em_call(k):
     if idst[k] >= 0:
         e2("mov %rax, ", vl(idst[k]))
 
+def o_ins(k, fi, x_epi):
+    global pos
+    n = fargs[fi]
+    op = iop[k]
+    if op == O_LABEL:
+        put_label(labasm[ic[k]])
+    elif op == O_MOV:
+        if idst[k] >= 0:
+            mv_to(ia[k], vl(idst[k]), in_mem(idst[k]))
+    elif op == O_PARAM:
+        off = concat(str(16 + 8 * (n - 1 - iimm[k])), "(%rbp)")
+        if in_reg(idst[k]):
+            e2(concat(concat("mov ", off), ", "), vl(idst[k]))
+        else:
+            e3("mov ", off, ", %rax")
+            e2("mov %rax, ", vl(idst[k]))
+    elif op >= O_ADD and op <= O_XOR:
+        em_bin(k)
+    elif op == O_SAR or op == O_NEG or op == O_NOT:
+        em_un(k)
+    elif op == O_DIV or op == O_MOD:
+        em_div(k)
+    elif op == O_BR:
+        e2("jmp ", lab(labasm[ic[k]]))
+    elif op == O_CBR:
+        em_cbr(k)
+    elif op == O_CALL:
+        em_call(k)
+    elif op == O_LNEW:
+        o = ia[k]
+        if is_c(o) and fits32(cval(o)):
+            e3("push $", str(cval(o)), "")
+        elif is_c(o):
+            e3("mov $", str(cval(o)), ", %rax")
+            e("push %rax")
+        else:
+            e2("pushq ", vl(o))
+        e("call rt_list")
+        e("add $8, %rsp")
+        e2("mov %rax, ", vl(idst[k]))
+    elif op == O_LDATA:
+        if in_reg(ia[k]):
+            A = vl(ia[k])
+        else:
+            e3("mov ", vl(ia[k]), ", %rax")
+            A = "%rax"
+        if in_reg(idst[k]):
+            e2(concat(concat("mov 16(", A), "), "), vl(idst[k]))
+        else:
+            e3("mov 16(", A, "), %rax")
+            e2("mov %rax, ", vl(idst[k]))
+    elif op == O_LOAD:
+        em_load(k)
+    elif op == O_STORE:
+        em_store(k)
+    elif op == O_RET:
+        mv_to(ia[k], "%rax", 0)
+        if hyb:
+            if fbret[fi] and fret[fi] == 0:
+                fbret[fi] = 0
+                conflict_ret()
+            e2("jmp ", lab(retlab))
+        elif k + 1 < nir:
+            e2("jmp ", lab(x_epi))
+    elif op == O_TSTMT:
+        pos = iimm[k]
+        stmt()
+    elif op == O_TCOND:
+        pos = ix[k]
+        cond_top(labasm[ic[k]], iimm[k])
+        if not tok_is_op(pos, ":"):
+            die(tl[ix[k]], "internal: island condition")
+    elif op == O_VLD:
+        if idst[k] >= 0:
+            hr = var_ref(hvn[iimm[k]])
+            D = vl(idst[k])
+            if in_reg(idst[k]) or starts(hr, "%"):
+                e2(concat(concat("mov ", hr), ", "), D)
+            else:
+                e3("mov ", hr, ", %rax")
+                e2("mov %rax, ", D)
+    elif op == O_VST:
+        hr = var_ref(hvn[iimm[k]])
+        mv_to(ia[k], hr, not starts(hr, "%"))
+
 def o_emit(fi):
     global ncs, ncold, no_ov, curf
     curf = fi
@@ -10642,65 +10914,9 @@ def o_emit(fi):
     e("mov %rsp, %rbp")
     x_prol = nout
     emit_raw("")
-    n = fargs[fi]
     k = 0
     while k < nir:
-        op = iop[k]
-        if op == O_LABEL:
-            put_label(labasm[ic[k]])
-        elif op == O_MOV:
-            if idst[k] >= 0:
-                mv_to(ia[k], vl(idst[k]), in_mem(idst[k]))
-        elif op == O_PARAM:
-            off = concat(str(16 + 8 * (n - 1 - iimm[k])), "(%rbp)")
-            if in_reg(idst[k]):
-                e2(concat(concat("mov ", off), ", "), vl(idst[k]))
-            else:
-                e3("mov ", off, ", %rax")
-                e2("mov %rax, ", vl(idst[k]))
-        elif op >= O_ADD and op <= O_XOR:
-            em_bin(k)
-        elif op == O_SAR or op == O_NEG or op == O_NOT:
-            em_un(k)
-        elif op == O_DIV or op == O_MOD:
-            em_div(k)
-        elif op == O_BR:
-            e2("jmp ", lab(labasm[ic[k]]))
-        elif op == O_CBR:
-            em_cbr(k)
-        elif op == O_CALL:
-            em_call(k)
-        elif op == O_LNEW:
-            o = ia[k]
-            if is_c(o) and fits32(cval(o)):
-                e3("push $", str(cval(o)), "")
-            elif is_c(o):
-                e3("mov $", str(cval(o)), ", %rax")
-                e("push %rax")
-            else:
-                e2("pushq ", vl(o))
-            e("call rt_list")
-            e("add $8, %rsp")
-            e2("mov %rax, ", vl(idst[k]))
-        elif op == O_LDATA:
-            if in_reg(ia[k]):
-                A = vl(ia[k])
-            else:
-                e3("mov ", vl(ia[k]), ", %rax")
-                A = "%rax"
-            if in_reg(idst[k]):
-                e2(concat(concat("mov 16(", A), "), "), vl(idst[k]))
-            else:
-                e3("mov 16(", A, "), %rax")
-                e2("mov %rax, ", vl(idst[k]))
-        elif op == O_LOAD:
-            em_load(k)
-        elif op == O_STORE:
-            em_store(k)
-        elif op == O_RET:
-            mv_to(ia[k], "%rax", 0)
-            if k + 1 < nir:
-                e2("jmp ", lab(x_epi))
+        o_ins(k, fi, x_epi)
         k += 1
     put_label(x_epi)
     fs = ncs + nspill
@@ -10820,14 +11036,197 @@ def ir_compile(fi):
     pos = endp
     return 1
 
+def hyb_ok(fi):
+    if not opt_on or fpre[fi] or fkind[fi] != 0 or fpar[fi] > 0 or ncap[fi] > 0:
+        return 0
+    if has_child(fi) or fn_has_try(fi) or fyields(fi):
+        return 0
+    return 1
+
+def hyb_reset(fi, p, endp):
+    global nir, nvr, ncp, nargb, nil, irfail, irfatal, nx, npc, nlp, nrf, inl_on, ir_f, ir_tco, ir_line, nhvn, cur_isl
+    nir = 0
+    nvr = 0
+    ncp = 0
+    nargb = 0
+    nil = 0
+    irfail = 0
+    irfatal = 0
+    nx = 0
+    npc = 0
+    nlp = 0
+    nrf = 0
+    inl_on = 0
+    nhvn = 0
+    cur_isl = 0
+    ir_f = fi
+    ir_tco = 0
+    ir_line = tl[p]
+    prescan_defs(p, endp)
+    i = 0
+    while i < fargs[fi]:
+        hn = pnames[fpb[fi] + i]
+        if find(hH, nH, hn) < 0:
+            v = new_vr(0)
+            add_var(hn, 1, v)
+            k = iadd(O_PARAM, v, -1, -1)
+            iimm[k] = i
+        i += 1
+
+def hyb_compile(fi, p, endp):
+    global hyb, nH, hgrow, ip, pos, nout, nlabel, curf, ir_cslo, ir_sb, nslots, hyb_pro, hyb_epi, hyb_noreg, ncs, ncold, no_ov, nspill, irfail
+    if not hyb_ok(fi):
+        return 0
+    hs_out = nout
+    hs_lab = nlabel
+    pos = p
+    func_begin(fi)
+    declare_locals(p, endp, 1)
+    nH = 0
+    hall = 0
+    q = fpos[fi]
+    while q < p:
+        if tok_is_op(q, "*") or tok_is_op(q, "**") or tok_is_op(q, "="):
+            hall = 1
+        q += 1
+    i = 0
+    while i < nparams:
+        if hall or ptyp[i] != T_INT:
+            hH[nH] = params[i]
+            nH += 1
+        i += 1
+    hyb = 1
+    it = 0
+    ok = 0
+    while it < 8 and not ok:
+        it += 1
+        hyb_reset(fi, p, endp)
+        hgrow = 0
+        ip = p
+        s_block()
+        if irfail:
+            break
+        if not hgrow:
+            ok = 1
+    if ok:
+        o_optimize()
+        if irfail:
+            ok = 0
+    if not ok:
+        hyb = 0
+        nout = hs_out
+        nlabel = hs_lab
+        curf = -1
+        return 0
+    o_intervals()
+    ir_cslo = 5 + nused
+    o_regalloc()
+    ir_cslo = 5
+    # emission inside the token compiler's frame
+    l = 0
+    while l <= nil:
+        labasm[l] = new_label()
+        l += 1
+    ncs = 0
+    q = 5
+    while q < 10:
+        if rused[q]:
+            csreg[ncs] = q
+            ncs += 1
+        q += 1
+    ir_sb = nslots
+    k = 0
+    while k < nir:
+        n = u_n(k)
+        j = 0
+        while j < n:
+            o = u_get(k, j)
+            if o >= 0 and vloc[o] < 0:
+                vloc[o] = 100 + nspill
+                nspill += 1
+            j += 1
+        if has_dst(k) and vloc[idst[k]] < 0:
+            vloc[idst[k]] = 100 + nspill
+            nspill += 1
+        k += 1
+    nslots = nslots + ncs + nspill
+    hyb_pro = ""
+    hyb_epi = ""
+    i = 0
+    while i < ncs:
+        sl = slot_ref(ir_sb + i + 1)
+        hyb_pro = concat(hyb_pro, concat(concat(concat(concat("    mov ", RN[csreg[i]]), ", "), sl), "\n"))
+        hyb_epi = concat(hyb_epi, concat(concat(concat(concat("    mov ", sl), ", "), RN[csreg[i]]), "\n"))
+        i += 1
+    ncold = 0
+    no_ov = 0
+    hyb_noreg = 1
+    k = 0
+    while k < nir:
+        o_ins(k, fi, 0)
+        k += 1
+    hyb_noreg = 0
+    hyb = 0
+    fisl[fi] = cur_isl
+    func_end(fi)
+    hyb_pro = ""
+    hyb_epi = ""
+    ir_sb = 0
+    curf = fi
+    i = 0
+    while i < ncold:
+        emit_raw(cold[i])
+        i += 1
+    i = 0
+    while i < no_ov:
+        put_label(o_ovl[i])
+        e3("push $", str(uline(o_ovn[i])), "")
+        call_internal("__iovf", 1)
+        i += 1
+    foe[fi] = nout
+    curf = -1
+    pos = endp
+    return 1
+
+def ir_report():
+    np_ = 0
+    nh_ = 0
+    nh0 = 0
+    nt_ = 0
+    ni_ = 0
+    f = 0
+    while f < nfuncs:
+        if not fpre[f] and foe[f] > fos[f]:
+            if fmode[f] == 1:
+                np_ += 1
+            elif fmode[f] == 2:
+                nh_ += 1
+                ni_ += fisl[f]
+                if fisl[f] == 0:
+                    nh0 += 1
+            else:
+                nt_ += 1
+                if ir_stats > 1:
+                    eputs(concat("  token: ", fnames[f]))
+        f += 1
+    eputs(concat(concat(concat(concat("ir: pure ", str(np_)), " hybrid "), str(nh_)), concat(concat(" (fully native ", str(nh0)), ")")))
+    eputs(concat(concat(concat(" token ", str(nt_)), " islands "), str(ni_)))
+
 def forge_main():
-    global PRETOK, PRE, passno, soft_line
+    global PRETOK, PRE, passno, soft_line, ir_stats
     if argc() < 3:
         eputs("usage: forgec <input.forge> <output.s>")
         exit(2)
     set_opt(1)
-    if argc() > 3 and str_eq(argv(3), "-O0"):
-        set_opt(0)
+    ai = 3
+    while ai < argc():
+        if str_eq(argv(ai), "-O0"):
+            set_opt(0)
+        elif str_eq(argv(ai), "--irstats"):
+            ir_stats = 1
+        elif str_eq(argv(ai), "--irstats2"):
+            ir_stats = 2
+        ai += 1
     src = read_file(argv(1))
     pre = prelude_text()
     lex(pre, 1, 0)
@@ -10859,6 +11258,8 @@ def forge_main():
         if passno > 40:
             die(0, "internal: type inference did not converge")
     reach_all()
+    if ir_stats:
+        ir_report()
     f = 0
     while f < nfuncs:
         if not freach[f] and foe[f] > fos[f]:
