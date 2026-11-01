@@ -44,8 +44,8 @@ print([f(10) for f in mk()])
 for i in range(2):
     pass
 print(i)
-def f():
+def lastj():
     for j in range(5):
         pass
     return j
-print(f())
+print(lastj())
