@@ -1,0 +1,5 @@
+def greet(name, greeting="hi"):
+    return greeting + name
+f = greet
+print(f("a", greeting="x"))
+print(f(greeting="x"))

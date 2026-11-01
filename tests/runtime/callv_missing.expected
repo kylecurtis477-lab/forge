@@ -1,0 +1,3 @@
+xa
+error: line 5: function missing required argument 'name'
+exit 1

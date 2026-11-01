@@ -64,6 +64,7 @@ fkind = list(MAXF)
 fpar = list(MAXF)
 capl = list(MAXF)
 ncap = list(MAXF)
+fshare = list(MAXF)
 fend = list(MAXF)
 fdname = list(MAXF)
 fba = list(MAXF)
@@ -1451,6 +1452,24 @@ def skip_arg(p):
                 return p
         p += 1
 
+def skip_larg(p):
+    # like skip_arg, but a lambda default also ends at a top-level ':'
+    d = 0
+    while 1:
+        if tk[p] == K_EOF:
+            return p
+        if tk[p] == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                if d == 0:
+                    return p
+                d -= 1
+            elif (str_eq(v, ",") or str_eq(v, ":")) and d == 0:
+                return p
+        p += 1
+
 def is_kwarg(p):
     return tk[p] == K_ID and tok_is_op(p + 1, "=")
 
@@ -1545,11 +1564,11 @@ def count_args(p):
             return n
         p += 1
 
-BI_NAMES = ["puts", "eputs", "concat", "write_file", "read_file", "substr", "alloc", "join", "argc", "argv", "exit", "str_eq", "chr", "mark", "release", "set_byte", "__new", "__copy", "__tag", "__aux", "__itos_raw", "__writes", "__wint", "__itof", "__ftoi", "__fbits", "__ffrombits", "__math", "__math2", "__raise", "__clsname", "__excval", "__gresume", "__gyield", "__gfin", "__syscall", "__clock", "__excline", "__env", "__flush"]
-BI_ARGS = [1, 1, 2, 2, 1, 3, 1, 2, 0, 1, 1, 2, 1, 0, 1, 3, 3, 3, 1, 1, 1, 1, 1, 1, 2, 1, 1, 2, 3, 2, 1, 0, 2, 1, 2, 4, 1, 0, 1, 0]
-BI_RT = ["rt_puts", "rt_eputs", "rt_concat", "rt_write_file", "rt_read_file", "rt_substr", "rt_alloc", "rt_join", "rt_argc", "rt_argv", "rt_exit", "rt_str_eq", "rt_chr", "rt_mark", "rt_release", "rt_set_byte", "rt_new", "rt_copy", "rt_tag", "rt_aux", "rt_itos", "rt_writes", "rt_wint", "rt_itof", "rt_ftoi", "rt_fbits", "rt_ffrombits", "rt_math", "rt_math2", "rt_raise", "rt_clsname", "rt_excval", "rt_gresume", "rt_gyield", "rt_gfin", "rt_syscall", "rt_clock", "rt_excline", "rt_env", "rt_flushv"]
-BI_TY = [0, 0, 2, 1, 2, 2, 0, 2, 1, 2, 0, 1, 2, 1, 0, 0, 0, 0, 1, 1, 2, 0, 0, 5, 1, 1, 5, 5, 5, 0, 2, 0, 0, 0, 0, 1, 1, 1, 0, 0]
-NBI = 40
+BI_NAMES = ["puts", "eputs", "concat", "write_file", "read_file", "substr", "alloc", "join", "argc", "argv", "exit", "str_eq", "chr", "mark", "release", "set_byte", "__new", "__copy", "__tag", "__aux", "__itos_raw", "__writes", "__wint", "__itof", "__ftoi", "__fbits", "__ffrombits", "__math", "__math2", "__raise", "__clsname", "__excval", "__gresume", "__gyield", "__gfin", "__syscall", "__clock", "__excline", "__env", "__flush", "__apply"]
+BI_ARGS = [1, 1, 2, 2, 1, 3, 1, 2, 0, 1, 1, 2, 1, 0, 1, 3, 3, 3, 1, 1, 1, 1, 1, 1, 2, 1, 1, 2, 3, 2, 1, 0, 2, 1, 2, 4, 1, 0, 1, 0, 2]
+BI_RT = ["rt_puts", "rt_eputs", "rt_concat", "rt_write_file", "rt_read_file", "rt_substr", "rt_alloc", "rt_join", "rt_argc", "rt_argv", "rt_exit", "rt_str_eq", "rt_chr", "rt_mark", "rt_release", "rt_set_byte", "rt_new", "rt_copy", "rt_tag", "rt_aux", "rt_itos", "rt_writes", "rt_wint", "rt_itof", "rt_ftoi", "rt_fbits", "rt_ffrombits", "rt_math", "rt_math2", "rt_raise", "rt_clsname", "rt_excval", "rt_gresume", "rt_gyield", "rt_gfin", "rt_syscall", "rt_clock", "rt_excline", "rt_env", "rt_flushv", "rt_apply"]
+BI_TY = [0, 0, 2, 1, 2, 2, 0, 2, 1, 2, 0, 1, 2, 1, 0, 0, 0, 0, 1, 1, 2, 0, 0, 5, 1, 1, 5, 5, 5, 0, 2, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0]
+NBI = 41
 
 def builtin_call(name, line):
     # returns 1 if name( ... ) was compiled as a builtin
@@ -3097,7 +3116,11 @@ def primary():
         if not r:
             fv = fv_func(name)
             if fv >= 0:
-                e3("lea ", fv_label(fv), "(%rip), %rax")
+                if fndefaults(fv) > 0:
+                    fv_label(fv)
+                    emit_fnobj(fv, 0)
+                else:
+                    e3("lea ", fv_label(fv), "(%rip), %rax")
                 ety = 0
                 return 0
             die(line, concat(concat("undefined name '", name), "'"))
@@ -3550,6 +3573,11 @@ def for_footer(info):
             e2("jl ", lab(info[1]))
         else:
             e2("jg ", lab(info[1]))
+        # Python leaves the loop variable at its last value
+        if step == 1:
+            e2("decq ", r)
+        else:
+            e3("subq $", str(step), concat(", ", r))
     else:
         e2("incq ", info[4])
         put_label(info[7])
@@ -3689,6 +3717,9 @@ def stmt():
                 store_var(fdname[c], line, 0, -1)
                 pos = skip_stmt(pos)
                 return 0
+        if str_eq(w, "def") and top_def_at(pos) >= 0:
+            pos = skip_stmt(pos)
+            return 0
         if str_eq(w, "def") or str_eq(w, "class"):
             die(line, "nested def/class is not supported here")
         if str_eq(w, "try"):
@@ -4053,6 +4084,9 @@ def stmt_simple(line):
     neq = 0
     aug = -1
     while tk[p] != K_NL and tk[p] != K_EOF and tk[p] != K_DED:
+        if tok_is_id(p, "lambda"):
+            p = skip_lambda_head(p)
+            continue
         if tk[p] == K_OP:
             v = tv[p]
             if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
@@ -4118,11 +4152,20 @@ def stmt_simple(line):
     pos = stend
     end_stmt()
 
+def skip_lambda_head(p):
+    # p at 'lambda' -> index after its ':' (the parameter list may hold ',' and '=')
+    while not tok_is_op(p, ":") and tk[p] != K_NL and tk[p] != K_EOF:
+        p = skip_larg(p + 1)
+    return p + 1
+
 def count_top_commas(a, b):
     d = 0
     n = 1
     p = a
     while p < b:
+        if tok_is_id(p, "lambda"):
+            p = skip_lambda_head(p)
+            continue
         if tk[p] == K_OP:
             v = tv[p]
             if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
@@ -4999,6 +5042,21 @@ def add_field(c, name):
     ncfld += 1
     cnf[c] = ncfld - cfb[c]
 
+def has_def(p, q):
+    while p < q:
+        if tok_is_id(p, "def"):
+            return 1
+        p += 1
+    return 0
+
+def top_def_at(p):
+    i = 0
+    while i < nfuncs:
+        if fpos[i] == p and fkind[i] == 0 and fmeth[i] == 0:
+            return i
+        i += 1
+    return -1
+
 def prescan():
     global ntops, nglobs, nmainloc, fmain, nfuncs
     p = 0
@@ -5017,6 +5075,15 @@ def prescan():
         else:
             tops[ntops] = p
             ntops += 1
+            # defs inside top-level if/for/while/try/with blocks are module-level functions
+            q = p + 1
+            qe = skip_stmt(p)
+            while q < qe:
+                if tok_is_id(q, "def") and (tk[q - 1] == K_NL or tk[q - 1] == K_IND or tk[q - 1] == K_DED):
+                    reg_func(q, -1)
+                    q = skip_stmt(q)
+                else:
+                    q += 1
         p = skip_stmt(p)
     # user functions shadow prelude functions of the same name and arity
     i = 0
@@ -5055,7 +5122,7 @@ def prescan():
                 p += 1
         else:
             q = skip_stmt(p)
-            if has_lambda(p, q):
+            if has_lambda(p, q) or has_def(p, q):
                 while p < q:
                     if tk[p] == K_ID:
                         k = find(nm, n, tv[p])
@@ -5187,6 +5254,24 @@ def reg_all_nested():
     while f < nfuncs:
         capture(f)
         f += 1
+    # a closure whose captures are all pass-through shares its parent's env,
+    # so nonlocal writes from deeper scopes reach the defining scope
+    f = nf0
+    while f < nfuncs:
+        pp = fpar[f] - 1
+        if pp >= 0 and pp != fmain and ncap[f] > 0 and ncap[pp] > 0:
+            nm = bound_of(f)
+            ok = 1
+            k = 0
+            while k < ncap[f]:
+                if find(nm, fbnn[f], capl[f][k]) >= 0 or find(capl[pp], ncap[pp], capl[f][k]) < 0:
+                    ok = 0
+                k += 1
+            if ok:
+                capl[f] = capl[pp]
+                ncap[f] = ncap[pp]
+                fshare[f] = 1
+        f += 1
 
 def reg_nested(par, a, b):
     global pos
@@ -5225,19 +5310,27 @@ def reg_lambda(q):
     fpb[fi] = npall
     p = q + 1
     n = 0
+    nmin = 0
     while not tok_is_op(p, ":"):
         if tk[p] == K_ID:
             pnames[npall] = tv[p]
             ptypes[npall] = 0
             pdef[npall] = -1
             pintf[npall] = 0
+            if tok_is_op(p + 1, "="):
+                pdef[npall] = p + 2
+                p = skip_larg(p + 2) - 1
+            elif n > nmin:
+                die(tl[p], "non-default parameter follows default parameter")
+            else:
+                nmin += 1
             npall += 1
             n += 1
         elif not tok_is_op(p, ","):
             die(tl[p], "unsupported lambda parameter syntax")
         p += 1
     fargs[fi] = n
-    fmin[fi] = n
+    fmin[fi] = nmin
     fret[fi] = 0
     fint[fi] = 0
     fbret[fi] = 0
@@ -5358,6 +5451,8 @@ def env_pro(fi):
     if fpar[fi] > 0:
         s = concat(s, "    mov 16(%r10), %r12\n")
     n = ncap[fi]
+    if fshare[fi]:
+        return concat(s, "    mov %r12, %rbx\n")
     if n > 0:
         s = concat(s, concat(concat("    mov $", str(8 * n)), ", %edi\n"))
         s = concat(s, concat(concat("    movabs $", str(288230376151711744 + 8 * n)), ", %rsi\n    call rt_new_r\n    mov %rax, %rbx\n"))
@@ -5378,20 +5473,80 @@ def env_pro(fi):
             k += 1
     return s
 
-def emit_closure(c):
+def fparam_names(f):
+    r = ""
+    i = 0
+    while i < fargs[f]:
+        if i > 0:
+            r = concat(r, ",")
+        r = concat(r, pnames[fpb[f] + i])
+        i += 1
+    return r
+
+def fndefaults(f):
+    n = 0
+    i = 0
+    while i < fargs[f]:
+        if pdef[fpb[f] + i] >= 0:
+            n += 1
+        i += 1
+    return n
+
+def emit_defaults(f):
+    # evaluate f's default values here (definition time) -> list in %rax
+    global pos, ety
+    sv = pos
+    sety = ety
+    nd = 0
+    i = 0
+    while i < fargs[f]:
+        if pdef[fpb[f] + i] >= 0:
+            pos = pdef[fpb[f] + i]
+            expr()
+            e("push %rax")
+            nd += 1
+        i += 1
+    pos = sv
+    ety = sety
+    e3("push $", str(nd), "")
+    call_rt("rt_list", 1)
+    e("mov 16(%rax), %rdx")
+    j = 0
+    while j < nd:
+        e3("mov ", str(8 * (nd - 1 - j)), "(%rsp), %rcx")
+        e3("mov %rcx, ", str(8 * j), "(%rdx)")
+        j += 1
+    e3("add $", str(8 * nd), ", %rsp")
+
+def emit_fnobj(c, envreg):
+    # heap function object: [code, nargs, env, param names, defaults]
     global ety
-    e("mov $24, %edi")
+    nd = fndefaults(c)
+    if nd > 0:
+        emit_defaults(c)
+        e("push %rax")
+    e("mov $40, %edi")
     e("movabs $576460752303423491, %rsi")
     e("call rt_new_r")
     e3("lea ", flabel[c], "(%rip), %rdx")
     e("mov %rdx, (%rax)")
     e3("movq $", str(fargs[c]), ", 8(%rax)")
-    if ncap[curf] > 0:
+    if envreg:
         e("mov %rbx, 16(%rax)")
     else:
         e("movq $0, 16(%rax)")
+    e3("lea ", emit_str(fparam_names(c)), "(%rip), %rdx")
+    e("mov %rdx, 24(%rax)")
+    if nd > 0:
+        e("pop %rcx")
+        e("mov %rcx, 32(%rax)")
+    else:
+        e("movq $0, 32(%rax)")
     add_edge(c)
     ety = 0
+
+def emit_closure(c):
+    emit_fnobj(c, ncap[curf] > 0)
 
 def compile_lambda(fi):
     global pos
@@ -5436,15 +5591,56 @@ def closure_var(name):
 
 def call_value(line):
     # callee value pushed; pos at '('
-    global ety, argf, argskip
+    global ety, argf, argskip, pos
     argf = -1
     argskip = 0
-    n = push_args()
+    expect("(")
+    n = 0
+    np = 0
+    kwn = ""
+    nk = 0
+    while not is_op(")"):
+        if is_kwarg(pos):
+            if nk > 0:
+                kwn = concat(kwn, ",")
+            kwn = concat(kwn, tv[pos])
+            nk += 1
+            pos += 2
+        elif nk > 0:
+            die(cur_line(), "positional argument follows keyword argument")
+        else:
+            np += 1
+        expr()
+        e("push %rax")
+        n += 1
+        if is_op(","):
+            pos += 1
+        elif not is_op(")"):
+            die(cur_line(), "expected ',' or ')' in call")
+    pos += 1
+    done = new_label()
     e3("mov ", str(8 * n), "(%rsp), %r10")
+    if nk == 0:
+        slow = new_label()
+        e3("mov $", str(n), ", %r11d")
+        e3("mov $", str(uline(line)), ", %edx")
+        e("call rt_callchk")
+        e("test %rax, %rax")
+        e2("jnz ", lab(slow))
+        e("call *(%r10)")
+        e2("jmp ", lab(done))
+        put_label(slow)
     e3("mov $", str(n), ", %r11d")
-    e3("mov $", str(uline(line)), ", %edx")
-    e("call rt_callchk")
-    e("call *(%r10)")
+    e("call rt_packargs")
+    e3("mov ", str(8 * n), "(%rsp), %rcx")
+    e("push %rcx")
+    e("push %rax")
+    e3("push $", str(np), "")
+    e3("lea ", emit_str(kwn), "(%rip), %rax")
+    e("push %rax")
+    e3("push $", str(uline(line)), "")
+    call_internal("__callv", 5)
+    put_label(done)
     e3("add $", str(8 * (n + 1)), ", %rsp")
     ety = 0
 
@@ -5469,6 +5665,7 @@ def reach_all():
     mark_root("__truth", 1, 1)
     mark_root("__binop", 4, 1)
     mark_root("__bigop", 4, 1)
+    mark_root("__callv", 5, 1)
     mark_root("__cmpop", 3, 1)
     mark_root("__ffloordiv", 2, 1)
     mark_root("__neg", 1, 1)
@@ -6088,7 +6285,8 @@ def forge_main():
         lb = "0"
         if freach[f]:
             lb = flabel[f]
-        emit_raw(concat(concat(concat(concat(concat(concat(".p2align 4\n    .quad 576460752303423491\nFV_", flabel[f]), ": .quad "), lb), ", "), str(fargs[f])), ", 0\n"))
+        nml = emit_str(fparam_names(f))
+        emit_raw(concat(concat(concat(concat(concat(concat(concat(concat(".p2align 4\n    .quad 576460752303423491\nFV_", flabel[f]), ": .quad "), lb), ", "), str(fargs[f])), ", 0, "), nml), ", 0\n"))
         i += 1
     i = 0
     while i < ndat:

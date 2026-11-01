@@ -1019,6 +1019,51 @@ def __bigpow(a, b: int):
             a = __bigop(a, a, 2, 0)
     return r
 
+def __callv(f, vals, np: int, kwn, line):
+    # slow path for calling a function value: defaults and keyword arguments
+    if __tag(f) != 8 or __ld(f, 0) == 0:
+        __err(line, "object is not callable")
+    na: int = __ld(f, 1)
+    names = __ld(f, 3)
+    defs = __ld(f, 4)
+    nd: int = 0
+    if defs != 0:
+        nd = len(defs)
+    if np > na:
+        __raise_rt(TypeError("too many positional arguments"), line, concat(concat(concat(concat("function takes ", str(na)), " positional arguments but "), str(np)), " were given"))
+    pn = []
+    if names != 0 and len(names) > 0:
+        pn = names.split(",")
+    args = [None] * na
+    have = [False] * na
+    i: int = 0
+    while i < np:
+        args[i] = vals[i]
+        have[i] = True
+        i += 1
+    if len(kwn) > 0:
+        ks = kwn.split(",")
+        j: int = 0
+        while j < len(ks):
+            k = ks[j]
+            if k not in pn:
+                __raise_rt(TypeError("unexpected keyword argument"), line, concat(concat("function got an unexpected keyword argument '", k), "'"))
+            x: int = pn.index(k)
+            if have[x]:
+                __raise_rt(TypeError("multiple values"), line, concat(concat("function got multiple values for argument '", k), "'"))
+            args[x] = vals[np + j]
+            have[x] = True
+            j += 1
+    i = 0
+    while i < na:
+        if not have[i]:
+            if i >= na - nd:
+                args[i] = defs[i - (na - nd)]
+            else:
+                __raise_rt(TypeError("missing argument"), line, concat(concat("function missing required argument '", pn[i]), "'"))
+        i += 1
+    return __apply(f, args)
+
 def __bnorm(x):
     if __tag(x) == 6:
         return int(x)

@@ -1076,15 +1076,48 @@ rt_callchk:
     je 1f
     cmp 8(%r10), %r11
     jne 2f
+    xor %eax, %eax
+    ret
+2:  mov $1, %eax
     ret
 1:  push %rdx
     lea rt_nc_msg(%rip), %rax
     push %rax
     call f___err
-2:  push %rdx
-    lea rt_na_msg(%rip), %rax
-    push %rax
-    call f___err
+rt_packargs:
+    # r11 = n; the n call arguments sit above our return address -> rax = list of them
+    push %r11
+    call rt_list
+    pop %r11
+    mov 16(%rax), %rdx
+    xor %ecx, %ecx
+1:  cmp %r11, %rcx
+    jge 2f
+    mov %r11, %rsi
+    sub %rcx, %rsi
+    mov (%rsp,%rsi,8), %rsi
+    mov %rsi, (%rdx,%rcx,8)
+    inc %rcx
+    jmp 1b
+2:  ret
+rt_apply:
+    # (fn, list) -> fn(*list)
+    push %rbp
+    mov %rsp, %rbp
+    mov 16(%rbp), %rsi
+    mov (%rsi), %rcx
+    mov 16(%rsi), %rdx
+    xor %eax, %eax
+1:  cmp %rcx, %rax
+    jge 2f
+    pushq (%rdx,%rax,8)
+    inc %rax
+    jmp 1b
+2:  mov 24(%rbp), %r10
+    call *(%r10)
+    mov %rbp, %rsp
+    pop %rbp
+    ret
 rt_nometh:
     push $0
     lea rt_nm_msg(%rip), %rax

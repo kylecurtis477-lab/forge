@@ -1,0 +1,51 @@
+def greet(name, greeting="hi", punct="!"):
+    return greeting + " " + name + punct
+
+f = greet
+print(f("a", punct="?"))
+print(f("b", greeting="yo"))
+g = lambda x, y=10: x + y
+print(g(1), g(1, 2))
+h = lambda s, sep="-": sep.join(s)
+print(h(["a", "b"]), h(["a", "b"], sep="+"))
+
+def outer():
+    count = 0
+    def mid():
+        def inner():
+            nonlocal count
+            count += 1
+            return count
+        inner()
+        return inner()
+    r = mid()
+    return r, count
+print(outer())
+
+if True:
+    def nd(x):
+        return x * 3
+print(nd(4))
+for i in range(2):
+    def loopdef(y):
+        return y + i
+print(loopdef(10))
+def mk():
+    fs = []
+    for i in range(3):
+        def f(x, i=i):
+            return x + i
+        fs.append(f)
+    def g(a, b=5):
+        return a * b
+    print(g(2), g(2, 3), g(a=1, b=7))
+    return fs
+print([f(10) for f in mk()])
+for i in range(2):
+    pass
+print(i)
+def f():
+    for j in range(5):
+        pass
+    return j
+print(f())
