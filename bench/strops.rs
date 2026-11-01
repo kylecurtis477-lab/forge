@@ -1,0 +1,1 @@
+fn main(){let mut w:Vec<String>=Vec::new();for i in 0..200000{w.push(format!("w{}",i%997));}let line=w.join(" ");let mut t:i64=0;for p in line.split(' '){if p.starts_with("w9"){t+=p.len() as i64;}t+=match p.find('7'){Some(k)=>k as i64,None=>-1};}let up=line.to_uppercase();println!("{} {} {}",t,up.len(),up.matches("W1").count());}

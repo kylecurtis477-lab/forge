@@ -1,0 +1,22 @@
+def caesar(s: str, k: int) -> str:
+    out = []
+    for c in s:
+        if "a" <= c <= "z":
+            out.append(chr((ord(c) - 97 + k) % 26 + 97))
+        else:
+            out.append(c)
+    return "".join(out)
+text = "the quick brown fox jumps over the lazy dog " * 50
+enc = caesar(text, 13)
+print(enc[:44], caesar(enc, 13) == text)
+words = text.split()
+counts = {}
+for w in words:
+    counts[w] = counts.get(w, 0) + 1
+print(sorted(counts.items())[:4], len(words))
+s = ""
+for i in range(300):
+    s += str(i % 10)
+print(len(s), s[:15], s[-5:], s.count("7"), s.find("789"), s.rfind("012"))
+print("-".join(reversed(words[:5])), " pad ".strip().upper(), "a,b,,c".split(","), "x".center(7, "*"))
+print("%d items at %s" % (3, "home"), f"{2.5:.2f}|{42:>5}|{'ab':<4}|", "abc" * 3, "AbC".lower().replace("b", "B"))
