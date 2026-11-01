@@ -4699,7 +4699,7 @@ def func_end(fi):
             if lint[flb[fi] + i] and ltyp[i] != T_INT:
                 lint[flb[fi] + i] = 0
             ok = lsl[i] and not lnl[i] and not lfix[i] and not lint[flb[fi] + i] and not has_child(fi)
-            if ok != llst[flb[fi] + i] and not (ok and hyb_fe):
+            if ok != llst[flb[fi] + i] and not (hyb_fe and (ok or not lsl[i] and not lnl[i])):
                 llst[flb[fi] + i] = ok
                 nconf += 1
                 if ir_stats > 2:
@@ -8403,6 +8403,16 @@ O_TSTMT = 24
 O_TCOND = 25
 O_VLD = 26
 O_VST = 27
+O_TEXPR = 28
+vtt = list(IVMAX)
+cur_tex = 0
+TXN = 8192
+tx_k = list(TXN)
+tx_e = list(TXN)
+tx_t = list(TXN)
+tx_s = list(TXN)
+tx_id = 0
+ftex = list(MAXF)
 hyb = 0
 hH = list(1000)
 nH = 0
@@ -8526,6 +8536,7 @@ def new_vr(temp):
         o_fatal("vregs")
         return 0
     vtemp[nvr] = temp
+    vtt[nvr] = T_INT
     nvr += 1
     return nvr - 1
 
@@ -8564,11 +8575,24 @@ def ibr(l):
     ic[k] = l
 
 def icbr(a, b, cc, l):
+    need_int(a)
+    need_int(b)
     k = iadd(O_CBR, -1, a, b)
     iimm[k] = cc
     ic[k] = l
 
+def oty(o):
+    if o < 0:
+        return T_INT
+    return vtt[o]
+
+def need_int(o):
+    if oty(o) != T_INT:
+        o_fail("opaque")
+
 def ibin(op, a, b, ovf):
+    need_int(a)
+    need_int(b)
     d = new_vr(1)
     k = iadd(op, d, a, b)
     iovf[k] = ovf and ovf_on
@@ -8808,11 +8832,14 @@ def x_expr():
         cond_range(c0, q, lf, 0)
         ip = p0
         a = x_bor()
+        vtt[d] = oty(a)
         iadd(O_MOV, d, a, -1)
         ibr(le)
         ilabel(lf)
         ip = q + 1
         w = x_expr()
+        if oty(w) != vtt[d]:
+            o_fail("ternary type")
         iadd(O_MOV, d, w, -1)
         ilabel(le)
         return d
@@ -8910,6 +8937,7 @@ def x_unary():
             ip += 1
             return cst(0 - k)
         a = x_unary()
+        need_int(a)
         d = new_vr(1)
         k = iadd(O_NEG, d, a, -1)
         iovf[k] = ovf_on
@@ -8920,6 +8948,7 @@ def x_unary():
     if tok_is_op(ip, "~"):
         ip += 1
         a = x_unary()
+        need_int(a)
         d = new_vr(1)
         iadd(O_NOT, d, a, -1)
         return d
@@ -8949,6 +8978,98 @@ def var_int(name):
     return xv[i]
 
 def x_post():
+    global ip, nir, nvr, ncp, nargb, nil, nx, nrf, nlp, irfail, inl_on
+    if not hyb or inl_on or irfail:
+        return x_post0()
+    p0 = ip
+    sv1 = nir
+    sv2 = nvr
+    sv3 = ncp
+    sv4 = nargb
+    sv5 = nil
+    sv6 = nx
+    sv7 = nrf
+    sv8 = nlp
+    v = x_post0()
+    if not irfail or irfatal:
+        return v
+    nir = sv1
+    nvr = sv2
+    ncp = sv3
+    nargb = sv4
+    nil = sv5
+    nx = sv6
+    nrf = sv7
+    nlp = sv8
+    irfail = 0
+    ip = p0
+    return x_texpr(p0)
+
+def tx_start(p):
+    k = tk[p]
+    if k == K_STR or k == K_FLT or k == K_NUM or tok_is_op(p, "(") or tok_is_op(p, "[") or tok_is_op(p, "{"):
+        return 1
+    if k != K_ID:
+        return 0
+    w = tv[p]
+    return not is_kw(w) or str_eq(w, "True") or str_eq(w, "False") or str_eq(w, "None")
+
+def x_texpr(p0):
+    global ip, pos, ety, nout, ndat, nlabel, nstr, nflt, pstop, cur_tex
+    if not tx_start(p0):
+        o_fail("texpr start")
+        return cst(0)
+    h = p0 % TXN
+    while tx_s[h] == tx_id and tx_k[h] != p0:
+        h = (h + 1) % TXN
+    if tx_s[h] == tx_id:
+        return x_tex2(p0, tx_e[h], tx_t[h])
+    s_pos = pos
+    s_ety = ety
+    s_out = nout
+    s_dat = ndat
+    s_lab = nlabel
+    s_str = nstr
+    s_flt = nflt
+    s_ps = pstop
+    pstop = -1
+    pos = p0
+    postfix_expr()
+    en = pos
+    t = ety
+    pos = s_pos
+    ety = s_ety
+    nout = s_out
+    ndat = s_dat
+    nlabel = s_lab
+    nstr = s_str
+    nflt = s_flt
+    pstop = s_ps
+    tx_s[h] = tx_id
+    tx_k[h] = p0
+    tx_e[h] = en
+    tx_t[h] = t
+    return x_tex2(p0, en, t)
+
+def x_tex2(p0, en, t):
+    global ip, cur_tex
+    q = p0
+    while q < en:
+        if tok_is_id(q, "lambda") or tok_is_id(q, "yield"):
+            o_fail("texpr lambda")
+            return cst(0)
+        q += 1
+    hyb_names(p0, en)
+    d = new_vr(1)
+    vtt[d] = t
+    k = iadd(O_TEXPR, d, -1, -1)
+    iimm[k] = p0
+    ix[k] = en
+    cur_tex += 1
+    ip = en
+    return d
+
+def x_post0():
     global ip
     k = tk[ip]
     v = cst(0)
@@ -9004,17 +9125,25 @@ def range_ok(i, idx):
     return 0
 
 def o_load(d, i, idx):
+    need_int(idx)
     k = iadd(O_LOAD, d, xdata[i], idx)
     ic[k] = xobj[i]
     ie[k] = xlen[i]
     iimm[k] = not range_ok(i, idx)
 
 def o_store(i, idx, val):
+    need_int(idx)
+    need_int(val)
     k = iadd(O_STORE, -1, xdata[i], idx)
     ic[k] = xobj[i]
     ie[k] = xlen[i]
     ix[k] = val
     iimm[k] = not range_ok(i, idx)
+
+def fn_ok2(f, n):
+    if f < 0 or fmeth[f] != 0 or fkind[f] != 0 or fpar[f] > 0 or ncap[f] > 0 or fargs[f] != n or fshadow[f]:
+        return 0
+    return 1
 
 def fn_ok(f, n):
     if f < 0 or fmeth[f] != 0 or fkind[f] != 0 or fpar[f] > 0 or ncap[f] > 0 or fargs[f] != n or fshadow[f]:
@@ -9088,9 +9217,12 @@ def x_call():
         iovf[k] = ovf_on
         ilabel(sk)
         return dd
+    gen = 0
     if not fn_ok(f, n) or fpre[f]:
-        o_fail(concat("callee ", name))
-        return cst(0)
+        if not hyb or inl_on or not fn_ok2(f, n):
+            o_fail(concat("callee ", name))
+            return cst(0)
+        gen = 1
     if fyields(f):
         o_fail("generator")
         return cst(0)
@@ -9106,7 +9238,14 @@ def x_call():
             ip += 1
         i += 1
     ip = rp + 1
-    if finl[f] > 0 and f != ir_f and not inl_on:
+    i = 0
+    while i < n:
+        kp = fpb[f] + i
+        if oty(vals[i]) != T_INT and (ptypes[kp] == T_INT or pintf[kp]):
+            o_fail("arg type")
+            return cst(0)
+        i += 1
+    if finl[f] > 0 and f != ir_f and not inl_on and not gen:
         sv_ip = ip
         i = 0
         while i < n:
@@ -9130,6 +9269,11 @@ def x_call():
     dd = new_vr(1)
     k = iadd(O_CALL, dd, st, n)
     iimm[k] = f
+    if gen:
+        if fnone[f]:
+            vtt[dd] = 0
+        else:
+            vtt[dd] = ret_type(f)
     return dd
 
 def o_argpush(v):
@@ -9212,6 +9356,8 @@ def s_stmt():
         o_fatal("island break")
         return 0
     hyb_names(st, en)
+    if ir_stats > 3:
+        eputs(concat("isl ", irwhy))
     k = iadd(O_TSTMT, -1, -1, -1)
     iimm[k] = st
     cur_isl += 1
@@ -9258,10 +9404,11 @@ def hv_name(name):
 def hyb_read(name):
     if h_home(name):
         r = var_ref(name)
-        if not r or vty != T_INT or vkind == 4 or vkind == 5:
+        if not r or vkind == 4 or vkind == 5:
             o_fail("home read")
             return cst(0)
         d = new_vr(1)
+        vtt[d] = vty
         k = iadd(O_VLD, d, -1, -1)
         iimm[k] = hv_name(name)
         return d
@@ -9270,11 +9417,15 @@ def hyb_read(name):
 
 def hyb_write(name, x):
     r = var_ref(name)
-    if not r or vkind == 4 or vkind == 5 or not (vty == T_INT or vty == 0):
+    t = oty(x)
+    if not r or vkind == 4 or vkind == 5 or not (vty == t or vty == 0 or t == 0 and vty != T_INT and vty != T_BOOL and vty != T_FLOAT):
         o_fail("home write")
         return 0
     if vkind == 2:
-        lnl[vidx] = 1
+        if t == T_LIST:
+            lsl[vidx] = 1
+        else:
+            lnl[vidx] = 1
     k = iadd(O_VST, -1, x, -1)
     iimm[k] = hv_name(name)
 
@@ -9344,6 +9495,11 @@ def s_stmt0():
             return 0
         if str_eq(w, "pass"):
             ip += 1
+            end_line()
+            return 0
+        if hyb and str_eq(w, "global"):
+            while not line_end_tok(ip):
+                ip += 1
             end_line()
             return 0
         if find(BADKW, 17, w) >= 0:
@@ -9534,7 +9690,7 @@ def s_for():
 def s_return():
     global ip
     r = ip
-    if hyb and (line_end_tok(ip + 1) or not (fret[ir_f] == 0 or fret[ir_f] == T_INT)):
+    if hyb and line_end_tok(ip + 1):
         o_fail("hyb return")
         return 0
     if ir_tco > 0:
@@ -9551,6 +9707,7 @@ def s_return():
                 if ip != tco_plus:
                     o_fail("tco lhs")
                     return 0
+                need_int(x)
                 kk = iadd(O_ADD, ir_acc, ir_acc, x)
                 iovf[kk] = ovf_on
             ip = tco_call + 2
@@ -9559,7 +9716,9 @@ def s_return():
             i = 0
             while i < n:
                 tmp[i] = new_vr(0)
-                iadd(O_MOV, tmp[i], x_expr(), -1)
+                tv_ = x_expr()
+                need_int(tv_)
+                iadd(O_MOV, tmp[i], tv_, -1)
                 if tok_is_op(ip, ","):
                     ip += 1
                 i += 1
@@ -9580,6 +9739,16 @@ def s_return():
             o_fail("tuple return")
             return 0
     end_line()
+    if hyb:
+        t = oty(x)
+        rt = fret[ir_f]
+        if t == T_INT:
+            if not (rt == 0 or rt == T_INT):
+                o_fail("hyb return")
+                return 0
+        elif not (rt == t or rt == 0 and not fint[ir_f] and (not fbret[ir_f] or t == T_BOOL)):
+            o_fail("ret type")
+            return 0
     if ir_tco == 2:
         x = ibin(O_ADD, ir_acc, x, 1)
     iadd(O_RET, -1, x, -1)
@@ -9591,10 +9760,14 @@ def assign_var(name, x):
     i = xfind(name)
     if i < 0:
         i = add_var(name, 1, new_vr(0))
+        vtt[xv[i]] = oty(x)
     if xk[i] != 1:
         o_fail("assign list var")
         return 0
     v = xv[i]
+    if vtt[v] != oty(x):
+        o_fail("var type")
+        return 0
     k = nir - 1
     if not is_c(x) and x >= 0 and k >= 0 and idst[k] == x and vtemp[x] and iop[k] != O_LABEL:
         idst[k] = v
@@ -9656,6 +9829,7 @@ def s_simple():
                     if ip != rp:
                         o_fail("list(n)")
                         return 0
+                    need_int(ln)
                     ln = stable(ln)
                     ob = new_vr(0)
                     iadd(O_LNEW, ob, ln, -1)
@@ -9692,6 +9866,8 @@ def s_simple():
             x = x_expr()
             end_line()
             v = xv[i]
+            need_int(v)
+            need_int(x)
             kk = iadd(op, v, v, x)
             iovf[kk] = aug_ovf(op) and ovf_on
             return 0
@@ -9798,7 +9974,7 @@ def u_set(k, j, v):
 
 def has_dst(k):
     op = iop[k]
-    if op == O_LABEL or op == O_BR or op == O_CBR or op == O_STORE or op == O_RET or op == O_NOP or op >= O_TSTMT and op != O_VLD:
+    if op == O_LABEL or op == O_BR or op == O_CBR or op == O_STORE or op == O_RET or op == O_NOP or op >= O_TSTMT and op != O_VLD and op != O_TEXPR:
         return 0
     return idst[k] >= 0
 
@@ -10232,7 +10408,7 @@ def o_dce():
                 ch = 1
             else:
                 if has_dst(k):
-                    if iop[k] == O_CALL and not lcur[idst[k]]:
+                    if (iop[k] == O_CALL or iop[k] == O_TEXPR) and not lcur[idst[k]]:
                         idst[k] = -1
                     else:
                         lcur[idst[k]] = 0
@@ -10336,7 +10512,7 @@ def o_intervals():
     k = 0
     while k < nir:
         cpre[k] = c
-        if iop[k] == O_CALL or iop[k] == O_LNEW or iop[k] == O_TSTMT or iop[k] == O_TCOND:
+        if iop[k] == O_CALL or iop[k] == O_LNEW or iop[k] == O_TSTMT or iop[k] == O_TCOND or iop[k] == O_TEXPR:
             c += 1
         k += 1
     cpre[nir] = c
@@ -10884,7 +11060,7 @@ def em_call(k):
         e2("mov %rax, ", vl(idst[k]))
 
 def o_ins(k, fi, x_epi):
-    global pos
+    global pos, pstop
     n = fargs[fi]
     op = iop[k]
     if op == O_LABEL:
@@ -10941,7 +11117,7 @@ def o_ins(k, fi, x_epi):
     elif op == O_RET:
         mv_to(ia[k], "%rax", 0)
         if hyb:
-            if fbret[fi] and fret[fi] == 0:
+            if fbret[fi] and fret[fi] == 0 and oty(ia[k]) != T_BOOL:
                 fbret[fi] = 0
                 conflict_ret()
             e2("jmp ", lab(retlab))
@@ -10950,6 +11126,16 @@ def o_ins(k, fi, x_epi):
     elif op == O_TSTMT:
         pos = iimm[k]
         stmt()
+    elif op == O_TEXPR:
+        pos = iimm[k]
+        s_ps = pstop
+        pstop = -1
+        postfix_expr()
+        pstop = s_ps
+        if pos != ix[k]:
+            die(tl[iimm[k]], "internal: island expression")
+        if idst[k] >= 0:
+            e2("mov %rax, ", vl(idst[k]))
     elif op == O_TCOND:
         pos = ix[k]
         cond_top(labasm[ic[k]], iimm[k])
@@ -11121,7 +11307,7 @@ def hyb_ok(fi):
     return 1
 
 def hyb_reset(fi, p, endp):
-    global nir, nvr, ncp, nargb, nil, irfail, irfatal, nx, npc, nlp, nrf, inl_on, ir_f, ir_tco, ir_line, nhvn, cur_isl
+    global nir, nvr, ncp, nargb, nil, irfail, irfatal, nx, npc, nlp, nrf, inl_on, ir_f, ir_tco, ir_line, nhvn, cur_isl, cur_tex
     nir = 0
     nvr = 0
     ncp = 0
@@ -11136,6 +11322,7 @@ def hyb_reset(fi, p, endp):
     inl_on = 0
     nhvn = 0
     cur_isl = 0
+    cur_tex = 0
     ir_f = fi
     ir_tco = 0
     ir_line = tl[p]
@@ -11151,11 +11338,12 @@ def hyb_reset(fi, p, endp):
         i += 1
 
 def hyb_compile(fi, p, endp):
-    global hyb_fe, hy_its, hyb, nH, hgrow, ip, pos, nout, nlabel, curf, ir_cslo, ir_sb, nslots, hyb_pro, hyb_epi, hyb_noreg, ncs, ncold, no_ov, nspill, irfail
+    global tx_id, hyb_fe, hy_its, hyb, nH, hgrow, ip, pos, nout, nlabel, curf, ir_cslo, ir_sb, nslots, hyb_pro, hyb_epi, hyb_noreg, ncs, ncold, no_ov, nspill, irfail
     if not hyb_on or not hyb_ok(fi):
         return 0
     hs_out = nout
     hs_lab = nlabel
+    tx_id += 1
     pos = p
     func_begin(fi)
     declare_locals(p, endp, 1)
@@ -11246,6 +11434,7 @@ def hyb_compile(fi, p, endp):
     hyb_noreg = 0
     hyb = 0
     fisl[fi] = cur_isl
+    ftex[fi] = cur_tex
     hyb_fe = 1
     func_end(fi)
     hyb_fe = 0
@@ -11274,6 +11463,7 @@ def ir_report():
     nh0 = 0
     nt_ = 0
     ni_ = 0
+    nte_ = 0
     f = 0
     while f < nfuncs:
         if not fpre[f] and foe[f] > fos[f]:
@@ -11282,6 +11472,7 @@ def ir_report():
             elif fmode[f] == 2:
                 nh_ += 1
                 ni_ += fisl[f]
+                nte_ += ftex[f]
                 if fisl[f] == 0:
                     nh0 += 1
             else:
@@ -11291,6 +11482,7 @@ def ir_report():
         f += 1
     eputs(concat(concat(concat(concat("ir: pure ", str(np_)), " hybrid "), str(nh_)), concat(concat(" (fully native ", str(nh0)), ")")))
     eputs(concat(concat(concat(" token ", str(nt_)), " islands "), str(ni_)))
+    eputs(concat(" expr islands ", str(nte_)))
     eputs(concat(concat(concat("hyb iterations ", str(hy_its)), " passes "), str(passno)))
 
 def forge_main():
@@ -11307,6 +11499,8 @@ def forge_main():
             ir_stats = 1
         elif str_eq(argv(ai), "--nohyb"):
             no_hyb = 1
+        elif str_eq(argv(ai), "--irstats4"):
+            ir_stats = 4
         elif str_eq(argv(ai), "--irstats3"):
             ir_stats = 3
         elif str_eq(argv(ai), "--irstats2"):
