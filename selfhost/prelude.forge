@@ -156,7 +156,10 @@ def pop(xs):
     if n < 0:
         __err(0, "pop from empty list")
     __st(xs, 0, n)
-    return __ld(__ld(xs, 2), n)
+    d = __ld(xs, 2)
+    v = __ld(d, n)
+    __st(d, n, 0)
+    return v
 
 def insert(xs, i: int, v):
     n: int = __ld(xs, 0)
@@ -1435,6 +1438,7 @@ def __ddel(d, k, line) -> int:
         x = __ld(kd, j)
         if __eq(x, k):
             __copy(kd + j * 8, kd + j * 8 + 8, (n - 1 - j) * 8)
+            __st(kd, n - 1, 0)
             __st(ks, 0, n - 1)
             return 1
         j -= 1
@@ -1457,6 +1461,7 @@ def __delidx(o, k, line):
             raise IndexError("list assignment index out of range")
         d: int = __ld(o, 2)
         __copy(d + j * 8, d + j * 8 + 8, (n - 1 - j) * 8)
+        __st(d, n - 1, 0)
         __st(o, 0, n - 1)
         return 0
     __err(line, "object does not support item deletion")
@@ -1475,12 +1480,21 @@ def __delslice(o, a: int, b: int, line):
         return 0
     d: int = __ld(o, 2)
     __copy(d + a * 8, d + b * 8, (n - b) * 8)
+    j: int = n - (b - a)
+    while j < n:
+        __st(d, j, 0)
+        j += 1
     __st(o, 0, n - (b - a))
     return 0
 
 def clear(o):
     t: int = __tag(o)
     if t == 0:
+        d: int = __ld(o, 2)
+        j: int = __ld(o, 0)
+        while j > 0:
+            j -= 1
+            __st(d, j, 0)
         __st(o, 0, 0)
         return None
     __st(o, 0, 0)

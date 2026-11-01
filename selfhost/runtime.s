@@ -636,7 +636,16 @@ rt_mark:
     mov rt_inuse(%rip), %rax
     ret
 rt_release:
-    # force a full collection (argument ignored)
+    # force a full collection (argument ignored); scratch registers hold no
+    # live values at a call from compiled code, so clear stale pointers first
+    xor %ecx, %ecx
+    xor %edx, %edx
+    xor %esi, %esi
+    xor %edi, %edi
+    xor %r8d, %r8d
+    xor %r9d, %r9d
+    xor %r10d, %r10d
+    xor %r11d, %r11d
     call rt_collect
     xor %eax, %eax
     ret
