@@ -2286,6 +2286,9 @@ def arith_code(op):
     return 5
 
 ovf_on = 1
+ovf_lab = list(4096)
+ovf_ln = list(4096)
+novf = 0
 
 def set_ovf(v):
     global ovf_on
@@ -2293,12 +2296,38 @@ def set_ovf(v):
 
 def ovf_check(line):
     # typed int add/sub/mul in user code: raise OverflowError instead of wrapping
+    global novf
     if pos >= PRETOK and ovf_on:
-        l = new_label()
-        e2("jno ", lab(l))
-        e3("push $", str(uline(line)), "")
+        # cold stub at the end of the function keeps the hot path fall-through
+        l = -1
+        i = 0
+        while i < novf:
+            if ovf_ln[i] == line:
+                l = ovf_lab[i]
+            i += 1
+        if l < 0:
+            if novf >= 4096:
+                l = new_label()
+                e2("jno ", lab(l))
+                e3("push $", str(uline(line)), "")
+                call_internal("__iovf", 1)
+                put_label(l)
+                return 0
+            l = new_label()
+            ovf_lab[novf] = l
+            ovf_ln[novf] = line
+            novf += 1
+        e2("jo ", lab(l))
+
+def flush_ovf():
+    global novf
+    i = 0
+    while i < novf:
+        put_label(ovf_lab[i])
+        e3("push $", str(uline(ovf_ln[i])), "")
         call_internal("__iovf", 1)
-        put_label(l)
+        i += 1
+    novf = 0
 
 def last_is_arith():
     if nout == 0:
@@ -4445,8 +4474,9 @@ def apply_binary(op, start, mark, lt, rt, line):
 prolog = 0
 
 def func_begin(fi):
-    global curf, nlocs, nslots, nused, nhid, nal, nh, nloops, nfglob, nparams, prolog, retlab, ntr, cur_exc
+    global curf, nlocs, nslots, nused, nhid, nal, nh, nloops, nfglob, nparams, prolog, retlab, ntr, cur_exc, novf
     curf = fi
+    novf = 0
     nlocs = 0
     nslots = 0
     nused = 0
@@ -4539,6 +4569,7 @@ def func_end(fi):
     emit_raw(epi)
     e("leave")
     e("ret")
+    flush_ovf()
     foe[fi] = nout
     # remember which unannotated locals stayed int (first pass only fixes the layout)
     if flb[fi] < 0:

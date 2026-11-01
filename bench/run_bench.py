@@ -4,7 +4,7 @@ import os, subprocess as sp, time
 os.chdir(os.path.dirname(os.path.abspath(__file__))); os.makedirs("out", exist_ok=True)
 def timed(cmd):
     s = time.perf_counter(); r = sp.run(cmd, capture_output=True, text=True, check=True); return time.perf_counter() - s, r.stdout.strip()
-def best(cmd): return min(timed(cmd)[0] for _ in range(3))
+def best(cmd): return min(timed(cmd)[0] for _ in range(5))
 print("| bench | Forge run | Rust -O3 run | CPython run | Forge compile | Rust compile | Forge bin | Rust bin | output |")
 print("|---|---|---|---|---|---|---|---|---|")
 for b in ["fib", "loop", "strbuild", "lists"]:
