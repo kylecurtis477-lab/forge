@@ -11525,8 +11525,29 @@ def o_ins(k, fi, x_epi):
 def em_fst(k):
     e2("mov %rax, ", vl(idst[k]))
 
+def em_fx(o, X):
+    if in_reg(o):
+        e3("movq ", vl(o), concat(", ", X))
+    else:
+        mv_to(o, "%rax", 0)
+        e2("movq %rax, ", X)
+
+def em_fxd(k):
+    if idst[k] >= 0 and in_reg(idst[k]):
+        e2("movq %xmm0, ", vl(idst[k]))
+        return 1
+    e("movq %xmm0, %rax")
+    return 0
+
 def em_flt(k):
     op = iop[k]
+    if op == O_FCST and idst[k] >= 0 and in_reg(idst[k]):
+        e3("mov ", emit_flt(tv[iimm[k]]), concat("(%rip), ", vl(idst[k])))
+        return 0
+    if op == O_FNEG and idst[k] >= 0 and in_reg(idst[k]):
+        mv_to(ia[k], vl(idst[k]), 0)
+        e2("btc $63, ", vl(idst[k]))
+        return 0
     if op == O_FCST:
         e3("mov ", emit_flt(tv[iimm[k]]), "(%rip), %rax")
     elif op == O_FNEG:
@@ -11547,10 +11568,8 @@ def em_flt(k):
         e("movq %rax, %xmm0")
         e("call rt_fbox_r")
     else:
-        mv_to(ia[k], "%rax", 0)
-        e("movq %rax, %xmm0")
-        mv_to(ib[k], "%rax", 0)
-        e("movq %rax, %xmm1")
+        em_fx(ia[k], "%xmm0")
+        em_fx(ib[k], "%xmm1")
         c = iimm[k]
         if op == O_FOP:
             if c == 0:
@@ -11567,7 +11586,8 @@ def em_flt(k):
                 e3("mov $", str(uline(ix[k])), ", %edx")
                 e("call rt_fdivzero")
                 e("1:  divsd %xmm1, %xmm0")
-            e("movq %xmm0, %rax")
+            if em_fxd(k):
+                return 0
         else:
             if c == 2 or c == 3:
                 e("ucomisd %xmm0, %xmm1")
