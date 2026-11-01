@@ -1,0 +1,70 @@
+def dm(a: int, b: int) -> int:
+    return a // b * 1000 + a % b
+
+def cdiv(a: int) -> int:
+    return (a // 7) * 100000 + (a % 7) * 1000 + (a // 8) * 10 + a % 8 + a // 1000003 + a % 3
+
+def sumsq(n: int) -> int:
+    xs = list(n)
+    for i in range(n):
+        xs[i] = i * i
+    t = 0
+    for i in range(n):
+        t += xs[i]
+    j = 0
+    while j < n:
+        t = t - xs[j] // 2
+        j += 1
+    return t
+
+def bad(n: int) -> int:
+    xs = list(n)
+    return xs[n + 2]
+
+def mx(a: int, b: int) -> int:
+    c = a if a > b else b
+    return max(c, 3) + min(a, b) + abs(a - b)
+
+i = -20
+while i <= 20:
+    print(dm(i, 7), dm(i, -3), cdiv(i * 12345), mx(i, 4))
+    i += 3
+print(sumsq(1000))
+
+def g(x: int) -> int:
+    return x + 1
+
+def pressure(n: int) -> int:
+    a = n + 1
+    b = n * 2
+    c = n - 3
+    d = a * b
+    e = b + c
+    f = g(a) + g(b)
+    h = c * 5 + d
+    k = e - f
+    m = g(h) * 2
+    p = a + b + c + d + e + f + h + k + m
+    q = p % 97 + g(p) // 13
+    r = a * c - b * d + e * f - h * k + m * p - q
+    return r + a + b + c + d + e + f + h + k + m + p + q
+
+def gcd(a: int, b: int) -> int:
+    if b == 0:
+        return a
+    return gcd(b, a % b)
+
+def sieve(n: int) -> int:
+    fl = list(n + 1)
+    cnt = 0
+    for i in range(2, n + 1):
+        if fl[i] == 0:
+            cnt += 1
+            j = i * i
+            while j <= n:
+                fl[j] = 1
+                j += i
+    return cnt
+
+for z in range(-5, 6):
+    print(pressure(z), gcd(z * 12, 18), sieve(z + 50))

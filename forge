@@ -4,5 +4,5 @@ set -e
 D="$(cd "$(dirname "$0")" && pwd)"
 src="$1"; out="${src%.forge}"
 [ "$2" = "-o" ] && out="$3"
-"$D/build/forgec" "$src" "$out.s"
+"$D/build/forgec" "$src" "$out.s" $FORGEC_FLAGS
 as -o "$out.o" "$out.s" && ld -Ttext-segment=0x100000000000 -o "$out" "$out.o" && rm -f "$out.o"

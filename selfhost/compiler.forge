@@ -4999,6 +4999,9 @@ def compile_def(fi):
         elif tok_is_op(p, ")"):
             d -= 1
         p += 1
+    if ir_compile(fi):
+        return 0
+    pos = p
     func_begin(fi)
     declare_locals(p, endp, 1)
     tco_setup(fi, p, endp)
@@ -8185,11 +8188,2542 @@ def rewrite_tokens():
     ntok = nr
     return 0
 
+# ======================================================================
+# optimizing backend (-O): tokens -> linear three-address IR (virtual
+# registers, basic blocks) -> const/copy propagation, folding, local CSE,
+# DCE, bounds-check elimination -> linear-scan register allocation -> asm.
+# A function the IR cannot express falls back to the direct code generator.
+# ======================================================================
+opt_on = 0
+IRMAX = 40000
+IVMAX = 20000
+O_MOV = 1
+O_PARAM = 2
+O_ADD = 3
+O_SUB = 4
+O_MUL = 5
+O_AND = 6
+O_OR = 7
+O_XOR = 8
+O_SAR = 9
+O_DIV = 10
+O_MOD = 11
+O_NEG = 12
+O_NOT = 13
+O_LABEL = 14
+O_BR = 15
+O_CBR = 16
+O_CALL = 17
+O_LNEW = 18
+O_LDATA = 19
+O_LOAD = 20
+O_STORE = 21
+O_RET = 22
+O_NOP = 23
+iop = list(IRMAX)
+idst = list(IRMAX)
+ia = list(IRMAX)
+ib = list(IRMAX)
+ic = list(IRMAX)
+ie = list(IRMAX)
+ix = list(IRMAX)
+iimm = list(IRMAX)
+iline = list(IRMAX)
+iovf = list(IRMAX)
+nir = 0
+nvr = 0
+vtemp = list(IVMAX)
+ndef = list(IVMAX)
+defat = list(IVMAX)
+vrep = list(IVMAX)
+cpool = list(IRMAX)
+ncp = 0
+argb = list(IRMAX)
+nargb = 0
+nil = 0
+labpos = list(IRMAX)
+labasm = list(IRMAX)
+irfail = 0
+irwhy = ""
+ip = 0
+ir_line = 0
+IRV = 1000
+xn = list(IRV)
+xk = list(IRV)
+xv = list(IRV)
+xlen = list(IRV)
+xdata = list(IRV)
+xobj = list(IRV)
+nx = 0
+pn_ = list(IRV)
+pc_ = list(IRV)
+npc = 0
+inl_on = 0
+inl_b = 0
+inl_n = 0
+inl_args = list(64)
+lbrk = list(256)
+lcnt = list(256)
+nlp = 0
+rf_v = list(256)
+rf_b = list(256)
+nrf = 0
+ir_f = -1
+ir_tco = 0
+ir_acc = -1
+ir_top = -1
+ir_pv = list(64)
+NCC = ["e", "ne", "l", "le", "g", "ge"]
+CC_NEG = [1, 0, 5, 4, 3, 2]
+CC_SWP = [0, 1, 4, 5, 2, 3]
+RN = ["%rsi", "%rdi", "%r8", "%r9", "%r10", "%rbx", "%r12", "%r13", "%r14", "%r15"]
+n_ir_ok = 0
+n_ir_fn = 0
+
+def set_opt(v):
+    global opt_on
+    opt_on = v
+
+def o_fail(why):
+    global irfail, irwhy
+    if not irfail:
+        irwhy = why
+    irfail = 1
+
+def cst(k):
+    global ncp
+    if ncp >= IRMAX:
+        o_fail("consts")
+        return -2
+    cpool[ncp] = k
+    ncp += 1
+    return 0 - ncp - 1
+
+def is_c(o):
+    return o <= -2
+
+def cval(o):
+    return cpool[0 - o - 2]
+
+def opnd_eq(a, b):
+    if a == b:
+        return 1
+    if is_c(a) and is_c(b):
+        return cval(a) == cval(b)
+    return 0
+
+def new_vr(temp):
+    global nvr
+    if nvr >= IVMAX - 2:
+        o_fail("vregs")
+        return 0
+    vtemp[nvr] = temp
+    nvr += 1
+    return nvr - 1
+
+def new_lab_ir():
+    global nil
+    if nil >= IRMAX - 2:
+        o_fail("labels")
+        return 0
+    nil += 1
+    return nil - 1
+
+def iadd(op, d, a, b):
+    global nir
+    if nir >= IRMAX - 4:
+        o_fail("too big")
+        return 0
+    iop[nir] = op
+    idst[nir] = d
+    ia[nir] = a
+    ib[nir] = b
+    ic[nir] = -1
+    ie[nir] = -1
+    ix[nir] = -1
+    iimm[nir] = 0
+    iline[nir] = ir_line
+    iovf[nir] = 0
+    nir += 1
+    return nir - 1
+
+def ilabel(l):
+    k = iadd(O_LABEL, -1, -1, -1)
+    ic[k] = l
+
+def ibr(l):
+    k = iadd(O_BR, -1, -1, -1)
+    ic[k] = l
+
+def icbr(a, b, cc, l):
+    k = iadd(O_CBR, -1, a, b)
+    iimm[k] = cc
+    ic[k] = l
+
+def ibin(op, a, b, ovf):
+    d = new_vr(1)
+    k = iadd(op, d, a, b)
+    iovf[k] = ovf and ovf_on
+    return d
+
+# ---------------- front end: tokens -> IR ----------------
+def xfind(name):
+    i = 0
+    while i < nx:
+        if str_eq(xn[i], name):
+            return i
+        i += 1
+    return -1
+
+def pcount(name):
+    i = 0
+    while i < npc:
+        if str_eq(pn_[i], name):
+            return pc_[i]
+        i += 1
+    return 0
+
+def pc_bump(name):
+    global npc
+    i = 0
+    while i < npc:
+        if str_eq(pn_[i], name):
+            pc_[i] = pc_[i] + 1
+            return 0
+        i += 1
+    if npc >= IRV:
+        o_fail("names")
+        return 0
+    pn_[npc] = name
+    pc_[npc] = 1
+    npc += 1
+
+AUGOPS = ["+=", "-=", "*=", "//=", "%=", "&=", "|=", "^=", ">>=", "<<=", "**=", "/=", "@="]
+
+def is_aug(p):
+    return tk[p] == K_OP and find(AUGOPS, 13, tv[p]) >= 0
+
+def prescan_defs(a, b):
+    p = a
+    while p < b:
+        if tk[p] == K_ID and not tok_is_op(p - 1, "."):
+            if tok_is_op(p + 1, "=") or is_aug(p + 1):
+                pc_bump(tv[p])
+            elif tok_is_op(p + 1, ":") and (tk[p - 1] == K_NL or tk[p - 1] == K_IND or tk[p - 1] == K_DED):
+                pc_bump(tv[p])
+            elif tok_is_id(p, "for") and tk[p + 1] == K_ID:
+                pc_bump(tv[p + 1])
+        p += 1
+
+def assigned_in(name, a, b):
+    p = a
+    while p < b:
+        if tk[p] == K_ID and str_eq(tv[p], name) and not tok_is_op(p - 1, "."):
+            if tok_is_op(p + 1, "=") or is_aug(p + 1) or tok_is_id(p - 1, "for"):
+                return 1
+        p += 1
+    return 0
+
+def add_var(name, kind, v):
+    global nx
+    if nx >= IRV:
+        o_fail("vars")
+        return 0
+    xn[nx] = name
+    xk[nx] = kind
+    xv[nx] = v
+    xlen[nx] = -1
+    nx += 1
+    return nx - 1
+
+def is_open(p):
+    return tok_is_op(p, "(") or tok_is_op(p, "[") or tok_is_op(p, "{")
+
+def is_close(p):
+    return tok_is_op(p, ")") or tok_is_op(p, "]") or tok_is_op(p, "}")
+
+def match_close(p):
+    d = 0
+    while tk[p] != K_EOF:
+        if is_open(p):
+            d += 1
+        elif is_close(p):
+            d -= 1
+            if d == 0:
+                return p
+        p += 1
+    return -1
+
+def find_top_kw(a, b, w):
+    d = 0
+    p = a
+    while p < b:
+        if is_open(p):
+            d += 1
+        elif is_close(p):
+            d -= 1
+        elif d == 0 and tok_is_id(p, w):
+            return p
+        p += 1
+    return -1
+
+CMPS = ["==", "!=", "<", "<=", ">", ">="]
+
+def find_top_cmp(a, b):
+    d = 0
+    p = a
+    while p < b:
+        if is_open(p):
+            d += 1
+        elif is_close(p):
+            d -= 1
+        elif d == 0 and tk[p] == K_OP and find(CMPS, 6, tv[p]) >= 0:
+            return p
+        elif d == 0 and (tok_is_id(p, "in") or tok_is_id(p, "is")):
+            return -2
+        p += 1
+    return -1
+
+def find_colon(p):
+    d = 0
+    while tk[p] != K_EOF and not (d == 0 and tk[p] == K_NL):
+        if is_open(p):
+            d += 1
+        elif is_close(p):
+            d -= 1
+        elif d == 0 and tok_is_op(p, ":"):
+            return p
+        p += 1
+    return -1
+
+def line_end_tok(p):
+    return tk[p] == K_NL or tk[p] == K_DED or tk[p] == K_EOF
+
+def end_line():
+    global ip
+    if tk[ip] == K_NL:
+        ip += 1
+    elif tk[ip] != K_DED and tk[ip] != K_EOF:
+        o_fail("stmt end")
+
+def cond_range(a, b, l, sense):
+    global ip
+    if irfail:
+        return 0
+    while tok_is_op(a, "(") and match_close(a) == b - 1:
+        a += 1
+        b -= 1
+    if find_top_kw(a, b, "if") >= 0 or find_top_kw(a, b, "lambda") >= 0:
+        o_fail("cond if")
+        return 0
+    q = find_top_kw(a, b, "or")
+    if q >= 0:
+        if sense:
+            cond_range(a, q, l, 1)
+            cond_range(q + 1, b, l, 1)
+        else:
+            s = new_lab_ir()
+            cond_range(a, q, s, 1)
+            cond_range(q + 1, b, l, 0)
+            ilabel(s)
+        return 0
+    q = find_top_kw(a, b, "and")
+    if q >= 0:
+        if sense:
+            s = new_lab_ir()
+            cond_range(a, q, s, 0)
+            cond_range(q + 1, b, l, 1)
+            ilabel(s)
+        else:
+            cond_range(a, q, l, 0)
+            cond_range(q + 1, b, l, 0)
+        return 0
+    if tok_is_id(a, "not"):
+        cond_range(a + 1, b, l, 1 - sense)
+        return 0
+    if b == a + 1 and tok_is_id(a, "True"):
+        if sense:
+            ibr(l)
+        return 0
+    if b == a + 1 and tok_is_id(a, "False"):
+        if not sense:
+            ibr(l)
+        return 0
+    q = find_top_cmp(a, b)
+    if q == -2:
+        o_fail("in/is")
+        return 0
+    if q >= 0:
+        cc = find(CMPS, 6, tv[q])
+        ip = a
+        x = x_expr()
+        if ip != q:
+            o_fail("cmp lhs")
+            return 0
+        ip = q + 1
+        y = x_expr()
+        if ip != b:
+            o_fail("cmp chain")
+            return 0
+        if not sense:
+            cc = CC_NEG[cc]
+        icbr(x, y, cc, l)
+        return 0
+    ip = a
+    x = x_expr()
+    if ip != b:
+        o_fail("cond expr")
+        return 0
+    if sense:
+        icbr(x, cst(0), 1, l)
+    else:
+        icbr(x, cst(0), 0, l)
+
+def x_expr():
+    global ip, nir
+    p0 = ip
+    n0 = nir
+    v = x_bor()
+    if irfail:
+        return v
+    if tok_is_id(ip, "if"):
+        # ternary: re-lower so the condition is evaluated first
+        c0 = ip + 1
+        q = find_top_kw(c0, tco_line_end(c0), "else")
+        if q < 0:
+            o_fail("ternary")
+            return v
+        nir = n0
+        d = new_vr(0)
+        lf = new_lab_ir()
+        le = new_lab_ir()
+        cond_range(c0, q, lf, 0)
+        ip = p0
+        a = x_bor()
+        iadd(O_MOV, d, a, -1)
+        ibr(le)
+        ilabel(lf)
+        ip = q + 1
+        w = x_expr()
+        iadd(O_MOV, d, w, -1)
+        ilabel(le)
+        return d
+    return v
+
+def line_tail(p):
+    d = 0
+    while tk[p] != K_EOF:
+        if is_open(p):
+            d += 1
+        elif is_close(p):
+            d -= 1
+            if d < 0:
+                return p
+        elif d == 0 and (tk[p] == K_NL or tok_is_op(p, ",") or tok_is_op(p, ":")):
+            return p
+        p += 1
+    return p
+
+def x_bor():
+    global ip
+    v = x_bxor()
+    while tok_is_op(ip, "|") and not irfail:
+        ip += 1
+        v = ibin(O_OR, v, x_bxor(), 0)
+    return v
+
+def x_bxor():
+    global ip
+    v = x_band()
+    while tok_is_op(ip, "^") and not irfail:
+        ip += 1
+        v = ibin(O_XOR, v, x_band(), 0)
+    return v
+
+def x_band():
+    global ip
+    v = x_shift()
+    while tok_is_op(ip, "&") and not irfail:
+        ip += 1
+        v = ibin(O_AND, v, x_shift(), 0)
+    return v
+
+def x_shift():
+    global ip
+    v = x_arith()
+    while (tok_is_op(ip, ">>") or tok_is_op(ip, "<<")) and not irfail:
+        if tok_is_op(ip, "<<"):
+            o_fail("<<")
+            return v
+        ip += 1
+        w = x_arith()
+        if not is_c(w) or cval(w) < 0 or cval(w) > 63:
+            o_fail(">> var")
+            return v
+        v = ibin(O_SAR, v, w, 0)
+    return v
+
+def x_arith():
+    global ip
+    v = x_term()
+    while (tok_is_op(ip, "+") or tok_is_op(ip, "-")) and not irfail:
+        if tok_is_op(ip, "+"):
+            ip += 1
+            v = ibin(O_ADD, v, x_term(), 1)
+        else:
+            ip += 1
+            v = ibin(O_SUB, v, x_term(), 1)
+    return v
+
+def x_term():
+    global ip
+    v = x_unary()
+    while (tok_is_op(ip, "*") or tok_is_op(ip, "//") or tok_is_op(ip, "%") or tok_is_op(ip, "/") or tok_is_op(ip, "@")) and not irfail:
+        if tok_is_op(ip, "*"):
+            ip += 1
+            v = ibin(O_MUL, v, x_unary(), 1)
+        elif tok_is_op(ip, "//"):
+            ip += 1
+            v = ibin(O_DIV, v, x_unary(), 0)
+        elif tok_is_op(ip, "%"):
+            ip += 1
+            v = ibin(O_MOD, v, x_unary(), 0)
+        else:
+            o_fail("/")
+            return v
+    return v
+
+def x_unary():
+    global ip
+    if tok_is_op(ip, "-"):
+        ip += 1
+        if tk[ip] == K_NUM and not tok_is_op(ip + 1, "**") and not tok_is_op(ip + 1, "[") and not tok_is_op(ip + 1, "("):
+            k = tv[ip]
+            ip += 1
+            return cst(0 - k)
+        a = x_unary()
+        d = new_vr(1)
+        k = iadd(O_NEG, d, a, -1)
+        iovf[k] = ovf_on
+        return d
+    if tok_is_op(ip, "+"):
+        ip += 1
+        return x_unary()
+    if tok_is_op(ip, "~"):
+        ip += 1
+        a = x_unary()
+        d = new_vr(1)
+        iadd(O_NOT, d, a, -1)
+        return d
+    v = x_post()
+    if tok_is_op(ip, "**"):
+        o_fail("**")
+    return v
+
+def var_int(name):
+    if inl_on:
+        i = 0
+        while i < inl_n:
+            if str_eq(pnames[inl_b + i], name):
+                return inl_args[i]
+            i += 1
+        o_fail("inline name")
+        return cst(0)
+    i = xfind(name)
+    if i < 0:
+        o_fail(concat("name ", name))
+        return cst(0)
+    if xk[i] != 1:
+        o_fail("list as value")
+        return cst(0)
+    return xv[i]
+
+def x_post():
+    global ip
+    k = tk[ip]
+    v = cst(0)
+    if k == K_NUM:
+        v = cst(tv[ip])
+        ip += 1
+    elif tok_is_op(ip, "("):
+        ip += 1
+        v = x_expr()
+        if not tok_is_op(ip, ")"):
+            o_fail("paren")
+            return v
+        ip += 1
+    elif k == K_ID:
+        name = tv[ip]
+        if is_kw(name) or str_eq(name, "True") or str_eq(name, "False") or str_eq(name, "None"):
+            o_fail(name)
+            return v
+        if tok_is_op(ip + 1, "("):
+            v = x_call()
+        elif tok_is_op(ip + 1, "[") and not inl_on:
+            i = xfind(name)
+            if i < 0 or xk[i] != 2:
+                o_fail("index")
+                return v
+            ip += 2
+            idx = x_expr()
+            if not tok_is_op(ip, "]"):
+                o_fail("slice")
+                return v
+            ip += 1
+            v = new_vr(1)
+            o_load(v, i, idx)
+        else:
+            v = var_int(name)
+            ip += 1
+    else:
+        o_fail("atom")
+        return v
+    if tok_is_op(ip, ".") or tok_is_op(ip, "(") or tok_is_op(ip, "["):
+        o_fail("postfix")
+    return v
+
+def range_ok(i, idx):
+    # idx is a counted-loop variable running over [c>=0, len(list i))
+    if is_c(idx):
+        return is_c(xlen[i]) and cval(idx) >= 0 and cval(idx) < cval(xlen[i])
+    k = nrf - 1
+    while k >= 0:
+        if rf_v[k] == idx and opnd_eq(rf_b[k], xlen[i]):
+            return 1
+        k -= 1
+    return 0
+
+def o_load(d, i, idx):
+    k = iadd(O_LOAD, d, xdata[i], idx)
+    ic[k] = xobj[i]
+    ie[k] = xlen[i]
+    iimm[k] = not range_ok(i, idx)
+
+def o_store(i, idx, val):
+    k = iadd(O_STORE, -1, xdata[i], idx)
+    ic[k] = xobj[i]
+    ie[k] = xlen[i]
+    ix[k] = val
+    iimm[k] = not range_ok(i, idx)
+
+def fn_ok(f, n):
+    if f < 0 or fmeth[f] != 0 or fkind[f] != 0 or fpar[f] > 0 or ncap[f] > 0 or fargs[f] != n or fshadow[f]:
+        return 0
+    return ret_type(f) == T_INT and not fnone[f]
+
+def x_call():
+    global ip, inl_on, inl_b, inl_n
+    name = tv[ip]
+    lp = ip + 1
+    rp = match_close(lp)
+    if rp < 0:
+        o_fail("call")
+        return cst(0)
+    if not inl_on and xfind(name) >= 0:
+        o_fail("call local")
+        return cst(0)
+    # count args, reject keywords / stars
+    n = 0
+    if rp > lp + 1:
+        n = 1
+    d = 0
+    p = lp + 1
+    while p < rp:
+        if is_open(p):
+            d += 1
+        elif is_close(p):
+            d -= 1
+        elif d == 0 and tok_is_op(p, ","):
+            n += 1
+        elif d == 0 and (tok_is_op(p, "=") or tok_is_op(p, "*") and (tok_is_op(p - 1, "(") or tok_is_op(p - 1, ",")) or tok_is_op(p, "**") or tok_is_id(p, "for")):
+            o_fail("call args")
+            return cst(0)
+        p += 1
+    if tok_is_op(rp - 1, ","):
+        o_fail("trailing comma")
+        return cst(0)
+    f = fn_lookup(name, n)
+    if (f < 0 or fpre[f]) and str_eq(name, "len") and n == 1 and not inl_on:
+        i = xfind(tv[lp + 1])
+        if tk[lp + 1] == K_ID and i >= 0 and xk[i] == 2 and lp + 2 == rp:
+            ip = rp + 1
+            return xlen[i]
+        o_fail("len")
+        return cst(0)
+    if (f < 0 or fpre[f]) and (str_eq(name, "min") or str_eq(name, "max")) and n == 2:
+        ip = lp + 1
+        a = x_expr()
+        ip += 1
+        b = x_expr()
+        ip = rp + 1
+        dd = new_vr(0)
+        iadd(O_MOV, dd, a, -1)
+        sk = new_lab_ir()
+        if str_eq(name, "min"):
+            icbr(dd, b, 3, sk)
+        else:
+            icbr(dd, b, 5, sk)
+        iadd(O_MOV, dd, b, -1)
+        ilabel(sk)
+        return dd
+    if (f < 0 or fpre[f]) and str_eq(name, "abs") and n == 1:
+        ip = lp + 1
+        a = x_expr()
+        ip = rp + 1
+        dd = new_vr(0)
+        iadd(O_MOV, dd, a, -1)
+        sk = new_lab_ir()
+        icbr(dd, cst(0), 5, sk)
+        k = iadd(O_NEG, dd, dd, -1)
+        iovf[k] = ovf_on
+        ilabel(sk)
+        return dd
+    if not fn_ok(f, n) or fpre[f]:
+        o_fail(concat("callee ", name))
+        return cst(0)
+    if fyields(f):
+        o_fail("generator")
+        return cst(0)
+    ip = lp + 1
+    vals = list(n + 1)
+    i = 0
+    while i < n:
+        vals[i] = x_expr()
+        if i < n - 1:
+            if not tok_is_op(ip, ","):
+                o_fail("arg")
+                return cst(0)
+            ip += 1
+        i += 1
+    ip = rp + 1
+    if finl[f] > 0 and f != ir_f and not inl_on:
+        sv_ip = ip
+        i = 0
+        while i < n:
+            inl_args[i] = vals[i]
+            i += 1
+        inl_on = 1
+        inl_b = fpb[f]
+        inl_n = n
+        ip = finl[f]
+        r = x_expr()
+        if ip != finle[f]:
+            o_fail("inline body")
+        inl_on = 0
+        ip = sv_ip
+        return r
+    st = nargb
+    i = 0
+    while i < n:
+        o_argpush(vals[i])
+        i += 1
+    dd = new_vr(1)
+    k = iadd(O_CALL, dd, st, n)
+    iimm[k] = f
+    return dd
+
+def o_argpush(v):
+    global nargb
+    if nargb >= IRMAX:
+        o_fail("args")
+        return 0
+    argb[nargb] = v
+    nargb += 1
+
+fy_cache = list(MAXF)
+
+def fyields(f):
+    if fy_cache[f] == 0:
+        a = fpos[f]
+        b = skip_stmt(a)
+        r = 1
+        while a < b:
+            if tok_is_id(a, "yield"):
+                r = 2
+            a += 1
+        fy_cache[f] = r
+    return fy_cache[f] == 2
+
+def s_block():
+    global ip
+    if not tok_is_op(ip, ":"):
+        o_fail("block")
+        return 0
+    ip += 1
+    if tk[ip] != K_NL:
+        s_stmt()
+        return 0
+    ip += 1
+    if tk[ip] != K_IND:
+        o_fail("indent")
+        return 0
+    ip += 1
+    while tk[ip] != K_DED and tk[ip] != K_EOF and not irfail:
+        s_stmt()
+    if tk[ip] == K_DED:
+        ip += 1
+
+BADKW = ["global", "nonlocal", "def", "class", "try", "raise", "del", "with", "yield", "import", "from", "assert", "lambda", "async", "await", "match", "print"]
+
+def s_stmt():
+    global ip, ir_line
+    ir_line = tl[ip]
+    if tk[ip] == K_NL:
+        ip += 1
+        return 0
+    if tk[ip] == K_ID:
+        w = tv[ip]
+        if str_eq(w, "if"):
+            s_if()
+            return 0
+        if str_eq(w, "while"):
+            s_while()
+            return 0
+        if str_eq(w, "for"):
+            s_for()
+            return 0
+        if str_eq(w, "return"):
+            s_return()
+            return 0
+        if str_eq(w, "break") or str_eq(w, "continue"):
+            if nlp == 0:
+                o_fail("break")
+                return 0
+            if str_eq(w, "break"):
+                ibr(lbrk[nlp - 1])
+            else:
+                ibr(lcnt[nlp - 1])
+            ip += 1
+            end_line()
+            return 0
+        if str_eq(w, "pass"):
+            ip += 1
+            end_line()
+            return 0
+        if find(BADKW, 17, w) >= 0:
+            o_fail(w)
+            return 0
+    if tk[ip] == K_STR and tk[ip + 1] == K_NL:
+        ip += 2
+        return 0
+    s_simple()
+
+def s_if():
+    global ip
+    ip += 1
+    q = find_colon(ip)
+    if q < 0:
+        o_fail("if")
+        return 0
+    lend = new_lab_ir()
+    lf = new_lab_ir()
+    cond_range(ip, q, lf, 0)
+    ip = q
+    s_block()
+    while tok_is_id(ip, "elif") and not irfail:
+        ibr(lend)
+        ilabel(lf)
+        ip += 1
+        q = find_colon(ip)
+        if q < 0:
+            o_fail("elif")
+            return 0
+        lf = new_lab_ir()
+        cond_range(ip, q, lf, 0)
+        ip = q
+        s_block()
+    if tok_is_id(ip, "else"):
+        ibr(lend)
+        ilabel(lf)
+        ip += 1
+        s_block()
+    else:
+        ilabel(lf)
+    ilabel(lend)
+
+def s_while():
+    global ip, nlp
+    ip += 1
+    c0 = ip
+    q = find_colon(ip)
+    if q < 0 or nlp >= 250:
+        o_fail("while")
+        return 0
+    top = new_lab_ir()
+    lc = new_lab_ir()
+    le = new_lab_ir()
+    inf = q == c0 + 1 and (tok_is_id(c0, "True") or tk[c0] == K_NUM and tv[c0] != 0)
+    if not inf:
+        cond_range(c0, q, le, 0)
+    ilabel(top)
+    lbrk[nlp] = le
+    lcnt[nlp] = lc
+    nlp += 1
+    ip = q
+    s_block()
+    nlp -= 1
+    if tok_is_id(ip, "else"):
+        o_fail("while else")
+        return 0
+    ilabel(lc)
+    if inf:
+        ibr(top)
+    else:
+        save = ip
+        cond_range(c0, q, top, 1)
+        ip = save
+    ilabel(le)
+
+def stable(o):
+    # an operand whose value cannot change for the rest of the function
+    if is_c(o) or vtemp[o]:
+        return o
+    i = 0
+    while i < nx:
+        if xv[i] == o and xk[i] == 1:
+            if pcount(xn[i]) == 0 or pcount(xn[i]) == 1 and not o_isparam(xn[i]):
+                return o
+        i += 1
+    d = new_vr(1)
+    iadd(O_MOV, d, o, -1)
+    return d
+
+def o_isparam(name):
+    i = 0
+    while i < fargs[ir_f]:
+        if str_eq(pnames[fpb[ir_f] + i], name):
+            return 1
+        i += 1
+    return 0
+
+def s_for():
+    global ip, nlp, nrf
+    p = ip
+    if tk[p + 1] != K_ID or not tok_is_id(p + 2, "in") or not tok_is_id(p + 3, "range") or not tok_is_op(p + 4, "(") or nlp >= 250 or nrf >= 250:
+        o_fail("for")
+        return 0
+    name = tv[p + 1]
+    rp = match_close(p + 4)
+    if rp < 0 or not tok_is_op(rp + 1, ":") or xfind("range") >= 0:
+        o_fail("for")
+        return 0
+    ip = p + 5
+    args = list(4)
+    n = 0
+    while ip < rp and n < 3 and not irfail:
+        args[n] = x_expr()
+        n += 1
+        if tok_is_op(ip, ","):
+            ip += 1
+    if ip != rp or n == 0:
+        o_fail("range args")
+        return 0
+    start = cst(0)
+    step = 1
+    if n == 1:
+        stop = stable(args[0])
+    else:
+        start = args[0]
+        stop = stable(args[1])
+    if n == 3:
+        if not is_c(args[2]) or cval(args[2]) == 0:
+            o_fail("range step")
+            return 0
+        step = cval(args[2])
+    ip = rp + 1
+    be = block_end(ip)
+    i = xfind(name)
+    if i < 0:
+        i = add_var(name, 1, new_vr(0))
+    if xk[i] != 1:
+        o_fail("for var")
+        return 0
+    v = xv[i]
+    own = assigned_in(name, ip, be)
+    c = v
+    if own:
+        c = new_vr(0)
+    t = new_vr(1)
+    iadd(O_MOV, t, start, -1)
+    le = new_lab_ir()
+    top = new_lab_ir()
+    lc = new_lab_ir()
+    if step > 0:
+        icbr(t, stop, 5, le)
+    else:
+        icbr(t, stop, 3, le)
+    iadd(O_MOV, c, t, -1)
+    ilabel(top)
+    if own:
+        iadd(O_MOV, v, c, -1)
+    fact = 0
+    if not own and step > 0 and is_c(start) and cval(start) >= 0:
+        rf_v[nrf] = v
+        rf_b[nrf] = stop
+        nrf += 1
+        fact = 1
+    lbrk[nlp] = le
+    lcnt[nlp] = lc
+    nlp += 1
+    s_block()
+    nlp -= 1
+    if fact:
+        nrf -= 1
+    if tok_is_id(ip, "else"):
+        o_fail("for else")
+        return 0
+    ilabel(lc)
+    iadd(O_ADD, c, c, cst(step))
+    if step > 0:
+        icbr(c, stop, 2, top)
+    else:
+        icbr(c, stop, 4, top)
+    if not own:
+        iadd(O_SUB, v, v, cst(step))
+    ilabel(le)
+
+def s_return():
+    global ip
+    r = ip
+    if ir_tco > 0:
+        k = tco_kind(ir_f, r)
+        if k == 2 and ir_tco != 2:
+            k = 0
+        if k > 0:
+            if k == 2:
+                ip = r + 1
+                svk = tk[tco_plus]
+                tk[tco_plus] = K_NL
+                x = x_expr()
+                tk[tco_plus] = svk
+                if ip != tco_plus:
+                    o_fail("tco lhs")
+                    return 0
+                kk = iadd(O_ADD, ir_acc, ir_acc, x)
+                iovf[kk] = ovf_on
+            ip = tco_call + 2
+            n = fargs[ir_f]
+            tmp = list(n + 1)
+            i = 0
+            while i < n:
+                tmp[i] = new_vr(0)
+                iadd(O_MOV, tmp[i], x_expr(), -1)
+                if tok_is_op(ip, ","):
+                    ip += 1
+                i += 1
+            i = 0
+            while i < n:
+                iadd(O_MOV, ir_pv[i], tmp[i], -1)
+                i += 1
+            ibr(ir_top)
+            ip = tco_line_end(r)
+            end_line()
+            return 0
+    ip += 1
+    if line_end_tok(ip):
+        x = cst(0)
+    else:
+        x = x_expr()
+        if tok_is_op(ip, ","):
+            o_fail("tuple return")
+            return 0
+    end_line()
+    if ir_tco == 2:
+        x = ibin(O_ADD, ir_acc, x, 1)
+    iadd(O_RET, -1, x, -1)
+
+def assign_var(name, x):
+    i = xfind(name)
+    if i < 0:
+        i = add_var(name, 1, new_vr(0))
+    if xk[i] != 1:
+        o_fail("assign list var")
+        return 0
+    v = xv[i]
+    k = nir - 1
+    if not is_c(x) and x >= 0 and k >= 0 and idst[k] == x and vtemp[x] and iop[k] != O_LABEL:
+        idst[k] = v
+        return 0
+    iadd(O_MOV, v, x, -1)
+
+def aug_code(p):
+    o = tv[p]
+    if str_eq(o, "+="):
+        return O_ADD
+    if str_eq(o, "-="):
+        return O_SUB
+    if str_eq(o, "*="):
+        return O_MUL
+    if str_eq(o, "//="):
+        return O_DIV
+    if str_eq(o, "%="):
+        return O_MOD
+    if str_eq(o, "&="):
+        return O_AND
+    if str_eq(o, "|="):
+        return O_OR
+    if str_eq(o, "^="):
+        return O_XOR
+    return 0
+
+def aug_ovf(op):
+    return op == O_ADD or op == O_SUB or op == O_MUL
+
+def s_simple():
+    global ip
+    p = ip
+    if tk[p] == K_ID and not is_kw(tv[p]):
+        name = tv[p]
+        q = p + 1
+        if tok_is_op(q, ":") and not inl_on:
+            # annotated local: skip the annotation
+            while not line_end_tok(q) and not tok_is_op(q, "="):
+                q += 1
+            if line_end_tok(q):
+                ip = q
+                end_line()
+                return 0
+        if tok_is_op(q, "="):
+            if find_top_eq(q + 1) >= 0:
+                o_fail("chained =")
+                return 0
+            if tok_is_id(q + 1, "list") and tok_is_op(q + 2, "(") and xfind("list") < 0:
+                rp = match_close(q + 2)
+                if rp > q + 3 and line_end_tok(rp + 1) and (fn_lookup("list", 1) < 0 or fpre[fn_lookup("list", 1)]):
+                    if pcount(name) != 1 or xfind(name) >= 0 or o_isparam(name):
+                        o_fail("list var reassigned")
+                        return 0
+                    ip = q + 3
+                    ln = x_expr()
+                    if ip != rp:
+                        o_fail("list(n)")
+                        return 0
+                    ln = stable(ln)
+                    ob = new_vr(0)
+                    iadd(O_LNEW, ob, ln, -1)
+                    da = new_vr(0)
+                    iadd(O_LDATA, da, ob, -1)
+                    i = add_var(name, 2, -1)
+                    xlen[i] = ln
+                    xdata[i] = da
+                    xobj[i] = ob
+                    ip = rp + 1
+                    end_line()
+                    return 0
+            ip = q + 1
+            x = x_expr()
+            end_line()
+            assign_var(name, x)
+            return 0
+        if is_aug(q):
+            op = aug_code(q)
+            i = xfind(name)
+            if op == 0 or i < 0 or xk[i] != 1:
+                o_fail("aug")
+                return 0
+            ip = q + 1
+            x = x_expr()
+            end_line()
+            v = xv[i]
+            kk = iadd(op, v, v, x)
+            iovf[kk] = aug_ovf(op) and ovf_on
+            return 0
+        if tok_is_op(q, "["):
+            rb = match_close(q)
+            i = xfind(name)
+            if rb > 0 and i >= 0 and xk[i] == 2 and (tok_is_op(rb + 1, "=") or is_aug(rb + 1)):
+                if is_aug(rb + 1):
+                    ip = q + 1
+                    idx = x_expr()
+                    if ip != rb:
+                        o_fail("store index")
+                        return 0
+                    ip = rb + 2
+                    x = x_expr()
+                    ee = ip
+                else:
+                    # value first (Python evaluates the right-hand side before the target)
+                    ip = rb + 2
+                    x = x_expr()
+                    ee = ip
+                    ip = q + 1
+                    idx = x_expr()
+                    if ip != rb:
+                        o_fail("store index")
+                        return 0
+                if is_aug(rb + 1):
+                    # target subscript first for augmented assignment
+                    op = aug_code(rb + 1)
+                    if op == 0:
+                        o_fail("aug")
+                        return 0
+                    old = new_vr(1)
+                    o_load(old, i, idx)
+                    x = ibin(op, old, x, aug_ovf(op))
+                o_store(i, idx, x)
+                ip = ee
+                end_line()
+                return 0
+    x_expr()
+    end_line()
+
+def find_top_eq(p):
+    d = 0
+    while not line_end_tok(p):
+        if is_open(p):
+            d += 1
+        elif is_close(p):
+            d -= 1
+        elif d == 0 and tok_is_op(p, "="):
+            return p
+        p += 1
+    return -1
+
+# ---------------- IR utilities ----------------
+def u_n(k):
+    op = iop[k]
+    if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET:
+        return 1
+    if op >= O_ADD and op <= O_MOD or op == O_CBR:
+        return 2
+    if op == O_LOAD:
+        if iimm[k]:
+            return 4
+        return 2
+    if op == O_STORE:
+        if iimm[k]:
+            return 5
+        return 3
+    if op == O_CALL:
+        return ib[k]
+    return 0
+
+def u_get(k, j):
+    if iop[k] == O_CALL:
+        return argb[ia[k] + j]
+    if iop[k] == O_STORE and j == 2 and not iimm[k]:
+        return ix[k]
+    if j == 0:
+        return ia[k]
+    if j == 1:
+        return ib[k]
+    if j == 2:
+        return ic[k]
+    if j == 3:
+        return ie[k]
+    return ix[k]
+
+def u_set(k, j, v):
+    if iop[k] == O_CALL:
+        argb[ia[k] + j] = v
+    elif iop[k] == O_STORE and j == 2 and not iimm[k]:
+        ix[k] = v
+    elif j == 0:
+        ia[k] = v
+    elif j == 1:
+        ib[k] = v
+    elif j == 2:
+        ic[k] = v
+    elif j == 3:
+        ie[k] = v
+    else:
+        ix[k] = v
+
+def has_dst(k):
+    op = iop[k]
+    if op == O_LABEL or op == O_BR or op == O_CBR or op == O_STORE or op == O_RET or op == O_NOP:
+        return 0
+    return idst[k] >= 0
+
+def is_pure(k):
+    op = iop[k]
+    if op == O_MOV or op == O_PARAM or op == O_AND or op == O_OR or op == O_XOR or op == O_SAR or op == O_NOT or op == O_LDATA or op == O_LNEW:
+        return 1
+    if op == O_ADD or op == O_SUB or op == O_MUL or op == O_NEG:
+        return not iovf[k]
+    if op == O_LOAD:
+        return not iimm[k]
+    if op == O_DIV or op == O_MOD:
+        return is_c(ib[k]) and cval(ib[k]) != 0
+    return 0
+
+def fits32(k):
+    return k >= -2147483648 and k < 2147483648
+
+def small(k):
+    return k > -2305843009213693952 and k < 2305843009213693952
+
+def build_defs():
+    v = 0
+    while v < nvr:
+        ndef[v] = 0
+        v += 1
+    k = 0
+    while k < nir:
+        if has_dst(k):
+            ndef[idst[k]] = ndef[idst[k]] + 1
+            defat[idst[k]] = k
+        k += 1
+
+def fold_one(k):
+    # returns 1 if instruction k changed
+    op = iop[k]
+    a = ia[k]
+    b = ib[k]
+    if op == O_CBR and is_c(a) and is_c(b):
+        x = cval(a)
+        y = cval(b)
+        cc = iimm[k]
+        t = 0
+        if cc == 0:
+            t = x == y
+        elif cc == 1:
+            t = x != y
+        elif cc == 2:
+            t = x < y
+        elif cc == 3:
+            t = x <= y
+        elif cc == 4:
+            t = x > y
+        else:
+            t = x >= y
+        if t:
+            iop[k] = O_BR
+        else:
+            iop[k] = O_NOP
+        return 1
+    if (op == O_NEG or op == O_NOT) and is_c(a):
+        x = cval(a)
+        if op == O_NOT:
+            r = 0 - x - 1
+        elif small(x):
+            r = 0 - x
+        else:
+            return 0
+        iop[k] = O_MOV
+        ia[k] = cst(r)
+        iovf[k] = 0
+        return 1
+    if op < O_ADD or op > O_MOD:
+        return 0
+    if is_c(a) and is_c(b):
+        x = cval(a)
+        y = cval(b)
+        ok = 1
+        r = 0
+        if op == O_ADD:
+            ok = small(x) and small(y)
+            if ok:
+                r = x + y
+        elif op == O_SUB:
+            ok = small(x) and small(y)
+            if ok:
+                r = x - y
+        elif op == O_MUL:
+            ok = fits32(x) and fits32(y)
+            if ok:
+                r = x * y
+        elif op == O_AND or op == O_OR or op == O_XOR or op == O_SAR:
+            ok = 0
+        elif op == O_DIV:
+            ok = y != 0 and small(x) and small(y)
+            if ok:
+                r = x // y
+        else:
+            ok = y != 0 and small(x) and small(y)
+            if ok:
+                r = x % y
+        if not ok:
+            return 0
+        iop[k] = O_MOV
+        ia[k] = cst(r)
+        ib[k] = -1
+        iovf[k] = 0
+        return 1
+    # identities
+    if is_c(b) and cval(b) == 0 and (op == O_ADD or op == O_SUB or op == O_OR or op == O_XOR or op == O_SAR):
+        iop[k] = O_MOV
+        ib[k] = -1
+        iovf[k] = 0
+        return 1
+    if is_c(b) and cval(b) == 1 and (op == O_MUL or op == O_DIV):
+        iop[k] = O_MOV
+        ib[k] = -1
+        iovf[k] = 0
+        return 1
+    if is_c(a) and cval(a) == 0 and (op == O_ADD or op == O_OR or op == O_XOR):
+        iop[k] = O_MOV
+        ia[k] = b
+        ib[k] = -1
+        iovf[k] = 0
+        return 1
+    if is_c(a) and cval(a) == 1 and op == O_MUL:
+        iop[k] = O_MOV
+        ia[k] = b
+        ib[k] = -1
+        iovf[k] = 0
+        return 1
+    return 0
+
+def o_prop():
+    # constant + copy propagation and folding to a fixpoint
+    rounds = 0
+    ch = 1
+    while ch and rounds < 12:
+        ch = 0
+        rounds += 1
+        build_defs()
+        v = 0
+        while v < nvr:
+            vrep[v] = -1
+            if ndef[v] == 1 and iop[defat[v]] == O_MOV:
+                s = ia[defat[v]]
+                if is_c(s):
+                    vrep[v] = s
+                elif vtemp[v] and s >= 0 and ndef[s] == 1:
+                    vrep[v] = s
+            v += 1
+        k = 0
+        while k < nir:
+            n = u_n(k)
+            j = 0
+            while j < n:
+                o = u_get(k, j)
+                g = 0
+                while o >= 0 and vrep[o] != -1 and g < 20:
+                    o = vrep[o]
+                    g += 1
+                if g > 0:
+                    u_set(k, j, o)
+                    ch = 1
+                j += 1
+            if fold_one(k):
+                ch = 1
+            k += 1
+
+def o_compact():
+    global nir
+    j = 0
+    k = 0
+    while k < nir:
+        if iop[k] != O_NOP:
+            iop[j] = iop[k]
+            idst[j] = idst[k]
+            ia[j] = ia[k]
+            ib[j] = ib[k]
+            ic[j] = ic[k]
+            ie[j] = ie[k]
+            ix[j] = ix[k]
+            iimm[j] = iimm[k]
+            iline[j] = iline[k]
+            iovf[j] = iovf[k]
+            j += 1
+        k += 1
+    nir = j
+
+nb = 0
+bst = list(IRMAX)
+ben = list(IRMAX)
+bs1 = list(IRMAX)
+bs2 = list(IRMAX)
+bmark = list(IRMAX)
+iblk = list(IRMAX)
+lblk = list(IRMAX)
+
+def o_cfg():
+    global nb
+    nb = 0
+    k = 0
+    while k < nir:
+        if k == 0 or iop[k] == O_LABEL or iop[k - 1] == O_BR or iop[k - 1] == O_CBR or iop[k - 1] == O_RET:
+            if nb > 0:
+                ben[nb - 1] = k
+            bst[nb] = k
+            nb += 1
+        iblk[k] = nb - 1
+        if iop[k] == O_LABEL:
+            lblk[ic[k]] = nb - 1
+        k += 1
+    if nb > 0:
+        ben[nb - 1] = nir
+    b = 0
+    while b < nb:
+        bs1[b] = -1
+        bs2[b] = -1
+        last = ben[b] - 1
+        op = iop[last]
+        if op == O_BR:
+            bs1[b] = lblk[ic[last]]
+        elif op == O_CBR:
+            bs1[b] = lblk[ic[last]]
+            if b + 1 < nb:
+                bs2[b] = b + 1
+        elif op != O_RET and b + 1 < nb:
+            bs1[b] = b + 1
+        b += 1
+
+def o_unreach():
+    # drop unreachable blocks; returns 1 if anything was removed
+    b = 0
+    while b < nb:
+        bmark[b] = 0
+        b += 1
+    stk = list(nb + 1)
+    ns = 1
+    stk[0] = 0
+    bmark[0] = 1
+    while ns > 0:
+        ns -= 1
+        b = stk[ns]
+        if bs1[b] >= 0 and not bmark[bs1[b]]:
+            bmark[bs1[b]] = 1
+            stk[ns] = bs1[b]
+            ns += 1
+        if bs2[b] >= 0 and not bmark[bs2[b]]:
+            bmark[bs2[b]] = 1
+            stk[ns] = bs2[b]
+            ns += 1
+    ch = 0
+    b = 0
+    while b < nb:
+        if not bmark[b]:
+            k = bst[b]
+            while k < ben[b]:
+                iop[k] = O_NOP
+                k += 1
+            ch = 1
+        b += 1
+    return ch
+
+def next_real(k):
+    k += 1
+    while k < nir and iop[k] == O_NOP:
+        k += 1
+    return k
+
+def label_follows(k, l):
+    # is label l among the labels directly after instruction k?
+    j = next_real(k)
+    while j < nir and iop[j] == O_LABEL:
+        if ic[j] == l:
+            return 1
+        j = next_real(j)
+    return 0
+
+def o_jumps():
+    ch = 0
+    k = 0
+    while k < nir:
+        op = iop[k]
+        if (op == O_BR or op == O_CBR) and label_follows(k, ic[k]):
+            iop[k] = O_NOP
+            ch = 1
+        elif op == O_CBR:
+            j = next_real(k)
+            if j < nir and iop[j] == O_BR and label_follows(j, ic[k]):
+                iimm[k] = CC_NEG[iimm[k]]
+                ic[k] = ic[j]
+                iop[j] = O_NOP
+                ch = 1
+        k += 1
+    # labels nobody jumps to
+    used = list(nil + 1)
+    k = 0
+    while k < nir:
+        if iop[k] == O_BR or iop[k] == O_CBR:
+            used[ic[k]] = 1
+        k += 1
+    k = 0
+    while k < nir:
+        if iop[k] == O_LABEL and not used[ic[k]] and k > 0:
+            iop[k] = O_NOP
+        k += 1
+    return ch
+
+# local common subexpression elimination (value numbering per block)
+cse_op = list(4096)
+cse_a = list(4096)
+cse_b = list(4096)
+cse_d = list(4096)
+
+def is_comm(op):
+    return op == O_ADD or op == O_MUL or op == O_AND or op == O_OR or op == O_XOR
+
+def o_cse():
+    b = 0
+    while b < nb:
+        n = 0
+        k = bst[b]
+        while k < ben[b]:
+            op = iop[k]
+            if (op >= O_ADD and op <= O_NOT or op == O_LDATA) and has_dst(k):
+                a = ia[k]
+                bb = ib[k]
+                hit = -1
+                j = 0
+                while j < n:
+                    if cse_op[j] == op and (opnd_eq(cse_a[j], a) and opnd_eq(cse_b[j], bb) or is_comm(op) and opnd_eq(cse_a[j], bb) and opnd_eq(cse_b[j], a)):
+                        hit = cse_d[j]
+                    j += 1
+                if hit >= 0 and (op != O_DIV and op != O_MOD or is_pure(k)):
+                    iop[k] = O_MOV
+                    ia[k] = hit
+                    ib[k] = -1
+                    iovf[k] = 0
+            if has_dst(k):
+                d = idst[k]
+                j = 0
+                while j < n:
+                    if cse_a[j] == d or cse_b[j] == d or cse_d[j] == d:
+                        n -= 1
+                        cse_op[j] = cse_op[n]
+                        cse_a[j] = cse_a[n]
+                        cse_b[j] = cse_b[n]
+                        cse_d[j] = cse_d[n]
+                    else:
+                        j += 1
+                op = iop[k]
+                if (op >= O_ADD and op <= O_NOT or op == O_LDATA) and ia[k] != d and ib[k] != d and n < 4096:
+                    cse_op[n] = op
+                    cse_a[n] = ia[k]
+                    cse_b[n] = ib[k]
+                    cse_d[n] = d
+                    n += 1
+            k += 1
+        b += 1
+
+# liveness (dense per-block sets)
+lin = list(1)
+lout = list(1)
+lgen = list(1)
+lkill = list(1)
+lcur = list(IVMAX)
+
+def o_live():
+    global lin, lout, lgen, lkill
+    sz = nb * nvr
+    if sz > 1500000:
+        o_fail("too many blocks*vregs")
+        return 0
+    lin = list(sz + 1)
+    lout = list(sz + 1)
+    lgen = list(sz + 1)
+    lkill = list(sz + 1)
+    b = 0
+    while b < nb:
+        base = b * nvr
+        k = bst[b]
+        while k < ben[b]:
+            n = u_n(k)
+            j = 0
+            while j < n:
+                o = u_get(k, j)
+                if o >= 0 and not lkill[base + o]:
+                    lgen[base + o] = 1
+                j += 1
+            if has_dst(k):
+                lkill[base + idst[k]] = 1
+            k += 1
+        b += 1
+    ch = 1
+    while ch:
+        ch = 0
+        b = nb - 1
+        while b >= 0:
+            base = b * nvr
+            s1 = bs1[b]
+            s2 = bs2[b]
+            v = 0
+            while v < nvr:
+                o = 0
+                if s1 >= 0 and lin[s1 * nvr + v]:
+                    o = 1
+                if s2 >= 0 and lin[s2 * nvr + v]:
+                    o = 1
+                lout[base + v] = o
+                i = lgen[base + v] or o and not lkill[base + v]
+                if i != lin[base + v]:
+                    lin[base + v] = i
+                    ch = 1
+                v += 1
+            b -= 1
+    return 1
+
+def o_dce():
+    ch = 0
+    b = 0
+    while b < nb:
+        base = b * nvr
+        v = 0
+        while v < nvr:
+            lcur[v] = lout[base + v]
+            v += 1
+        k = ben[b] - 1
+        while k >= bst[b]:
+            if has_dst(k) and not lcur[idst[k]] and is_pure(k):
+                iop[k] = O_NOP
+                ch = 1
+            else:
+                if has_dst(k):
+                    if iop[k] == O_CALL and not lcur[idst[k]]:
+                        idst[k] = -1
+                    else:
+                        lcur[idst[k]] = 0
+                n = u_n(k)
+                j = 0
+                while j < n:
+                    o = u_get(k, j)
+                    if o >= 0:
+                        lcur[o] = 1
+                    j += 1
+            k -= 1
+        b += 1
+    return ch
+
+def o_optimize():
+    r = 0
+    while r < 6 and not irfail:
+        r += 1
+        o_prop()
+        o_compact()
+        o_cfg()
+        ch = o_unreach()
+        ch = o_jumps() or ch
+        o_compact()
+        o_cfg()
+        o_cse()
+        o_prop()
+        o_compact()
+        o_cfg()
+        if not o_live():
+            return 0
+        ch = o_dce() or ch
+        o_compact()
+        if not ch:
+            r = 99
+    o_cfg()
+    o_live()
+
+# ---------------- linear-scan register allocation ----------------
+vs = list(IVMAX)
+ve = list(IVMAX)
+vloc = list(IVMAX)
+vdefst = list(IVMAX)
+cpre = list(IRMAX)
+bhead = list(IRMAX)
+bnext = list(IVMAX)
+act = list(64)
+nact = 0
+rused = list(16)
+nspill = 0
+
+def o_intervals():
+    BIG = 1000000000
+    v = 0
+    while v < nvr:
+        vs[v] = BIG
+        ve[v] = -1
+        vloc[v] = -1
+        vdefst[v] = 0
+        v += 1
+    b = 0
+    while b < nb:
+        base = b * nvr
+        v = 0
+        while v < nvr:
+            if lin[base + v] and bst[b] < vs[v]:
+                vs[v] = bst[b]
+            if lout[base + v] and ben[b] > ve[v]:
+                ve[v] = ben[b]
+            v += 1
+        b += 1
+    k = 0
+    while k < nir:
+        n = u_n(k)
+        j = 0
+        while j < n:
+            o = u_get(k, j)
+            if o >= 0:
+                if k < vs[o]:
+                    vs[o] = k
+                if k > ve[o]:
+                    ve[o] = k
+            j += 1
+        if has_dst(k):
+            d = idst[k]
+            if k < vs[d]:
+                vs[d] = k
+                vdefst[d] = 1
+            if k > ve[d]:
+                ve[d] = k
+        k += 1
+    # a def that also begins a block where the value is live-in is not a fresh start
+    v = 0
+    while v < nvr:
+        if vdefst[v] and vs[v] < nir:
+            p = vs[v]
+            if idst[p] != v or lin[iblk[p] * nvr + v]:
+                vdefst[v] = 0
+        v += 1
+    c = 0
+    k = 0
+    while k < nir:
+        cpre[k] = c
+        if iop[k] == O_CALL or iop[k] == O_LNEW:
+            c += 1
+        k += 1
+    cpre[nir] = c
+
+def crosses(v):
+    a = vs[v] + 1
+    z = ve[v]
+    if z > nir:
+        z = nir
+    if a >= z:
+        return 0
+    return cpre[z] - cpre[a] > 0
+
+def expire(p, relaxed):
+    global nact
+    j = 0
+    while j < nact:
+        a = act[j]
+        if ve[a] < p or relaxed and ve[a] == p:
+            nact -= 1
+            act[j] = act[nact]
+        else:
+            j += 1
+
+def reg_free(r):
+    j = 0
+    while j < nact:
+        if vloc[act[j]] == r:
+            return 0
+        j += 1
+    return 1
+
+def alloc_one(v, p):
+    global nact, nspill
+    cr = crosses(v)
+    lo = 0
+    if cr:
+        lo = 5
+    # hint: reuse the register of the first source operand
+    r = -1
+    if vdefst[v] and idst[p] == v:
+        op = iop[p]
+        if op == O_MOV or op >= O_ADD and op <= O_NOT:
+            h = ia[p]
+            if h >= 0 and vloc[h] >= lo and vloc[h] < 10 and reg_free(vloc[h]):
+                r = vloc[h]
+    if r < 0:
+        q = lo
+        while q < 10 and r < 0:
+            if reg_free(q):
+                r = q
+            q += 1
+    if r < 0:
+        # spill the active interval (in a usable register) that ends last
+        w = -1
+        j = 0
+        while j < nact:
+            a = act[j]
+            if vloc[a] >= lo and vloc[a] < 10 and (w < 0 or ve[a] > ve[w]):
+                w = a
+            j += 1
+        if w >= 0 and ve[w] > ve[v]:
+            r = vloc[w]
+            vloc[w] = 100 + nspill
+            nspill += 1
+            j = 0
+            while j < nact:
+                if act[j] == w:
+                    nact -= 1
+                    act[j] = act[nact]
+                j += 1
+        else:
+            vloc[v] = 100 + nspill
+            nspill += 1
+            return 0
+    vloc[v] = r
+    rused[r] = 1
+    act[nact] = v
+    nact += 1
+
+def o_regalloc():
+    global nact, nspill
+    nact = 0
+    nspill = 0
+    q = 0
+    while q < 16:
+        rused[q] = 0
+        q += 1
+    p = 0
+    while p <= nir:
+        bhead[p] = -1
+        p += 1
+    v = nvr - 1
+    while v >= 0:
+        if ve[v] >= 0 and vs[v] <= nir:
+            bnext[v] = bhead[vs[v]]
+            bhead[vs[v]] = v
+        v -= 1
+    p = 0
+    while p <= nir:
+        expire(p, 0)
+        v = bhead[p]
+        dv = -1
+        while v >= 0:
+            if vdefst[v]:
+                dv = v
+            else:
+                alloc_one(v, p)
+            v = bnext[v]
+        if dv >= 0:
+            expire(p, 1)
+            alloc_one(dv, p)
+        p += 1
+
+# ---------------- emission ----------------
+ncs = 0
+csreg = list(8)
+cold = list(IRMAX)
+ncold = 0
+o_epi = 0
+o_ovl = list(4096)
+o_ovn = list(4096)
+no_ov = 0
+
+def vl(v):
+    # location string of a vreg
+    global nspill
+    if vloc[v] < 0:
+        vloc[v] = 100 + nspill
+        nspill += 1
+    if vloc[v] < 100:
+        return RN[vloc[v]]
+    return concat(str(0 - 8 * (vloc[v] - 100 + ncs + 1)), "(%rbp)")
+
+def in_reg(o):
+    return o >= 0 and vloc[o] >= 0 and vloc[o] < 100
+
+def in_mem(o):
+    return o >= 0 and not in_reg(o)
+
+def src_of(o, scratch):
+    # operand usable as an instruction source (may load into scratch)
+    if is_c(o):
+        if fits32(cval(o)):
+            return concat("$", str(cval(o)))
+        e2(concat(concat("mov $", str(cval(o))), ", "), scratch)
+        return scratch
+    return vl(o)
+
+def mv_to(o, D, dmem):
+    if is_c(o):
+        k = cval(o)
+        if k == 0 and not dmem:
+            e2(concat(concat("xor ", D), ", "), D)
+        elif fits32(k):
+            e2(concat(concat("movq $", str(k)), ", "), D)
+        elif dmem:
+            e3("mov $", str(k), ", %rax")
+            e2("mov %rax, ", D)
+        else:
+            e2(concat(concat("mov $", str(k)), ", "), D)
+        return 0
+    S = vl(o)
+    if str_eq(S, D):
+        return 0
+    if in_mem(o) and dmem:
+        e3("mov ", S, ", %rax")
+        e2("mov %rax, ", D)
+    else:
+        e2(concat(concat("mov ", S), ", "), D)
+
+def o_ovf(k):
+    global no_ov
+    if not iovf[k]:
+        return 0
+    line = iline[k]
+    l = -1
+    i = 0
+    while i < no_ov:
+        if o_ovn[i] == line:
+            l = o_ovl[i]
+        i += 1
+    if l < 0:
+        if no_ov >= 4096:
+            o_fail("ovf")
+            return 0
+        l = new_label()
+        o_ovl[no_ov] = l
+        o_ovn[no_ov] = line
+        no_ov += 1
+    e2("jo ", lab(l))
+
+def add_cold(s):
+    global ncold
+    cold[ncold] = s
+    ncold += 1
+
+def binname(op):
+    if op == O_ADD:
+        return "add "
+    if op == O_SUB:
+        return "sub "
+    if op == O_MUL:
+        return "imul "
+    if op == O_AND:
+        return "and "
+    if op == O_OR:
+        return "or "
+    return "xor "
+
+def em_bin(k):
+    op = iop[k]
+    d = idst[k]
+    a = ia[k]
+    b = ib[k]
+    D = vl(d)
+    dreg = in_reg(d)
+    if op == O_MUL and is_c(a) and not is_c(b):
+        t = a
+        a = b
+        b = t
+    if op == O_MUL and is_c(b) and fits32(cval(b)):
+        R = "%rax"
+        if dreg:
+            R = D
+        if is_c(a):
+            mv_to(a, "%rax", 0)
+            A = "%rax"
+        else:
+            A = vl(a)
+        e2(concat(concat(concat(concat("imul $", str(cval(b))), ", "), A), ", "), R)
+        o_ovf(k)
+        if not dreg:
+            e2("mov %rax, ", D)
+        return 0
+    nm = binname(op)
+    if dreg and not (b >= 0 and str_eq(vl(b), D)):
+        mv_to(a, D, 0)
+        e2(concat(concat(nm, src_of(b, "%rcx")), ", "), D)
+        o_ovf(k)
+    elif dreg and is_comm(op):
+        e2(concat(concat(nm, src_of(a, "%rcx")), ", "), D)
+        o_ovf(k)
+    else:
+        mv_to(a, "%rax", 0)
+        e2(concat(nm, src_of(b, "%rcx")), ", %rax")
+        o_ovf(k)
+        e2("mov %rax, ", D)
+
+def em_un(k):
+    op = iop[k]
+    d = idst[k]
+    D = vl(d)
+    R = "%rax"
+    if in_reg(d):
+        R = D
+    mv_to(ia[k], R, 0)
+    if op == O_SAR:
+        e2(concat(concat("sar $", str(cval(ib[k]))), ", "), R)
+    elif op == O_NEG:
+        e2("neg ", R)
+        o_ovf(k)
+    else:
+        e2("not ", R)
+    if not in_reg(d):
+        e2("mov %rax, ", D)
+
+def o_cdiv(d, ismod, D):
+    # floor div/mod of %rax by a constant 0 < d < 2^31 into register D
+    # (scratch: rax rcx rdx r11 and D itself)
+    k = 0
+    p = 1
+    while p < d:
+        p = p * 2
+        k += 1
+    if d == 1 or p == d:
+        const_div(d, ismod)
+        if not str_eq(D, "%rax"):
+            e2("mov %rax, ", D)
+        return 0
+    s = 63 + k
+    r = 0
+    q = 0
+    bb = s
+    while bb >= 0:
+        r = r * 2
+        if bb == s:
+            r += 1
+        q = q * 2
+        if r >= d:
+            r -= d
+            q += 1
+        bb -= 1
+    m = q + 1
+    if ismod:
+        e("mov %rax, %r11")
+    e("cqo")
+    sg = D
+    if str_eq(D, "%rax"):
+        sg = "%r11"
+        if ismod:
+            e("push %r11")
+    e2("mov %rdx, ", sg)
+    e("xor %rdx, %rax")
+    e3("mov $", str(m), ", %rcx")
+    e("mul %rcx")
+    if k > 1:
+        e3("shr $", str(k - 1), ", %rdx")
+    e2(concat("xor ", sg), ", %rdx")
+    if str_eq(D, "%rax") and ismod:
+        e("pop %r11")
+    if ismod:
+        e3("imul $", str(d), ", %rdx")
+        e2("mov %r11, ", D)
+        e2("sub %rdx, ", D)
+    else:
+        e2("mov %rdx, ", D)
+
+def em_div(k):
+    op = iop[k]
+    ismod = op == O_MOD
+    mv_to(ia[k], "%rax", 0)
+    b = ib[k]
+    if is_c(b) and cval(b) > 0 and cval(b) < 2147483648:
+        # const_div clobbers rsi/rdi/rcx/rdx: preserve allocatable ones
+        R = "%rax"
+        if in_reg(idst[k]):
+            R = vl(idst[k])
+        o_cdiv(cval(b), ismod, R)
+        if not in_reg(idst[k]):
+            e2("mov %rax, ", vl(idst[k]))
+        return 0
+    else:
+        if is_c(b):
+            e3("mov $", str(cval(b)), ", %rcx")
+        else:
+            e3("mov ", vl(b), ", %rcx")
+        lz = new_label()
+        e("test %rcx, %rcx")
+        e2("jz ", lab(lz))
+        add_cold(concat(concat(concat(concat(lab(lz), ":\n    mov $"), str(uline(iline[k]))), ", %rdx\n"), "    call rt_divzero\n"))
+        e("cmp $-1, %rcx")
+        lm = new_label()
+        ld = new_label()
+        e2("je ", lab(lm))
+        e("cqo")
+        e("idiv %rcx")
+        # floor adjustment when the remainder is nonzero and signs differ
+        e("test %rdx, %rdx")
+        e2("jz ", lab(ld))
+        if ismod:
+            e("mov %rdx, %rax")
+            e("xor %rcx, %rax")
+            e2("jns ", lab(ld))
+            e("add %rcx, %rdx")
+        else:
+            e("xor %rcx, %rdx")
+            e2("jns ", lab(ld))
+            e("dec %rax")
+        e2("jmp ", lab(ld))
+        put_label(lm)
+        if ismod:
+            e("xor %edx, %edx")
+        else:
+            e("neg %rax")
+        put_label(ld)
+        if ismod:
+            e("mov %rdx, %rax")
+    e2("mov %rax, ", vl(idst[k]))
+
+def em_cbr(k):
+    a = ia[k]
+    b = ib[k]
+    cc = iimm[k]
+    if is_c(a) and not is_c(b):
+        t = a
+        a = b
+        b = t
+        cc = CC_SWP[cc]
+    if is_c(a):
+        mv_to(a, "%rax", 0)
+        A = "%rax"
+    else:
+        A = vl(a)
+    if is_c(b) and cval(b) == 0 and in_reg(a):
+        e2(concat(concat("test ", A), ", "), A)
+    elif is_c(b) and fits32(cval(b)):
+        if in_mem(a):
+            e2(concat(concat("cmpq $", str(cval(b))), ", "), A)
+        else:
+            e2(concat(concat("cmp $", str(cval(b))), ", "), A)
+    elif in_mem(a) and in_mem(b) or is_c(b):
+        if not str_eq(A, "%rax"):
+            e3("mov ", A, ", %rax")
+        e2(concat("cmp ", src_of(b, "%rcx")), ", %rax")
+    else:
+        e2(concat(concat("cmp ", vl(b)), ", "), A)
+    e2(concat(concat("j", NCC[cc]), " "), lab(labasm[ic[k]]))
+
+def save_caller():
+    s = ""
+    q = 0
+    while q < 5:
+        s = concat(s, concat(concat("    push ", RN[q]), "\n"))
+        q += 1
+    return s
+
+def rest_caller():
+    s = ""
+    q = 4
+    while q >= 0:
+        s = concat(s, concat(concat("    pop ", RN[q]), "\n"))
+        q -= 1
+    return s
+
+def cold_ld(o, R):
+    # text that loads operand o into register R (no flags/stack assumptions)
+    if is_c(o):
+        return concat(concat(concat(concat("    mov $", str(cval(o))), ", "), R), "\n")
+    return concat(concat(concat(concat("    mov ", vl(o)), ", "), R), "\n")
+
+def em_idx(k):
+    # common: emits the hot access for LOAD/STORE, returns the memory operand
+    a = ia[k]
+    b = ib[k]
+    if in_reg(a):
+        A = vl(a)
+    else:
+        e3("mov ", vl(a), ", %rax")
+        A = "%rax"
+    if is_c(b):
+        return concat(concat(concat(str(8 * cval(b)), "("), A), ")")
+    if in_reg(b):
+        B = vl(b)
+    else:
+        e3("mov ", vl(b), ", %rcx")
+        B = "%rcx"
+    return concat(concat(concat(concat("(", A), ","), B), ",8)")
+
+def em_check(k, lc):
+    # unsigned bounds check of the index against the length operand
+    b = ib[k]
+    n = ie[k]
+    if is_c(b):
+        if is_c(n):
+            if cval(b) >= 0 and cval(b) < cval(n):
+                return 0
+            e2("jmp ", lab(lc))
+            return 0
+        e2(concat(concat("cmpq $", str(cval(b))), ", "), vl(n))
+        e2("jbe ", lab(lc))
+        return 0
+    if in_reg(b):
+        B = vl(b)
+    else:
+        e3("mov ", vl(b), ", %rcx")
+        B = "%rcx"
+    if is_c(n):
+        e2(concat(concat("cmp $", str(cval(n))), ", "), B)
+    else:
+        e2(concat(concat("cmp ", vl(n)), ", "), B)
+    e2("jae ", lab(lc))
+
+def em_load(k):
+    global u_getidx
+    u_getidx = 1
+    d = idst[k]
+    lc = 0
+    lb = 0
+    if iimm[k]:
+        lc = new_label()
+        lb = new_label()
+        em_check(k, lc)
+    m = em_idx(k)
+    if in_reg(d):
+        e2(concat(concat("mov ", m), ", "), vl(d))
+    else:
+        e3("mov ", m, ", %rax")
+        e2("mov %rax, ", vl(d))
+    if iimm[k]:
+        put_label(lb)
+        s = concat(concat(lab(lc), ":\n"), save_caller())
+        s = concat(s, cold_ld(ic[k], "%rax"))
+        s = concat(s, cold_ld(ib[k], "%rcx"))
+        s = concat(s, concat(concat("    mov $", str(uline(iline[k]))), ", %rdx\n    call rtp_getidx\n"))
+        s = concat(s, rest_caller())
+        s = concat(s, concat(concat("    mov %rax, ", vl(d)), "\n"))
+        s = concat(s, concat(concat("    jmp ", lab(lb)), "\n"))
+        add_cold(s)
+
+def em_store(k):
+    global u_setidx
+    u_setidx = 1
+    x = ix[k]
+    lc = 0
+    lb = 0
+    if iimm[k]:
+        lc = new_label()
+        lb = new_label()
+        em_check(k, lc)
+    # value into a register first (rdx is free scratch here)
+    if is_c(x) and fits32(cval(x)):
+        V = concat("$", str(cval(x)))
+        m = em_idx(k)
+        e2(concat(concat("movq ", V), ", "), m)
+    else:
+        if in_reg(x):
+            V = vl(x)
+        else:
+            mv_to(x, "%rdx", 0)
+            V = "%rdx"
+        m = em_idx(k)
+        e2(concat(concat("mov ", V), ", "), m)
+    if iimm[k]:
+        put_label(lb)
+        s = concat(concat(lab(lc), ":\n"), save_caller())
+        s = concat(s, cold_ld(x, "%rax"))
+        s = concat(s, cold_ld(ic[k], "%rdx"))
+        s = concat(s, cold_ld(ib[k], "%rcx"))
+        s = concat(s, concat(concat("    mov $", str(uline(iline[k]))), ", %rsi\n    call rtp_setidx\n"))
+        s = concat(s, rest_caller())
+        s = concat(s, concat(concat("    jmp ", lab(lb)), "\n"))
+        add_cold(s)
+
+def em_call(k):
+    n = ib[k]
+    j = 0
+    while j < n:
+        o = argb[ia[k] + j]
+        if is_c(o):
+            if fits32(cval(o)):
+                e3("push $", str(cval(o)), "")
+            else:
+                e3("mov $", str(cval(o)), ", %rax")
+                e("push %rax")
+        else:
+            e2("pushq ", vl(o))
+        j += 1
+    f = iimm[k]
+    e2("call ", flabel[f])
+    add_edge(f)
+    if n > 0:
+        e3("add $", str(8 * n), ", %rsp")
+    if idst[k] >= 0:
+        e2("mov %rax, ", vl(idst[k]))
+
+def o_emit(fi):
+    global ncs, ncold, no_ov, curf
+    curf = fi
+    ncold = 0
+    no_ov = 0
+    l = 0
+    while l <= nil:
+        labasm[l] = new_label()
+        l += 1
+    ncs = 0
+    q = 5
+    while q < 10:
+        if rused[q]:
+            csreg[ncs] = q
+            ncs += 1
+        q += 1
+    o_epi = new_label()
+    fos[fi] = nout
+    emit_raw(concat(flabel[fi], ":    # opt\n"))
+    e("push %rbp")
+    e("mov %rsp, %rbp")
+    prolog = nout
+    emit_raw("")
+    n = fargs[fi]
+    k = 0
+    while k < nir:
+        op = iop[k]
+        if op == O_LABEL:
+            put_label(labasm[ic[k]])
+        elif op == O_MOV:
+            if idst[k] >= 0:
+                mv_to(ia[k], vl(idst[k]), in_mem(idst[k]))
+        elif op == O_PARAM:
+            off = concat(str(16 + 8 * (n - 1 - iimm[k])), "(%rbp)")
+            if in_reg(idst[k]):
+                e2(concat(concat("mov ", off), ", "), vl(idst[k]))
+            else:
+                e3("mov ", off, ", %rax")
+                e2("mov %rax, ", vl(idst[k]))
+        elif op >= O_ADD and op <= O_XOR:
+            em_bin(k)
+        elif op == O_SAR or op == O_NEG or op == O_NOT:
+            em_un(k)
+        elif op == O_DIV or op == O_MOD:
+            em_div(k)
+        elif op == O_BR:
+            e2("jmp ", lab(labasm[ic[k]]))
+        elif op == O_CBR:
+            em_cbr(k)
+        elif op == O_CALL:
+            em_call(k)
+        elif op == O_LNEW:
+            o = ia[k]
+            if is_c(o) and fits32(cval(o)):
+                e3("push $", str(cval(o)), "")
+            elif is_c(o):
+                e3("mov $", str(cval(o)), ", %rax")
+                e("push %rax")
+            else:
+                e2("pushq ", vl(o))
+            e("call rt_list")
+            e("add $8, %rsp")
+            e2("mov %rax, ", vl(idst[k]))
+        elif op == O_LDATA:
+            if in_reg(ia[k]):
+                A = vl(ia[k])
+            else:
+                e3("mov ", vl(ia[k]), ", %rax")
+                A = "%rax"
+            if in_reg(idst[k]):
+                e2(concat(concat("mov 16(", A), "), "), vl(idst[k]))
+            else:
+                e3("mov 16(", A, "), %rax")
+                e2("mov %rax, ", vl(idst[k]))
+        elif op == O_LOAD:
+            em_load(k)
+        elif op == O_STORE:
+            em_store(k)
+        elif op == O_RET:
+            mv_to(ia[k], "%rax", 0)
+            if k + 1 < nir:
+                e2("jmp ", lab(o_epi))
+        k += 1
+    put_label(o_epi)
+    fs = ncs + nspill
+    pro = ""
+    epi = ""
+    if fs > 0:
+        pro = concat(concat("    sub $", str(8 * fs)), ", %rsp\n")
+    i = 0
+    while i < ncs:
+        sl = concat(str(0 - 8 * (i + 1)), "(%rbp)")
+        pro = concat(pro, concat(concat(concat(concat("    mov ", RN[csreg[i]]), ", "), sl), "\n"))
+        epi = concat(epi, concat(concat(concat(concat("    mov ", sl), ", "), RN[csreg[i]]), "\n"))
+        i += 1
+    out[prolog] = pro
+    emit_raw(epi)
+    e("leave")
+    e("ret")
+    i = 0
+    while i < ncold:
+        emit_raw(cold[i])
+        i += 1
+    i = 0
+    while i < no_ov:
+        put_label(o_ovl[i])
+        e3("push $", str(uline(o_ovn[i])), "")
+        call_internal("__iovf", 1)
+        i += 1
+    foe[fi] = nout
+    curf = -1
+
+# ---------------- driver ----------------
+def ir_ok_fn(fi):
+    if fpre[fi] or fmeth[fi] != 0 or fkind[fi] != 0 or fpar[fi] > 0 or ncap[fi] > 0 or fshadow[fi]:
+        return 0
+    if fnone[fi] or fargs[fi] > 60 or fmin[fi] != fargs[fi]:
+        return 0
+    if ret_type(fi) != T_INT:
+        return 0
+    i = 0
+    while i < fargs[fi]:
+        k = fpb[fi] + i
+        if not (ptypes[k] == T_INT or ptypes[k] == 0 and pintf[k]):
+            return 0
+        i += 1
+    if has_child(fi) or fn_has_try(fi):
+        return 0
+    return 1
+
+def ir_compile(fi):
+    global nir, nvr, ncp, nargb, nil, irfail, nx, npc, nlp, nrf, inl_on, ip, ir_f, ir_tco, ir_acc, ir_top, ir_line, pos, nout, nlabel
+    if not opt_on or not ir_ok_fn(fi):
+        return 0
+    p0 = fpos[fi]
+    endp = skip_stmt(p0)
+    p = p0
+    d = 0
+    while not (d == 0 and tok_is_op(p, ":")):
+        if tok_is_op(p, "("):
+            d += 1
+        elif tok_is_op(p, ")"):
+            d -= 1
+        if tok_is_op(p, "*") or tok_is_op(p, "**") or tok_is_op(p, "="):
+            return 0
+        p += 1
+    nir = 0
+    nvr = 0
+    ncp = 0
+    nargb = 0
+    nil = 0
+    irfail = 0
+    nx = 0
+    npc = 0
+    nlp = 0
+    nrf = 0
+    inl_on = 0
+    ir_f = fi
+    ir_line = tl[p]
+    prescan_defs(p, endp)
+    i = 0
+    while i < fargs[fi]:
+        v = new_vr(0)
+        add_var(pnames[fpb[fi] + i], 1, v)
+        ir_pv[i] = v
+        k = iadd(O_PARAM, v, -1, -1)
+        iimm[k] = i
+        i += 1
+    ir_tco = tco_scan(fi, p, endp)
+    ir_acc = -1
+    if ir_tco == 2:
+        ir_acc = new_vr(0)
+        iadd(O_MOV, ir_acc, cst(0), -1)
+    ir_top = new_lab_ir()
+    ilabel(ir_top)
+    ip = p
+    s_block()
+    if irfail:
+        return 0
+    if ir_tco == 2:
+        iadd(O_RET, -1, ir_acc, -1)
+    else:
+        iadd(O_RET, -1, cst(0), -1)
+    o_optimize()
+    if irfail:
+        return 0
+    o_intervals()
+    o_regalloc()
+    save_out = nout
+    save_lab = nlabel
+    o_emit(fi)
+    if irfail:
+        nout = save_out
+        nlabel = save_lab
+        return 0
+    if fbret[fi] and fret[fi] == 0:
+        fbret[fi] = 0
+        conflict_ret()
+    pos = endp
+    return 1
+
 def forge_main():
     global PRETOK, PRE, passno, soft_line
     if argc() < 3:
         eputs("usage: forgec <input.forge> <output.s>")
         exit(2)
+    if argc() > 3 and str_eq(argv(3), "-O"):
+        set_opt(1)
     src = read_file(argv(1))
     pre = prelude_text()
     lex(pre, 1, 0)
