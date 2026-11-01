@@ -30,7 +30,7 @@ print("hello")
 puts(concat("ab", str(-42)))
 t = "xyz"
 print(char_at(t, 1) == ord("y") and not False)
-print(17 % 5 - 7 / 2)
+print(17 % 5 - 7 // 2)
 write_file("build/ft.txt", "data\n")
 puts(read_file("build/ft.txt"))
 parts = list(3)

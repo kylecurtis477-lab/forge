@@ -17,6 +17,10 @@ K_DED = 7
 K_EOF = 8
 
 T_INT = 1
+T_FLOAT = 5
+T_BOOL = 6
+B_FALSE = "$4611686018427387904"
+B_TRUE = "$4611686018427387905"
 T_STR = 2
 T_LIST = 3
 T_DICT = 4
@@ -48,6 +52,7 @@ flabel = list(MAXF)
 fargs = list(MAXF)
 fret = list(MAXF)
 fint = list(MAXF)
+fbret = list(MAXF)
 fpos = list(MAXF)
 fpb = list(MAXF)
 fcls = list(MAXF)
@@ -509,8 +514,12 @@ def atoi(s):
     return v
 
 def type_of_name(t):
-    if str_eq(t, "int") or str_eq(t, "bool"):
+    if str_eq(t, "int"):
         return T_INT
+    if str_eq(t, "bool"):
+        return T_BOOL
+    if str_eq(t, "float"):
+        return T_FLOAT
     if str_eq(t, "str"):
         return T_STR
     if str_eq(t, "list") or str_eq(t, "List"):
@@ -675,12 +684,10 @@ def store_var(name, line, t, mark):
     if vkind == 4:
         die(line, "cannot assign to inlined parameter")
     if vty == T_INT and t != T_INT:
-        if vkind == 1 and ptypes[fpb[curf] + vidx] == T_INT:
-            pass
-        elif vkind == 2 and lfix[vidx]:
-            pass
-        elif vkind == 3 and gtype[vidx] == T_INT:
-            pass
+        if (vkind == 1 and ptypes[fpb[curf] + vidx] == T_INT) or (vkind == 2 and lfix[vidx]) or (vkind == 3 and gtype[vidx] == T_INT):
+            if t == T_BOOL:
+                e("and $1, %eax")
+                mark = -1
         else:
             conflict_var(vkind, vidx)
     src = 0
@@ -862,30 +869,46 @@ def odd(a):
 
 def half(a):
     # floor(a / 2) under both truncating and flooring division
-    q = a / 2
+    q = a // 2
     if q * 2 > a:
         q -= 1
     return q
 
-def jump_if_false(l):
+def fused_cc():
+    # the value code ends with set<cc>/movzbq/bts: drop those lines and return cc
     global nout
-    if nout >= 2 and str_eq(out[nout - 1], "    movzbq %al, %rax\n") and starts(out[nout - 2], "    set"):
-        cc = substr(out[nout - 2], 7, len(out[nout - 2]) - 5)
-        nout -= 2
-        e2(concat(concat("j", negcc(cc)), " "), lab(l))
+    if nout >= 3 and str_eq(out[nout - 1], "    bts $62, %rax\n") and str_eq(out[nout - 2], "    movzbq %al, %rax\n") and starts(out[nout - 3], "    set"):
+        cc = substr(out[nout - 3], 7, len(out[nout - 3]) - 5)
+        nout -= 3
+        return cc
+    return 0
+
+def truth_test():
+    if ety == T_BOOL:
+        e("test $1, %al")
     else:
         e("test %rax, %rax")
+
+def jump_if_false(l):
+    cc = fused_cc()
+    if cc:
+        e2(concat(concat("j", negcc(cc)), " "), lab(l))
+    else:
+        truth_test()
         e2("jz ", lab(l))
 
 def jump_if_true(l):
-    global nout
-    if nout >= 2 and str_eq(out[nout - 1], "    movzbq %al, %rax\n") and starts(out[nout - 2], "    set"):
-        cc = substr(out[nout - 2], 7, len(out[nout - 2]) - 5)
-        nout -= 2
+    cc = fused_cc()
+    if cc:
         e2(concat(concat("j", cc), " "), lab(l))
     else:
-        e("test %rax, %rax")
+        truth_test()
         e2("jnz ", lab(l))
+
+def emit_bool():
+    # %al holds 0/1 after setcc
+    e("movzbq %al, %rax")
+    e("bts $62, %rax")
 
 def negcc(cc):
     if str_eq(cc, "e"):
@@ -904,12 +927,16 @@ def negcc(cc):
         return "ae"
     if str_eq(cc, "ae"):
         return "b"
+    if str_eq(cc, "a"):
+        return "be"
+    if str_eq(cc, "be"):
+        return "a"
     return "z"
 
 def value_jump(l, sense):
     # and/or in value context: the operand value must survive in %rax
-    if ety == T_INT:
-        e("test %rax, %rax")
+    if ety == T_INT or ety == T_BOOL:
+        truth_test()
         if sense:
             e2("jnz ", lab(l))
         else:
@@ -1025,7 +1052,7 @@ def cond_not(l, sense):
 def jump_false(l):
     # Python truthiness: 0, None, "", [] and {} are false
     global u_truth
-    if ety == T_INT:
+    if ety == T_INT or ety == T_BOOL:
         jump_if_false(l)
         return 0
     t = new_label()
@@ -1042,7 +1069,7 @@ def jump_false(l):
 
 def jump_true(l):
     global u_truth
-    if ety == T_INT:
+    if ety == T_INT or ety == T_BOOL:
         jump_if_true(l)
         return 0
     f = new_label()
@@ -1105,6 +1132,8 @@ def ret_type(f):
         return fret[f]
     if fint[f]:
         return T_INT
+    if fbret[f]:
+        return T_BOOL
     return 0
 
 argf = -1
@@ -1112,6 +1141,8 @@ argf = -1
 def arg_check(f, i):
     # a non-int argument contradicts the "always int" assumption for that parameter
     global nconf
+    if f >= 0 and i < fargs[f] and ety == T_BOOL and ptypes[fpb[f] + i] == T_INT:
+        e("and $1, %eax")
     if f >= 0 and i < fargs[f] and ety != T_INT:
         k = fpb[f] + i
         if pintf[k]:
@@ -1158,11 +1189,11 @@ def count_args(p):
             return n
         p += 1
 
-BI_NAMES = ["puts", "eputs", "concat", "write_file", "read_file", "substr", "alloc", "join", "argc", "argv", "exit", "str_eq", "chr", "mark", "release", "set_byte", "__new", "__copy", "__tag", "__aux", "__itos_raw", "__writes", "__wint"]
-BI_ARGS = [1, 1, 2, 2, 1, 3, 1, 2, 0, 1, 1, 2, 1, 0, 1, 3, 3, 3, 1, 1, 1, 1, 1]
-BI_RT = ["rt_puts", "rt_eputs", "rt_concat", "rt_write_file", "rt_read_file", "rt_substr", "rt_alloc", "rt_join", "rt_argc", "rt_argv", "rt_exit", "rt_str_eq", "rt_chr", "rt_mark", "rt_release", "rt_set_byte", "rt_new", "rt_copy", "rt_tag", "rt_aux", "rt_itos", "rt_writes", "rt_wint"]
-BI_TY = [0, 0, 2, 1, 2, 2, 0, 2, 1, 2, 0, 1, 2, 1, 0, 0, 0, 0, 1, 1, 2, 0, 0, 0]
-NBI = 23
+BI_NAMES = ["puts", "eputs", "concat", "write_file", "read_file", "substr", "alloc", "join", "argc", "argv", "exit", "str_eq", "chr", "mark", "release", "set_byte", "__new", "__copy", "__tag", "__aux", "__itos_raw", "__writes", "__wint", "__itof", "__ftoi", "__fbits", "__ffrombits", "__math", "__math2"]
+BI_ARGS = [1, 1, 2, 2, 1, 3, 1, 2, 0, 1, 1, 2, 1, 0, 1, 3, 3, 3, 1, 1, 1, 1, 1, 1, 2, 1, 1, 2, 3]
+BI_RT = ["rt_puts", "rt_eputs", "rt_concat", "rt_write_file", "rt_read_file", "rt_substr", "rt_alloc", "rt_join", "rt_argc", "rt_argv", "rt_exit", "rt_str_eq", "rt_chr", "rt_mark", "rt_release", "rt_set_byte", "rt_new", "rt_copy", "rt_tag", "rt_aux", "rt_itos", "rt_writes", "rt_wint", "rt_itof", "rt_ftoi", "rt_fbits", "rt_ffrombits", "rt_math", "rt_math2"]
+BI_TY = [0, 0, 2, 1, 2, 2, 0, 2, 1, 2, 0, 1, 2, 1, 0, 0, 0, 0, 1, 1, 2, 0, 0, 5, 1, 1, 5, 5, 5, 0]
+NBI = 29
 
 def builtin_call(name, line):
     # returns 1 if name( ... ) was compiled as a builtin
@@ -1460,17 +1491,19 @@ def not_expr():
         if ety == T_INT:
             e("test %rax, %rax")
             e("sete %al")
-            e("movzbq %al, %rax")
+            emit_bool()
+        elif ety == T_BOOL:
+            e("xor $1, %rax")
         else:
             lf = new_label()
             le = new_label()
             jump_false(lf)
-            e("xor %eax, %eax")
+            e2(concat("mov ", B_FALSE), ", %rax")
             e2("jmp ", lab(le))
             put_label(lf)
-            e("mov $1, %eax")
+            e2(concat("mov ", B_TRUE), ", %rax")
             put_label(le)
-        ety = T_INT
+        ety = T_BOOL
         return 0
     cmp_expr()
 
@@ -1511,71 +1544,120 @@ def setcc(op):
     return "ge"
 
 def cmp_expr():
-    global pos, ety, u_eq
+    global pos, ety
     start = nout
     bor_expr()
     op = cmp_op()
     if not op:
         return 0
-    line = cur_line()
-    lt = ety
-    pos += cmplen
-    mark = nout
-    e("push %rax")
-    bor_expr()
-    rt = ety
-    if cmp_op():
-        die(line, "chained comparisons are not supported; use 'and'")
+    cend = -1
+    tmp = 0
+    tmp2 = 0
+    while 1:
+        line = cur_line()
+        lt = ety
+        pos += cmplen
+        mark = nout
+        e("push %rax")
+        bor_expr()
+        rt = ety
+        nxt = cmp_op()
+        if nxt:
+            if not tmp:
+                tmp = hidden_local("__cc", 0)
+                tmp2 = hidden_local("__cc2", 0)
+            sw = tmp
+            tmp = tmp2
+            tmp2 = sw
+            e2("mov %rax, ", var_ref(tmp))
+        cmp_one(op, start, mark, lt, rt, line)
+        if not nxt:
+            break
+        if cend < 0:
+            cend = new_label()
+        e("test $1, %al")
+        e2("jz ", lab(cend))
+        start = nout
+        e3("mov ", var_ref(tmp), ", %rax")
+        ety = rt
+        op = nxt
+    if cend >= 0:
+        put_label(cend)
+        ety = T_BOOL
+
+def is_ref(t):
+    return t == T_LIST or t == T_DICT or t > 10
+
+def is_num(t):
+    return t == T_INT or t == T_FLOAT or t == T_BOOL
+
+def cmp_code(op):
+    if str_eq(op, "=="):
+        return 10
+    if str_eq(op, "!="):
+        return 11
+    if str_eq(op, "<"):
+        return 12
+    if str_eq(op, ">"):
+        return 13
+    if str_eq(op, "<="):
+        return 14
+    return 15
+
+def cmp_one(op, start, mark, lt, rt, line):
+    global ety
+    ety = T_BOOL
     if str_eq(op, "in") or str_eq(op, "not in"):
         lr(start, mark)
         e("push %rcx")
         e("push %rax")
         call_internal("__contains", 2)
+        e("and $1, %eax")
         if str_eq(op, "not in"):
             e("xor $1, %rax")
-        ety = T_INT
+        e("bts $62, %rax")
         return 0
+    raw = str_eq(op, "is") or str_eq(op, "is not") or (lt == T_INT and rt == T_INT)
     if str_eq(op, "==") or str_eq(op, "!="):
-        known = lt == T_INT or rt == T_INT or ((lt == T_LIST or lt == T_DICT or lt > 10) and (rt == T_LIST or rt == T_DICT or rt > 10))
-        if not known:
-            lr(start, mark)
-            e("cmp %rcx, %rax")
-            e("je 1f")
-            e("mov %rax, %rdx")
-            e("or %rcx, %rdx")
-            e("shr $44, %rdx")
-            e("jz 2f")
-            e("call rtp_eq")
-            u_eq = 1
-            e("jmp 3f")
-            emit_raw("1:\n")
-            e("mov $1, %eax")
-            e("jmp 3f")
-            emit_raw("2:\n")
-            e("xor %eax, %eax")
-            emit_raw("3:\n")
+        if (is_ref(lt) and is_ref(rt)) or (lt == T_BOOL and rt == T_BOOL):
+            raw = 1
+        if (lt == T_INT and (rt == T_STR or is_ref(rt))) or (rt == T_INT and (lt == T_STR or is_ref(lt))):
+            raw = 1
+    if raw:
+        binop("cmp", start, mark)
+        e2(concat("set", setcc(op)), " %al")
+        emit_bool()
+        return 0
+    if lt == T_STR and rt == T_STR:
+        lr(start, mark)
+        e("push %rax")
+        e("push %rcx")
+        if str_eq(op, "==") or str_eq(op, "!="):
+            call_rt("rt_str_eq", 2)
             if str_eq(op, "!="):
                 e("xor $1, %rax")
-            ety = T_INT
+            e("bts $62, %rax")
             return 0
-    elif not str_eq(op, "is") and not str_eq(op, "is not"):
-        if lt == T_STR or rt == T_STR or (lt != T_INT and rt != T_INT):
-            lr(start, mark)
-            e("push %rax")
-            e("push %rcx")
-            if lt == T_STR and rt == T_STR:
-                call_internal("__strcmp", 2)
-            else:
-                call_internal("__cmp", 2)
-            e("cmp $0, %rax")
-            e2(concat("set", setcc(op)), " %al")
-            e("movzbq %al, %rax")
-            ety = T_INT
-            return 0
-    binop("cmp", start, mark)
-    e2(concat("set", setcc(op)), " %al")
-    e("movzbq %al, %rax")
-    ety = T_INT
+        call_internal("__strcmp", 2)
+        e("cmp $0, %rax")
+        e2(concat("set", setcc(op)), " %al")
+        emit_bool()
+        return 0
+    lr(start, mark)
+    if not (lt == T_FLOAT or rt == T_FLOAT):
+        e("mov %rax, %rdx")
+        e("or %rcx, %rdx")
+        e("shr $44, %rdx")
+        e("jnz 1f")
+        e("cmp %rcx, %rax")
+        e2(concat("set", setcc(op)), " %al")
+        e("movzbq %al, %rax")
+        e("jmp 2f")
+        emit_raw("1:\n")
+    e3("mov $", str(cmp_code(op)), ", %esi")
+    e("call rtp_cmp")
+    emit_raw("2:\n")
+    e("bts $62, %rax")
 
 def bor_expr():
     global pos, ety
@@ -1642,53 +1724,16 @@ def add_expr():
     mul_expr()
     while is_op("+") or is_op("-"):
         line = cur_line()
-        plus = is_op("+")
+        op = tv[pos]
         lt = ety
         pos += 1
         mark = nout
         e("push %rax")
         mul_expr()
-        if plus:
-            apply_add(start, mark, lt, ety, line)
-        else:
-            if lt == T_STR or ety == T_STR:
-                die(line, "unsupported operand '-' for str")
-            binop("sub", start, mark)
-            ety = T_INT
+        arith(op, start, mark, lt, ety, line)
 
 def apply_add(start, mark, lt, rt, line):
-    global ety, u_add
-    if lt == T_INT or rt == T_INT:
-        if lt == T_STR or rt == T_STR or lt == T_LIST or rt == T_LIST:
-            die(line, "cannot add int and a non-int")
-        binop("add", start, mark)
-        ety = T_INT
-    elif lt == T_STR or rt == T_STR:
-        lr(start, mark)
-        e("push %rax")
-        e("push %rcx")
-        call_rt("rt_concat", 2)
-        ety = T_STR
-    elif lt == T_LIST or rt == T_LIST:
-        lr(start, mark)
-        e("push %rax")
-        e("push %rcx")
-        call_internal("__list_add", 2)
-        ety = T_LIST
-    else:
-        lr(start, mark)
-        e("mov %rax, %rdx")
-        e("or %rcx, %rdx")
-        e("shr $44, %rdx")
-        e("jnz 1f")
-        e("add %rcx, %rax")
-        e("jmp 2f")
-        emit_raw("1:\n")
-        e3("mov $", str(uline(line)), ", %rdx")
-        e("call rtp_add")
-        u_add = 1
-        emit_raw("2:\n")
-        ety = 0
+    arith("+", start, mark, lt, rt, line)
 
 def mul_expr():
     global pos, ety
@@ -1702,37 +1747,111 @@ def mul_expr():
         mark = nout
         e("push %rax")
         unary_expr()
-        apply_mul(op, start, mark, lt, ety, line)
+        arith(op, start, mark, lt, ety, line)
 
-def apply_mul(op, start, mark, lt, rt, line):
-    global ety
-    if str_eq(op, "*"):
-        if lt == T_STR or lt == T_LIST:
-            lr(start, mark)
-            e("push %rax")
-            e("push %rcx")
-            if lt == T_STR:
-                call_internal("__strmul", 2)
-            else:
-                call_internal("__list_mul", 2)
-            ety = lt
-        elif rt == T_STR or rt == T_LIST:
-            lr(start, mark)
-            e("push %rcx")
-            e("push %rax")
-            if rt == T_STR:
-                call_internal("__strmul", 2)
-            else:
-                call_internal("__list_mul", 2)
-            ety = rt
-        else:
-            binop("imul", start, mark)
-            ety = T_INT
+def arith_code(op):
+    if str_eq(op, "+"):
         return 0
-    if lt == T_STR:
-        die(line, "string % formatting is not supported; use f-strings")
-    divmod(start, mark, str_eq(op, "%"), line)
-    ety = T_INT
+    if str_eq(op, "-"):
+        return 1
+    if str_eq(op, "*"):
+        return 2
+    if str_eq(op, "/"):
+        return 3
+    if str_eq(op, "//"):
+        return 4
+    return 5
+
+def call_binop(code, line):
+    e3("mov $", str(code), ", %esi")
+    e3("mov $", str(uline(line)), ", %edx")
+    e("call rtp_binop")
+
+def arith(op, start, mark, lt, rt, line):
+    # + - * / // % with Python semantics; ints stay inline when both sides are known ints
+    global ety
+    code = arith_code(op)
+    if lt == T_INT and rt == T_INT and code != 3:
+        if code == 0:
+            binop("add", start, mark)
+        elif code == 1:
+            binop("sub", start, mark)
+        elif code == 2:
+            binop("imul", start, mark)
+        else:
+            divmod(start, mark, code == 5, line)
+        ety = T_INT
+        return 0
+    if code == 0 and (lt == T_STR or rt == T_STR):
+        if is_num(lt) or is_num(rt) or lt == T_LIST or rt == T_LIST:
+            die(line, "cannot add str and a non-str")
+        lr(start, mark)
+        e("push %rax")
+        e("push %rcx")
+        call_rt("rt_concat", 2)
+        ety = T_STR
+        return 0
+    if code == 0 and (lt == T_LIST or rt == T_LIST):
+        lr(start, mark)
+        e("push %rax")
+        e("push %rcx")
+        call_internal("__list_add", 2)
+        ety = T_LIST
+        return 0
+    if code == 2 and (lt == T_STR or lt == T_LIST or rt == T_STR or rt == T_LIST):
+        lr(start, mark)
+        if lt == T_STR or lt == T_LIST:
+            e("push %rax")
+            e("push %rcx")
+            ety = lt
+        else:
+            e("push %rcx")
+            e("push %rax")
+            ety = rt
+        if ety == T_STR:
+            call_internal("__strmul", 2)
+        else:
+            call_internal("__list_mul", 2)
+        return 0
+    if code != 0 and code != 2 and (lt == T_STR or rt == T_STR):
+        if code == 5:
+            die(line, "string % formatting is not supported; use f-strings")
+        die(line, concat(concat("unsupported operand '", op), "' for str"))
+    lr(start, mark)
+    if is_num(lt) and is_num(rt):
+        call_binop(code, line)
+        ety = T_INT
+        if lt == T_FLOAT or rt == T_FLOAT or code == 3:
+            ety = T_FLOAT
+        return 0
+    if code != 3:
+        e("mov %rax, %rdx")
+        e("or %rcx, %rdx")
+        e("shr $44, %rdx")
+        e("jnz 1f")
+        if code == 0:
+            e("add %rcx, %rax")
+        elif code == 1:
+            e("sub %rcx, %rax")
+        elif code == 2:
+            e("imul %rcx, %rax")
+        else:
+            e("test %rcx, %rcx")
+            e("jz 1f")
+            e("cqo")
+            e("idiv %rcx")
+            if code == 5:
+                e("mov %rdx, %rax")
+        e("jmp 2f")
+        emit_raw("1:\n")
+    call_binop(code, line)
+    if code != 3:
+        emit_raw("2:\n")
+    ety = 0
+    if code == 3 or lt == T_FLOAT or rt == T_FLOAT:
+        ety = T_FLOAT
+    if not is_num(lt) and not is_num(rt):
+        ety = 0
 
 def divmod(start, mark, ismod, line):
     global nout
@@ -1823,13 +1942,23 @@ def unary_expr():
         unary_expr()
         if nout == mark + 1:
             src = simple_src(out[mark])
-            if src and is_imm(src) and char_at(src, 1) != ord("-"):
+            if ety == T_INT and src and is_imm(src) and char_at(src, 1) != ord("-"):
                 nout = mark
                 e3("mov $-", substr(src, 1, len(src)), ", %rax")
                 ety = T_INT
                 return 0
-        e("neg %rax")
-        ety = T_INT
+        if ety == T_INT:
+            e("neg %rax")
+            return 0
+        t = ety
+        e("mov %rax, %rcx")
+        e("xor %eax, %eax")
+        call_binop(1, cur_line())
+        ety = 0
+        if t == T_FLOAT or t == T_BOOL:
+            ety = t
+        if t == T_BOOL:
+            ety = T_INT
         return 0
     if is_op("+"):
         pos += 1
@@ -1838,6 +1967,8 @@ def unary_expr():
     if is_op("~"):
         pos += 1
         unary_expr()
+        if ety == T_BOOL:
+            e("and $1, %eax")
         e("not %rax")
         ety = T_INT
         return 0
@@ -1848,11 +1979,19 @@ def power_expr():
     postfix_expr()
     if is_op("**"):
         pos += 1
+        lt = ety
         e("push %rax")
         unary_expr()
+        rt = ety
         e("push %rax")
+        if lt == T_INT and rt == T_INT:
+            call_internal("__ipow", 2)
+            ety = T_INT
+            return 0
         call_internal("__pow", 2)
-        ety = T_INT
+        ety = 0
+        if lt == T_FLOAT or rt == T_FLOAT:
+            ety = T_FLOAT
 
 pstop = -1
 
@@ -2157,10 +2296,14 @@ def primary():
         name = tv[pos]
         pos += 1
         if str_eq(name, "True"):
-            e("mov $1, %rax")
-            ety = T_INT
+            e2(concat("mov ", B_TRUE), ", %rax")
+            ety = T_BOOL
             return 0
-        if str_eq(name, "False") or str_eq(name, "None"):
+        if str_eq(name, "False"):
+            e2(concat("mov ", B_FALSE), ", %rax")
+            ety = T_BOOL
+            return 0
+        if str_eq(name, "None"):
             e("mov $0, %rax")
             ety = T_INT
             return 0
@@ -2562,6 +2705,11 @@ def stmt():
             if curf >= 0 and fint[curf] and ety != T_INT and fret[curf] == 0:
                 fint[curf] = 0
                 conflict_ret()
+            if curf >= 0 and fbret[curf] and ety != T_BOOL and fret[curf] == 0:
+                fbret[curf] = 0
+                conflict_ret()
+            if curf >= 0 and fret[curf] == T_INT and ety == T_BOOL:
+                e("and $1, %eax")
             e2("jmp ", lab(retlab))
             end_stmt()
             return 0
@@ -3068,13 +3216,8 @@ def int_ins(op):
 
 def apply_binary(op, start, mark, lt, rt, line):
     global ety
-    if str_eq(op, "+"):
-        apply_add(start, mark, lt, rt, line)
-    elif str_eq(op, "-"):
-        binop("sub", start, mark)
-        ety = T_INT
-    elif str_eq(op, "*") or str_eq(op, "/") or str_eq(op, "//") or str_eq(op, "%"):
-        apply_mul(op, start, mark, lt, rt, line)
+    if str_eq(op, "+") or str_eq(op, "-") or str_eq(op, "*") or str_eq(op, "/") or str_eq(op, "//") or str_eq(op, "%"):
+        arith(op, start, mark, lt, rt, line)
     elif str_eq(op, "&"):
         binop("and", start, mark)
         ety = T_INT
@@ -3480,6 +3623,7 @@ def reg_func(p, c):
         pos += 1
         fret[fi] = parse_type()
     fint[fi] = fret[fi] == 0 or fret[fi] == T_INT
+    fbret[fi] = fret[fi] == 0
     if c < 0 and not fpre[fi]:
         check_inline(fi, pos)
     return fi
@@ -3576,6 +3720,7 @@ def reg_class(p):
     fpb[fi] = npall
     fret[fi] = 11 + c
     fint[fi] = 0
+    fbret[fi] = 0
     if cinit[c] >= 0:
         fargs[fi] = fargs[cinit[c]] - 1
     else:
@@ -3671,6 +3816,7 @@ def prescan():
     fpb[fi] = npall
     fret[fi] = 0
     fint[fi] = 1
+    fbret[fi] = 0
     flb[fi] = -1
     finl[fi] = -1
     fshadow[fi] = 0
@@ -3719,6 +3865,9 @@ def reach_all():
     mark_root("__add", 3, 1)
     mark_root("__eq", 2, 1)
     mark_root("__truth", 1, 1)
+    mark_root("__binop", 4, 1)
+    mark_root("__cmpop", 3, 1)
+    mark_root("__ffloordiv", 2, 1)
     i = 0
     while i < ndynm:
         if dynm_fb[i] >= 0:

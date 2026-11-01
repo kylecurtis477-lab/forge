@@ -44,7 +44,7 @@ fn lex(src: &str) -> Vec<(T, usize)> {
             continue;
         }
         let two = if i + 1 < s.len() { String::from_utf8_lossy(&s[i..i + 2]).to_string() } else { String::new() };
-        if ["==", "!=", "<=", ">=", "+=", "-=", "->"].contains(&two.as_str()) { out.push((T::Op(two), line)); i += 2; continue; }
+        if ["==", "!=", "<=", ">=", "+=", "-=", "->", "//"].contains(&two.as_str()) { out.push((T::Op(two), line)); i += 2; continue; }
         if b"+-*/%()[]:,=<>.".contains(&c) {
             if c == b'(' || c == b'[' { depth += 1; } if c == b')' || c == b']' { depth -= 1; }
             out.push((T::Op((c as char).to_string()), line)); i += 1; continue; }
@@ -116,7 +116,7 @@ impl C {
     fn mul_expr(&mut self) {
         self.unary();
         loop {
-            let op = if self.is_op("*") { 0 } else if self.is_op("/") { 1 } else if self.is_op("%") { 2 } else { return };
+            let op = if self.is_op("*") { 0 } else if self.is_op("/") || self.is_op("//") { 1 } else if self.is_op("%") { 2 } else { return };
             self.p += 1; self.e("push %rax"); self.unary(); self.e("mov %rax, %rcx"); self.e("pop %rax");
             if op == 0 { self.e("imul %rcx, %rax"); } else { self.e("cqo"); self.e("idiv %rcx"); if op == 2 { self.e("mov %rdx, %rax"); } }
         }

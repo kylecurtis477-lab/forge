@@ -86,12 +86,22 @@ def __str(x) -> str:
         return __itos_raw(x)
     return __repr(x)
 
+def __brepr(x) -> str:
+    v: int = x
+    if v & 1:
+        return "True"
+    return "False"
+
 def __repr(x) -> str:
     t: int = __tag(x)
     if t == 1:
         return concat(concat("'", x), "'")
     if t < 0:
         return __itos_raw(x)
+    if t == 6:
+        return __brepr(x)
+    if t == 5:
+        return __frepr(x)
     parts = []
     if t == 0:
         n: int = __ld(x, 0)
@@ -131,6 +141,44 @@ def __pr(x):
         __writes(__repr(x))
     return 0
 
+def __isnum(x) -> int:
+    t: int = __tag(x)
+    return t < 0 or t == 5 or t == 6
+
+def __binop(a, b, op: int, line):
+    if op == 2:
+        ta: int = __tag(a)
+        tb: int = __tag(b)
+        if ta == 1 and __isnum(b):
+            return __strmul(a, int(b))
+        if tb == 1 and __isnum(a):
+            return __strmul(b, int(a))
+        if ta == 0 and __isnum(b):
+            return __list_mul(a, int(b))
+        if tb == 0 and __isnum(a):
+            return __list_mul(b, int(a))
+    names = ["+", "-", "*", "/", "//", "%"]
+    __err(line, concat(concat("unsupported operand type(s) for ", __lst(names, op)), ""))
+
+def __cmpop(a, b, op: int) -> int:
+    if op == 10:
+        return __eq(a, b)
+    if op == 11:
+        return __eq(a, b) == 0
+    if op == 12:
+        return __lt(a, b)
+    if op == 13:
+        return __lt(b, a)
+    if op == 14:
+        return __lt(b, a) == 0
+    return __lt(a, b) == 0
+
+def __ffloordiv(a, b):
+    return __math(a / b, 1)
+
+def __frepr(x) -> str:
+    return "<float>"
+
 def __add(a, b, line):
     ta: int = __tag(a)
     tb: int = __tag(b)
@@ -142,17 +190,49 @@ def __add(a, b, line):
         return __list_add(a, b)
     __err(line, "unsupported operand types for +")
 
-def __eq(a, b):
-    if a - b == 0:
+def __eq(a, b) -> int:
+    x: int = a
+    y: int = b
+    if x == y:
         return 1
-    if __tag(a) == 1 and __tag(b) == 1:
+    ta: int = __tag(a)
+    tb: int = __tag(b)
+    if ta == 1 and tb == 1:
         return str_eq(a, b)
+    if __isnum(a) and __isnum(b):
+        return a == b
+    if ta == 0 and tb == 0:
+        n: int = __ld(a, 0)
+        if n != __ld(b, 0):
+            return 0
+        i: int = 0
+        while i < n:
+            if not __eq(__lst(a, i), __lst(b, i)):
+                return 0
+            i += 1
+        return 1
     return 0
 
-def __lt(a, b):
-    if __tag(a) == 1 and __tag(b) == 1:
+def __lt(a, b) -> int:
+    ta: int = __tag(a)
+    tb: int = __tag(b)
+    if ta == 1 and tb == 1:
         return __strcmp(a, b) < 0
-    return a - b < 0
+    if __isnum(a) and __isnum(b):
+        return a < b
+    if ta == 0 and tb == 0:
+        na: int = __ld(a, 0)
+        nb: int = __ld(b, 0)
+        i: int = 0
+        while i < na and i < nb:
+            x = __lst(a, i)
+            y = __lst(b, i)
+            if not __eq(x, y):
+                return __lt(x, y)
+            i += 1
+        return na < nb
+    __err(0, "'<' not supported between these types")
+    return 0
 
 def __strcmp(a, b):
     na: int = __aux(a)
@@ -283,7 +363,15 @@ def __dict():
 
 def __hash(k) -> int:
     h: int = 0
-    if __tag(k) == 1:
+    t: int = __tag(k)
+    if t == 6:
+        k = int(k)
+    elif t == 5:
+        if __math(k, 1) == k and __math(k, 10) < __itof(1000000000000000000):
+            k = int(k)
+        else:
+            k = __fbits(k)
+    if t == 1:
         h = 5381
         n: int = __aux(k)
         i: int = 0
@@ -517,7 +605,13 @@ def isalpha(s) -> int:
     return n > 0
 
 def int(x) -> int:
-    if __tag(x) != 1:
+    t: int = __tag(x)
+    if t == 6:
+        v: int = x
+        return v & 1
+    if t == 5:
+        return __ftoi(x, 0)
+    if t != 1:
         return x
     s = strip(x)
     n: int = __aux(s)
@@ -540,10 +634,14 @@ def int(x) -> int:
     return v
 
 # ---- numbers and lists ----
-def abs(x: int) -> int:
-    if x < 0:
-        return 0 - x
-    return x
+def abs(x):
+    t: int = __tag(x)
+    if t == 5:
+        return __math(x, 10)
+    v: int = int(x)
+    if v < 0:
+        return 0 - v
+    return v
 
 def min(a, b):
     if __lt(b, a):
@@ -569,17 +667,48 @@ def max__1(xs):
             m = x
     return m
 
-def sum(xs) -> int:
+def sum(xs):
     s: int = 0
     n: int = __ld(xs, 0)
     d = __ld(xs, 2)
     i: int = 0
     while i < n:
-        s += __ld(d, i)
+        v = __ld(d, i)
+        if __tag(v) >= 0:
+            acc = s
+            while i < n:
+                acc = acc + __ld(d, i)
+                i += 1
+            return acc
+        s += v
         i += 1
     return s
 
-def __pow(a: int, b: int) -> int:
+def __pow(a, b):
+    ta: int = __tag(a)
+    tb: int = __tag(b)
+    if ta != 5 and tb != 5:
+        ia: int = int(a)
+        ib: int = int(b)
+        if ib >= 0:
+            return __ipow(ia, ib)
+        return __itof(1) / __ipow(ia, 0 - ib)
+    if a == 0:
+        if b < 0:
+            __err(0, "0.0 cannot be raised to a negative power")
+        if b == 0:
+            return __itof(1)
+        return __itof(0)
+    if a > 0:
+        return __math2(b, a, 1)
+    if __math(b, 1) != b:
+        __err(0, "negative number cannot be raised to a fractional power")
+    r = __math2(b, 0 - a, 1)
+    if __math(b / 2, 1) != b / 2:
+        return 0 - r
+    return r
+
+def __ipow(a: int, b: int) -> int:
     r: int = 1
     while b > 0:
         if b & 1:
@@ -662,6 +791,11 @@ def __truth(x) -> int:
     if t < 0:
         v: int = x
         return v != 0
+    if t == 6:
+        w: int = x
+        return w & 1
+    if t == 5:
+        return (__fbits(x) << 1) != 0
     if t == 1:
         return __aux(x) != 0
     if t == 0 or t == 3:
@@ -687,6 +821,9 @@ def __strmul(s, k: int) -> str:
     return join(parts, k)
 
 def __listof(x):
+    if __tag(x) < 0:
+        n: int = x
+        return list(n)
     it = __iter(x, 0)
     return __slice(it, 0, __ld(it, 0), 0)
 

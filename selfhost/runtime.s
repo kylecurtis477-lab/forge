@@ -96,8 +96,16 @@ rt_list:
     mov %r8, %rax
     ret
 rt_tag_r:
-    # rdi = value -> rax = tag, or -1 if not a heap/data object
-    test $7, %dil
+    # rdi = value -> rax = tag (6 for bools), or -1 if not a heap/data object
+    mov %rdi, %rax
+    or $1, %rax
+    btr $62, %rax
+    jnc 0f
+    cmp $1, %rax
+    jne 0f
+    mov $6, %eax
+    ret
+0:  test $7, %dil
     jnz 9f
     cmp rt_hlo(%rip), %rdi
     jbe 1f
@@ -560,6 +568,463 @@ rt_divzero:
     lea rt_dz_msg(%rip), %rax
     push %rax
     call f___err
+# ---- numbers: bools are 1<<62|b, floats are boxed doubles (tag 5) ----
+rt_tod_r:
+    # rdi = int/bool/float -> xmm0; clobbers rax
+    call rt_tag_r
+    cmp $5, %eax
+    je 1f
+    cmp $6, %eax
+    je 2f
+    cvtsi2sdq %rdi, %xmm0
+    ret
+1:  movsd (%rdi), %xmm0
+    ret
+2:  mov %rdi, %rax
+    and $1, %eax
+    cvtsi2sdq %rax, %xmm0
+    ret
+rt_fbox_r:
+    # xmm0 -> rax (new float object); clobbers rdx, rdi, rsi
+    mov $8, %edi
+    mov $5, %esi
+    shl $56, %rsi
+    call rt_new_r
+    movsd %xmm0, (%rax)
+    ret
+rt_numk:
+    # rdi -> eax: 0 int, 1 bool, 2 float, 3 other; clobbers nothing else
+    call rt_tag_r
+    cmp $-1, %rax
+    je 1f
+    cmp $4, %eax
+    je 1f
+    cmp $6, %eax
+    je 2f
+    cmp $5, %eax
+    je 3f
+    mov $3, %eax
+    ret
+1:  xor %eax, %eax
+    ret
+2:  mov $1, %eax
+    ret
+3:  mov $2, %eax
+    ret
+rt_floor_r:
+    # xmm0 -> xmm0 = floor(xmm0); clobbers rax, rdx, xmm1, xmm2
+    movq %xmm0, %rax
+    btr $63, %rax
+    mov $0x4330000000000000, %rdx
+    cmp %rdx, %rax
+    jae 1f
+    cvttsd2si %xmm0, %rax
+    cvtsi2sdq %rax, %xmm1
+    ucomisd %xmm0, %xmm1
+    jbe 2f
+    dec %rax
+    cvtsi2sdq %rax, %xmm1
+2:  movapd %xmm1, %xmm0
+1:  ret
+rt_fmod_r:
+    # xmm0 = a, xmm1 = b -> xmm0 = a mod b with the sign of b (Python); clobbers rax, rdx, xmm3
+    sub $16, %rsp
+    movsd %xmm1, (%rsp)
+    fldl (%rsp)
+    movsd %xmm0, 8(%rsp)
+    fldl 8(%rsp)
+1:  fprem
+    fnstsw %ax
+    test $0x400, %ax
+    jnz 1b
+    fstpl 8(%rsp)
+    fstp %st(0)
+    movsd 8(%rsp), %xmm0
+    add $16, %rsp
+    xorpd %xmm3, %xmm3
+    ucomisd %xmm3, %xmm0
+    jp 3f
+    je 2f
+    movq %xmm0, %rax
+    movq %xmm1, %rdx
+    xor %rdx, %rax
+    jns 3f
+    addsd %xmm1, %xmm0
+    ret
+2:  movq %xmm1, %rax
+    shr $63, %rax
+    shl $63, %rax
+    movq %rax, %xmm0
+3:  ret
+rtp_binop:
+    # rax=a rcx=b esi=op (0 + 1 - 2 * 3 / 4 // 5 %) edx=line -> rax; preserves r8-r11
+    push %r8
+    push %r9
+    push %r10
+    push %r11
+    push %rax
+    push %rcx
+    push %rsi
+    push %rdx
+    mov 24(%rsp), %rdi
+    call rt_numk
+    mov %eax, %r8d
+    mov 16(%rsp), %rdi
+    call rt_numk
+    mov %eax, %r9d
+    cmp $3, %r8d
+    je 7f
+    cmp $3, %r9d
+    je 7f
+    cmp $2, %r8d
+    je 5f
+    cmp $2, %r9d
+    je 5f
+    cmpq $3, 8(%rsp)
+    je 5f
+    mov 24(%rsp), %rax
+    cmp $1, %r8d
+    jne 1f
+    and $1, %eax
+1:  mov 16(%rsp), %rcx
+    cmp $1, %r9d
+    jne 1f
+    and $1, %ecx
+1:  mov 8(%rsp), %rsi
+    cmp $0, %esi
+    jne 1f
+    add %rcx, %rax
+    jmp 9f
+1:  cmp $1, %esi
+    jne 1f
+    sub %rcx, %rax
+    jmp 9f
+1:  cmp $2, %esi
+    jne 1f
+    imul %rcx, %rax
+    jmp 9f
+1:  test %rcx, %rcx
+    jz 8f
+    cqo
+    idiv %rcx
+    test %rdx, %rdx
+    jz 4f
+    mov %rdx, %r10
+    xor %rcx, %r10
+    jns 4f
+    dec %rax
+    add %rcx, %rdx
+4:  cmp $5, %esi
+    jne 9f
+    mov %rdx, %rax
+    jmp 9f
+5:  mov 24(%rsp), %rdi
+    call rt_tod_r
+    movapd %xmm0, %xmm2
+    mov 16(%rsp), %rdi
+    call rt_tod_r
+    movapd %xmm0, %xmm1
+    movapd %xmm2, %xmm0
+    mov 8(%rsp), %rsi
+    cmp $0, %esi
+    jne 1f
+    addsd %xmm1, %xmm0
+    jmp 6f
+1:  cmp $1, %esi
+    jne 1f
+    subsd %xmm1, %xmm0
+    jmp 6f
+1:  cmp $2, %esi
+    jne 1f
+    mulsd %xmm1, %xmm0
+    jmp 6f
+1:  xorpd %xmm3, %xmm3
+    ucomisd %xmm3, %xmm1
+    jp 1f
+    je 3f
+1:  cmp $3, %esi
+    jne 1f
+    divsd %xmm1, %xmm0
+    jmp 6f
+1:  cmp $5, %esi
+    jne 1f
+    call rt_fmod_r
+    jmp 6f
+1:  mov 24(%rsp), %rax
+    push %rax
+    mov 24(%rsp), %rax
+    push %rax
+    call f___ffloordiv
+    add $16, %rsp
+    jmp 9f
+3:  mov (%rsp), %rdx
+    jmp rt_fdivzero
+6:  call rt_fbox_r
+    jmp 9f
+7:  cmpq $0, 8(%rsp)
+    jne 1f
+    pushq 24(%rsp)
+    pushq 24(%rsp)
+    pushq 16(%rsp)
+    call f___add
+    add $24, %rsp
+    jmp 9f
+1:  call f___binop
+    jmp 9f
+8:  mov (%rsp), %rdx
+    jmp rt_divzero
+9:  add $32, %rsp
+    pop %r11
+    pop %r10
+    pop %r9
+    pop %r8
+    ret
+rtp_cmp:
+    # rax=a rcx=b esi=op (10 == 11 != 12 < 13 > 14 <= 15 >=) -> rax 0/1 or a bool; preserves r8-r11
+    push %r8
+    push %r9
+    push %r10
+    push %r11
+    push %rax
+    push %rcx
+    push %rsi
+    mov 16(%rsp), %rdi
+    call rt_numk
+    mov %eax, %r8d
+    mov 8(%rsp), %rdi
+    call rt_numk
+    mov %eax, %r9d
+    cmp $3, %r8d
+    je 7f
+    cmp $3, %r9d
+    je 7f
+    mov (%rsp), %rsi
+    cmp $2, %r8d
+    je 5f
+    cmp $2, %r9d
+    je 5f
+    mov 16(%rsp), %rdx
+    cmp $1, %r8d
+    jne 1f
+    and $1, %edx
+1:  mov 8(%rsp), %rcx
+    cmp $1, %r9d
+    jne 1f
+    and $1, %ecx
+1:  xor %eax, %eax
+    cmp $10, %esi
+    jne 1f
+    cmp %rcx, %rdx
+    sete %al
+    jmp 9f
+1:  cmp $11, %esi
+    jne 1f
+    cmp %rcx, %rdx
+    setne %al
+    jmp 9f
+1:  cmp $12, %esi
+    jne 1f
+    cmp %rcx, %rdx
+    setl %al
+    jmp 9f
+1:  cmp $13, %esi
+    jne 1f
+    cmp %rcx, %rdx
+    setg %al
+    jmp 9f
+1:  cmp $14, %esi
+    jne 1f
+    cmp %rcx, %rdx
+    setle %al
+    jmp 9f
+1:  cmp %rcx, %rdx
+    setge %al
+    jmp 9f
+5:  mov 16(%rsp), %rdi
+    call rt_tod_r
+    movapd %xmm0, %xmm2
+    mov 8(%rsp), %rdi
+    call rt_tod_r
+    movapd %xmm0, %xmm1
+    movapd %xmm2, %xmm0
+    mov (%rsp), %rsi
+    xor %eax, %eax
+    cmp $10, %esi
+    jne 1f
+    ucomisd %xmm1, %xmm0
+    setnp %al
+    sete %cl
+    and %cl, %al
+    jmp 9f
+1:  cmp $11, %esi
+    jne 1f
+    ucomisd %xmm1, %xmm0
+    setp %al
+    setne %cl
+    or %cl, %al
+    jmp 9f
+1:  cmp $12, %esi
+    jne 1f
+    ucomisd %xmm0, %xmm1
+    seta %al
+    jmp 9f
+1:  cmp $13, %esi
+    jne 1f
+    ucomisd %xmm1, %xmm0
+    seta %al
+    jmp 9f
+1:  cmp $14, %esi
+    jne 1f
+    ucomisd %xmm0, %xmm1
+    setae %al
+    jmp 9f
+1:  ucomisd %xmm1, %xmm0
+    setae %al
+    jmp 9f
+7:  call f___cmpop
+9:  add $24, %rsp
+    pop %r11
+    pop %r10
+    pop %r9
+    pop %r8
+    ret
+rt_fdivzero:
+    # rdx = line
+    push %rdx
+    lea rt_fdz_msg(%rip), %rax
+    push %rax
+    call f___err
+# float builtins callable from Forge
+rt_itof:
+    mov 8(%rsp), %rdi
+    call rt_tod_r
+    jmp rt_fbox_r
+rt_ftoi:
+    # (float, mode) mode 0 truncate, 1 floor, 2 round-half-even -> int
+    mov 16(%rsp), %rdi
+    call rt_tod_r
+    mov 8(%rsp), %rax
+    cmp $1, %eax
+    jne 1f
+    call rt_floor_r
+    mov 8(%rsp), %rax
+1:  cmp $2, %eax
+    je 2f
+    cvttsd2si %xmm0, %rax
+    ret
+2:  cvtsd2si %xmm0, %rax
+    ret
+rt_fbits:
+    mov 8(%rsp), %rdi
+    call rt_tod_r
+    movq %xmm0, %rax
+    ret
+rt_ffrombits:
+    mov 8(%rsp), %rax
+    movq %rax, %xmm0
+    jmp rt_fbox_r
+rt_math:
+    # (x, op) -> float. 0 sqrt 1 floor 2 sin 3 cos 4 tan 5 atan 6 exp 7 log 8 log2 9 log10 10 fabs
+    mov 16(%rsp), %rdi
+    call rt_tod_r
+    mov 8(%rsp), %rcx
+    cmp $0, %ecx
+    jne 1f
+    sqrtsd %xmm0, %xmm0
+    jmp rt_fbox_r
+1:  cmp $1, %ecx
+    jne 1f
+    call rt_floor_r
+    jmp rt_fbox_r
+1:  cmp $10, %ecx
+    jne 1f
+    movq %xmm0, %rax
+    btr $63, %rax
+    movq %rax, %xmm0
+    jmp rt_fbox_r
+1:  sub $24, %rsp
+    movsd %xmm0, (%rsp)
+    cmp $7, %ecx
+    jl 1f
+    cmp $7, %ecx
+    jne 2f
+    fldln2
+    jmp 3f
+2:  cmp $8, %ecx
+    jne 2f
+    fld1
+    jmp 3f
+2:  fldlg2
+3:  fldl (%rsp)
+    fyl2x
+    jmp 8f
+1:  fldl (%rsp)
+    cmp $2, %ecx
+    jne 1f
+    fsin
+    jmp 8f
+1:  cmp $3, %ecx
+    jne 1f
+    fcos
+    jmp 8f
+1:  cmp $4, %ecx
+    jne 1f
+    fptan
+    fstp %st(0)
+    jmp 8f
+1:  cmp $5, %ecx
+    jne 1f
+    fld1
+    fpatan
+    jmp 8f
+1:  fldl2e
+    fmulp
+    call rt_exp2_x87
+8:  fstpl (%rsp)
+    movsd (%rsp), %xmm0
+    add $24, %rsp
+    jmp rt_fbox_r
+rt_exp2_x87:
+    # st0 = t -> st0 = 2^t; uses 16 bytes of stack scratch
+    sub $24, %rsp
+    fstl (%rsp)
+    frndint
+    fstl 8(%rsp)
+    fsubrl (%rsp)
+    f2xm1
+    fld1
+    faddp
+    fldl 8(%rsp)
+    fxch
+    fscale
+    fstp %st(1)
+    add $24, %rsp
+    ret
+rt_math2:
+    # (y, x, op) op 0: atan2(y, x)  1: x ** y for x > 0
+    mov 24(%rsp), %rdi
+    call rt_tod_r
+    movapd %xmm0, %xmm2
+    mov 16(%rsp), %rdi
+    call rt_tod_r
+    sub $24, %rsp
+    movsd %xmm2, (%rsp)
+    movsd %xmm0, 8(%rsp)
+    mov 32(%rsp), %rcx
+    cmp $0, %ecx
+    jne 1f
+    fldl (%rsp)
+    fldl 8(%rsp)
+    fpatan
+    jmp 8f
+1:  fldl (%rsp)
+    fldl 8(%rsp)
+    fyl2x
+    call rt_exp2_x87
+8:  fstpl (%rsp)
+    movsd (%rsp), %xmm0
+    add $24, %rsp
+    jmp rt_fbox_r
 .data
 .p2align 3
 rt_sigact: .quad 0, 0, 0, 0
@@ -574,6 +1039,9 @@ rt_segv_msg: .ascii "error: segmentation fault (invalid memory access, e.g. None
 .p2align 3
 .quad 0x100000000000010
 rt_dz_msg: .asciz "division by zero"
+.p2align 3
+.quad 0x100000000000016
+rt_fdz_msg: .asciz "float division by zero"
 .p2align 3
 .quad 0x100000000000019
 rt_nm_msg: .asciz "object has no such method"

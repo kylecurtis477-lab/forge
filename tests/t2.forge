@@ -26,7 +26,7 @@ def sum_to(n: int) -> int:
 print(ack(2, 3))
 print(many(1, 2, 3, 4, 5, 6, 7))
 print(sum_to(100))
-print(2 + 3 * 4 - 10 / 3)
+print(2 + 3 * 4 - 10 // 3)
 print(-7 % 3)
 x = 5
 if x > 3 and x < 10 or False:
@@ -50,7 +50,7 @@ while True:
         break
 print(k)
 def sdiv(a, b):
-    q = a / b
+    q = a // b
     m = a % b
     return q * 100 + m
 print(sdiv(47, 5))
