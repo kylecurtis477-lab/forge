@@ -6,6 +6,7 @@
 .text
 rt_init:
     # rdi = initial %rsp (argc, argv...)
+    mov %rdi, rt_stk0(%rip)
     mov (%rdi), %rax
     mov %rax, rt_argcv(%rip)
     lea 8(%rdi), %rax
@@ -20,6 +21,24 @@ rt_init:
     syscall
     mov %rax, rt_hp(%rip)
     mov %rax, rt_hlo(%rip)
+    mov $9, %eax
+    xor %edi, %edi
+    mov $0x800000, %esi
+    mov $3, %edx
+    mov $0x4022, %r10d
+    mov $-1, %r8
+    xor %r9d, %r9d
+    syscall
+    mov %rax, rt_pt(%rip)
+    mov $9, %eax
+    xor %edi, %edi
+    mov $0x40000000, %esi
+    mov $3, %edx
+    mov $0x4022, %r10d
+    mov $-1, %r8
+    xor %r9d, %r9d
+    syscall
+    mov %rax, rt_ms(%rip)
     lea rt_segv(%rip), %rax
     mov %rax, rt_sigact(%rip)
     mov %rax, rt_sigact+16(%rip)
@@ -41,13 +60,459 @@ rt_segv:
     mov $60, %eax
     syscall
 rt_new_r:
-    # rdi = payload bytes, rsi = header -> rax = object (8-aligned); clobbers rdx
-    mov rt_hp(%rip), %rax
+    # rdi = payload bytes, rsi = header -> rax = object (8-aligned, zeroed); clobbers rdx
+    # GC heap: 64 KiB pages; size classes 1..32 (16-byte steps), 33..38 (1K..32K), large runs above.
+    push %rcx
+    lea 23(%rdi), %rcx
+    shr $4, %rcx
+    cmp $32, %rcx
+    ja 5f
+0:  lea rt_fl(%rip), %rdx
+    lea (%rdx,%rcx,8), %rdx
+    mov (%rdx), %rax
+    test %rax, %rax
+    jz 6f
+    mov 8(%rax), %rcx
+    mov %rcx, (%rdx)
+    movq $0, 8(%rax)
     mov %rsi, (%rax)
     add $8, %rax
-    lea 7(%rax,%rdi), %rdx
-    and $-8, %rdx
+    add %rdi, rt_inuse(%rip)
+    pop %rcx
+    ret
+6:  call rt_refill
+    jmp 0b
+5:  lea 8(%rdi), %rdx
+    mov $1024, %eax
+    mov $33, %ecx
+7:  cmp %rax, %rdx
+    jbe 0b
+    shl $1, %rax
+    inc %ecx
+    cmp $38, %ecx
+    jbe 7b
+    pop %rcx
+    jmp rt_new_large
+rt_saveall:
+    # not called; documentation of save order used by rt_refill/rt_new_large/rt_collect
+rt_refill:
+    # rcx = class; refill rt_fl[class] (may collect). preserves all GPRs
+    push %rax
+    push %rbx
+    push %rcx
+    push %rdx
+    push %rsi
+    push %rdi
+    push %rbp
+    push %r8
+    push %r9
+    push %r10
+    push %r11
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    mov %rcx, %rbx
+    mov rt_inuse(%rip), %rax
+    cmp rt_gcnext(%rip), %rax
+    jb 1f
+    push %rbx
+    call rt_gc_core
+    pop %rbx
+    lea rt_fl(%rip), %rax
+    cmpq $0, (%rax,%rbx,8)
+    jne 9f
+1:  mov $1, %edi
+    call rt_getpages
+    mov %rax, %r8
+    # stride
+    mov %rbx, %r12
+    shl $4, %r12
+    cmp $32, %rbx
+    jbe 2f
+    lea -33(%rbx), %rcx
+    mov $1024, %r12d
+    shl %cl, %r12
+2:  mov %r8, %rax
+    sub rt_hlo(%rip), %rax
+    shr $16, %rax
+    mov rt_pt(%rip), %rdx
+    mov %r12, (%rdx,%rax,8)
+    lea 65536(%r8), %r9
+    mov %r8, %r10
+    movabs $0xFF00000000000000, %rax
+3:  mov %rax, (%r10)
+    lea (%r10,%r12), %r11
+    lea (%r11,%r12), %rcx
+    cmp %r9, %rcx
+    ja 4f
+    mov %r11, 8(%r10)
+    mov %r11, %r10
+    jmp 3b
+4:  movq $0, 8(%r10)
+    lea rt_fl(%rip), %rax
+    mov %r8, (%rax,%rbx,8)
+9:  pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %r11
+    pop %r10
+    pop %r9
+    pop %r8
+    pop %rbp
+    pop %rdi
+    pop %rsi
+    pop %rdx
+    pop %rcx
+    pop %rbx
+    pop %rax
+    ret
+rt_getpages:
+    # rdi = npages -> rax = page-aligned zeroed run (first-fit from free runs, else bump); clobbers rcx,rdx,rsi,r8
+    lea rt_lfree(%rip), %rcx
+1:  mov (%rcx), %rax
+    test %rax, %rax
+    jz 5f
+    mov 8(%rax), %rdx
+    cmp %rdi, %rdx
+    jae 2f
+    mov %rax, %rcx
+    jmp 1b
+2:  je 3f
+    mov %rdi, %rsi
+    shl $16, %rsi
+    add %rax, %rsi
+    mov (%rax), %r8
+    mov %r8, (%rsi)
+    sub %rdi, %rdx
+    mov %rdx, 8(%rsi)
+    mov %rsi, (%rcx)
+    jmp 4f
+3:  mov (%rax), %rsi
+    mov %rsi, (%rcx)
+4:  movq $0, (%rax)
+    movq $0, 8(%rax)
+    ret
+5:  mov rt_hp(%rip), %rax
+    mov %rdi, %rdx
+    shl $16, %rdx
+    add %rax, %rdx
+    movabs $0x1000000000, %rsi
+    add rt_hlo(%rip), %rsi
+    cmp %rsi, %rdx
+    ja rt_oom
     mov %rdx, rt_hp(%rip)
+    ret
+rt_oom:
+    call rt_flush
+    mov $2, %edi
+    lea rt_oom_msg(%rip), %rsi
+    mov $20, %edx
+    call rt_write_r
+    mov $1, %edi
+    mov $60, %eax
+    syscall
+rt_new_large:
+    # rdi = payload, rsi = header -> rax; clobbers rdx
+    push %rbx
+    push %rcx
+    push %rsi
+    push %rdi
+    push %rbp
+    push %r8
+    push %r9
+    push %r10
+    push %r11
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    mov rt_inuse(%rip), %rax
+    cmp rt_gcnext(%rip), %rax
+    jb 1f
+    call rt_gc_core
+1:  mov 72(%rsp), %rdi
+    lea 65543(%rdi), %rdi
+    shr $16, %rdi
+    mov %rdi, %rbx
+    call rt_getpages
+    mov %rax, %r8
+    sub rt_hlo(%rip), %rax
+    shr $16, %rax
+    mov rt_pt(%rip), %rdx
+    mov %rbx, %rcx
+    shl $16, %rcx
+    add %rcx, rt_inuse(%rip)
+    mov %rcx, (%rdx,%rax,8)
+    mov $1, %ecx
+2:  cmp %rbx, %rcx
+    jae 3f
+    lea (%rax,%rcx), %rsi
+    mov %rcx, %r9
+    neg %r9
+    mov %r9, (%rdx,%rsi,8)
+    inc %rcx
+    jmp 2b
+3:  mov 80(%rsp), %rsi
+    mov %rsi, (%r8)
+    lea 8(%r8), %rax
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %r11
+    pop %r10
+    pop %r9
+    pop %r8
+    pop %rbp
+    pop %rdi
+    pop %rsi
+    pop %rcx
+    pop %rbx
+    ret
+rt_collect:
+    # full collection, preserves all GPRs except rax
+    push %rbx
+    push %rcx
+    push %rdx
+    push %rsi
+    push %rdi
+    push %rbp
+    push %r8
+    push %r9
+    push %r10
+    push %r11
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    call rt_gc_core
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %r11
+    pop %r10
+    pop %r9
+    pop %r8
+    pop %rbp
+    pop %rdi
+    pop %rsi
+    pop %rdx
+    pop %rcx
+    pop %rbx
+    ret
+rt_gc_mark:
+    # rdi = candidate word; pushes newly marked slot onto mark stack (%r15); clobbers rax,rcx,rdx,rsi,r8
+    mov rt_hlo(%rip), %rax
+    cmp %rax, %rdi
+    jb 9f
+    cmp rt_hp(%rip), %rdi
+    jae 9f
+    mov %rdi, %rcx
+    sub %rax, %rcx
+    shr $16, %rcx
+    mov rt_pt(%rip), %rdx
+    mov (%rdx,%rcx,8), %rsi
+    test %rsi, %rsi
+    jz 9f
+    jns 1f
+    add %rsi, %rcx
+    mov (%rdx,%rcx,8), %rsi
+1:  mov %rcx, %r8
+    shl $16, %r8
+    add %rax, %r8
+    cmp $65536, %rsi
+    jae 2f
+    mov %rdi, %rax
+    sub %r8, %rax
+    xor %edx, %edx
+    div %rsi
+    imul %rsi, %rax
+    lea (%rax,%rsi), %rdx
+    cmp $65536, %rdx
+    ja 9f
+    add %rax, %r8
+2:  mov (%r8), %rax
+    mov %rax, %rcx
+    shr $56, %rcx
+    cmp $0xFF, %ecx
+    je 9f
+    bts $55, %rax
+    jc 9f
+    mov %rax, (%r8)
+    mov %r8, (%r15)
+    add $8, %r15
+9:  ret
+rt_gc_core:
+    # mark from stack [rsp, rt_stk0), data [rt_dlo, rt_dhi), rt_exc_val; then sweep
+    incq rt_ngc(%rip)
+    mov rt_ms(%rip), %r15
+    mov %rsp, %r14
+1:  cmp rt_stk0(%rip), %r14
+    jae 2f
+    mov (%r14), %rdi
+    call rt_gc_mark
+    add $8, %r14
+    jmp 1b
+2:  lea rt_dlo(%rip), %r14
+3:  lea rt_dhi(%rip), %rax
+    cmp %rax, %r14
+    jae 4f
+    mov (%r14), %rdi
+    call rt_gc_mark
+    add $8, %r14
+    jmp 3b
+4:  mov rt_exc_val(%rip), %rdi
+    call rt_gc_mark
+5:  cmp rt_ms(%rip), %r15
+    je 10f
+    sub $8, %r15
+    mov (%r15), %r14
+    movzbl 7(%r14), %eax
+    cmp $1, %eax
+    je 5b
+    cmp $5, %eax
+    je 5b
+    mov %r14, %rax
+    sub rt_hlo(%rip), %rax
+    shr $16, %rax
+    mov rt_pt(%rip), %rdx
+    mov (%rdx,%rax,8), %r13
+    add %r14, %r13
+    lea 8(%r14), %r12
+6:  cmp %r13, %r12
+    jae 5b
+    mov (%r12), %rdi
+    call rt_gc_mark
+    add $8, %r12
+    jmp 6b
+10: # sweep: r12 = page base, r13 = page index, r11 = live bytes
+    lea rt_fl(%rip), %rdi
+    mov $40, %ecx
+    xor %eax, %eax
+    rep stosq
+    xor %r11d, %r11d
+    mov rt_hlo(%rip), %r12
+    xor %r13d, %r13d
+11: cmp rt_hp(%rip), %r12
+    jae 30f
+    mov rt_pt(%rip), %rdx
+    mov (%rdx,%r13,8), %r10
+    test %r10, %r10
+    jg 12f
+    add $65536, %r12
+    inc %r13
+    jmp 11b
+12: cmp $65536, %r10
+    jb 20f
+    # large run of r10 bytes
+    mov %r10, %r9
+    shr $16, %r9
+    mov (%r12), %rax
+    btr $55, %rax
+    jnc 13f
+    mov %rax, (%r12)
+    add %r10, %r11
+    jmp 14f
+13: mov %r12, %rdi
+    mov %r10, %rsi
+    mov %r9, %rcx
+    call rt_freerun
+14: add %r10, %r12
+    add %r9, %r13
+    jmp 11b
+20: # small page, stride r10: count live
+    lea 65536(%r12), %r9
+    xor %r8d, %r8d
+    mov %r12, %rsi
+21: lea (%rsi,%r10), %rax
+    cmp %r9, %rax
+    ja 22f
+    mov (%rsi), %rax
+    bt $55, %rax
+    jnc 211f
+    mov %rax, %rcx
+    shr $56, %rcx
+    cmp $0xFF, %ecx
+    je 211f
+    inc %r8
+211: add %r10, %rsi
+    jmp 21b
+22: test %r8, %r8
+    jnz 23f
+    mov %r12, %rdi
+    mov $65536, %esi
+    mov $1, %ecx
+    call rt_freerun
+    jmp 29f
+23: # class index of stride
+    mov %r10, %rbx
+    shr $4, %rbx
+    cmp $512, %r10
+    jbe 24f
+    bsr %r10, %rbx
+    add $23, %rbx
+24: lea rt_fl(%rip), %rax
+    lea (%rax,%rbx,8), %rbx
+    mov %r12, %rsi
+25: lea (%rsi,%r10), %rax
+    cmp %r9, %rax
+    ja 29f
+    mov (%rsi), %rax
+    mov %rax, %rcx
+    shr $56, %rcx
+    cmp $0xFF, %ecx
+    je 27f
+    btr $55, %rax
+    jnc 26f
+    mov %rax, (%rsi)
+    add %r10, %r11
+    jmp 28f
+26: mov %rsi, %rdi
+    mov %r10, %rcx
+    shr $3, %rcx
+    xor %eax, %eax
+    rep stosq
+    movabs $0xFF00000000000000, %rax
+    mov %rax, (%rsi)
+27: mov (%rbx), %rax
+    mov %rax, 8(%rsi)
+    mov %rsi, (%rbx)
+28: add %r10, %rsi
+    jmp 25b
+29: add $65536, %r12
+    inc %r13
+    jmp 11b
+30: mov %r11, rt_inuse(%rip)
+    add %r11, %r11
+    cmp $0x2000000, %r11
+    jae 31f
+    mov $0x2000000, %r11d
+31: mov %r11, rt_gcnext(%rip)
+    ret
+rt_freerun:
+    # rdi = run base, rsi = bytes, rcx = npages, r13 = first page index: clear page table, madvise, push on free list
+    push %rcx
+    push %r11
+    mov rt_pt(%rip), %rdx
+    lea (%rdx,%r13,8), %rdx
+1:  movq $0, (%rdx)
+    add $8, %rdx
+    dec %rcx
+    jnz 1b
+    push %rdi
+    mov $4, %edx
+    mov $28, %eax
+    syscall
+    pop %rdi
+    pop %r11
+    pop %rcx
+    mov rt_lfree(%rip), %rax
+    mov %rax, (%rdi)
+    mov %rcx, 8(%rdi)
+    mov %rdi, rt_lfree(%rip)
     ret
 rt_mkstr_r:
     # rdi = length -> rax = string with header and NUL; clobbers rdx, rsi
@@ -158,11 +623,12 @@ rt_copy:
     xor %eax, %eax
     ret
 rt_mark:
-    mov rt_hp(%rip), %rax
+    # bytes in use (approximate payload bytes since last collection)
+    mov rt_inuse(%rip), %rax
     ret
 rt_release:
-    mov 8(%rsp), %rax
-    mov %rax, rt_hp(%rip)
+    # force a full collection (argument ignored)
+    call rt_collect
     xor %eax, %eax
     ret
 rt_char_at:
@@ -1093,6 +1559,15 @@ rt_exc_line: .quad 0
 rt_sigact: .quad 0, 0, 0, 0
 rt_hp: .quad 0
 rt_hlo: .quad 0
+rt_inuse: .quad 0
+rt_gcnext: .quad 0x2000000
+rt_ngc: .quad 0
+rt_stk0: .quad 0
+rt_pt: .quad 0
+rt_ms: .quad 0
+rt_lfree: .quad 0
+rt_fl: .fill 40, 8, 0
+rt_oom_msg: .ascii "error: out of memory"
 rt_on: .quad 0
 rt_argcv: .quad 0
 rt_argvp: .quad 0

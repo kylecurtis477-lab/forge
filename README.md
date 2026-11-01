@@ -4,7 +4,7 @@ Forge is a small language with Python-like syntax. It is compiled ahead of time 
 
 ## Status
 - **Self-hosting works.** The Rust bootstrap compiles forgec into stage1. Then stage1 builds stage2, stage2 builds stage3, and stage3 builds stage4. `stage2.s == stage3.s == stage4.s` byte for byte. Once stage1 exists, Rust is no longer needed: forgec emits its own runtime asm. Only binutils `as`/`ld` is still required.
-- **Tests:** `./run_tests.sh` runs 2 program tests and 6 error tests (errors report line numbers). All pass.
+- **Tests:** `./run_tests.sh` runs 23 tests: 12 program tests (t1–t4, bools, none, floats, floats_basic, inherit, exceptions, closures, gc), 4 runtime-error tests and 7 compile-error tests. All pass. `closures.expected` and `floats.expected` are CPython output.
 - **Recovery:** the source transcript cut every `main.rs` write off at 4101 chars. The lexer and the edit fragments were recovered (see `recovered/`). The parser, codegen and runtime in `src/` were rewritten. `selfhost_start.forge` is the transcript's latest fragment, taken verbatim; it compiles and prints `scan loop fixed`.
 
 ## Build
@@ -69,12 +69,22 @@ main()
   - Constant folding for small immediates.
   - Comparisons fuse with conditional jumps.
   - `addq`/`subq` with immediates for `+=`/`-=`.
-- Runtime (asm): direct syscalls, a 2 GiB bump allocator in `.bss` with no GC, and unbuffered looped `write` syscalls.
+- Runtime (asm): direct syscalls, a mark-sweep garbage-collected heap (see below), and buffered output.
 
 ## Phase 2 additions
 String `+`/`*`, f-strings, `for x in list/str/dict`, `enumerate`, tuple assign/swap, ternary, comprehensions with filters, `+=` etc. on names/fields/indexes, dicts (open-addressing hash map, insertion-ordered), slices, `split`/`join`/`upper`, `sorted`/`min`/`max`, classes with `__init__` and methods and per-class field layout (dynamic dispatch by name), Python floor `//` and `%`.
 Runtime errors carry source lines: index out of range, missing key, division by zero (`tests/runtime`).
-Memory: a bump arena; `m = mark()` ... `release(m)` frees everything allocated in between (`tests/t4.forge`). There is no GC.
+Memory: see Phase 3 (GC). `mark()` returns bytes in use; `release(m)` forces a full collection.
+
+## Phase 3 additions
+- Values: real `True`/`False` (tagged), `None` as a distinct value that prints `None`, boxed 64-bit floats with Python formatting and mixed arithmetic.
+- Classes: single inheritance, `super()`, `isinstance` (`tests/inherit`); exceptions with `try/except/else/finally`, exception classes, `raise`, line-numbered uncaught errors (`tests/exceptions`).
+- Functions: `lambda`, nested `def`, closures with `nonlocal`, first-class functions (incl. builtins like `str`/`len` as values), `map`/`filter`, `sorted`/`sort` with `key=`/`reverse=` (`tests/closures`, compared with CPython).
+- **Garbage collector:** a non-moving, conservative mark-sweep collector in `selfhost/runtime.s`.
+  - Heap: 64 KiB pages in a 64 GiB reserved region, plus a page table. Small objects use 38 segregated size classes (16 B steps up to 512 B, then powers of two up to 32 KiB) with free lists. Larger objects get page runs (first fit). Free pages and runs are returned to the OS with `madvise(DONTNEED)`.
+  - Roots: all registers (spilled at the allocation point), the whole machine stack up to the entry `%rsp` (which also covers the exception-handler frames saved on the stack), every global and data object (`rt_dlo..rt_dhi`), and `rt_exc_val`. Interior pointers are accepted. Strings and floats are not scanned.
+  - A collection triggers when the bytes allocated reach `max(32 MB, 2 × live)`.
+  - `tests/gc` churns about 1 GB of strings, lists, cyclic objects, floats, closures and exceptions. Its peak RSS is 44 MB with GC versus 819 MB without. The compiler runs with GC on while self-compiling (the fixpoint holds). Its peak is still ~300 MB because most of what it allocates stays live: the emitted assembly lines are kept until the final `join`.
 Optimizer: multi-pass int-type inference, magic-number division by constants, top-5 weighted locals/params in callee-saved registers, scratch registers for temporaries, inlining of single-`return` leaf functions, hoisting of invariant safe calls in loops, jump-based conditions and rotated loops, and dead-function pruning.
 
 ## Benchmarks
@@ -83,18 +93,15 @@ Best of 3 wall clock. Rust: rustc -C opt-level=3 (unstripped binaries). Phase 1 
 
 | bench | Forge run | Rust -O3 run | CPython run | Forge compile | Rust compile | Forge bin | Rust bin | output |
 |---|---|---|---|---|---|---|---|---|
-| fib | 0.016s | 0.007s | 0.20s | 189ms | 259ms | 20,960 B | 11,395,072 B | 2178309 |
-| loop | 0.099s | 0.077s | 5.99s | 116ms | 227ms | 20,984 B | 11,395,024 B | 199999997 |
-| strbuild | 0.097s | 0.070s | 0.12s | 116ms | 435ms | 21,064 B | 11,399,736 B | 6888890 |
-| lists | 0.200s | 0.092s | 3.22s | 107ms | 275ms | 21,248 B | 11,399,120 B | 49950000000 |
+| fib | 0.015s | 0.006s | 0.19s | 173ms | 271ms | 85,104 B | 11,395,072 B | 2178309 |
+| loop | 0.088s | 0.073s | 5.57s | 187ms | 200ms | 85,136 B | 11,395,024 B | 199999997 |
+| strbuild | 0.090s | 0.070s | 0.11s | 285ms | 332ms | 85,216 B | 11,399,736 B | 6888890 |
+| lists | 0.176s | 0.061s | 3.10s | 237ms | 241ms | 85,552 B | 11,399,120 B | 49950000000 |
+
+(Phase 3 run, GC on. Forge binaries now include the prelude, floats, exceptions and the GC, hence about 85 KB.)
 
 ## Limitations
-- No GC: memory is never freed.
-- No nested functions or closures, and no conditional expressions.
-- `for` supports only `range`.
-- No string `+`: use `concat`/`join`.
-- Field offsets are resolved by field name across all classes, so a shared field name must be at the same position in every class.
-- No bounds checks, and errors stop at the first one.
+- No tuples as a separate type (they behave as, and print as, lists). No bigints, generators, `with`, or keyword arguments on indirect calls.
+- No lambda default arguments, no `min`/`max` `key=`, and no `nonlocal` through an intermediate scope that does not itself use the name. Nested `def` is not allowed at module level.
+- The collector is conservative and non-moving, so an integer that looks like a heap pointer can keep an object alive.
 - Requires binutils `as`/`ld` and Linux x86-64.
-
-- Phase 2 gaps: no bool type (comparisons print 1/0), no floats, no GC (arena only), no inheritance, default args, nested defs, lambda, try/except, with, generators, or chained comparisons, and no `print(sep=)`. `field_type` is untyped, and hoisting assumes builtins are not shadowed. Output goes through `as`/`ld` (no direct ELF emission).
