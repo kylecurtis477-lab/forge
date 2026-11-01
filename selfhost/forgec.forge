@@ -979,7 +979,7 @@ def conflict_var(kind, idx):
             lint[fi] = 0
         nconf += 1
         if ir_stats > 2:
-            eputs(concat("conf site 1 p", str(passno)))
+            eputs(concat(concat(concat("conf site 1 p", str(passno)), cur_fname()), concat(" ", locs[idx])))
     elif kind == 3:
         if gint[idx]:
             gint[idx] = 0
@@ -1488,7 +1488,7 @@ def arg_check(f, i):
             pintf[k] = 0
             nconf += 1
             if ir_stats > 2:
-                eputs(concat("conf site 3 p", str(passno)))
+                eputs(concat(concat("conf site 3 p", str(passno)), cur_fname()))
 
 def push_args():
     # parses "(a, b, ...)" pushing each value; returns the count
@@ -4083,11 +4083,16 @@ def stmt_raise(line):
     e("call rt_raise")
     end_stmt()
 
+def cur_fname():
+    if curf >= 0:
+        return concat(" ", fnames[curf])
+    return " -"
+
 def conflict_ret():
     global nconf
     nconf += 1
     if ir_stats > 2:
-        eputs(concat("conf site 5 p", str(passno)))
+        eputs(concat(concat("conf site 5 p", str(passno)), cur_fname()))
 
 def stmt_if():
     global pos
@@ -8404,6 +8409,9 @@ O_TCOND = 25
 O_VLD = 26
 O_VST = 27
 O_TEXPR = 28
+O_TSET = 29
+xf_s = list(8192)
+xf_k = list(8192)
 vtt = list(IVMAX)
 cur_tex = 0
 TXN = 8192
@@ -8788,12 +8796,12 @@ def cond_range(a, b, l, sense):
     if q >= 0:
         cc = find(CMPS, 6, tv[q])
         ip = a
-        x = x_expr()
+        x = x_expr0()
         if ip != q:
             o_fail("cmp lhs")
             return 0
         ip = q + 1
-        y = x_expr()
+        y = x_expr0()
         if ip != b:
             o_fail("cmp chain")
             return 0
@@ -8802,7 +8810,7 @@ def cond_range(a, b, l, sense):
         icbr(x, y, cc, l)
         return 0
     ip = a
-    x = x_expr()
+    x = x_expr0()
     if ip != b:
         o_fail("cond expr")
         return 0
@@ -8811,7 +8819,44 @@ def cond_range(a, b, l, sense):
     else:
         icbr(x, cst(0), 0, l)
 
-def x_expr():
+def xe_more(p):
+    if tk[p] == K_OP:
+        return find(CMPS, 6, tv[p]) >= 0
+    return tok_is_id(p, "and") or tok_is_id(p, "or") or tok_is_id(p, "in") or tok_is_id(p, "is") or tok_is_id(p, "not")
+
+def x_expr() -> int:
+    global ip, nir, nvr, ncp, nargb, nil, nx, nrf, nlp, irfail
+    if not hyb or inl_on or irfail:
+        return x_expr0()
+    p0 = ip
+    if xf_s[p0 % TXN] == tx_id and xf_k[p0 % TXN] == p0:
+        return x_texpr(p0, 1)
+    sv1 = nir
+    sv2 = nvr
+    sv3 = ncp
+    sv4 = nargb
+    sv5 = nil
+    sv6 = nx
+    sv7 = nrf
+    sv8 = nlp
+    v = x_expr0()
+    if irfatal or not irfail and not xe_more(ip):
+        return v
+    nir = sv1
+    nvr = sv2
+    ncp = sv3
+    nargb = sv4
+    nil = sv5
+    nx = sv6
+    nrf = sv7
+    nlp = sv8
+    irfail = 0
+    ip = p0
+    xf_s[p0 % TXN] = tx_id
+    xf_k[p0 % TXN] = p0
+    return x_texpr(p0, 1)
+
+def x_expr0() -> int:
     global ip, nir
     p0 = ip
     n0 = nir
@@ -8859,7 +8904,7 @@ def line_tail(p):
         p += 1
     return p
 
-def x_bor():
+def x_bor() -> int:
     global ip
     v = x_bxor()
     while tok_is_op(ip, "|") and not irfail:
@@ -8867,7 +8912,7 @@ def x_bor():
         v = ibin(O_OR, v, x_bxor(), 0)
     return v
 
-def x_bxor():
+def x_bxor() -> int:
     global ip
     v = x_band()
     while tok_is_op(ip, "^") and not irfail:
@@ -8875,7 +8920,7 @@ def x_bxor():
         v = ibin(O_XOR, v, x_band(), 0)
     return v
 
-def x_band():
+def x_band() -> int:
     global ip
     v = x_shift()
     while tok_is_op(ip, "&") and not irfail:
@@ -8883,7 +8928,7 @@ def x_band():
         v = ibin(O_AND, v, x_shift(), 0)
     return v
 
-def x_shift():
+def x_shift() -> int:
     global ip
     v = x_arith()
     while (tok_is_op(ip, ">>") or tok_is_op(ip, "<<")) and not irfail:
@@ -8898,7 +8943,7 @@ def x_shift():
         v = ibin(O_SAR, v, w, 0)
     return v
 
-def x_arith():
+def x_arith() -> int:
     global ip
     v = x_term()
     while (tok_is_op(ip, "+") or tok_is_op(ip, "-")) and not irfail:
@@ -8910,7 +8955,7 @@ def x_arith():
             v = ibin(O_SUB, v, x_term(), 1)
     return v
 
-def x_term():
+def x_term() -> int:
     global ip
     v = x_unary()
     while (tok_is_op(ip, "*") or tok_is_op(ip, "//") or tok_is_op(ip, "%") or tok_is_op(ip, "/") or tok_is_op(ip, "@")) and not irfail:
@@ -8928,7 +8973,7 @@ def x_term():
             return v
     return v
 
-def x_unary():
+def x_unary() -> int:
     global ip
     if tok_is_op(ip, "-"):
         ip += 1
@@ -8977,7 +9022,7 @@ def var_int(name):
         return cst(0)
     return xv[i]
 
-def x_post():
+def x_post() -> int:
     global ip, nir, nvr, ncp, nargb, nil, nx, nrf, nlp, irfail, inl_on
     if not hyb or inl_on or irfail:
         return x_post0()
@@ -9003,7 +9048,7 @@ def x_post():
     nlp = sv8
     irfail = 0
     ip = p0
-    return x_texpr(p0)
+    return x_texpr(p0, 0)
 
 def tx_start(p):
     k = tk[p]
@@ -9014,16 +9059,17 @@ def tx_start(p):
     w = tv[p]
     return not is_kw(w) or str_eq(w, "True") or str_eq(w, "False") or str_eq(w, "None")
 
-def x_texpr(p0):
+def x_texpr(p0, kind) -> int:
     global ip, pos, ety, nout, ndat, nlabel, nstr, nflt, pstop, cur_tex
-    if not tx_start(p0):
+    if not tx_start(p0) and not (kind and (tok_is_id(p0, "not") or tok_is_op(p0, "-") or tok_is_op(p0, "~") or tok_is_op(p0, "+"))):
         o_fail("texpr start")
         return cst(0)
-    h = p0 % TXN
-    while tx_s[h] == tx_id and tx_k[h] != p0:
+    key = p0 * 2 + kind
+    h = key % TXN
+    while tx_s[h] == tx_id and tx_k[h] != key:
         h = (h + 1) % TXN
     if tx_s[h] == tx_id:
-        return x_tex2(p0, tx_e[h], tx_t[h])
+        return x_tex2(p0, tx_e[h], tx_t[h], kind)
     s_pos = pos
     s_ety = ety
     s_out = nout
@@ -9034,7 +9080,10 @@ def x_texpr(p0):
     s_ps = pstop
     pstop = -1
     pos = p0
-    postfix_expr()
+    if kind:
+        expr()
+    else:
+        postfix_expr()
     en = pos
     t = ety
     pos = s_pos
@@ -9046,12 +9095,12 @@ def x_texpr(p0):
     nflt = s_flt
     pstop = s_ps
     tx_s[h] = tx_id
-    tx_k[h] = p0
+    tx_k[h] = key
     tx_e[h] = en
     tx_t[h] = t
-    return x_tex2(p0, en, t)
+    return x_tex2(p0, en, t, kind)
 
-def x_tex2(p0, en, t):
+def x_tex2(p0, en, t, kind) -> int:
     global ip, cur_tex
     q = p0
     while q < en:
@@ -9065,11 +9114,12 @@ def x_tex2(p0, en, t):
     k = iadd(O_TEXPR, d, -1, -1)
     iimm[k] = p0
     ix[k] = en
+    ic[k] = kind
     cur_tex += 1
     ip = en
     return d
 
-def x_post0():
+def x_post0() -> int:
     global ip
     k = tk[ip]
     v = cst(0)
@@ -9150,7 +9200,7 @@ def fn_ok(f, n):
         return 0
     return ret_type(f) == T_INT and not fnone[f]
 
-def x_call():
+def x_call() -> int:
     global ip, inl_on, inl_b, inl_n
     name = tv[ip]
     lp = ip + 1
@@ -9797,9 +9847,47 @@ def aug_code(p):
 def aug_ovf(op):
     return op == O_ADD or op == O_SUB or op == O_MUL
 
+def top_comma(a, b):
+    d = 0
+    q = a
+    while q < b:
+        if is_open(q):
+            d += 1
+        elif is_close(q):
+            d -= 1
+        elif d == 0 and tok_is_op(q, ","):
+            return 1
+        elif tok_is_id(q, "lambda"):
+            return 1
+        q += 1
+    return 0
+
+def s_tset(p, e):
+    global ip
+    le = p
+    while not line_end_tok(le):
+        le += 1
+    if top_comma(e + 1, le) or tok_is_op(p, "(") or tok_is_op(p, "["):
+        o_fail("tset form")
+        return 0
+    ip = e + 1
+    x = x_expr()
+    end_line()
+    if irfail:
+        return 0
+    hyb_names(p, e)
+    k = iadd(O_TSET, -1, x, -1)
+    iimm[k] = p
+    ix[k] = e
+
 def s_simple():
     global ip
     p = ip
+    if hyb and not inl_on:
+        e = find_top_eq(p)
+        if e > p + 1 and find_top_eq(e + 1) < 0 and not tok_is_op(p + 1, ":") and not (tk[p] == K_ID and tok_is_op(p + 1, "[") and xfind(tv[p]) >= 0):
+            s_tset(p, e)
+            return 0
     if tk[p] == K_ID and not is_kw(tv[p]):
         name = tv[p]
         q = p + 1
@@ -9925,7 +10013,7 @@ def find_top_eq(p):
 # ---------------- IR utilities ----------------
 def u_n(k):
     op = iop[k]
-    if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET or op == O_VST:
+    if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET or op == O_VST or op == O_TSET:
         return 1
     if op >= O_ADD and op <= O_MOD or op == O_CBR:
         return 2
@@ -10512,7 +10600,7 @@ def o_intervals():
     k = 0
     while k < nir:
         cpre[k] = c
-        if iop[k] == O_CALL or iop[k] == O_LNEW or iop[k] == O_TSTMT or iop[k] == O_TCOND or iop[k] == O_TEXPR:
+        if iop[k] == O_CALL or iop[k] == O_LNEW or iop[k] == O_TSTMT or iop[k] == O_TCOND or iop[k] == O_TEXPR or iop[k] == O_TSET:
             c += 1
         k += 1
     cpre[nir] = c
@@ -11117,7 +11205,7 @@ def o_ins(k, fi, x_epi):
     elif op == O_RET:
         mv_to(ia[k], "%rax", 0)
         if hyb:
-            if fbret[fi] and fret[fi] == 0 and oty(ia[k]) != T_BOOL:
+            if fbret[fi] and fret[fi] == 0 and not fint[fi] and oty(ia[k]) != T_BOOL:
                 fbret[fi] = 0
                 conflict_ret()
             e2("jmp ", lab(retlab))
@@ -11126,11 +11214,17 @@ def o_ins(k, fi, x_epi):
     elif op == O_TSTMT:
         pos = iimm[k]
         stmt()
+    elif op == O_TSET:
+        mv_to(ia[k], "%rax", 0)
+        assign_targets(iimm[k], ix[k], oty(ia[k]), tl[iimm[k]], -1)
     elif op == O_TEXPR:
         pos = iimm[k]
         s_ps = pstop
         pstop = -1
-        postfix_expr()
+        if ic[k]:
+            expr()
+        else:
+            postfix_expr()
         pstop = s_ps
         if pos != ix[k]:
             die(tl[iimm[k]], "internal: island expression")
@@ -11293,7 +11387,7 @@ def ir_compile(fi):
         nout = save_out
         nlabel = save_lab
         return 0
-    if fbret[fi] and fret[fi] == 0:
+    if fbret[fi] and fret[fi] == 0 and not fint[fi]:
         fbret[fi] = 0
         conflict_ret()
     pos = endp
