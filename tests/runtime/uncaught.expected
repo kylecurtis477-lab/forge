@@ -1,0 +1,4 @@
+start
+caught handled
+error: line 10: AppError: boom
+exit 1

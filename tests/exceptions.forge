@@ -1,0 +1,131 @@
+class AppError(Exception):
+    pass
+
+
+class ParseError(AppError):
+    def __init__(self, text, pos):
+        super().__init__("cannot parse " + repr(text))
+        self.text = text
+        self.pos = pos
+
+
+def parse_int(s):
+    if not s.isdigit():
+        raise ParseError(s, 0)
+    return int(s)
+
+
+def safe_div(a, b):
+    try:
+        return a // b
+    except ZeroDivisionError:
+        return -1
+    finally:
+        print("safe_div done", a, b)
+
+
+def lookup(d, k):
+    try:
+        v = d[k]
+    except KeyError as e:
+        print("missing key", e, repr(e))
+        return "none"
+    else:
+        print("found", k)
+        return v
+
+
+def nested(n):
+    out = []
+    for i in range(n):
+        try:
+            try:
+                if i % 3 == 0:
+                    raise ValueError("bad " + str(i))
+                if i % 3 == 1:
+                    out.append([1, 2][i])
+                out.append(i)
+            except ValueError as e:
+                out.append(str(e))
+                if i == 3:
+                    continue
+                if i == 6:
+                    break
+            finally:
+                out.append("f" + str(i))
+        except IndexError as e:
+            out.append("idx:" + str(e))
+    return out
+
+
+def reraise():
+    try:
+        raise AppError("first")
+    except AppError:
+        print("caught, re-raising")
+        raise
+
+
+def deep(n):
+    if n == 0:
+        raise RuntimeError("deep bottom")
+    return deep(n - 1) + 1
+
+
+def main():
+    for s in ["12", "x7", "40"]:
+        try:
+            print("parsed", parse_int(s))
+        except ParseError as e:
+            print("ParseError:", e, e.text, e.pos, isinstance(e, AppError), isinstance(e, Exception))
+    print(safe_div(7, 2), safe_div(1, 0))
+    print(lookup({"a": 1}, "a"), lookup({"a": 1}, "b"))
+    print(nested(8))
+    try:
+        reraise()
+    except Exception as e:
+        print("outer got", type_name(e), e)
+    try:
+        deep(50)
+    except RuntimeError as e:
+        print("deep:", e)
+    try:
+        x = [1, 2, 3]
+        x[10] = 5
+    except (KeyError, IndexError) as e:
+        print("multi:", e)
+    try:
+        print(int("abc"))
+    except ValueError as e:
+        print("value error caught")
+    try:
+        raise KeyError
+    except LookupError as e:
+        print("lookup", repr(e))
+    total = 0
+    for i in range(1000):
+        try:
+            if i % 2:
+                raise ValueError("odd")
+            total += i
+        except ValueError:
+            total -= 1
+    print("total", total)
+    try:
+        try:
+            1 // 0
+        finally:
+            print("inner finally")
+    except ZeroDivisionError as e:
+        print("zde caught", isinstance(e, ArithmeticError))
+
+
+def type_name(e):
+    if isinstance(e, ParseError):
+        return "ParseError"
+    if isinstance(e, AppError):
+        return "AppError"
+    return "other"
+
+
+main()

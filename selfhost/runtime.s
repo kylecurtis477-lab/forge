@@ -2,7 +2,7 @@
 # Object layout: 8-byte header at ptr-8 = tag<<56 | aux.  tags: 0 list [len,cap,data]  1 str (aux=len, NUL-terminated)
 #   2 object (aux=class id, fields at 0..)  3 dict  4 raw bytes (aux=size)
 # Heap: 64 GiB MAP_NORESERVE bump arena at 2^45; image linked at 2^44, so ints in [0,2^44) never alias pointers.
-.weak f___getidx, f___setidx, f___add, f___eq, f___truth, f___err
+.weak f___getidx, f___setidx, f___add, f___eq, f___truth, f___err, f___uncaught
 .text
 rt_init:
     # rdi = initial %rsp (argc, argv...)
@@ -1025,8 +1025,48 @@ rt_math2:
     movsd (%rsp), %xmm0
     add $24, %rsp
     jmp rt_fbox_r
+# ---- exceptions: handler frames are [prev, rbp, rbx, r12, r13, r14, r15, landing] on the stack ----
+rt_raise:
+    mov 16(%rsp), %rax
+    mov 8(%rsp), %rcx
+    mov %rax, rt_exc_val(%rip)
+    mov %rcx, rt_exc_line(%rip)
+rt_throw:
+    mov rt_exc_top(%rip), %rdx
+    test %rdx, %rdx
+    jz 1f
+    mov %rdx, %rsp
+    pop rt_exc_top(%rip)
+    pop %rbp
+    pop %rbx
+    pop %r12
+    pop %r13
+    pop %r14
+    pop %r15
+    ret
+1:  push rt_exc_val(%rip)
+    push rt_exc_line(%rip)
+    call f___uncaught
+    push $1
+    call rt_exit
+rt_rethrow:
+    mov 8(%rsp), %rax
+    mov %rax, rt_exc_val(%rip)
+    jmp rt_throw
+rt_clsname:
+    mov 8(%rsp), %rax
+    movzwl -8(%rax), %ecx
+    lea rt_cnames(%rip), %rdx
+    mov (%rdx,%rcx,8), %rax
+    ret
+rt_excval:
+    mov rt_exc_val(%rip), %rax
+    ret
 .data
 .p2align 3
+rt_exc_top: .quad 0
+rt_exc_val: .quad 0
+rt_exc_line: .quad 0
 rt_sigact: .quad 0, 0, 0, 0
 rt_hp: .quad 0
 rt_hlo: .quad 0

@@ -1,0 +1,19 @@
+parsed 12
+ParseError: cannot parse 'x7' x7 0 True True
+parsed 40
+safe_div done 7 2
+safe_div done 1 0
+3 -1
+found a
+missing key 'b' KeyError('b')
+1 none
+['bad 0', 'f0', 2, 1, 'f1', 2, 'f2', 'bad 3', 'f3', 'f4', 'idx:list index out of range', 5, 'f5', 'bad 6', 'f6']
+caught, re-raising
+outer got AppError first
+deep: deep bottom
+multi: list assignment index out of range
+value error caught
+lookup KeyError()
+total 249000
+inner finally
+zde caught True

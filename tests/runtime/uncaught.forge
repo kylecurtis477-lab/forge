@@ -1,0 +1,10 @@
+class AppError(Exception):
+    pass
+
+
+print("start")
+try:
+    raise AppError("handled")
+except AppError as e:
+    print("caught", e)
+raise AppError("boom")

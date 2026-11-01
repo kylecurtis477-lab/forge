@@ -145,6 +145,12 @@ lcont = list(1000)
 lend = list(1000)
 nloops = 0
 retlab = 0
+tr_prev = list(256)
+tr_sp = list(256)
+tr_fin = list(256)
+tr_loops = list(256)
+ntr = 0
+cur_exc = ""
 REGS = ["%rbx", "%r12", "%r13", "%r14", "%r15"]
 NREGS = 5
 
@@ -1396,11 +1402,11 @@ def count_args(p):
             return n
         p += 1
 
-BI_NAMES = ["puts", "eputs", "concat", "write_file", "read_file", "substr", "alloc", "join", "argc", "argv", "exit", "str_eq", "chr", "mark", "release", "set_byte", "__new", "__copy", "__tag", "__aux", "__itos_raw", "__writes", "__wint", "__itof", "__ftoi", "__fbits", "__ffrombits", "__math", "__math2"]
-BI_ARGS = [1, 1, 2, 2, 1, 3, 1, 2, 0, 1, 1, 2, 1, 0, 1, 3, 3, 3, 1, 1, 1, 1, 1, 1, 2, 1, 1, 2, 3]
-BI_RT = ["rt_puts", "rt_eputs", "rt_concat", "rt_write_file", "rt_read_file", "rt_substr", "rt_alloc", "rt_join", "rt_argc", "rt_argv", "rt_exit", "rt_str_eq", "rt_chr", "rt_mark", "rt_release", "rt_set_byte", "rt_new", "rt_copy", "rt_tag", "rt_aux", "rt_itos", "rt_writes", "rt_wint", "rt_itof", "rt_ftoi", "rt_fbits", "rt_ffrombits", "rt_math", "rt_math2"]
-BI_TY = [0, 0, 2, 1, 2, 2, 0, 2, 1, 2, 0, 1, 2, 1, 0, 0, 0, 0, 1, 1, 2, 0, 0, 5, 1, 1, 5, 5, 5, 0]
-NBI = 29
+BI_NAMES = ["puts", "eputs", "concat", "write_file", "read_file", "substr", "alloc", "join", "argc", "argv", "exit", "str_eq", "chr", "mark", "release", "set_byte", "__new", "__copy", "__tag", "__aux", "__itos_raw", "__writes", "__wint", "__itof", "__ftoi", "__fbits", "__ffrombits", "__math", "__math2", "__raise", "__clsname", "__excval"]
+BI_ARGS = [1, 1, 2, 2, 1, 3, 1, 2, 0, 1, 1, 2, 1, 0, 1, 3, 3, 3, 1, 1, 1, 1, 1, 1, 2, 1, 1, 2, 3, 2, 1, 0]
+BI_RT = ["rt_puts", "rt_eputs", "rt_concat", "rt_write_file", "rt_read_file", "rt_substr", "rt_alloc", "rt_join", "rt_argc", "rt_argv", "rt_exit", "rt_str_eq", "rt_chr", "rt_mark", "rt_release", "rt_set_byte", "rt_new", "rt_copy", "rt_tag", "rt_aux", "rt_itos", "rt_writes", "rt_wint", "rt_itof", "rt_ftoi", "rt_fbits", "rt_ffrombits", "rt_math", "rt_math2", "rt_raise", "rt_clsname", "rt_excval"]
+BI_TY = [0, 0, 2, 1, 2, 2, 0, 2, 1, 2, 0, 1, 2, 1, 0, 0, 0, 0, 1, 1, 2, 0, 0, 5, 1, 1, 5, 5, 5, 0, 2, 0]
+NBI = 32
 
 def builtin_call(name, line):
     # returns 1 if name( ... ) was compiled as a builtin
@@ -1578,6 +1584,8 @@ def emit_len():
 
 def compile_print(line):
     global pos
+    if count_args(pos) > 1 and not print_simple(pos):
+        return compile_print_n(line)
     expect("(")
     first = 1
     endnl = 1
@@ -1606,6 +1614,70 @@ def compile_print(line):
             pos += 1
     pos += 1
     if endnl:
+        call_rt("rt_nl", 0)
+
+def print_simple(p):
+    # no calls inside the arguments: evaluation order cannot be observed
+    p += 1
+    d = 1
+    while d > 0 and tk[p] != K_EOF:
+        if tk[p] == K_OP:
+            if str_eq(tv[p], "(") or str_eq(tv[p], "[") or str_eq(tv[p], "{"):
+                if str_eq(tv[p], "(") and tk[p - 1] == K_ID:
+                    return 0
+                if str_eq(tv[p], "(") and tok_is_op(p - 1, ")"):
+                    return 0
+                d += 1
+            elif str_eq(tv[p], ")") or str_eq(tv[p], "]") or str_eq(tv[p], "}"):
+                d -= 1
+        p += 1
+    return 1
+
+def compile_print_n(line):
+    # evaluate every argument before printing anything (calls may print)
+    global pos
+    expect("(")
+    tys = list(256)
+    n = 0
+    endv = -1
+    sep = 0
+    while not is_op(")"):
+        if tk[pos] == K_ID and tok_is_op(pos + 1, "=") and (tok_is_id(pos, "end") or tok_is_id(pos, "sep")):
+            if tok_is_id(pos, "sep"):
+                die(line, "print(sep=...) is not supported")
+            pos += 2
+            endv = pos
+            pos = skip_arg(pos)
+        else:
+            expr()
+            e("push %rax")
+            tys[n] = ety
+            n += 1
+        if is_op(","):
+            pos += 1
+    pos += 1
+    i = 0
+    while i < n:
+        if i > 0:
+            call_rt("rt_sp", 0)
+        e3("mov ", str(8 * (n - 1 - i)), "(%rsp), %rax")
+        e("push %rax")
+        if tys[i] == T_STR:
+            call_rt("rt_writes", 1)
+        elif tys[i] == T_INT:
+            call_rt("rt_wint", 1)
+        else:
+            call_internal("__pr", 1)
+        i += 1
+    e3("add $", str(8 * n), ", %rsp")
+    if endv >= 0:
+        save = pos
+        pos = endv
+        expr()
+        pos = save
+        e("push %rax")
+        call_rt("rt_writes", 1)
+    else:
         call_rt("rt_nl", 0)
 
 def call_named(name, line):
@@ -3103,6 +3175,7 @@ def stmt():
                 conflict_ret()
             if curf >= 0 and fret[curf] == T_INT and ety == T_BOOL:
                 e("and $1, %eax")
+            try_unwind(0)
             e2("jmp ", lab(retlab))
             end_stmt()
             return 0
@@ -3110,6 +3183,7 @@ def stmt():
             if nloops == 0:
                 die(line, concat(w, " outside loop"))
             pos += 1
+            try_unwind(nloops)
             if str_eq(w, "break"):
                 e2("jmp ", lab(lend[nloops - 1]))
             else:
@@ -3131,19 +3205,231 @@ def stmt():
                 e3("lea ", emit_str(msg), "(%rip), %rax")
             e3("push $", str(uline(line)), "")
             e("push %rax")
-            call_internal("__err", 2)
+            call_internal("__aerr", 2)
             put_label(l)
             end_stmt()
             return 0
         if str_eq(w, "def") or str_eq(w, "class"):
             die(line, "nested def/class is not supported")
-        if str_eq(w, "del") or str_eq(w, "try") or str_eq(w, "with") or str_eq(w, "lambda") or str_eq(w, "yield"):
+        if str_eq(w, "try"):
+            stmt_try(line)
+            return 0
+        if str_eq(w, "raise"):
+            stmt_raise(line)
+            return 0
+        if str_eq(w, "del") or str_eq(w, "with") or str_eq(w, "lambda") or str_eq(w, "yield"):
             die(line, concat(concat("'", w), "' is not supported"))
     if tk[pos] == K_STR and (tk[pos + 1] == K_NL or tk[pos + 1] == K_EOF):
         pos += 1
         end_stmt()
         return 0
     stmt_simple(line)
+
+def fn_has_try(fi):
+    if fi == fmain:
+        a = PRETOK
+        b = ntok
+    else:
+        a = fpos[fi]
+        b = skip_stmt(a)
+    while a < b:
+        if tk[a] == K_ID and str_eq(tv[a], "try"):
+            return 1
+        a += 1
+    return 0
+
+def try_push(fin):
+    # install a handler frame; returns its landing label
+    global ntr
+    k = ntr
+    ntr += 1
+    tr_prev[k] = var_ref(hidden_local("__ehp", T_INT))
+    tr_sp[k] = var_ref(hidden_local("__ehs", T_INT))
+    tr_fin[k] = fin
+    tr_loops[k] = nloops
+    land = new_label()
+    e("mov rt_exc_top(%rip), %rax")
+    e2("mov %rax, ", tr_prev[k])
+    e2("mov %rsp, ", tr_sp[k])
+    e3("lea ", lab(land), "(%rip), %rax")
+    e("push %rax")
+    e("push %r15")
+    e("push %r14")
+    e("push %r13")
+    e("push %r12")
+    e("push %rbx")
+    e("push %rbp")
+    e("push rt_exc_top(%rip)")
+    e("mov %rsp, rt_exc_top(%rip)")
+    return land
+
+def try_exit(k):
+    e3("mov ", tr_prev[k], ", %rcx")
+    e("mov %rcx, rt_exc_top(%rip)")
+    e3("mov ", tr_sp[k], ", %rsp")
+
+def try_unwind(depth):
+    # leaving every handler entered at loop depth >= depth (running finally blocks); keeps %rax
+    global ntr, pos
+    n0 = ntr
+    while ntr > 0 and tr_loops[ntr - 1] >= depth:
+        k = ntr - 1
+        try_exit(k)
+        ntr = k
+        if tr_fin[k] >= 0:
+            e("push %rax")
+            save = pos
+            pos = tr_fin[k]
+            block()
+            pos = save
+            e("pop %rax")
+    ntr = n0
+
+def clause_colon(p):
+    while not tok_is_op(p, ":") and tk[p] != K_NL and tk[p] != K_EOF:
+        p += 1
+    return p
+
+def stmt_try(line):
+    global pos, ntr, cur_exc, ety
+    pos += 1
+    body = pos
+    p = block_end(body)
+    exs = list(64)
+    nex = 0
+    elsep = -1
+    finp = -1
+    while tok_is_id(p, "except"):
+        exs[nex] = p
+        nex += 1
+        p = block_end(clause_colon(p))
+    if tok_is_id(p, "else"):
+        elsep = p + 1
+        p = block_end(p + 1)
+    if tok_is_id(p, "finally"):
+        finp = p + 1
+        p = block_end(p + 1)
+    endp = p
+    if nex == 0 and finp < 0:
+        die(line, "try needs an except or finally clause")
+    if finp >= 0:
+        landf = try_push(finp)
+        kf = ntr - 1
+    if nex > 0:
+        lande = try_push(-1)
+        ke = ntr - 1
+    pos = body
+    block()
+    if nex > 0:
+        try_exit(ke)
+        ntr = ke
+    if elsep >= 0:
+        pos = elsep
+        block()
+    done = new_label()
+    e2("jmp ", lab(done))
+    if nex > 0:
+        put_label(lande)
+        exc = var_ref(hidden_local("__exc", 0))
+        e("mov rt_exc_val(%rip), %rax")
+        e2("mov %rax, ", exc)
+        saved = cur_exc
+        cur_exc = exc
+        i = 0
+        while i < nex:
+            pos = exs[i] + 1
+            nxt = new_label()
+            if not is_op(":"):
+                e3("mov ", exc, ", %rax")
+                e("push %rax")
+                call_internal("__typeid", 1)
+                if is_op("("):
+                    pos += 1
+                    while not is_op(")"):
+                        type_test(line)
+                        if is_op(","):
+                            pos += 1
+                    pos += 1
+                else:
+                    type_test(line)
+                e2("jmp ", lab(nxt))
+                emit_raw("1:\n")
+                if is_id("as"):
+                    pos += 1
+                    nm = ident()
+                    e3("mov ", exc, ", %rax")
+                    store_var(nm, line, 0, -1)
+            block()
+            e2("jmp ", lab(done))
+            put_label(nxt)
+            i += 1
+        cur_exc = saved
+        e3("mov ", exc, ", %rax")
+        e("push %rax")
+        e("call rt_rethrow")
+    put_label(done)
+    if finp >= 0:
+        try_exit(kf)
+        ntr = kf
+        pos = finp
+        block()
+        endl = new_label()
+        e2("jmp ", lab(endl))
+        put_label(landf)
+        ev = var_ref(hidden_local("__exc", 0))
+        el = var_ref(hidden_local("__exl", T_INT))
+        e("mov rt_exc_val(%rip), %rax")
+        e2("mov %rax, ", ev)
+        e("mov rt_exc_line(%rip), %rax")
+        e2("mov %rax, ", el)
+        pos = finp
+        block()
+        e3("mov ", el, ", %rax")
+        e("mov %rax, rt_exc_line(%rip)")
+        e3("mov ", ev, ", %rax")
+        e("push %rax")
+        e("call rt_rethrow")
+        put_label(endl)
+    pos = endp
+
+def stmt_raise(line):
+    global pos
+    pos += 1
+    if tk[pos] == K_NL or tk[pos] == K_EOF or tk[pos] == K_DED:
+        if str_eq(cur_exc, ""):
+            die(line, "bare 'raise' outside an except block")
+        e3("mov ", cur_exc, ", %rax")
+        e("push %rax")
+        e("call rt_rethrow")
+        end_stmt()
+        return 0
+    c = -1
+    if tk[pos] == K_ID and (tk[pos + 1] == K_NL or tok_is_id(pos + 1, "from")):
+        c = find(cnm, nclass, tv[pos])
+    if c >= 0:
+        pos += 1
+        f = ctor_of(c)
+        if fmin[f] > 0:
+            die(line, concat(concat("exception class ", cnm[c]), " needs arguments"))
+        if cinit[c] >= 0 and fargs[f] > 0:
+            k = 0
+            while k < fargs[f]:
+                save = pos
+                pos = pdef[fpb[cinit[c]] + 1 + k]
+                expr()
+                pos = save
+                e("push %rax")
+                k += 1
+        call_f(f, fargs[f])
+    else:
+        expr()
+    if tok_is_id(pos, "from"):
+        while tk[pos] != K_NL and tk[pos] != K_EOF:
+            pos += 1
+    e("push %rax")
+    e3("push $", str(uline(line)), "")
+    e("call rt_raise")
+    end_stmt()
 
 def conflict_ret():
     global nconf
@@ -3632,7 +3918,7 @@ def apply_binary(op, start, mark, lt, rt, line):
 prolog = 0
 
 def func_begin(fi):
-    global curf, nlocs, nslots, nused, nhid, nal, nh, nloops, nfglob, nparams, prolog, retlab
+    global curf, nlocs, nslots, nused, nhid, nal, nh, nloops, nfglob, nparams, prolog, retlab, ntr, cur_exc
     curf = fi
     nlocs = 0
     nslots = 0
@@ -3642,6 +3928,10 @@ def func_begin(fi):
     nh = 0
     nloops = 0
     nfglob = 0
+    ntr = 0
+    cur_exc = ""
+    if fn_has_try(fi):
+        nused = NREGS
     retlab = new_label()
     fos[fi] = nout
     emit_raw(concat(flabel[fi], ":\n"))
@@ -3829,6 +4119,12 @@ def scan_more(p0, p1, nm, ty, n0):
                     while tk[r] == K_ID and tok_is_op(r + 1, "="):
                         n = add_name(nm, ty, n, tv[r], -1)
                         r += 2
+        if tok_is_id(p, "except"):
+            q = p + 1
+            while tk[q] != K_NL and tk[q] != K_EOF and not tok_is_op(q, ":"):
+                if tok_is_id(q, "as") and tk[q + 1] == K_ID:
+                    n = add_name(nm, ty, n, tv[q + 1], -1)
+                q += 1
         if tok_is_id(p, "for"):
             q = p + 1
             if tok_is_op(q, "("):
@@ -3882,7 +4178,7 @@ def block_end(p):
 
 def skip_stmt(p):
     p = block_end(p)
-    while tok_is_id(p, "elif") or tok_is_id(p, "else"):
+    while tok_is_id(p, "elif") or tok_is_id(p, "else") or tok_is_id(p, "except") or tok_is_id(p, "finally"):
         p = block_end(p)
     return p
 
@@ -4281,6 +4577,7 @@ def reach_all():
             freach[i] = 1
         i += 1
     mark_root("__err", 2, 1)
+    mark_root("__uncaught", 2, 1)
     mark_root("__getidx", 3, 1)
     mark_root("__setidx", 4, 1)
     mark_root("__add", 3, 1)
@@ -4417,6 +4714,11 @@ def forge_main():
                 emit_raw(concat(concat("    .quad ", flabel[g]), "\n"))
             c += 1
         i += 1
+    emit_raw("rt_cnames: .quad 0\n")
+    c = 0
+    while c < nclass:
+        emit_raw(concat(concat("    .quad ", emit_str(cnm[c])), "\n"))
+        c += 1
     i = 0
     while i < ndat:
         emit_raw(dat[i])

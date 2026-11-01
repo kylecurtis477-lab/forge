@@ -2,7 +2,128 @@
 # Unreferenced functions are dropped from the output. A user function with the same name replaces a public one here.
 # Internals use only __-prefixed helpers so user code cannot change their behaviour.
 
-def __err(line, msg):
+class BaseException:
+    def __init__(self, msg=""):
+        self.__msg = msg
+        self.__rt = 0
+
+    def __str__(self):
+        return __str(self.__msg)
+
+    def __repr__(self):
+        if __tag(self.__msg) == 1 and __aux(self.__msg) == 0:
+            return concat(__clsname(self), "()")
+        return concat(concat(concat(__clsname(self), "("), __repr(self.__msg)), ")")
+
+
+class Exception(BaseException):
+    pass
+
+
+class ArithmeticError(Exception):
+    pass
+
+
+class ZeroDivisionError(ArithmeticError):
+    pass
+
+
+class OverflowError(ArithmeticError):
+    pass
+
+
+class LookupError(Exception):
+    pass
+
+
+class IndexError(LookupError):
+    pass
+
+
+class KeyError(LookupError):
+    def __str__(self):
+        return __repr(self.__msg)
+
+
+class ValueError(Exception):
+    pass
+
+
+class TypeError(Exception):
+    pass
+
+
+class RuntimeError(Exception):
+    pass
+
+
+class NotImplementedError(RuntimeError):
+    pass
+
+
+class RecursionError(RuntimeError):
+    pass
+
+
+class AssertionError(Exception):
+    pass
+
+
+class AttributeError(Exception):
+    pass
+
+
+class NameError(Exception):
+    pass
+
+
+class StopIteration(Exception):
+    pass
+
+
+def __has(msg, p) -> int:
+    return __find(msg, p, 0) >= 0
+
+def __sw(msg, p) -> int:
+    return __find(msg, p, 0) == 0
+
+def __rtexc(msg):
+    if __sw(msg, "list index"):
+        return IndexError("list index out of range")
+    if __sw(msg, "list assignment index"):
+        return IndexError("list assignment index out of range")
+    if __has(msg, "index out of range") or __sw(msg, "pop from empty"):
+        return IndexError(msg)
+    if __has(msg, "division by zero"):
+        return ZeroDivisionError(msg)
+    if __has(msg, "could not convert") or __has(msg, "invalid literal") or __has(msg, "not in list") or __has(msg, "math domain") or __has(msg, "empty separator") or __has(msg, "must not be zero"):
+        return ValueError(msg)
+    if __has(msg, "no such method"):
+        return AttributeError(msg)
+    if __has(msg, "unsupported operand") or __has(msg, "not supported") or __has(msg, "not indexable") or __has(msg, "not iterable") or __has(msg, "does not support") or __has(msg, "cannot be sliced") or __has(msg, "cannot be raised"):
+        return TypeError(msg)
+    return RuntimeError(msg)
+
+def __raise_rt(e, line, msg):
+    e.__rt = msg
+    __raise(e, line)
+
+def __err(line, msg0):
+    msg: str = concat(msg0, "")
+    __raise_rt(__rtexc(msg), line, msg)
+
+def __aerr(line, msg):
+    __raise_rt(AssertionError(msg), line, __str(msg))
+
+def __uncaught(e, line):
+    msg = ""
+    if isinstance(e, BaseException) and e.__rt != 0:
+        msg = e.__rt
+    else:
+        s: str = __str(e)
+        msg = __clsname(e)
+        if __aux(s) > 0:
+            msg = concat(concat(msg, ": "), s)
     eputs(concat(concat(concat("error: line ", __itos(line)), ": "), msg))
     exit(1)
 
@@ -157,6 +278,9 @@ def __m___str__(o) -> str:
 
 def __m___repr__(o) -> str:
     return "<object>"
+
+def repr(x) -> str:
+    return __repr(x)
 
 def __pr(x):
     t: int = __tag(x)
@@ -842,7 +966,7 @@ def __dfind(d, k, h: int) -> int:
 def __dget(d, k, line):
     i: int = __dfind(d, k, __hash(k))
     if __ld(__ld(d, 2), i) == 0:
-        __err(line, concat("key not found: ", __repr(k)))
+        __raise_rt(KeyError(k), line, concat("key not found: ", __repr(k)))
     return __ld(__ld(d, 4), i)
 
 def get(d, k, dflt):
