@@ -4,7 +4,7 @@ Forge is a small language with Python-like syntax. It is compiled ahead of time 
 
 ## Status
 - **Self-hosting works.** The Rust bootstrap compiles forgec into stage1. Then stage1 builds stage2, stage2 builds stage3, and stage3 builds stage4. `stage2.s == stage3.s == stage4.s` byte for byte. Once stage1 exists, Rust is no longer needed: forgec emits its own runtime asm. Only binutils `as`/`ld` is still required.
-- **Tests:** `./run_tests.sh` runs 23 tests: 12 program tests (t1–t4, bools, none, floats, floats_basic, inherit, exceptions, closures, gc), 4 runtime-error tests and 7 compile-error tests. All pass. `closures.expected` and `floats.expected` are CPython output.
+- **Tests:** `./run_tests.sh` runs 36 tests: 23 program tests, 6 runtime-error tests and 7 compile-error tests. All pass. Except for `gc`/`gc_retention` (which use `mark()`/`release()`), the program `.expected` files are CPython output.
 - **Recovery:** the source transcript cut every `main.rs` write off at 4101 chars. The lexer and the edit fragments were recovered (see `recovered/`). The parser, codegen and runtime in `src/` were rewritten. `selfhost_start.forge` is the transcript's latest fragment, taken verbatim; it compiles and prints `scan loop fixed`.
 
 ## Build
@@ -87,21 +87,31 @@ Memory: see Phase 3 (GC). `mark()` returns bytes in use; `release(m)` forces a f
   - `tests/gc` churns about 1 GB of strings, lists, cyclic objects, floats, closures and exceptions. Its peak RSS is 44 MB with GC versus 819 MB without. The compiler runs with GC on while self-compiling (the fixpoint holds). Its peak is still ~300 MB because most of what it allocates stays live: the emitted assembly lines are kept until the final `join`.
 Optimizer: multi-pass int-type inference, magic-number division by constants, top-5 weighted locals/params in callee-saved registers, scratch registers for temporaries, inlining of single-`return` leaf functions, hoisting of invariant safe calls in loops, jump-based conditions and rotated loops, and dead-function pruning.
 
+## Phase 4 additions
+- Generators and `yield` (including generator expressions as call arguments), `with` statements and file I/O (`open`, `read`, `write`, `readlines`, iteration).
+- Imports of other `.forge` modules (`import m`, `from m import f`) and a small stdlib: `sys.argv`, `sys.exit`, `os` helpers, `time.time`/`perf_counter`.
+- Set comprehensions, dict comprehensions and nested comprehensions; real tuples.
+- **Bigints:** dynamic (untyped) int arithmetic promotes to arbitrary precision on overflow (`+ - * // % **`, comparisons, hashing, `str`/`repr`, mixing with floats). Int-typed or inferred-int arithmetic in user code raises `OverflowError` instead of wrapping. The checks are a fall-through `jo` to a cold stub at the end of the function. `# forge: wrapping-ints` turns them off (the compiler itself uses it).
+- Loose ends: keyword arguments and defaults on indirect calls (function values, closures, lambdas), lambda default arguments, `nonlocal` through intermediate scopes, `def` inside top-level `if`/`for`/`while` blocks, `for i in range(...)` leaves `i` at its last value as in Python.
+- GC: `pop`, `del`, slice deletion, `clear` and dict deletion clear the vacated slots, and `release()` clears scratch registers first, so dropped objects are no longer retained (`tests/gc_retention`).
+
 ## Benchmarks
 
-Best of 3 wall clock. Rust: rustc -C opt-level=3 (unstripped binaries). Phase 1 Forge: fib 0.015s, loop 0.274s, strbuild 0.093s, lists 0.189s.
+Best of 5 wall clock. Rust: rustc -C opt-level=3 (unstripped binaries). Phase 1 Forge: fib 0.015s, loop 0.274s, strbuild 0.093s, lists 0.189s. Phase 3: fib 0.015s, loop 0.088s, strbuild 0.090s, lists 0.176s.
 
 | bench | Forge run | Rust -O3 run | CPython run | Forge compile | Rust compile | Forge bin | Rust bin | output |
 |---|---|---|---|---|---|---|---|---|
-| fib | 0.015s | 0.006s | 0.19s | 173ms | 271ms | 85,104 B | 11,395,072 B | 2178309 |
-| loop | 0.088s | 0.073s | 5.57s | 187ms | 200ms | 85,136 B | 11,395,024 B | 199999997 |
-| strbuild | 0.090s | 0.070s | 0.11s | 285ms | 332ms | 85,216 B | 11,399,736 B | 6888890 |
-| lists | 0.176s | 0.061s | 3.10s | 237ms | 241ms | 85,552 B | 11,399,120 B | 49950000000 |
+| fib | 0.015s | 0.006s | 0.18s | 169ms | 213ms | 137,152 B | 11,395,072 B | 2178309 |
+| loop | 0.097s | 0.072s | 5.57s | 211ms | 215ms | 137,208 B | 11,395,024 B | 199999997 |
+| strbuild | 0.071s | 0.054s | 0.09s | 202ms | 275ms | 137,232 B | 11,399,736 B | 6888890 |
+| lists | 0.100s | 0.057s | 2.99s | 217ms | 239ms | 137,600 B | 11,399,120 B | 49950000000 |
 
-(Phase 3 run, GC on. Forge binaries now include the prelude, floats, exceptions and the GC, hence about 85 KB.)
+(Phase 4 run, GC and overflow checks on. Binaries now include generators, bigints and file I/O, hence about 137 KB.)
 
 ## Limitations
-- No tuples as a separate type (they behave as, and print as, lists). No bigints, generators, `with`, or keyword arguments on indirect calls.
-- No lambda default arguments, no `min`/`max` `key=`, and no `nonlocal` through an intermediate scope that does not itself use the name. Nested `def` is not allowed at module level.
-- The collector is conservative and non-moving, so an integer that looks like a heap pointer can keep an object alive.
+- Int-typed or inferred-int code raises `OverflowError` rather than promoting to a bigint, e.g. `fact(40)` called with a literal. `int(big)` raises. There are no bitwise operators on bigints.
+- No `*args`/`**kwargs`, and `type()` is not supported.
+- A module-level `def` name cannot also be rebound as a variable. `class` inside a block is not supported. Two `def`s of the same name in different top-level branches count as duplicates.
+- `nonlocal` writes through an intermediate closure only reach the defining scope when that closure has no captured variables of its own.
+- The collector is conservative and non-moving, so an integer that looks like a heap pointer, or a stale value in a scratch register at an automatic collection, can keep an object alive.
 - Requires binutils `as`/`ld` and Linux x86-64.
