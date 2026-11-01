@@ -1,0 +1,41 @@
+enter a
+body a
+exit a False
+enter b
+enter c
+two c
+exit c False
+exit b False
+enter d
+exit d True
+after d
+enter e
+exit e True
+caught e
+enter f
+exit f False
+42
+enter g
+i 0
+exit g False
+enter g
+exit g False
+enter g
+i 2
+exit g False
+enter one
+inline one
+exit one False
+'alpha\nbeta\ngamma\ndelta'
+line alpha
+line beta
+line gamma
+line delta
+['alpha\n', 'beta\n', 'gamma\n', 'delta\n', 'end\n']
+'alpha\n' 'beta\n'
+fnf
+27 5
+False
+enter gen
+exit gen False
+[1, 2]

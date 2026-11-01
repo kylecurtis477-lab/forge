@@ -4,6 +4,7 @@
 # tests/errors/*.forge: compiler must fail with "error: line N: ..."
 cd "$(dirname "$0")"; fail=0; mkdir -p build
 for t in tests/*.forge; do
+  case "$t" in tests/mod_*) continue;; esac
   ./forge "$t" -o build/t_bin && build/t_bin a b | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS $t" || { echo "FAIL $t"; fail=1; }
 done
 for t in tests/runtime/*.forge; do

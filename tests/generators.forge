@@ -1,0 +1,65 @@
+def gen(n):
+    i = 0
+    while i < n:
+        x = yield i
+        if x is not None:
+            print("got", x)
+        i += 1
+    return 5
+def kw(a, rest, k=2):
+    yield a
+    yield from rest
+    yield k
+class Tree:
+    def __init__(self, v, kids):
+        self.v = v
+        self.kids = kids
+    def walk(self, depth=0):
+        yield self.v, depth
+        for c in self.kids:
+            yield from c.walk(depth + 1)
+for v in gen(4):
+    print(v)
+it = gen(3)
+print(next(it), it.send("hi"), next(it))
+try:
+    next(it)
+except StopIteration:
+    print("stop")
+print(list(gen(5)), sum(gen(10)))
+print(list(kw(1, [2, 3], k=9)), list(kw(0, (5,))))
+t = Tree(1, [Tree(2, [Tree(4, [])]), Tree(3, [])])
+for v, d in t.walk():
+    print(v, d)
+def fib():
+    a, b = 0, 1
+    while True:
+        yield a
+        a, b = b, a + b
+f = fib()
+print([next(f) for _ in range(10)])
+def bad():
+    yield 1
+    raise ValueError("boom")
+try:
+    for x in bad():
+        print(x)
+except ValueError as e:
+    print("caught", e)
+g = (lambda: 0)
+def nested():
+    def inner(x):
+        return x * 2
+    for i in range(3):
+        yield inner(i)
+print(list(nested()), 4 in gen(6), max(gen(7)))
+def evens(it):
+    for x in it:
+        if x % 2 == 0:
+            yield x
+print(list(evens(gen(10))))
+d = dict(zip("abc", gen(3)))
+print(d)
+for i, x in enumerate(gen(3)):
+    print(i, x)
+print(sorted(gen(4), reverse=True), ",".join(str(x) for x in gen(3)) if False else "")

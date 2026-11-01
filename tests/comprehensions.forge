@@ -1,0 +1,27 @@
+xs = [3, 1, 4, 1, 5, 9, 2, 6]
+s = {x % 4 for x in xs}
+print(sorted(s), len(s), 1 in s)
+d = {x: x * x for x in xs if x > 2}
+print(sorted(d.items()))
+pairs = [(i, j) for i in range(3) for j in range(i) if (i + j) % 2 == 1]
+print(pairs)
+m = [[r * c for c in range(4)] for r in range(3)]
+print(m)
+flat = [v for row in m for v in row if v]
+print(flat)
+print(",".join(str(x) for x in xs))
+print(sum(x * x for x in range(10)))
+print(max(len(w) for w in ["a", "abc", "ab"]))
+print(any(x > 8 for x in xs), all(x > 0 for x in xs))
+print(sorted({w[0] for w in ["apple", "avocado", "banana", "cherry"]}))
+words = "the quick brown the lazy the end".split()
+cnt = {w: words.count(w) for w in set(words)}
+print(sorted(cnt.items()))
+inv = {v: k for k, v in {"a": 1, "b": 2}.items()}
+print(inv)
+print(list(x for x in range(5) if x % 2 == 0))
+print(tuple(x + 1 for x in [1, 2]))
+print(set())
+print({1, 2} | {3}, {1, 2} & {2, 3}, {1, 2} - {2})
+nested = {(a, b) for a in range(2) for b in range(2)}
+print(sorted(nested))

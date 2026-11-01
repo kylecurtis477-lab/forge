@@ -1,0 +1,65 @@
+import os
+class Ctx:
+    def __init__(self, name, swallow=False):
+        self.name = name
+        self.swallow = swallow
+    def __enter__(self):
+        print("enter", self.name)
+        return self
+    def __exit__(self, et, ev, tb):
+        print("exit", self.name, ev is not None)
+        return self.swallow
+with Ctx("a") as c:
+    print("body", c.name)
+with Ctx("b"), Ctx("c") as c2:
+    print("two", c2.name)
+with Ctx("d", True):
+    raise ValueError("x")
+print("after d")
+try:
+    with Ctx("e"):
+        raise KeyError("k")
+except KeyError:
+    print("caught e")
+def f():
+    with Ctx("f"):
+        return 42
+print(f())
+for i in range(3):
+    with Ctx("g"):
+        if i == 1:
+            continue
+        print("i", i)
+with Ctx("one") as o: print("inline", o.name)
+p = "build/w1_tmp.txt"
+with open(p, "w") as fh:
+    fh.write("alpha\nbeta\n")
+    fh.writelines(["gamma\n", "delta"])
+with open(p) as fh:
+    print(repr(fh.read()))
+with open(p) as fh:
+    for line in fh:
+        print("line", line.strip())
+with open(p, "a") as fh:
+    fh.write("\nend\n")
+with open(p, "r") as fh:
+    print(fh.readlines())
+with open(p) as fh:
+    print(repr(fh.readline()), repr(fh.readline()))
+try:
+    open("nope_dir/zz.txt")
+except FileNotFoundError:
+    print("fnf")
+except OSError:
+    print("oserr")
+fh = open(p)
+data = fh.read()
+fh.close()
+print(len(data), data.count("\n"))
+os.remove(p)
+print(os.path.exists(p))
+def gen_lines():
+    with Ctx("gen"):
+        yield 1
+        yield 2
+print(list(gen_lines()))

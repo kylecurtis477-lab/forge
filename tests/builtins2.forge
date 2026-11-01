@@ -1,0 +1,6 @@
+print(repr("a\nb\\c\x01\x1f"), repr("it's"), repr("q\"'"), ["x\ty"])
+print(divmod(17, 5), divmod(-7, 2), pow(3, 4), pow(3, 4, 5), hex(255), bin(5), oct(8), hex(-26))
+print(list(zip([1,2,3], "ab")), list(enumerate("xy", 1)), list(reversed([1,2,3])))
+print(dict([(1, 2), (3, 4)]), any([]), all([]), sum(range(5)))
+it = iter([1, 2])
+print(next(it), next(it), next(it, "done"))

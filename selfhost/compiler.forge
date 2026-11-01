@@ -204,6 +204,13 @@ def find(lst, n, name):
 mimp = list(256)
 nmimp = 0
 mimp_on = 0
+mimp_pre = list(256)
+mimp_cur = "math"
+smods = list(64)
+nsm = 0
+umods = list(256)
+num = 0
+imp_on = 0
 
 def tok_id_is(p, s):
     return p >= 0 and tk[p] == K_ID and str_eq(tv[p], s)
@@ -224,37 +231,72 @@ def math_tok(name, line):
     else:
         add_tok(K_ID, concat("__math_", name), line)
 
-def add_id(name, line):
-    # math.f -> __math_f; names from "from math import a, b" -> __math_a, __math_b
-    global ntok, nmimp, mimp_on
-    if ntok >= 2 and tk[ntok - 1] == K_OP and str_eq(tv[ntok - 1], ".") and tok_id_is(ntok - 2, "math") and not tok_id_is(ntok - 3, "import"):
-        ntok -= 2
+def std_mod(n):
+    return str_eq(n, "sys") or str_eq(n, "os") or str_eq(n, "time")
+
+def mod_tok(base, name, line):
+    if str_eq(base, "math"):
         math_tok(name, line)
         return 0
+    nm = concat(concat(concat("__", base), "_"), name)
+    if starts(base, "__"):
+        nm = concat(concat(base, "_"), name)
+    if str_eq(nm, "__sys_maxsize"):
+        add_tok(K_NUM, 9223372036854775807, line)
+        return 0
+    add_tok(K_ID, nm, line)
+    if str_eq(nm, "__sys_argv") or str_eq(nm, "__sys_stdout") or str_eq(nm, "__sys_stderr") or str_eq(nm, "__sys_stdin"):
+        add_tok(K_OP, "(", line)
+        add_tok(K_OP, ")", line)
+    return 0
+
+def add_id(name, line):
+    # math.f -> __math_f, sys.argv -> __sys_argv(), os.path.f -> __os_path_f; user module qualifiers are dropped;
+    # names from "from math import a, b" -> __math_a, __math_b
+    global ntok, nmimp, mimp_on, mimp_cur, nsm, imp_on
+    if ntok >= 2 and tk[ntok - 1] == K_OP and str_eq(tv[ntok - 1], ".") and tk[ntok - 2] == K_ID and not tok_id_is(ntok - 3, "import"):
+        b = tv[ntok - 2]
+        if str_eq(b, "math") or find(smods, nsm, b) >= 0 or str_eq(b, "__os_path"):
+            ntok -= 2
+            mod_tok(b, name, line)
+            return 0
+        if num > 0 and find(umods, num, b) >= 0:
+            ntok -= 2
+            return add_id(name, line)
     if mimp_on:
         if nmimp < 256:
             mimp[nmimp] = name
+            mimp_pre[nmimp] = mimp_cur
             nmimp += 1
         add_tok(K_ID, name, line)
         return 0
-    if str_eq(name, "import") and tok_id_is(ntok - 1, "math") and tok_id_is(ntok - 2, "from"):
-        mimp_on = 1
+    if str_eq(name, "import") and ntok >= 2 and tk[ntok - 1] == K_ID and tok_id_is(ntok - 2, "from"):
+        b = tv[ntok - 1]
+        if str_eq(b, "math") or std_mod(b) or str_eq(b, "__os_path"):
+            mimp_on = 1
+            mimp_cur = b
         add_tok(K_ID, name, line)
         return 0
+    if str_eq(name, "import"):
+        imp_on = 1
+    elif imp_on and std_mod(name) and nsm < 64:
+        smods[nsm] = name
+        nsm += 1
     if nmimp > 0 and not (ntok >= 1 and tk[ntok - 1] == K_OP and str_eq(tv[ntok - 1], ".")) and not tok_id_is(ntok - 1, "def"):
         i = 0
         while i < nmimp:
             if str_eq(mimp[i], name):
-                math_tok(name, line)
+                mod_tok(mimp_pre[i], name, line)
                 return 0
             i += 1
     add_tok(K_ID, name, line)
     return 0
 
 def add_tok(k, v, line):
-    global ntok, mimp_on
+    global ntok, mimp_on, imp_on
     if k == K_NL:
         mimp_on = 0
+        imp_on = 0
     tk[ntok] = k
     tv[ntok] = v
     tl[ntok] = line
@@ -374,6 +416,9 @@ def lex_fstring(src, i, q, line, buf):
             if d == 92:
                 i += 1
                 d = esc_char(char_at(src, i))
+                if char_at(src, i) == 120 and i + 2 < n and is_hex(char_at(src, i + 1)) and is_hex(char_at(src, i + 2)):
+                    d = hexval(char_at(src, i + 1)) * 16 + hexval(char_at(src, i + 2))
+                    i += 2
             set_byte(buf, k, d)
             k += 1
             i += 1
@@ -514,6 +559,9 @@ def lex(src, line, inner):
                 if d == 92:
                     i += 1
                     d = esc_char(char_at(src, i))
+                    if char_at(src, i) == 120 and i + 2 < n and is_hex(char_at(src, i + 1)) and is_hex(char_at(src, i + 2)):
+                        d = hexval(char_at(src, i + 1)) * 16 + hexval(char_at(src, i + 2))
+                        i += 2
                 set_byte(buf, k, d)
                 k += 1
                 i += 1
@@ -1490,11 +1538,11 @@ def count_args(p):
             return n
         p += 1
 
-BI_NAMES = ["puts", "eputs", "concat", "write_file", "read_file", "substr", "alloc", "join", "argc", "argv", "exit", "str_eq", "chr", "mark", "release", "set_byte", "__new", "__copy", "__tag", "__aux", "__itos_raw", "__writes", "__wint", "__itof", "__ftoi", "__fbits", "__ffrombits", "__math", "__math2", "__raise", "__clsname", "__excval"]
-BI_ARGS = [1, 1, 2, 2, 1, 3, 1, 2, 0, 1, 1, 2, 1, 0, 1, 3, 3, 3, 1, 1, 1, 1, 1, 1, 2, 1, 1, 2, 3, 2, 1, 0]
-BI_RT = ["rt_puts", "rt_eputs", "rt_concat", "rt_write_file", "rt_read_file", "rt_substr", "rt_alloc", "rt_join", "rt_argc", "rt_argv", "rt_exit", "rt_str_eq", "rt_chr", "rt_mark", "rt_release", "rt_set_byte", "rt_new", "rt_copy", "rt_tag", "rt_aux", "rt_itos", "rt_writes", "rt_wint", "rt_itof", "rt_ftoi", "rt_fbits", "rt_ffrombits", "rt_math", "rt_math2", "rt_raise", "rt_clsname", "rt_excval"]
-BI_TY = [0, 0, 2, 1, 2, 2, 0, 2, 1, 2, 0, 1, 2, 1, 0, 0, 0, 0, 1, 1, 2, 0, 0, 5, 1, 1, 5, 5, 5, 0, 2, 0]
-NBI = 32
+BI_NAMES = ["puts", "eputs", "concat", "write_file", "read_file", "substr", "alloc", "join", "argc", "argv", "exit", "str_eq", "chr", "mark", "release", "set_byte", "__new", "__copy", "__tag", "__aux", "__itos_raw", "__writes", "__wint", "__itof", "__ftoi", "__fbits", "__ffrombits", "__math", "__math2", "__raise", "__clsname", "__excval", "__gresume", "__gyield", "__gfin", "__syscall", "__clock", "__excline", "__env", "__flush"]
+BI_ARGS = [1, 1, 2, 2, 1, 3, 1, 2, 0, 1, 1, 2, 1, 0, 1, 3, 3, 3, 1, 1, 1, 1, 1, 1, 2, 1, 1, 2, 3, 2, 1, 0, 2, 1, 2, 4, 1, 0, 1, 0]
+BI_RT = ["rt_puts", "rt_eputs", "rt_concat", "rt_write_file", "rt_read_file", "rt_substr", "rt_alloc", "rt_join", "rt_argc", "rt_argv", "rt_exit", "rt_str_eq", "rt_chr", "rt_mark", "rt_release", "rt_set_byte", "rt_new", "rt_copy", "rt_tag", "rt_aux", "rt_itos", "rt_writes", "rt_wint", "rt_itof", "rt_ftoi", "rt_fbits", "rt_ffrombits", "rt_math", "rt_math2", "rt_raise", "rt_clsname", "rt_excval", "rt_gresume", "rt_gyield", "rt_gfin", "rt_syscall", "rt_clock", "rt_excline", "rt_env", "rt_flushv"]
+BI_TY = [0, 0, 2, 1, 2, 2, 0, 2, 1, 2, 0, 1, 2, 1, 0, 0, 0, 0, 1, 1, 2, 0, 0, 5, 1, 1, 5, 5, 5, 0, 2, 0, 0, 0, 0, 1, 1, 1, 0, 0]
+NBI = 40
 
 def builtin_call(name, line):
     # returns 1 if name( ... ) was compiled as a builtin
@@ -2927,6 +2975,31 @@ def primary():
     if k == K_ID:
         name = tv[pos]
         pos += 1
+        if str_eq(name, "yield"):
+            if tok_is_id(pos, "from"):
+                pos += 1
+                expr()
+                e("push %rax")
+                call_internal("__yfrom", 1)
+                ety = 0
+                return 0
+            if tk[pos] == K_NL or tk[pos] == K_EOF or tk[pos] == K_DED or is_op(")") or is_op("]") or is_op("}") or is_op(","):
+                e2(concat("mov ", B_NONE), ", %rax")
+            else:
+                expr()
+                if is_op(","):
+                    e("push %rax")
+                    n = 1
+                    while is_op(","):
+                        pos += 1
+                        expr()
+                        e("push %rax")
+                        n += 1
+                    build_tuple(n)
+            e("push %rax")
+            call_rt("rt_gyield", 1)
+            ety = 0
+            return 0
         if str_eq(name, "True"):
             e2(concat("mov ", B_TRUE), ", %rax")
             ety = T_BOOL
@@ -3001,6 +3074,10 @@ def primary():
                 pos += 1
                 build_tuple(0)
                 return 0
+            fp = comp_for(pos)
+            if fp >= 0:
+                comprehension(fp, line, ")", 0)
+                return 0
             expr()
             if is_op(","):
                 e("push %rax")
@@ -3043,6 +3120,23 @@ def primary():
             return 0
         if is_op("{"):
             pos += 1
+            fp = comp_for(pos)
+            if fp >= 0:
+                q = pos
+                d = 0
+                kind = 1
+                while q < fp:
+                    if tk[q] == K_OP:
+                        v = tv[q]
+                        if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                            d += 1
+                        elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                            d -= 1
+                        elif d == 0 and str_eq(v, ":"):
+                            kind = 2
+                    q += 1
+                comprehension(fp, line, "}", kind)
+                return 0
             call_internal("__dict", 0)
             if set_lit(pos):
                 e("movb $10, -1(%rax)")
@@ -3201,32 +3295,64 @@ def comp_for(p):
         p += 1
 
 def compile_comprehension(fp, line):
+    comprehension(fp, line, "]", 0)
+
+def comprehension(fp, line, closer, kind):
+    # [e for .. in .. if .. for ..], {e for ..}, {k: v for ..}; kind 0 list, 1 set, 2 dict
     global pos, ety
-    lc = hidden_local("__lc", T_LIST)
+    lc = hidden_local("__lc", 0)
     lref = var_ref(lc)
-    e("push $0")
-    call_rt("rt_list", 1)
+    if kind == 2:
+        call_internal("__dict", 0)
+    else:
+        e("push $0")
+        call_rt("rt_list", 1)
     e2("mov %rax, ", lref)
     epos = pos
     pos = fp
-    info = for_header()
-    if is_id("if"):
-        pos += 1
-        cond_or(info[2], 0)
+    infos = list(16)
+    ni = 0
+    while is_id("for"):
+        if ni >= 16:
+            die(line, "comprehension too deeply nested")
+        infos[ni] = for_header()
+        ni += 1
+        while is_id("if"):
+            pos += 1
+            cond_or(infos[ni - 1][2], 0)
     endp = pos
     pos = epos
     expr()
+    if kind == 2:
+        e("push %rax")
+        expect(":")
+        expr()
+        e("mov %rax, %rcx")
+        e("pop %rdx")
+        e2("push ", lref)
+        e("push %rdx")
+        e("push %rcx")
+        call_internal("__dset", 3)
+    else:
+        e("mov %rax, %rcx")
+        e2("push ", lref)
+        e("push %rcx")
+        call_f(internal("append", 2), 2)
     if pos != fp:
-        die(line, "bad list comprehension")
-    e("mov %rax, %rcx")
-    e2("push ", lref)
-    e("push %rcx")
-    call_f(internal("append", 2), 2)
-    for_footer(info)
+        die(line, "bad comprehension")
+    while ni > 0:
+        ni -= 1
+        for_footer(infos[ni])
     pos = endp
-    expect("]")
+    expect(closer)
     e3("mov ", lref, ", %rax")
     ety = T_LIST
+    if kind == 1:
+        e("push %rax")
+        call_internal("set", 1)
+        ety = 0
+    elif kind == 2:
+        ety = T_DICT
 
 def for_header():
     # pos at 'for'. Emits the loop head; returns [kind, top, cont, end, var/idx, limit/iter, step]
@@ -3250,7 +3376,8 @@ def for_header():
     if not is_id("in"):
         die(line, "expected 'in' in for")
     pos += 1
-    info = list(8)
+    info = list(9)
+    info[8] = 0
     top = new_label()
     cont = new_label()
     endl = new_label()
@@ -3322,7 +3449,11 @@ def for_header():
     if ety != T_LIST:
         e("push %rax")
         e3("push $", str(uline(line)), "")
-        call_internal("__iter", 2)
+        if enum:
+            call_internal("__iter", 2)
+        else:
+            call_internal("__forit", 2)
+            info[8] = 1
     e2("mov %rax, ", itr)
     ix = hidden_local("__ix", T_INT)
     ixr = var_ref(ix)
@@ -3389,6 +3520,15 @@ def for_footer(info):
         e3("mov ", info[4], ", %rcx")
         e("cmp (%rax), %rcx")
         e2("jl ", lab(info[1]))
+        if info[8]:
+            e("cmpb $11, -1(%rax)")
+            e2("jne ", lab(info[3]))
+            e("push %rax")
+            call_internal("__inext", 1)
+            e("test %rax, %rax")
+            e2("jz ", lab(info[3]))
+            e2("movq $0, ", info[4])
+            e2("jmp ", lab(info[1]))
     put_label(info[3])
     nloops -= 1
 
@@ -3523,8 +3663,8 @@ def stmt():
         if str_eq(w, "del"):
             stmt_del(line)
             return 0
-        if str_eq(w, "with") or str_eq(w, "yield"):
-            die(line, concat(concat("'", w), "' is not supported"))
+        if str_eq(w, "with"):
+            die(line, "'with' is not supported here")
     if tk[pos] == K_STR and (tk[pos + 1] == K_NL or tk[pos + 1] == K_EOF):
         pos += 1
         end_stmt()
@@ -5355,6 +5495,473 @@ def one_pass():
             i += 1
     emit_raw("    ret\n")
 
+lmods = list(256)
+nlm = 0
+
+def load_mod(name, dir):
+    # lex dir/name.forge (once); returns 1 if it is a user module
+    global num, nlm
+    if find(lmods, nlm, name) >= 0:
+        return 1
+    if str_eq(name, "math") or std_mod(name):
+        return 0
+    ms = read_file(concat(concat(dir, name), ".forge"))
+    mi: int = ms
+    if mi == 0:
+        return 0
+    if nlm < 256:
+        lmods[nlm] = name
+        nlm += 1
+    load_imports(ms, dir)
+    lex(ms, 1, 0)
+    if num < 256:
+        umods[num] = name
+        num += 1
+    return 1
+
+def read_word(s, i):
+    n = len(s)
+    j = i
+    while j < n and (is_alpha(char_at(s, j)) or is_digit(char_at(s, j))):
+        j += 1
+    return substr(s, i, j)
+
+def skip_sp(s, i):
+    n = len(s)
+    while i < n and (char_at(s, i) == 32 or char_at(s, i) == 44):
+        i += 1
+    return i
+
+def load_imports(src, dir):
+    global num
+    n = len(src)
+    i = 0
+    while i < n:
+        j = i
+        while j < n and char_at(src, j) == 32:
+            j += 1
+        e = j
+        while e < n and char_at(src, e) != 10:
+            e += 1
+        line = substr(src, j, e)
+        i = e + 1
+        if starts(line, "import "):
+            k = skip_sp(line, 7)
+            last = 0
+            while k < len(line):
+                w = read_word(line, k)
+                if len(w) == 0:
+                    k = len(line)
+                elif str_eq(w, "as"):
+                    k = skip_sp(line, k + 2)
+                    a = read_word(line, k)
+                    if last and num < 256:
+                        umods[num] = a
+                        num += 1
+                    k = skip_sp(line, k + len(a))
+                else:
+                    last = load_mod(w, dir)
+                    k = skip_sp(line, k + len(w))
+        elif starts(line, "from "):
+            k = skip_sp(line, 5)
+            w = read_word(line, k)
+            if len(w) > 0:
+                load_mod(w, dir)
+
+# ---------------- token rewriter: generators and 'with' ----------------
+rk = list(1)
+rv = list(1)
+rl = list(1)
+nr = 0
+nwith = 0
+
+def r_emit(k, v, line):
+    global nr
+    if nr >= MAXT:
+        die(line, "program too large")
+    rk[nr] = k
+    rv[nr] = v
+    rl[nr] = line
+    nr += 1
+
+def r_id(v, line):
+    r_emit(K_ID, v, line)
+
+def r_op(v, line):
+    r_emit(K_OP, v, line)
+
+def r_copy(a, b):
+    while a < b:
+        if tk[a] == K_OP and str_eq(tv[a], "))"):
+            r_emit(K_OP, ")", tl[a])
+            r_emit(K_OP, ")", tl[a])
+        else:
+            r_emit(tk[a], tv[a], tl[a])
+            if tk[a] == K_OP and str_eq(tv[a], "(") and a > 0 and (tk[a - 1] == K_ID or (tk[a - 1] == K_OP and (str_eq(tv[a - 1], ")") or str_eq(tv[a - 1], "]")))) and not tok_is_op(a + 1, "(") and not (tk[a - 1] == K_ID and is_kw(tv[a - 1]) and not str_eq(tv[a - 1], "print")):
+                if comp_for(a + 1) >= 0:
+                    r_emit(K_OP, "(", tl[a])
+                    m = a + 1
+                    d = 0
+                    while not (d == 0 and tk[m] == K_OP and str_eq(tv[m], ")")):
+                        if tk[m] == K_OP and (str_eq(tv[m], "(") or str_eq(tv[m], "[") or str_eq(tv[m], "{")):
+                            d += 1
+                        elif tk[m] == K_OP and (str_eq(tv[m], ")") or str_eq(tv[m], "]") or str_eq(tv[m], "}") or str_eq(tv[m], "))")):
+                            d -= 1
+                        m += 1
+                    tv[m] = "))"
+        a += 1
+
+def r_nl_of(p):
+    while tk[p] != K_NL and tk[p] != K_EOF:
+        p += 1
+    return p
+
+def r_blk_end(p):
+    # p at K_IND; index of the matching K_DED
+    d = 0
+    while 1:
+        if tk[p] == K_IND:
+            d += 1
+        elif tk[p] == K_DED:
+            d -= 1
+            if d == 0:
+                return p
+        elif tk[p] == K_EOF:
+            return p
+        p += 1
+
+def r_colon(p, q):
+    # first ':' at bracket depth 0 in [p, q), skipping lambda colons
+    d = 0
+    lam = 0
+    while p < q:
+        if tk[p] == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                d -= 1
+            elif d == 0 and str_eq(v, ":"):
+                if lam == 0:
+                    return p
+                lam -= 1
+        elif tk[p] == K_ID and d == 0 and str_eq(tv[p], "lambda"):
+            lam += 1
+        p += 1
+    return -1
+
+def r_has_yield(p, e):
+    # yield in [p, e), not counting nested def/class bodies
+    bol = 1
+    while p < e:
+        k = tk[p]
+        if bol and k == K_ID and (str_eq(tv[p], "def") or str_eq(tv[p], "class")):
+            q = r_nl_of(p)
+            if tk[q + 1] == K_IND:
+                p = r_blk_end(q + 1) + 1
+            else:
+                p = q + 1
+            bol = 1
+        else:
+            if k == K_ID and str_eq(tv[p], "yield"):
+                return 1
+            bol = k == K_NL or k == K_IND or k == K_DED
+            p += 1
+    return 0
+
+def r_body(bs, be, isblk, incls, line):
+    # emits NL IND body DED
+    r_emit(K_NL, 0, line)
+    r_emit(K_IND, 0, line)
+    if isblk:
+        r_stmts(bs, incls)
+    else:
+        r_copy(bs, be)
+        r_emit(K_NL, 0, line)
+    r_emit(K_DED, 0, line)
+
+def r_stmts(p, incls):
+    while tk[p] != K_DED and tk[p] != K_EOF:
+        p = r_stmt(p, incls)
+    return p
+
+def r_stmt(p, incls):
+    q = r_nl_of(p)
+    hasblk = tk[q] == K_NL and tk[q + 1] == K_IND
+    line = tl[p]
+    if tok_id_is(p, "with"):
+        c = r_colon(p + 1, q)
+        if c < 0:
+            die(line, "expected ':' after with")
+        ws = list(64)
+        we = list(64)
+        n = 0
+        a = p + 1
+        d = 0
+        i = p + 1
+        while i <= c:
+            if i == c or (d == 0 and tk[i] == K_OP and str_eq(tv[i], ",")):
+                if n < 64:
+                    ws[n] = a
+                    we[n] = i
+                    n += 1
+                a = i + 1
+            elif tk[i] == K_OP and (str_eq(tv[i], "(") or str_eq(tv[i], "[") or str_eq(tv[i], "{")):
+                d += 1
+            elif tk[i] == K_OP and (str_eq(tv[i], ")") or str_eq(tv[i], "]") or str_eq(tv[i], "}")):
+                d -= 1
+            i += 1
+        if hasblk:
+            be = r_blk_end(q + 1)
+            r_with(ws, we, 0, n, q + 2, be, 1, incls, line)
+            return be + 1
+        r_with(ws, we, 0, n, c + 1, q, 0, incls, line)
+        return q + 1
+    if tok_id_is(p, "def"):
+        c = r_colon(p, q)
+        gen = 0
+        if hasblk:
+            be = r_blk_end(q + 1)
+            gen = r_has_yield(q + 2, be)
+        elif c >= 0:
+            gen = r_has_yield(c + 1, q)
+        if gen:
+            r_gen(p, q, c, hasblk, incls)
+            if hasblk:
+                return r_blk_end(q + 1) + 1
+            return q + 1
+    if tk[q] == K_EOF:
+        r_copy(p, q)
+        return q
+    r_copy(p, q + 1)
+    if hasblk:
+        be = r_blk_end(q + 1)
+        r_emit(K_IND, 0, tl[q + 1])
+        r_stmts(q + 2, tok_id_is(p, "class"))
+        r_emit(K_DED, 0, tl[be])
+        return be + 1
+    return q + 1
+
+def r_with(ws, we, k, n, bs, be, isblk, incls, line):
+    global nwith
+    wn = concat("__w", str(nwith))
+    fn = concat("__wf", str(nwith))
+    nwith += 1
+    s = ws[k]
+    e = we[k]
+    a = -1
+    d = 0
+    i = s
+    while i < e:
+        if tk[i] == K_OP and (str_eq(tv[i], "(") or str_eq(tv[i], "[") or str_eq(tv[i], "{")):
+            d += 1
+        elif tk[i] == K_OP and (str_eq(tv[i], ")") or str_eq(tv[i], "]") or str_eq(tv[i], "}")):
+            d -= 1
+        elif d == 0 and tok_id_is(i, "as"):
+            a = i
+        i += 1
+    r_id(wn, line)
+    r_op("=", line)
+    if a >= 0:
+        r_copy(s, a)
+    else:
+        r_copy(s, e)
+    r_emit(K_NL, 0, line)
+    if a >= 0:
+        r_copy(a + 1, e)
+        r_op("=", line)
+    r_id(wn, line)
+    r_op(".", line)
+    r_id("__enter__", line)
+    r_op("(", line)
+    r_op(")", line)
+    r_emit(K_NL, 0, line)
+    r_id(fn, line)
+    r_op("=", line)
+    r_emit(K_NUM, 0, line)
+    r_emit(K_NL, 0, line)
+    r_id("try", line)
+    r_op(":", line)
+    if k + 1 < n:
+        r_emit(K_NL, 0, line)
+        r_emit(K_IND, 0, line)
+        r_with(ws, we, k + 1, n, bs, be, isblk, incls, line)
+        r_emit(K_DED, 0, line)
+    else:
+        r_body(bs, be, isblk, incls, line)
+    r_id("except", line)
+    r_op(":", line)
+    r_emit(K_NL, 0, line)
+    r_emit(K_IND, 0, line)
+    r_id(fn, line)
+    r_op("=", line)
+    r_emit(K_NUM, 1, line)
+    r_emit(K_NL, 0, line)
+    r_id("if", line)
+    r_id("not", line)
+    r_id(wn, line)
+    r_op(".", line)
+    r_id("__exit__", line)
+    r_op("(", line)
+    r_id("__exctype", line)
+    r_op("(", line)
+    r_op(")", line)
+    r_op(",", line)
+    r_id("__excval", line)
+    r_op("(", line)
+    r_op(")", line)
+    r_op(",", line)
+    r_id("None", line)
+    r_op(")", line)
+    r_op(":", line)
+    r_emit(K_NL, 0, line)
+    r_emit(K_IND, 0, line)
+    r_id("raise", line)
+    r_emit(K_NL, 0, line)
+    r_emit(K_DED, 0, line)
+    r_emit(K_DED, 0, line)
+    r_id("finally", line)
+    r_op(":", line)
+    r_emit(K_NL, 0, line)
+    r_emit(K_IND, 0, line)
+    r_id("if", line)
+    r_id(fn, line)
+    r_op("==", line)
+    r_emit(K_NUM, 0, line)
+    r_op(":", line)
+    r_emit(K_NL, 0, line)
+    r_emit(K_IND, 0, line)
+    r_id(wn, line)
+    r_op(".", line)
+    r_id("__exit__", line)
+    r_op("(", line)
+    r_id("None", line)
+    r_op(",", line)
+    r_id("None", line)
+    r_op(",", line)
+    r_id("None", line)
+    r_op(")", line)
+    r_emit(K_NL, 0, line)
+    r_emit(K_DED, 0, line)
+    r_emit(K_DED, 0, line)
+
+def r_gen(p, q, c, hasblk, incls):
+    # def NAME(PARAMS): return __mkgen(lambda: [self.]__gb_NAME(ARGS))  +  def __gb_NAME(PARAMS): BODY
+    line = tl[p]
+    name = tv[p + 1]
+    gb = concat("__gb_", name)
+    ps = p + 3
+    pe = ps
+    d = 0
+    while not (d == 0 and tk[pe] == K_OP and str_eq(tv[pe], ")")):
+        if tk[pe] == K_OP and (str_eq(tv[pe], "(") or str_eq(tv[pe], "[") or str_eq(tv[pe], "{")):
+            d += 1
+        elif tk[pe] == K_OP and (str_eq(tv[pe], ")") or str_eq(tv[pe], "]") or str_eq(tv[pe], "}")):
+            d -= 1
+        pe += 1
+    r_id("def", line)
+    r_id(name, line)
+    r_op("(", line)
+    r_copy(ps, pe)
+    r_op(")", line)
+    r_op(":", line)
+    r_emit(K_NL, 0, line)
+    r_emit(K_IND, 0, line)
+    r_id("return", line)
+    r_id("__mkgen", line)
+    r_op("(", line)
+    r_id("lambda", line)
+    r_op(":", line)
+    i = ps
+    first = 1
+    if incls:
+        r_id(tv[ps], line)
+        r_op(".", line)
+        while i < pe and not (tk[i] == K_OP and str_eq(tv[i], ",")):
+            i += 1
+        i += 1
+    r_id(gb, line)
+    r_op("(", line)
+    kwonly = 0
+    while i < pe:
+        # one parameter at i
+        j = i
+        d = 0
+        while j < pe and not (d == 0 and tk[j] == K_OP and str_eq(tv[j], ",")):
+            if tk[j] == K_OP and (str_eq(tv[j], "(") or str_eq(tv[j], "[") or str_eq(tv[j], "{")):
+                d += 1
+            elif tk[j] == K_OP and (str_eq(tv[j], ")") or str_eq(tv[j], "]") or str_eq(tv[j], "}")):
+                d -= 1
+            j += 1
+        if tk[i] == K_OP and str_eq(tv[i], "*"):
+            kwonly = 1
+            if tk[i + 1] == K_ID:
+                if not first:
+                    r_op(",", line)
+                r_op("*", line)
+                r_id(tv[i + 1], line)
+                first = 0
+        elif tk[i] == K_OP and str_eq(tv[i], "**"):
+            if not first:
+                r_op(",", line)
+            r_op("**", line)
+            r_id(tv[i + 1], line)
+            first = 0
+        elif tk[i] == K_ID:
+            if not first:
+                r_op(",", line)
+            if kwonly:
+                r_id(tv[i], line)
+                r_op("=", line)
+            r_id(tv[i], line)
+            first = 0
+        i = j + 1
+    r_op(")", line)
+    r_op(")", line)
+    r_emit(K_NL, 0, line)
+    r_emit(K_DED, 0, line)
+    r_id("def", line)
+    r_id(gb, line)
+    r_op("(", line)
+    r_copy(ps, pe)
+    r_op(")", line)
+    r_op(":", line)
+    if hasblk:
+        r_body(q + 2, r_blk_end(q + 1), 1, 0, line)
+    else:
+        r_body(c + 1, q, 0, 0, line)
+
+def rewrite_tokens():
+    global tk, tv, tl, ntok, rk, rv, rl, nr
+    need = 0
+    i = 0
+    while i < ntok:
+        if tk[i] == K_ID and (str_eq(tv[i], "with") or str_eq(tv[i], "yield")):
+            need = 1
+            i = ntok
+        elif i >= PRETOK and tk[i] == K_ID and str_eq(tv[i], "for") and tk[i - 1] != K_NL and tk[i - 1] != K_IND and tk[i - 1] != K_DED and not tok_is_op(i - 1, ":") and i > PRETOK:
+            need = 1
+            i = ntok
+        i += 1
+    if not need:
+        return 0
+    rk = list(MAXT)
+    rv = list(MAXT)
+    rl = list(MAXT)
+    nr = 0
+    p = 0
+    while tk[p] != K_EOF:
+        p = r_stmts(p, 0)
+        if tk[p] == K_DED:
+            r_emit(K_DED, 0, tl[p])
+            p += 1
+    r_emit(K_EOF, 0, tl[p])
+    tk = rk
+    tv = rv
+    tl = rl
+    ntok = nr
+    return 0
+
 def forge_main():
     global PRETOK, PRE, passno, soft_line
     if argc() < 3:
@@ -5365,8 +5972,14 @@ def forge_main():
     lex(pre, 1, 0)
     PRETOK = ntok
     set_lphase(1)
+    path = argv(1)
+    sl = len(path) - 1
+    while sl >= 0 and char_at(path, sl) != 47:
+        sl -= 1
+    load_imports(src, substr(path, 0, sl + 1))
     lex(src, 1, 0)
     add_tok(K_EOF, 0, 0)
+    rewrite_tokens()
     set_lphase(2)
     prescan()
     passno = 0

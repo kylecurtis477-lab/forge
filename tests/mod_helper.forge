@@ -1,0 +1,9 @@
+import mod_util2
+K = 7
+def sq(x):
+    return x * x
+def twice(x):
+    return mod_util2.dbl(x)
+class Pt:
+    def __init__(self, a):
+        self.a = a

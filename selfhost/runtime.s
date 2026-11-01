@@ -2,7 +2,7 @@
 # Object layout: 8-byte header at ptr-8 = tag<<56 | aux.  tags: 0 list [len,cap,data]  1 str (aux=len, NUL-terminated)
 #   2 object (aux=class id, fields at 0..)  3 dict  4 raw bytes (aux=size)
 # Heap: 64 GiB MAP_NORESERVE bump arena at 2^45; image linked at 2^44, so ints in [0,2^44) never alias pointers.
-.weak f___getidx, f___setidx, f___add, f___eq, f___truth, f___err, f___uncaught
+.weak f___getidx, f___setidx, f___add, f___eq, f___truth, f___err, f___uncaught, f___gstart
 .text
 rt_init:
     # rdi = initial %rsp (argc, argv...)
@@ -355,6 +355,12 @@ rt_gc_core:
     incq rt_ngc(%rip)
     mov rt_ms(%rip), %r15
     mov %rsp, %r14
+    mov rt_gcur(%rip), %rdi
+    test %rdi, %rdi
+    jz 1f
+    # inside a generator: its stack is a heap object reached via rt_gcur; scan the main stack from where it was left
+    call rt_gc_mark
+    mov rt_main_sp(%rip), %r14
 1:  cmp rt_stk0(%rip), %r14
     jae 2f
     mov (%r14), %rdi
@@ -681,6 +687,36 @@ rt_argv:
     ret
 1:  xor %edi, %edi
     jmp rt_mkstr_r
+rt_flushv:
+    call rt_flush
+    xor %eax, %eax
+    ret
+rt_env:
+    # (i) -> envp[i] as a string, or 0 past the end
+    mov 8(%rsp), %rcx
+    mov rt_argcv(%rip), %rax
+    inc %rax
+    shl $3, %rax
+    add rt_argvp(%rip), %rax
+    mov (%rax,%rcx,8), %r8
+    test %r8, %r8
+    jz 1f
+    mov %r8, %rdi
+    xor %ecx, %ecx
+2:  cmpb $0, (%rdi,%rcx)
+    je 3f
+    inc %rcx
+    jmp 2b
+3:  mov %rcx, %rdi
+    push %rcx
+    call rt_mkstr_r
+    pop %rcx
+    mov %rax, %rdi
+    mov %r8, %rsi
+    rep movsb
+    ret
+1:  xor %eax, %eax
+    ret
 rt_write_r:
     # rdi=fd rsi=buf rdx=len, loops until done
 1:  test %rdx, %rdx
@@ -1518,6 +1554,107 @@ rt_math2:
     add $24, %rsp
     jmp rt_fbox_r
 # ---- exceptions: handler frames are [prev, rbp, rbx, r12, r13, r14, r15, landing] on the stack ----
+# ---- generators: stackful coroutines. h = raw object:
+#   0 fn  8 stack  16 gen sp  24 state(0 new 1 suspended 2 running 3 done 4 failed)  32 -  40 caller sp
+#   48 caller exc_top  56 previous rt_gcur  64 gen exc_top
+rt_gresume:
+    # (h, sendval) -> yielded value
+    mov 16(%rsp), %rdi
+    mov 8(%rsp), %rax
+    push %rbp
+    push %rbx
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    mov %rsp, 40(%rdi)
+    mov rt_exc_top(%rip), %rcx
+    mov %rcx, 48(%rdi)
+    mov rt_gcur(%rip), %rcx
+    mov %rcx, 56(%rdi)
+    test %rcx, %rcx
+    jnz 1f
+    mov %rsp, rt_main_sp(%rip)
+1:  mov %rdi, rt_gcur(%rip)
+    cmpq $0, 24(%rdi)
+    jne 2f
+    movq $2, 24(%rdi)
+    mov 8(%rdi), %rsp
+    add $65520, %rsp
+    and $-16, %rsp
+    push %rdi
+    push %rdi
+    movabs $f___gstart, %rax
+    call *%rax
+    ud2
+2:  movq $2, 24(%rdi)
+    mov 64(%rdi), %rcx
+    mov %rcx, rt_exc_top(%rip)
+    mov 16(%rdi), %rsp
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %rbx
+    pop %rbp
+    ret
+rt_gyield:
+    # (value) -> value sent by the next resume
+    mov 8(%rsp), %rax
+    mov rt_gcur(%rip), %rdi
+    test %rdi, %rdi
+    jz 9f
+    push %rbp
+    push %rbx
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    mov %rsp, 16(%rdi)
+    movq $1, 24(%rdi)
+rt_gback:
+    mov rt_exc_top(%rip), %rcx
+    mov %rcx, 64(%rdi)
+    mov 48(%rdi), %rcx
+    mov %rcx, rt_exc_top(%rip)
+    mov 56(%rdi), %rcx
+    mov %rcx, rt_gcur(%rip)
+    mov 40(%rdi), %rsp
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %rbx
+    pop %rbp
+    ret
+9:  ret
+rt_gfin:
+    # (value, state): generator finished; never returns
+    mov 16(%rsp), %rax
+    mov 8(%rsp), %rcx
+    mov rt_gcur(%rip), %rdi
+    mov %rcx, 24(%rdi)
+    jmp rt_gback
+rt_syscall:
+    # (n, a, b, c) -> raw result
+    mov 32(%rsp), %rax
+    mov 24(%rsp), %rdi
+    mov 16(%rsp), %rsi
+    mov 8(%rsp), %rdx
+    syscall
+    ret
+rt_clock:
+    # (clockid) -> nanoseconds
+    mov 8(%rsp), %rdi
+    sub $16, %rsp
+    mov %rsp, %rsi
+    mov $228, %eax
+    syscall
+    mov (%rsp), %rax
+    imul $1000000000, %rax, %rax
+    add 8(%rsp), %rax
+    add $16, %rsp
+    ret
 rt_raise:
     mov 16(%rsp), %rax
     mov 8(%rsp), %rcx
@@ -1551,6 +1688,9 @@ rt_clsname:
     lea rt_cnames(%rip), %rdx
     mov (%rdx,%rcx,8), %rax
     ret
+rt_excline:
+    mov rt_exc_line(%rip), %rax
+    ret
 rt_excval:
     mov rt_exc_val(%rip), %rax
     ret
@@ -1566,6 +1706,8 @@ rt_inuse: .quad 0
 rt_gcnext: .quad 0x2000000
 rt_ngc: .quad 0
 rt_stk0: .quad 0
+rt_gcur: .quad 0
+rt_main_sp: .quad 0
 rt_pt: .quad 0
 rt_ms: .quad 0
 rt_lfree: .quad 0

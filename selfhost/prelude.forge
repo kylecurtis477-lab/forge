@@ -215,10 +215,52 @@ def __brepr(x) -> str:
         return "True"
     return "False"
 
+def __srepr(x) -> str:
+    q = "'"
+    if __find(x, "'", 0) >= 0 and __find(x, chr(34), 0) < 0:
+        q = chr(34)
+    n: int = len(x)
+    i: int = 0
+    plain: int = 1
+    while i < n:
+        c: int = ord(x[i])
+        if c < 32 or c == 92 or c == 127 or c == ord(q):
+            plain = 0
+            break
+        i += 1
+    if plain == 1:
+        return concat(concat(q, x), q)
+    parts = [q]
+    i = 0
+    while i < n:
+        ch = x[i]
+        c: int = ord(ch)
+        if c == 10:
+            append(parts, "\\n")
+        elif c == 9:
+            append(parts, "\\t")
+        elif c == 13:
+            append(parts, "\\r")
+        elif c == 92:
+            append(parts, "\\\\")
+        elif ch == q:
+            append(parts, concat("\\", q))
+        elif c < 32 or c == 127:
+            h = hex(c)
+            if c < 16:
+                append(parts, concat("\\x0", substr(h, 2, 3)))
+            else:
+                append(parts, concat("\\x", substr(h, 2, 4)))
+        else:
+            append(parts, ch)
+        i += 1
+    append(parts, q)
+    return join(parts, len(parts))
+
 def __repr(x) -> str:
     t: int = __tag(x)
     if t == 1:
-        return concat(concat("'", x), "'")
+        return __srepr(x)
     if t < 0:
         return __itos_raw(x)
     if t == 6:
@@ -961,6 +1003,8 @@ def __iter(x, line):
             __st(__ld(r, 2), i, chr(char_at(x, i)))
             i += 1
         return r
+    if t == 2:
+        return __drain(x)
     __err(line, "value is not iterable")
 
 def __contains(c, x):
@@ -978,6 +1022,8 @@ def __contains(c, x):
         return 0
     if t == 1:
         return __find(c, x, 0) >= 0
+    if t == 2:
+        return __contains(__drain(c), x)
     return 0
 
 # ---- dict: open addressing, insertion-ordered keys ----
@@ -1721,6 +1767,8 @@ def split__1(s):
     return r
 
 def __m_join(sep, xs) -> str:
+    if __tag(xs) != 0 and __tag(xs) != 9:
+        xs = __iter(xs, 0)
     n: int = __ld(xs, 0)
     if n == 0:
         return ""
@@ -1860,6 +1908,8 @@ def max__1(xs, key=None):
     return m
 
 def sum(xs):
+    if __tag(xs) != 0 and __tag(xs) != 9:
+        xs = __iter(xs, 0)
     s: int = 0
     n: int = __ld(xs, 0)
     d = __ld(xs, 2)
@@ -2645,3 +2695,514 @@ def bool(x) -> bool:
 
 def hash(x) -> int:
     return __hash(x)
+
+# ---- iteration protocol, generators ----
+class generator:
+    def __init__(self, f):
+        h = __new(80, 4, 80)
+        i: int = 0
+        while i < 10:
+            __st(h, i, 0)
+            i += 1
+        __st(h, 0, f)
+        __st(h, 1, __new(65536, 4, 65536))
+        self.h = h
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return __gnext(self.h, None)
+
+    def send(self, v):
+        return __gnext(self.h, v)
+
+    def close(self):
+        __st(self.h, 3, 3)
+        __st(self.h, 1, 0)
+        return None
+
+def __mkgen(f):
+    g = generator(f)
+    if __tag(f) == 99:
+        __gstart(g)
+    return g
+
+def __gstart(h):
+    r = None
+    try:
+        f = __ld(h, 0)
+        r = f()
+    except:
+        __st(h, 4, __excval())
+        __st(h, 9, __excline())
+        __gfin(None, 4)
+    __gfin(r, 3)
+
+def __gnext(h, v):
+    s: int = __ld(h, 3)
+    if s >= 3:
+        raise StopIteration()
+    if s == 2:
+        raise ValueError("generator already executing")
+    r = __gresume(h, v)
+    s = __ld(h, 3)
+    if s == 3:
+        __st(h, 1, 0)
+        raise StopIteration()
+    if s == 4:
+        __st(h, 1, 0)
+        __st(h, 3, 3)
+        __raise(__ld(h, 4), __ld(h, 9))
+    return r
+
+def __yfrom(it):
+    for x in it:
+        __gyield(x)
+    return None
+
+class __listiter:
+    def __init__(self, xs):
+        self.xs = xs
+        self.i = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        i: int = self.i
+        if i >= len(self.xs):
+            raise StopIteration()
+        self.i = i + 1
+        return self.xs[i]
+
+def iter(x):
+    if __tag(x) == 2:
+        return x.__iter__()
+    return __listiter(__iter(x, 0))
+
+def next__1(it):
+    if isinstance(it, generator):
+        return __gnext(it.h, None)
+    return it.__next__()
+
+def next__2(it, dflt):
+    try:
+        return next__1(it)
+    except StopIteration:
+        return dflt
+
+def __forit(x, line):
+    if __tag(x) == 2:
+        b = [None, x.__iter__()]
+        __st(b, 0, 0)
+        set_byte(b, -1, 11)
+        return b
+    return __iter(x, line)
+
+def __inext(b) -> int:
+    if __tag(b) != 11:
+        return 0
+    d = __ld(b, 2)
+    it = __ld(d, 1)
+    r = None
+    if isinstance(it, generator):
+        h = it.h
+        s: int = __ld(h, 3)
+        if s >= 3:
+            return 0
+        r = __gresume(h, None)
+        s = __ld(h, 3)
+        if s == 3:
+            __st(h, 1, 0)
+            return 0
+        if s == 4:
+            __st(h, 1, 0)
+            __st(h, 3, 3)
+            __raise(__ld(h, 4), __ld(h, 9))
+    else:
+        try:
+            r = it.__next__()
+        except StopIteration:
+            return 0
+    __st(d, 0, r)
+    __st(b, 0, 1)
+    return 1
+
+def __drain(x):
+    b = __forit(x, 0)
+    r = []
+    while __inext(b):
+        append(r, __lst(b, 0))
+    return r
+
+# ---- files ----
+class OSError(Exception):
+    pass
+class FileNotFoundError(OSError):
+    pass
+
+class __File:
+    def __init__(self, path, mode):
+        self.path = path
+        self.mode = mode
+        self.data = ""
+        self.pos = 0
+        self.parts = []
+        self.closed = False
+        self.w = __find(mode, "w", 0) >= 0 or __find(mode, "a", 0) >= 0
+
+    def read(self, n=-1):
+        p: int = self.pos
+        m: int = __aux(self.data)
+        if n < 0 or p + n > m:
+            n = m - p
+        self.pos = p + n
+        return substr(self.data, p, p + n)
+
+    def readline(self):
+        p: int = self.pos
+        m: int = __aux(self.data)
+        q: int = __find(self.data, "\n", p)
+        if q < 0:
+            q = m
+        else:
+            q += 1
+        self.pos = q
+        return substr(self.data, p, q)
+
+    def readlines(self):
+        r = []
+        while self.pos < __aux(self.data):
+            append(r, self.readline())
+        return r
+
+    def write(self, s):
+        append(self.parts, s)
+        return len(s)
+
+    def writelines(self, xs):
+        for s in xs:
+            append(self.parts, s)
+        return None
+
+    def flush(self):
+        return None
+
+    def close(self):
+        if not self.closed and self.w:
+            if not write_file(self.path, join(self.parts, len(self.parts))):
+                raise OSError(concat("cannot write ", self.path))
+        self.closed = True
+        return None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.pos >= __aux(self.data):
+            raise StopIteration()
+        return self.readline()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, t, v, tb):
+        self.close()
+        return False
+
+def open(path, mode="r", encoding=None):
+    f = __File(path, mode)
+    if __find(mode, "w", 0) >= 0:
+        return f
+    if __syscall(21, path, 4, 0) != 0:
+        if __find(mode, "a", 0) >= 0:
+            return f
+        raise FileNotFoundError(concat("No such file or directory: ", __repr(path)))
+    s = read_file(path)
+    if __find(mode, "a", 0) >= 0:
+        append(f.parts, s)
+    else:
+        f.data = s
+    return f
+
+# ---- sys / os / time ----
+class __Stream:
+    def __init__(self, fd):
+        self.fd = fd
+
+    def write(self, s):
+        if self.fd == 2:
+            __flushout()
+            __syscall(1, 2, s, __aux(s))
+        else:
+            __writes(s)
+        return len(s)
+
+    def flush(self):
+        return None
+
+    def read(self, n=-1):
+        parts = []
+        buf = alloc(65536)
+        while True:
+            n: int = __syscall(0, 0, buf, 65536)
+            if n <= 0:
+                break
+            append(parts, substr(buf, 0, n))
+        return join(parts, len(parts))
+
+    def readline(self):
+        # unbuffered so that no state is needed; the kernel keeps the position
+        parts = []
+        buf = alloc(8)
+        while True:
+            n: int = __syscall(0, 0, buf, 1)
+            if n <= 0:
+                break
+            c = substr(buf, 0, 1)
+            append(parts, c)
+            if char_at(buf, 0) == 10:
+                break
+        return join(parts, len(parts))
+
+    def readlines(self):
+        r = []
+        while True:
+            l = self.readline()
+            if __aux(l) == 0:
+                return r
+            append(r, l)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        l = self.readline()
+        if __aux(l) == 0:
+            raise StopIteration()
+        return l
+
+def __sys_stdout():
+    return __Stream(1)
+
+def __sys_stderr():
+    return __Stream(2)
+
+def __sys_stdin():
+    return __Stream(0)
+
+def __sys_argv():
+    return __mkargv()
+
+def __flushout():
+    __flush()
+
+def __mkargv():
+    r = []
+    i: int = 0
+    while i < argc():
+        append(r, argv(i))
+        i += 1
+    return r
+
+def __sys_exit(code=0):
+    if __tag(code) == 1:
+        eputs(code)
+        exit(1)
+    if code is None:
+        exit(0)
+    exit(code)
+
+def __sys_setrecursionlimit(n):
+    return None
+
+def __sys_getrecursionlimit():
+    return 1000
+
+def __os_getenv(name, dflt=None):
+    i: int = 0
+    while True:
+        e = __env(i)
+        if __tag(e) != 1:
+            return dflt
+        if startswith(e, name) and char_at(e, __aux(name)) == 61:
+            return substr(e, __aux(name) + 1, __aux(e))
+        i += 1
+
+def __os_path_exists(p) -> bool:
+    return __syscall(21, p, 0, 0) == 0
+
+def __os_path_join(a, b):
+    if startswith(b, "/"):
+        return b
+    if __aux(a) == 0 or endswith(a, "/"):
+        return concat(a, b)
+    return concat(concat(a, "/"), b)
+
+def __os_path_basename(p):
+    i: int = rfind(p, "/")
+    return substr(p, i + 1, __aux(p))
+
+def __os_path_dirname(p):
+    i: int = rfind(p, "/")
+    if i < 0:
+        return ""
+    if i == 0:
+        return "/"
+    return substr(p, 0, i)
+
+def __os_remove(p):
+    if __syscall(87, p, 0, 0) != 0:
+        raise FileNotFoundError(concat("No such file or directory: ", __repr(p)))
+    return None
+
+def __os_getcwd():
+    buf = alloc(4096)
+    n: int = __syscall(79, buf, 4096, 0)
+    if n <= 0:
+        return "."
+    return substr(buf, 0, __find(buf, chr(0), 0))
+
+def __time_time():
+    return __clock(0) / 1000000000
+
+def __time_time_ns() -> int:
+    return __clock(0)
+
+def __time_perf_counter():
+    return __clock(1) / 1000000000
+
+def __time_perf_counter_ns() -> int:
+    return __clock(1)
+
+def __time_monotonic():
+    return __clock(1) / 1000000000
+
+def __time_sleep(s):
+    ns: int = int(s * 1000000000)
+    ts = __new(16, 4, 16)
+    __st(ts, 0, ns // 1000000000)
+    __st(ts, 1, ns % 1000000000)
+    __syscall(35, ts, 0, 0)
+    return None
+
+def __exctype():
+    return __excval()
+
+def dict(xs=None):
+    r = __dict()
+    if xs is None:
+        return r
+    if __tag(xs) == 3:
+        for k in __ld(xs, 5):
+            __dset(r, k, xs[k])
+        return r
+    for p in xs:
+        __dset(r, p[0], p[1])
+    return r
+
+def zip__2(a, b):
+    a = __iter(a, 0)
+    b = __iter(b, 0)
+    n: int = min(len(a), len(b))
+    r = list(n)
+    i: int = 0
+    while i < n:
+        r[i] = (a[i], b[i])
+        i += 1
+    return r
+
+def zip__3(a, b, c):
+    a = __iter(a, 0)
+    b = __iter(b, 0)
+    c = __iter(c, 0)
+    n: int = min(min(len(a), len(b)), len(c))
+    r = list(n)
+    i: int = 0
+    while i < n:
+        r[i] = (a[i], b[i], c[i])
+        i += 1
+    return r
+
+def enumerate__1(xs):
+    return enumerate__2(xs, 0)
+
+def enumerate__2(xs, start):
+    xs = __iter(xs, 0)
+    n: int = len(xs)
+    r = list(n)
+    i: int = 0
+    while i < n:
+        r[i] = (i + start, xs[i])
+        i += 1
+    return r
+
+def reversed(xs):
+    xs = __iter(xs, 0)
+    n: int = len(xs)
+    r = list(n)
+    i: int = 0
+    while i < n:
+        r[i] = xs[n - 1 - i]
+        i += 1
+    return r
+
+def any(xs) -> bool:
+    for x in xs:
+        if x:
+            return True
+    return False
+
+def all(xs) -> bool:
+    for x in xs:
+        if not x:
+            return False
+    return True
+
+def divmod(a, b):
+    return (a // b, a % b)
+
+def __radixp(x, base: int, pre):
+    if x < 0:
+        return concat(concat("-", pre), __radix(-x, base, 0))
+    return concat(pre, __radix(x, base, 0))
+
+def hex(x):
+    return __radixp(x, 16, "0x")
+
+def bin(x):
+    return __radixp(x, 2, "0b")
+
+def oct(x):
+    return __radixp(x, 8, "0o")
+
+def pow__2(a, b):
+    return a ** b
+
+def pow__3(a, b, m):
+    r = 1
+    a = a % m
+    while b > 0:
+        if b & 1:
+            r = r * a % m
+        a = a * a % m
+        b = b >> 1
+    return r
+
+def input__0():
+    return input__1("")
+
+def input__1(prompt):
+    if __aux(prompt) > 0:
+        __writes(prompt)
+    __flush()
+    l = __Stream(0).readline()
+    if endswith(l, "\n"):
+        return substr(l, 0, __aux(l) - 1)
+    if __aux(l) == 0:
+        raise EOFError("EOF when reading a line")
+    return l
+
+class EOFError(Exception):
+    pass

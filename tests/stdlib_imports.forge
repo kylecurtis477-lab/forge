@@ -1,0 +1,19 @@
+import sys, os
+import time
+import mod_helper
+import mod_helper as h
+from mod_util2 import dbl
+from os.path import join
+from time import perf_counter
+print(mod_helper.sq(5), h.twice(4), dbl(3), mod_helper.K, mod_helper.Pt(2).a)
+print(len(sys.argv), sys.argv[1:])
+t0 = time.time()
+p0 = perf_counter()
+time.sleep(0.01)
+print(time.time() - t0 >= 0.01, perf_counter() - p0 > 0.005)
+print(os.path.join("a", "b"), join("x", "y"), os.path.basename("/x/y.txt"), os.path.dirname("/x/y.txt"))
+print(os.path.exists("tests/stdlib_imports.forge"), os.path.exists("tests/nope.forge"))
+print(os.getenv("FORGE_SURELY_UNSET_X", "dflt"))
+sys.stdout.write("out\n")
+print(sys.maxsize)
+print(len(os.getcwd()) > 0)
