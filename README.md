@@ -71,26 +71,22 @@ main()
   - `addq`/`subq` with immediates for `+=`/`-=`.
 - Runtime (asm): direct syscalls, a 2 GiB bump allocator in `.bss` with no GC, and unbuffered looped `write` syscalls.
 
+## Phase 2 additions
+String `+`/`*`, f-strings, `for x in list/str/dict`, `enumerate`, tuple assign/swap, ternary, comprehensions with filters, `+=` etc. on names/fields/indexes, dicts (open-addressing hash map, insertion-ordered), slices, `split`/`join`/`upper`, `sorted`/`min`/`max`, classes with `__init__` and methods and per-class field layout (dynamic dispatch by name), Python floor `//` and `%`.
+Runtime errors carry source lines: index out of range, missing key, division by zero (`tests/runtime`).
+Memory: a bump arena; `m = mark()` ... `release(m)` frees everything allocated in between (`tests/t4.forge`). There is no GC.
+Optimizer: multi-pass int-type inference, magic-number division by constants, top-5 weighted locals/params in callee-saved registers, scratch registers for temporaries, inlining of single-`return` leaf functions, hoisting of invariant safe calls in loops, jump-based conditions and rotated loops, and dead-function pruning.
+
 ## Benchmarks
-Measured on this box: best-of-3 wall clock. Rust uses `rustc -C opt-level=3`. CPython is 3.13.5.
+
+Best of 3 wall clock. Rust: rustc -C opt-level=3 (unstripped binaries). Phase 1 Forge: fib 0.015s, loop 0.274s, strbuild 0.093s, lists 0.189s.
 
 | bench | Forge run | Rust -O3 run | CPython run | Forge compile | Rust compile | Forge bin | Rust bin | output |
 |---|---|---|---|---|---|---|---|---|
-| fib | 0.015s | 0.006s | 0.20s | 8ms | 216ms | 10,008 B | 11,395,072 B | 2178309 |
-| loop | 0.274s | 0.080s | 5.87s | 12ms | 259ms | 10,008 B | 11,395,024 B | 199999997 |
-| strbuild | 0.093s | 0.071s | 0.12s | 9ms | 468ms | 10,072 B | 11,399,736 B | 6888890 |
-| lists | 0.189s | 0.136s | 3.22s | 7ms | 258ms | 10,200 B | 11,399,120 B | 49950000000 |
-
-How to read the results:
-- **Forge is 1.3–3.4× slower than Rust on every benchmark** and 1.3–21× faster than CPython.
-- Why Forge trails:
-  - It does no inlining or loop optimization.
-  - `%`/`/` use `idiv`, where LLVM uses multiply-by-magic-constant.
-  - Complex expressions still go through the stack.
-  - Locals beyond 5 use memory.
-  - It has no bounds checks, which helps Forge, not Rust.
-  - LLVM transforms recursive `fib` aggressively.
-- Forge wins on compile time (~10 ms vs ~250–470 ms) and binary size (~10 KB vs 11 MB unstripped Rust; about 390 KB stripped).
+| fib | 0.016s | 0.007s | 0.20s | 189ms | 259ms | 20,960 B | 11,395,072 B | 2178309 |
+| loop | 0.099s | 0.077s | 5.99s | 116ms | 227ms | 20,984 B | 11,395,024 B | 199999997 |
+| strbuild | 0.097s | 0.070s | 0.12s | 116ms | 435ms | 21,064 B | 11,399,736 B | 6888890 |
+| lists | 0.200s | 0.092s | 3.22s | 107ms | 275ms | 21,248 B | 11,399,120 B | 49950000000 |
 
 ## Limitations
 - No GC: memory is never freed.
@@ -100,3 +96,5 @@ How to read the results:
 - Field offsets are resolved by field name across all classes, so a shared field name must be at the same position in every class.
 - No bounds checks, and errors stop at the first one.
 - Requires binutils `as`/`ld` and Linux x86-64.
+
+- Phase 2 gaps: no bool type (comparisons print 1/0), no floats, no GC (arena only), no inheritance, default args, nested defs, lambda, try/except, with, generators, or chained comparisons, and no `print(sep=)`. `field_type` is untyped, and hoisting assumes builtins are not shadowed. Output goes through `as`/`ld` (no direct ELF emission).
