@@ -21,6 +21,11 @@ rt_init:
     syscall
     mov %rax, rt_hp(%rip)
     mov %rax, rt_hlo(%rip)
+    mov %rax, %rdi
+    movabs $0x1000000000, %rsi
+    mov $14, %edx
+    mov $28, %eax
+    syscall
     mov $9, %eax
     xor %edi, %edi
     mov $0x800000, %esi
@@ -555,9 +560,7 @@ rt_list:
     call rt_new_r
     pop %rcx
     mov %rax, 16(%r8)
-    mov %rax, %rdi
-    xor %eax, %eax
-    rep stosq
+    # heap memory is always handed out zeroed (fresh pages, madvised runs, swept slots)
     mov %r8, %rax
     ret
 rt_tag_r:

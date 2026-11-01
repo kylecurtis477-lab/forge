@@ -92,6 +92,9 @@ pdef = list(200000)
 fmin = list(MAXF)
 npall = 0
 lint = list(2000000)
+llst = list(2000000)
+lnl = list(65536)
+lsl = list(65536)
 nlint = 0
 
 cnm = list(2000)
@@ -802,6 +805,10 @@ def new_local(name, t, fixed):
             fi = flag_index(i)
             if fi >= 0 and lint[fi]:
                 t = T_INT
+            elif fi >= 0 and llst[fi]:
+                t = T_LIST
+    lnl[i] = 0
+    lsl[i] = 0
     ltyp[i] = t
     lreg[i] = 0
     if want_reg(name):
@@ -871,6 +878,11 @@ def store_var(name, line, t, mark):
                 mark = -1
         else:
             conflict_var(vkind, vidx)
+    if vkind == 2:
+        if t == T_LIST:
+            lsl[vidx] = 1
+        else:
+            lnl[vidx] = 1
     src = 0
     if mark >= 0 and nout == mark + 1:
         src = simple_src(out[mark])
@@ -2402,9 +2414,13 @@ def power_expr():
 pstop = -1
 
 def emit_getidx(line):
+    emit_getidx_t(line, 0)
+
+def emit_getidx_t(line, t):
     global u_getidx
-    e("cmpb $0, -1(%rax)")
-    e("jne 1f")
+    if t != T_LIST:
+        e("cmpb $0, -1(%rax)")
+        e("jne 1f")
     e("cmp (%rax), %rcx")
     e("jae 1f")
     e("mov 16(%rax), %rax")
@@ -2417,10 +2433,14 @@ def emit_getidx(line):
     emit_raw("2:\n")
 
 def emit_setidx(line):
+    emit_setidx_t(line, 0)
+
+def emit_setidx_t(line, t):
     # rdx = object, rcx = index, rax = value
     global u_setidx
-    e("cmpb $0, -1(%rdx)")
-    e("jne 1f")
+    if t != T_LIST:
+        e("cmpb $0, -1(%rdx)")
+        e("jne 1f")
     e("cmp (%rdx), %rcx")
     e("jae 1f")
     e("mov 16(%rdx), %rdx")
@@ -2523,7 +2543,7 @@ def postfix_expr():
                 ety = 0
                 continue
             lr(pstart, mark)
-            emit_getidx(line)
+            emit_getidx_t(line, ot)
             ety = 0
         elif is_op("."):
             pos += 1
@@ -3833,7 +3853,7 @@ def assign_one(a, b, vt, line, mark):
         e("mov %rax, %rcx")
         tpop(vmark, "%rax")
         e3("mov ", r, ", %rdx")
-        emit_setidx(line)
+        emit_setidx_t(line, ot)
         return 0
     pos = a
     pstop = lp
@@ -3889,6 +3909,8 @@ def stmt_aug(line, ap):
         if not r:
             die(line, concat(concat("undefined name '", name), "'"))
         lt = vty
+        if vkind == 2:
+            lnl[vidx] = 1
         pos = ap + 1
         if lt == T_INT and (str_eq(op, "+") or str_eq(op, "-") or str_eq(op, "&") or str_eq(op, "|") or str_eq(op, "^")):
             mark = nout
@@ -4081,8 +4103,16 @@ def env_begin(fi):
     nslots += 2
     envslot = nslots - 1
 
+def has_child(fi):
+    c = 0
+    while c < nfuncs:
+        if fpar[c] == fi + 1:
+            return 1
+        c += 1
+    return 0
+
 def func_end(fi):
-    global curf, nlint
+    global curf, nlint, nconf
     if fnone[fi]:
         e2(concat("mov ", B_NONE), ", %rax")
     else:
@@ -4131,6 +4161,10 @@ def func_end(fi):
         while i < nlocs and i < flcnt[fi]:
             if lint[flb[fi] + i] and ltyp[i] != T_INT:
                 lint[flb[fi] + i] = 0
+            ok = lsl[i] and not lnl[i] and not lfix[i] and not lint[flb[fi] + i] and not has_child(fi)
+            if ok != llst[flb[fi] + i]:
+                llst[flb[fi] + i] = ok
+                nconf += 1
             i += 1
     rank_regs(fi)
     curf = -1
