@@ -15,6 +15,7 @@ K_NL = 5
 K_IND = 6
 K_DED = 7
 K_EOF = 8
+K_FLT = 9
 
 T_INT = 1
 T_FLOAT = 5
@@ -39,6 +40,9 @@ dat = list(1000000)
 ndat = 0
 nlabel = 0
 nstr = 0
+nflt = 0
+flt_f = list(65536)
+flt_s = list(65536)
 pos = 0
 ety = 0
 vty = 0
@@ -71,6 +75,8 @@ nfuncs = 0
 pnames = list(200000)
 ptypes = list(200000)
 pintf = list(200000)
+pdef = list(200000)
+fmin = list(MAXF)
 npall = 0
 lint = list(2000000)
 nlint = 0
@@ -80,6 +86,7 @@ cfb = list(2000)
 cnf = list(2000)
 cdecl = list(2000)
 cinit = list(2000)
+cpar = list(2000)
 nclass = 0
 cfld = list(50000)
 ncfld = 0
@@ -154,6 +161,16 @@ def die(line, msg):
     eputs(concat(concat(concat("error: line ", str(uline(line))), ": "), msg))
     exit(1)
 
+soft_line = -1
+soft_msg = ""
+
+def soft_die(line, msg):
+    # a type error that may vanish once parameter types are re-inferred
+    global soft_line, soft_msg
+    if soft_line < 0:
+        soft_line = line
+        soft_msg = msg
+
 def find(lst, n, name):
     i = 0
     while i < n:
@@ -162,8 +179,60 @@ def find(lst, n, name):
         i += 1
     return -1
 
+mimp = list(256)
+nmimp = 0
+mimp_on = 0
+
+def tok_id_is(p, s):
+    return p >= 0 and tk[p] == K_ID and str_eq(tv[p], s)
+
+def math_tok(name, line):
+    if str_eq(name, "pi"):
+        add_tok(K_FLT, "3.141592653589793", line)
+    elif str_eq(name, "e"):
+        add_tok(K_FLT, "2.718281828459045", line)
+    elif str_eq(name, "tau"):
+        add_tok(K_FLT, "6.283185307179586", line)
+    elif str_eq(name, "inf"):
+        add_tok(K_FLT, "1e999", line)
+    elif str_eq(name, "nan"):
+        add_tok(K_ID, "__math_nan", line)
+        add_tok(K_OP, "(", line)
+        add_tok(K_OP, ")", line)
+    else:
+        add_tok(K_ID, concat("__math_", name), line)
+
+def add_id(name, line):
+    # math.f -> __math_f; names from "from math import a, b" -> __math_a, __math_b
+    global ntok, nmimp, mimp_on
+    if ntok >= 2 and tk[ntok - 1] == K_OP and str_eq(tv[ntok - 1], ".") and tok_id_is(ntok - 2, "math") and not tok_id_is(ntok - 3, "import"):
+        ntok -= 2
+        math_tok(name, line)
+        return 0
+    if mimp_on:
+        if nmimp < 256:
+            mimp[nmimp] = name
+            nmimp += 1
+        add_tok(K_ID, name, line)
+        return 0
+    if str_eq(name, "import") and tok_id_is(ntok - 1, "math") and tok_id_is(ntok - 2, "from"):
+        mimp_on = 1
+        add_tok(K_ID, name, line)
+        return 0
+    if nmimp > 0 and not (ntok >= 1 and tk[ntok - 1] == K_OP and str_eq(tv[ntok - 1], ".")) and not tok_id_is(ntok - 1, "def"):
+        i = 0
+        while i < nmimp:
+            if str_eq(mimp[i], name):
+                math_tok(name, line)
+                return 0
+            i += 1
+    add_tok(K_ID, name, line)
+    return 0
+
 def add_tok(k, v, line):
-    global ntok
+    global ntok, mimp_on
+    if k == K_NL:
+        mimp_on = 0
     tk[ntok] = k
     tv[ntok] = v
     tl[ntok] = line
@@ -262,6 +331,23 @@ OPS3 = ["//=", "<<=", ">>=", "**="]
 OPS2 = ["==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "->", "//", "**", "<<", ">>"]
 OPS1 = "+-*/%()[]{}:,=<>.&|^~;"
 
+def flt_text(t):
+    # literal text for the assembler's .double: drop '_' and make "1." / "1.e5" well-formed
+    n = len(t)
+    parts = list(2 * n + 2)
+    k = 0
+    i = 0
+    while i < n:
+        c = char_at(t, i)
+        if c != 95:
+            parts[k] = chr(c)
+            k += 1
+            if c == 46 and (i + 1 >= n or not is_digit(char_at(t, i + 1))):
+                parts[k] = "0"
+                k += 1
+        i += 1
+    return join(parts, k)
+
 def lex(src, line, inner):
     n = len(src)
     i = 0
@@ -317,6 +403,7 @@ def lex(src, line, inner):
             line += 1
         elif is_digit(c):
             v = 0
+            isf = 0
             if c == 48 and i + 1 < n and (char_at(src, i + 1) == ord("x") or char_at(src, i + 1) == ord("X")):
                 i += 2
                 while i < n and (is_hex(char_at(src, i)) or char_at(src, i) == 95):
@@ -324,11 +411,32 @@ def lex(src, line, inner):
                         v = v * 16 + hexval(char_at(src, i))
                     i += 1
             else:
+                st = i
                 while i < n and (is_digit(char_at(src, i)) or char_at(src, i) == 95):
                     if char_at(src, i) != 95:
                         v = v * 10 + char_at(src, i) - 48
                     i += 1
-            add_tok(K_NUM, v, line)
+                isf = 0
+                if i < n and char_at(src, i) == 46 and not (i + 1 < n and char_at(src, i + 1) == 46):
+                    isf = 1
+                    i += 1
+                    while i < n and (is_digit(char_at(src, i)) or char_at(src, i) == 95):
+                        i += 1
+                if i < n and (char_at(src, i) == 101 or char_at(src, i) == 69):
+                    j = i + 1
+                    if j < n and (char_at(src, j) == 43 or char_at(src, j) == 45):
+                        j += 1
+                    if j < n and is_digit(char_at(src, j)):
+                        isf = 1
+                        i = j
+                        while i < n and is_digit(char_at(src, i)):
+                            i += 1
+                if isf:
+                    v = flt_text(substr(src, st, i))
+            if isf:
+                add_tok(K_FLT, v, line)
+            else:
+                add_tok(K_NUM, v, line)
         elif is_alpha(c):
             st = i
             while i < n and (is_alpha(char_at(src, i)) or is_digit(char_at(src, i))):
@@ -336,7 +444,7 @@ def lex(src, line, inner):
             if i - st == 1 and c == ord("f") and i < n and (char_at(src, i) == 34 or char_at(src, i) == 39):
                 i = lex_fstring(src, i + 1, char_at(src, i), line, buf)
             else:
-                add_tok(K_ID, substr(src, st, i), line)
+                add_id(substr(src, st, i), line)
         elif c == 34 or c == 39:
             q = c
             i += 1
@@ -687,6 +795,9 @@ def store_var(name, line, t, mark):
         if (vkind == 1 and ptypes[fpb[curf] + vidx] == T_INT) or (vkind == 2 and lfix[vidx]) or (vkind == 3 and gtype[vidx] == T_INT):
             if t == T_BOOL:
                 e("and $1, %eax")
+                mark = -1
+            elif t == 0:
+                unbool()
                 mark = -1
         else:
             conflict_var(vkind, vidx)
@@ -1096,7 +1207,7 @@ def fn_lookup(name, n):
     # a plain (non-method) function with this name and arity that is not shadowed
     i = 0
     while i < nfuncs:
-        if fmeth[i] != 1 and fargs[i] == n and not fshadow[i] and str_eq(fnames[i], name):
+        if fmeth[i] != 1 and fmin[i] <= n and n <= fargs[i] and not fshadow[i] and str_eq(fnames[i], name):
             return i
         i += 1
     return -1
@@ -1137,12 +1248,25 @@ def ret_type(f):
     return 0
 
 argf = -1
+argskip = 0
+
+def unbool():
+    # a dynamically typed value entering an int slot: a bool becomes 0/1
+    e("mov %rax, %rcx")
+    e("and $-2, %rcx")
+    e("btc $62, %rcx")
+    e("test %rcx, %rcx")
+    e("jnz 1f")
+    e("and $1, %eax")
+    e("1:")
 
 def arg_check(f, i):
     # a non-int argument contradicts the "always int" assumption for that parameter
     global nconf
     if f >= 0 and i < fargs[f] and ety == T_BOOL and ptypes[fpb[f] + i] == T_INT:
         e("and $1, %eax")
+    elif f >= 0 and i < fargs[f] and ety == 0 and ptypes[fpb[f] + i] == T_INT:
+        unbool()
     if f >= 0 and i < fargs[f] and ety != T_INT:
         k = fpb[f] + i
         if pintf[k]:
@@ -1151,14 +1275,18 @@ def arg_check(f, i):
 
 def push_args():
     # parses "(a, b, ...)" pushing each value; returns the count
-    global pos, argf
+    global pos, argf, argskip
     f = argf
+    sk = argskip
     argf = -1
+    argskip = 0
+    if f >= 0 and need_slots(f, sk):
+        return push_slots(f, sk)
     expect("(")
     n = 0
     while not is_op(")"):
         expr()
-        arg_check(f, n)
+        arg_check(f, sk + n)
         e("push %rax")
         n += 1
         if is_op(","):
@@ -1167,6 +1295,85 @@ def push_args():
             die(cur_line(), "expected ',' or ')' in call")
     pos += 1
     return n
+
+def skip_arg(p):
+    # index of the ',' or ')' ending the expression that starts at p
+    d = 0
+    while 1:
+        if tk[p] == K_EOF:
+            return p
+        if tk[p] == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                if d == 0:
+                    return p
+                d -= 1
+            elif str_eq(v, ",") and d == 0:
+                return p
+        p += 1
+
+def is_kwarg(p):
+    return tk[p] == K_ID and tok_is_op(p + 1, "=")
+
+def need_slots(f, sk):
+    if count_args(pos) < fargs[f] - sk:
+        return 1
+    p = pos + 1
+    while not tok_is_op(p, ")") and tk[p] != K_EOF:
+        if is_kwarg(p):
+            return 1
+        p = skip_arg(p)
+        if tok_is_op(p, ","):
+            p += 1
+    return 0
+
+def push_slots(f, sk):
+    # call with keyword arguments and/or defaults: evaluate each parameter slot in order
+    global pos
+    np = fargs[f] - sk
+    spos = list(np + 1)
+    k = 0
+    while k < np:
+        spos[k] = -1
+        k += 1
+    line = cur_line()
+    p = pos + 1
+    i = 0
+    while not tok_is_op(p, ")") and tk[p] != K_EOF:
+        if is_kwarg(p):
+            k = 0
+            while k < np and not str_eq(pnames[fpb[f] + sk + k], tv[p]):
+                k += 1
+            if k >= np:
+                die(line, concat(concat(concat(concat("unexpected keyword argument '", tv[p]), "' to "), fnames[f]), "()"))
+            if spos[k] >= 0:
+                die(line, concat(concat("multiple values for argument '", tv[p]), "'"))
+            spos[k] = p + 2
+        else:
+            if i >= np:
+                die(line, concat(concat("too many arguments to ", fnames[f]), "()"))
+            spos[i] = p
+            i += 1
+        p = skip_arg(p)
+        if tok_is_op(p, ","):
+            p += 1
+    endp = p + 1
+    k = 0
+    while k < np:
+        q = spos[k]
+        if q < 0:
+            q = pdef[fpb[f] + sk + k]
+        if q < 0:
+            die(line, concat(concat(concat(concat("missing argument '", pnames[fpb[f] + sk + k]), "' to "), fnames[f]), "()"))
+        pos = q
+        expr()
+        arg_check(f, sk + k)
+        e("push %rax")
+        k += 1
+    pos = endp
+    return np
 
 def count_args(p):
     # number of top-level arguments of the call whose '(' is at p
@@ -1198,6 +1405,29 @@ NBI = 29
 def builtin_call(name, line):
     # returns 1 if name( ... ) was compiled as a builtin
     global pos, ety, nout
+    if str_eq(name, "isinstance"):
+        expect("(")
+        expr()
+        e("push %rax")
+        call_internal("__typeid", 1)
+        expect(",")
+        if is_op("("):
+            pos += 1
+            while not is_op(")"):
+                type_test(line)
+                if is_op(","):
+                    pos += 1
+            pos += 1
+        else:
+            type_test(line)
+        expect(")")
+        e2(concat("mov ", B_FALSE), ", %rax")
+        e("jmp 2f")
+        emit_raw("1:\n")
+        e2(concat("mov ", B_TRUE), ", %rax")
+        emit_raw("2:\n")
+        ety = T_BOOL
+        return 1
     if str_eq(name, "print"):
         compile_print(line)
         return 1
@@ -1305,6 +1535,33 @@ def builtin_call(name, line):
         ety = BI_TY[b]
         return 1
     return 0
+
+TY_NAMES = ["int", "str", "list", "dict", "float", "bool", "object"]
+
+def type_test(line):
+    # %rax holds __typeid(x); jump to 1f when it matches the type named at pos
+    global pos
+    nm = ident()
+    b = find(TY_NAMES, 7, nm)
+    if b == 6:
+        e("jmp 1f")
+        return 0
+    if b >= 0:
+        e3("cmp $", str(-1 - b), ", %rax")
+        e("je 1f")
+        if b == 0:
+            e("cmp $-6, %rax")
+            e("je 1f")
+        return 0
+    c = find(cnm, nclass, nm)
+    if c < 0:
+        die(line, concat(concat("isinstance: unknown type '", nm), "'"))
+    d = 0
+    while d < nclass:
+        if is_sub(d, c):
+            e3("cmp $", str(d + 1), ", %rax")
+            e("je 1f")
+        d += 1
 
 def emit_len():
     global ety
@@ -1784,7 +2041,7 @@ def arith(op, start, mark, lt, rt, line):
         return 0
     if code == 0 and (lt == T_STR or rt == T_STR):
         if is_num(lt) or is_num(rt) or lt == T_LIST or rt == T_LIST:
-            die(line, "cannot add str and a non-str")
+            soft_die(line, "cannot add str and a non-str")
         lr(start, mark)
         e("push %rax")
         e("push %rcx")
@@ -1951,9 +2208,8 @@ def unary_expr():
             e("neg %rax")
             return 0
         t = ety
-        e("mov %rax, %rcx")
-        e("xor %eax, %eax")
-        call_binop(1, cur_line())
+        e("push %rax")
+        call_internal("__neg", 1)
         ety = 0
         if t == T_FLOAT or t == T_BOOL:
             ety = t
@@ -1981,10 +2237,11 @@ def power_expr():
         pos += 1
         lt = ety
         e("push %rax")
+        p0 = pos
         unary_expr()
         rt = ety
         e("push %rax")
-        if lt == T_INT and rt == T_INT:
+        if lt == T_INT and rt == T_INT and tk[p0] == K_NUM:
             call_internal("__ipow", 2)
             ety = T_INT
             return 0
@@ -2175,28 +2432,43 @@ def compile_slice(line):
 def method_call(name, line):
     # receiver in %rax, pos at '('
     global ety
+    global argf, argskip
     rt = ety
     e("push %rax")
-    n = push_args()
     f = -1
+    cnt = 0
+    one = -1
+    same = 1
     if rt > 10:
         f = method_of(rt - 11, name)
         if f < 0:
             die(line, concat(concat(concat("class ", cnm[rt - 11]), " has no method "), name))
-    cnt = 0
-    one = -1
+        if overridden(rt - 11, name, f):
+            one = f
+            f = -1
+            cnt = 2
+            same = 0
     if f < 0 and rt <= 10 and rt != T_STR and rt != T_LIST and rt != T_DICT:
         c = 0
         while c < nclass:
             g = method_of(c, name)
             if g >= 0:
+                if one >= 0 and g != one:
+                    same = 0
                 cnt += 1
                 one = g
             c += 1
+    if f >= 0:
+        argf = f
+        argskip = 1
+    elif one >= 0:
+        argf = one
+        argskip = 1
+    n = push_args()
     plain = resolve_fn(concat("__m_", name), n + 1)
     if plain < 0:
         plain = resolve_fn(name, n + 1)
-    if f < 0 and cnt == 1 and plain < 0:
+    if f < 0 and cnt > 0 and same and plain < 0:
         f = one
     if f >= 0:
         if fargs[f] != n + 1:
@@ -2251,12 +2523,107 @@ def dynm_add(name, n, plain):
     ndynm += 1
 
 def method_of(c, name):
-    i = 0
-    while i < nfuncs:
-        if fmeth[i] == 1 and fcls[i] == c and str_eq(fnames[i], name):
-            return i
-        i += 1
+    while c >= 0:
+        i = 0
+        while i < nfuncs:
+            if fmeth[i] == 1 and fcls[i] == c and str_eq(fnames[i], name):
+                return i
+            i += 1
+        c = cpar[c]
     return -1
+
+def is_sub(d, c):
+    while d >= 0:
+        if d == c:
+            return 1
+        d = cpar[d]
+    return 0
+
+def overridden(c, name, f):
+    # some subclass of c resolves name to a different method
+    d = 0
+    while d < nclass:
+        if d != c and is_sub(d, c) and method_of(d, name) != f:
+            return 1
+        d += 1
+    return 0
+
+def digcmp(sig, k, ref):
+    # compare digit list sig[0:k] with digit string ref (as 0.SIG vs 0.REF)
+    i = 0
+    while i < k or i < len(ref):
+        a = 48
+        b = 48
+        if i < k:
+            a = sig[i]
+        if i < len(ref):
+            b = char_at(ref, i)
+        if a != b:
+            return a - b
+        i += 1
+    return 0
+
+def flt_class(t):
+    # the assembler rejects literals that overflow or underflow to zero: 0 ok, 1 zero, 2 inf
+    n = len(t)
+    sig = list(n + 1)
+    k = 0
+    m = 0
+    dot = 0
+    i = 0
+    while i < n and char_at(t, i) != 101 and char_at(t, i) != 69:
+        c = char_at(t, i)
+        if c == 46:
+            dot = 1
+        elif k > 0 or c != 48:
+            sig[k] = c
+            k += 1
+            if not dot:
+                m += 1
+        elif dot:
+            m -= 1
+        i += 1
+    if k == 0:
+        return 0
+    if i < n:
+        i += 1
+        sg = 1
+        if char_at(t, i) == 45:
+            sg = -1
+            i += 1
+        elif char_at(t, i) == 43:
+            i += 1
+        x = 0
+        while i < n:
+            if x < 100000:
+                x = x * 10 + char_at(t, i) - 48
+            i += 1
+        m += sg * x
+    if m > 309 or (m == 309 and digcmp(sig, k, "179769313486231580793728971405301") >= 0):
+        return 2
+    if m < -323 or (m == -323 and digcmp(sig, k, "24703282292062327208828439643411") <= 0):
+        return 1
+    return 0
+
+def emit_flt(t):
+    global nstr, nflt
+    nstr += 1
+    emit_dat(".p2align 3\n")
+    emit_dat("    .quad 360287970189639680\n")
+    fc = flt_class(t)
+    if fc == 1:
+        emit_dat(concat(concat("F", str(nstr)), ": .quad 0\n"))
+    elif fc == 2:
+        emit_dat(concat(concat("F", str(nstr)), ": .quad 9218868437227405312\n"))
+    else:
+        # exact decimal->double happens at startup (F_init calls __fparse on the literal text)
+        fl = concat("F", str(nstr))
+        emit_dat(concat(fl, ": .quad 0\n"))
+        flt_f[nflt] = fl
+        flt_s[nflt] = emit_str(t)
+        nflt += 1
+        return fl
+    return concat("F", str(nstr))
 
 def emit_str(s):
     global nstr
@@ -2275,13 +2642,18 @@ def emit_str(s):
     return concat("S", str(nstr))
 
 def primary():
-    global pos, ety
+    global pos, ety, argf, argskip
     line = cur_line()
     k = tk[pos]
     if k == K_NUM:
         e3("mov $", str(tv[pos]), ", %rax")
         pos += 1
         ety = T_INT
+        return 0
+    if k == K_FLT:
+        e3("lea ", emit_flt(tv[pos]), "(%rip), %rax")
+        pos += 1
+        ety = T_FLOAT
         return 0
     if k == K_STR:
         s = tv[pos]
@@ -2307,6 +2679,24 @@ def primary():
             e("mov $0, %rax")
             ety = T_INT
             return 0
+        if str_eq(name, "super") and tok_is_op(pos, "(") and tok_is_op(pos + 1, ")") and tok_is_op(pos + 2, ".") and tk[pos + 3] == K_ID:
+            if curf < 0 or fmeth[curf] != 1 or cpar[fcls[curf]] < 0:
+                die(line, "super() used outside a method of a subclass")
+            mname = tv[pos + 3]
+            f = method_of(cpar[fcls[curf]], mname)
+            if f < 0:
+                die(line, concat(concat("base class has no method '", mname), "'"))
+            pos += 4
+            e3("mov ", var_ref(pnames[fpb[curf]]), ", %rax")
+            e("push %rax")
+            argf = f
+            argskip = 1
+            n = push_args()
+            if n + 1 != fargs[f]:
+                die(line, concat(concat("wrong number of arguments to method ", mname), "()"))
+            call_f(f, n + 1)
+            ety = ret_type(f)
+            return 0
         if str_eq(name, "__name__"):
             e3("lea ", emit_str("__main__"), "(%rip), %rax")
             ety = T_STR
@@ -2315,6 +2705,9 @@ def primary():
             c = find(cnm, nclass, name)
             if c >= 0 and not var_ref(name):
                 f = ctor_of(c)
+                if cinit[c] >= 0:
+                    argf = cinit[c]
+                    argskip = 1
                 n = push_args()
                 if n != fargs[f]:
                     die(line, concat(concat("wrong number of arguments to ", name), "()"))
@@ -3601,14 +3994,24 @@ def reg_func(p, c):
     pos = p + 2
     expect("(")
     n = 0
+    nd = 0
+    nmin = 0
     while not is_op(")"):
         pn = ident()
         t = 0
         if is_op(":"):
             pos += 1
             t = parse_type()
+        pdef[npall] = -1
         if is_op("="):
-            die(tl[pos], "default parameter values are not supported")
+            pdef[npall] = pos + 1
+            pos = skip_arg(pos + 1)
+        elif nd > 0:
+            die(tl[pos], "non-default parameter follows default parameter")
+        else:
+            nmin += 1
+        if pdef[npall] >= 0:
+            nd += 1
         pnames[npall] = pn
         ptypes[npall] = t
         pintf[npall] = c < 0 and t == 0 and not starts(name, "__")
@@ -3618,6 +4021,7 @@ def reg_func(p, c):
             pos += 1
     pos += 1
     fargs[fi] = n
+    fmin[fi] = nmin
     fret[fi] = 0
     if is_op("->"):
         pos += 1
@@ -3668,7 +4072,18 @@ def reg_class(p):
     nclass += 1
     cnm[c] = tv[p + 1]
     cinit[c] = -1
+    cpar[c] = -1
     cfb[c] = ncfld
+    cnf[c] = 0
+    if tok_is_op(p + 2, "(") and tk[p + 3] == K_ID and tok_is_op(p + 4, ")") and not str_eq(tv[p + 3], "object"):
+        b = find(cnm, nclass - 1, tv[p + 3])
+        if b < 0:
+            die(tl[p], concat(concat("unknown base class '", tv[p + 3]), "'"))
+        cpar[c] = b
+        k = 0
+        while k < cnf[b]:
+            add_field(c, cfld[cfb[b] + k])
+            k += 1
     q = p + 2
     while not tok_is_op(q, ":"):
         q += 1
@@ -3691,6 +4106,10 @@ def reg_class(p):
         else:
             r = skip_stmt(r)
     cdecl[c] = ncfld - cfb[c]
+    if cinit[c] < 0 and cpar[c] >= 0:
+        cinit[c] = cinit[cpar[c]]
+        if cinit[c] < 0:
+            cdecl[c] = cdecl[cpar[c]]
     # fields assigned through self.X in methods
     m = m0
     while m < nfuncs:
@@ -3723,8 +4142,10 @@ def reg_class(p):
     fbret[fi] = 0
     if cinit[c] >= 0:
         fargs[fi] = fargs[cinit[c]] - 1
+        fmin[fi] = fmin[cinit[c]] - 1
     else:
         fargs[fi] = cdecl[c]
+        fmin[fi] = cdecl[c]
     return endp
 
 def add_field(c, name):
@@ -3868,6 +4289,8 @@ def reach_all():
     mark_root("__binop", 4, 1)
     mark_root("__cmpop", 3, 1)
     mark_root("__ffloordiv", 2, 1)
+    mark_root("__neg", 1, 1)
+    mark_root("__fparse", 2, nflt > 0)
     i = 0
     while i < ndynm:
         if dynm_fb[i] >= 0:
@@ -3890,11 +4313,12 @@ def mark_root(name, n, used):
             freach[f] = 1
 
 def one_pass():
-    global nout, ndat, nlabel, nstr, nce, ndynm, ndynf, u_getidx, u_setidx, u_add, u_eq, u_truth, nconf
+    global nflt, nout, ndat, nlabel, nstr, nce, ndynm, ndynf, u_getidx, u_setidx, u_add, u_eq, u_truth, nconf
     nout = 0
     ndat = 0
     nlabel = 0
     nstr = 0
+    nflt = 0
     nce = 0
     ndynm = 0
     ndynf = 0
@@ -3904,7 +4328,7 @@ def one_pass():
     u_eq = 0
     u_truth = 0
     nconf = 0
-    emit_raw(".text\n.globl _start\n_start:\n    mov %rsp, %rdi\n    call rt_init\n    call f___main\n    jmp rt_exit0\n")
+    emit_raw(".text\n.globl _start\n_start:\n    mov %rsp, %rdi\n    call rt_init\n    call F_init\n    call f___main\n    jmp rt_exit0\n")
     f = 0
     while f < nfuncs:
         fos[f] = 0
@@ -3915,9 +4339,19 @@ def one_pass():
             compile_def(f)
         f += 1
     compile_main(fmain)
+    emit_raw("F_init:\n")
+    if nflt > 0:
+        fp = fn_lookup("__fparse", 2)
+        i = 0
+        while i < nflt:
+            emit_raw(concat(concat("    lea ", flt_s[i]), "(%rip), %rax\n    push %rax\n    push $0\n"))
+            emit_raw(concat(concat("    call ", flabel[fp]), "\n    add $16, %rsp\n    mov (%rax), %rcx\n"))
+            emit_raw(concat(concat("    mov %rcx, ", flt_f[i]), "(%rip)\n"))
+            i += 1
+    emit_raw("    ret\n")
 
 def forge_main():
-    global PRETOK, PRE, passno
+    global PRETOK, PRE, passno, soft_line
     if argc() < 3:
         eputs("usage: forgec <input.forge> <output.s>")
         exit(2)
@@ -3932,8 +4366,11 @@ def forge_main():
     prescan()
     passno = 0
     while 1:
+        soft_line = -1
         one_pass()
         passno += 1
+        if soft_line >= 0 and nconf == 0:
+            die(soft_line, soft_msg)
         if passno >= 2 and nconf == 0:
             break
         if passno > 40:

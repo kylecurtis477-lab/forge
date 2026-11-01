@@ -1,0 +1,92 @@
+class Shape:
+    def __init__(self, name, sides=0):
+        self.name = name
+        self.sides = sides
+
+    def area(self):
+        return 0
+
+    def describe(self):
+        return f"{self.name} with {self.sides} sides, area {self.area()}"
+
+    def __str__(self):
+        return "Shape(" + self.name + ")"
+
+
+class Rect(Shape):
+    def __init__(self, w, h):
+        super().__init__("rect", 4)
+        self.w = w
+        self.h = h
+
+    def area(self):
+        return self.w * self.h
+
+
+class Square(Rect):
+    def __init__(self, s):
+        super().__init__(s, s)
+        self.name = "square"
+
+    def describe(self):
+        return "Square! " + super().describe()
+
+
+class Circle(Shape):
+    def __init__(self, r):
+        super().__init__("circle")
+        self.r = r
+
+    def area(self):
+        return 3.14159 * self.r * self.r
+
+    def __repr__(self):
+        return f"Circle(r={self.r})"
+
+
+class Animal:
+    def speak(self):
+        return "..."
+
+    def intro(self):
+        return "I say " + self.speak()
+
+
+class Dog(Animal):
+    def speak(self):
+        return "Woof"
+
+
+class Puppy(Dog):
+    pass
+
+
+def greet(name, greeting="Hello", punct="!"):
+    return greeting + ", " + name + punct
+
+
+def main():
+    shapes = [Shape("blob"), Rect(2, 3), Square(5), Circle(1.5)]
+    for s in shapes:
+        print(s.describe())
+    total = 0.0
+    for s in shapes:
+        total += s.area()
+    print("total", total)
+    r = Rect(4, 5)
+    print(r.area(), r.name, r.sides)
+    sq = Square(3)
+    print(sq.area(), sq.describe())
+    print(isinstance(sq, Rect), isinstance(sq, Shape), isinstance(r, Square), isinstance(sq, Circle))
+    print(isinstance(3, int), isinstance(True, int), isinstance(3.0, float), isinstance("x", str))
+    print(isinstance([1], list), isinstance({}, dict), isinstance(3, (str, float)), isinstance(3, (str, int)))
+    print(isinstance(r, (Circle, Rect)), isinstance(5, Shape), isinstance(r, object))
+    print(str(sq), Circle(2), [Circle(1), Circle(2)])
+    print(Puppy().intro(), Dog().intro(), Animal().intro())
+    animals = [Animal(), Dog(), Puppy()]
+    print([a.speak() for a in animals])
+    print(greet("Bob"), greet("Ann", "Hi"), greet("Cy", punct="?"), greet(punct=".", name="Di"))
+    print(greet("Ed", greeting="Yo", punct="!!"))
+
+
+main()

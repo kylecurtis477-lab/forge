@@ -84,6 +84,8 @@ def __str(x) -> str:
         return x
     if t < 0:
         return __itos_raw(x)
+    if t == 2:
+        return x.__str__()
     return __repr(x)
 
 def __brepr(x) -> str:
@@ -128,8 +130,33 @@ def __repr(x) -> str:
             i += 1
         append(parts, "}")
     else:
-        return "<object>"
+        return x.__repr__()
     return join(parts, __ld(parts, 0))
+
+def __typeid(x) -> int:
+    # class index + 1 for objects; -1 int, -2 str, -3 list, -4 dict, -5 float, -6 bool
+    t: int = __tag(x)
+    if t < 0:
+        return -1
+    if t == 2:
+        return __aux(x)
+    if t == 1:
+        return -2
+    if t == 0:
+        return -3
+    if t == 3:
+        return -4
+    if t == 5:
+        return -5
+    if t == 6:
+        return -6
+    return -7
+
+def __m___str__(o) -> str:
+    return o.__repr__()
+
+def __m___repr__(o) -> str:
+    return "<object>"
 
 def __pr(x):
     t: int = __tag(x)
@@ -138,7 +165,7 @@ def __pr(x):
     elif t < 0:
         __wint(x)
     else:
-        __writes(__repr(x))
+        __writes(__str(x))
     return 0
 
 def __isnum(x) -> int:
@@ -173,11 +200,427 @@ def __cmpop(a, b, op: int) -> int:
         return __lt(b, a) == 0
     return __lt(a, b) == 0
 
+def __neg(x):
+    if __tag(x) == 5:
+        return __ffrombits(__fbits(x) ^ (1 << 63))
+    return 0 - x
+
 def __ffloordiv(a, b):
     return __math(a / b, 1)
 
+# ---- arbitrary-precision naturals (little-endian base 2^32 limbs) for exact float<->decimal ----
+def __bn_norm(a):
+    while len(a) > 0 and a[len(a) - 1] == 0:
+        pop(a)
+    return a
+
+def __bn(v: int):
+    a = []
+    while v > 0:
+        append(a, v & 4294967295)
+        v = v >> 32
+    return a
+
+def __bn_muls(a, m: int):
+    r = []
+    c: int = 0
+    n: int = len(a)
+    i: int = 0
+    while i < n:
+        x: int = a[i]
+        t: int = x * m + c
+        append(r, t & 4294967295)
+        c = t >> 32
+        i += 1
+    while c > 0:
+        append(r, c & 4294967295)
+        c = c >> 32
+    return r
+
+def __bn_add(a, b):
+    na: int = len(a)
+    nb: int = len(b)
+    r = []
+    c: int = 0
+    i: int = 0
+    while i < na or i < nb:
+        t: int = c
+        if i < na:
+            x: int = a[i]
+            t = t + x
+        if i < nb:
+            y: int = b[i]
+            t = t + y
+        append(r, t & 4294967295)
+        c = t >> 32
+        i += 1
+    if c > 0:
+        append(r, c)
+    return r
+
+def __bn_sub(a, b):
+    # a - b, a >= b
+    na: int = len(a)
+    nb: int = len(b)
+    r = []
+    c: int = 0
+    i: int = 0
+    while i < na:
+        x: int = a[i]
+        t: int = x - c
+        if i < nb:
+            y: int = b[i]
+            t = t - y
+        c = 0
+        if t < 0:
+            t = t + 4294967296
+            c = 1
+        append(r, t)
+        i += 1
+    return __bn_norm(r)
+
+def __bn_cmp(a, b) -> int:
+    na: int = len(a)
+    nb: int = len(b)
+    if na != nb:
+        if na < nb:
+            return -1
+        return 1
+    i: int = na - 1
+    while i >= 0:
+        x: int = a[i]
+        y: int = b[i]
+        if x != y:
+            if x < y:
+                return -1
+            return 1
+        i -= 1
+    return 0
+
+def __bn_shl(a, k: int):
+    if len(a) == 0:
+        return []
+    r = []
+    w: int = k >> 5
+    b: int = k & 31
+    i: int = 0
+    while i < w:
+        append(r, 0)
+        i += 1
+    c: int = 0
+    n: int = len(a)
+    i = 0
+    while i < n:
+        x: int = a[i]
+        t: int = (x << b) | c
+        append(r, t & 4294967295)
+        c = t >> 32
+        i += 1
+    if c > 0:
+        append(r, c)
+    return r
+
+def __bn_bitlen(a) -> int:
+    n: int = len(a)
+    if n == 0:
+        return 0
+    x: int = a[n - 1]
+    b: int = 0
+    while x > 0:
+        b += 1
+        x = x >> 1
+    return (n - 1) * 32 + b
+
+def __bn_pow10(k: int):
+    r = [1]
+    while k >= 9:
+        r = __bn_muls(r, 1000000000)
+        k -= 9
+    while k > 0:
+        r = __bn_muls(r, 10)
+        k -= 1
+    return r
+
+def __bn_toint(a) -> int:
+    v: int = 0
+    i: int = len(a) - 1
+    while i >= 0:
+        x: int = a[i]
+        v = (v << 32) | x
+        i -= 1
+    return v
+
 def __frepr(x) -> str:
-    return "<float>"
+    bits: int = __fbits(x)
+    neg: int = (bits >> 63) & 1
+    er: int = (bits >> 52) & 2047
+    f: int = bits & 4503599627370495
+    if er == 2047:
+        if f != 0:
+            return "nan"
+        if neg:
+            return "-inf"
+        return "inf"
+    if er == 0 and f == 0:
+        if neg:
+            return "-0.0"
+        return "0.0"
+    if er >= 1023 and er < 1023 + 53:
+        iv: int = __ftoi(x, 0)
+        if iv < 10000000000000000 and iv > -10000000000000000 and __itof(iv) == x:
+            return concat(str(iv), ".0")
+    m: int = f
+    e: int = -1074
+    if er > 0:
+        m = f | 4503599627370496
+        e = er - 1075
+    big: int = 0
+    if m == 4503599627370496 and er > 1:
+        big = 1
+    if e >= 0:
+        r = __bn_shl(__bn(m), e + 1 + big)
+        s = __bn(2 << big)
+        mp = __bn_shl([1], e + big)
+        mm = __bn_shl([1], e)
+    else:
+        r = __bn(m << (1 + big))
+        s = __bn_shl([1], 1 + big - e)
+        mp = __bn(1 << big)
+        mm = [1]
+    even: int = (m & 1) == 0
+    k: int = 0
+    while True:
+        c: int = __bn_cmp(__bn_add(r, mp), s)
+        if c > 0 or (c == 0 and even):
+            s = __bn_muls(s, 10)
+            k += 1
+        else:
+            break
+    while True:
+        c = __bn_cmp(__bn_muls(__bn_add(r, mp), 10), s)
+        if c < 0 or (c == 0 and not even):
+            r = __bn_muls(r, 10)
+            mp = __bn_muls(mp, 10)
+            mm = __bn_muls(mm, 10)
+            k -= 1
+        else:
+            break
+    ds = []
+    while True:
+        r = __bn_muls(r, 10)
+        mp = __bn_muls(mp, 10)
+        mm = __bn_muls(mm, 10)
+        d: int = 0
+        while __bn_cmp(r, s) >= 0:
+            r = __bn_sub(r, s)
+            d += 1
+        c1: int = __bn_cmp(r, mm)
+        lo: int = c1 < 0 or (c1 == 0 and even)
+        c2: int = __bn_cmp(__bn_add(r, mp), s)
+        hi: int = c2 > 0 or (c2 == 0 and even)
+        if not lo and not hi:
+            append(ds, d)
+        else:
+            if hi and not lo:
+                d += 1
+            elif hi and lo:
+                c3: int = __bn_cmp(__bn_shl(r, 1), s)
+                if c3 > 0 or (c3 == 0 and (d & 1) == 1):
+                    d += 1
+            append(ds, d)
+            break
+    n: int = len(ds)
+    parts = []
+    if neg:
+        append(parts, "-")
+    x10: int = k - 1
+    i: int = 0
+    if x10 >= -5 + 1 and x10 < 16:
+        if k <= 0:
+            append(parts, "0.")
+            i = 0
+            while i < 0 - k:
+                append(parts, "0")
+                i += 1
+            i = 0
+            while i < n:
+                append(parts, chr(48 + ds[i]))
+                i += 1
+        else:
+            while i < n or i < k:
+                if i == k:
+                    append(parts, ".")
+                if i < n:
+                    append(parts, chr(48 + ds[i]))
+                else:
+                    append(parts, "0")
+                i += 1
+            if n <= k:
+                append(parts, ".0")
+    else:
+        append(parts, chr(48 + ds[0]))
+        if n > 1:
+            append(parts, ".")
+            i = 1
+            while i < n:
+                append(parts, chr(48 + ds[i]))
+                i += 1
+        append(parts, "e")
+        if x10 < 0:
+            append(parts, "-")
+            x10 = 0 - x10
+        else:
+            append(parts, "+")
+        if x10 < 10:
+            append(parts, "0")
+        append(parts, str(x10))
+    return join(parts, len(parts))
+
+def __bn_ratio_bits(num, den) -> int:
+    # correctly rounded double nearest num/den (both > 0)
+    e: int = __bn_bitlen(num) - __bn_bitlen(den) - 53
+    q: int = 0
+    rem = []
+    d2 = []
+    while True:
+        if e < -1074:
+            e = -1074
+        if e >= 0:
+            n2 = num
+            d2 = __bn_shl(den, e)
+        else:
+            n2 = __bn_shl(num, 0 - e)
+            d2 = den
+        q = 0
+        b: int = 56
+        while b >= 0:
+            t = __bn_shl(d2, b)
+            if __bn_cmp(n2, t) >= 0:
+                n2 = __bn_sub(n2, t)
+                q = q | (1 << b)
+            b -= 1
+        rem = n2
+        if q >= 9007199254740992:
+            e += 1
+        elif q < 4503599627370496 and e > -1074:
+            e -= 1
+        else:
+            break
+    c: int = __bn_cmp(__bn_shl(rem, 1), d2)
+    if c > 0 or (c == 0 and (q & 1) == 1):
+        q += 1
+        if q == 9007199254740992:
+            q = q >> 1
+            e += 1
+    if e + 1075 >= 2047:
+        return 9218868437227405312
+    return ((e + 1074) << 52) + q
+
+def __fparse(s0, line):
+    s = lower(strip(s0))
+    n: int = len(s)
+    i: int = 0
+    neg: int = 0
+    if n > 0 and (char_at(s, 0) == 45 or char_at(s, 0) == 43):
+        neg = char_at(s, 0) == 45
+        i = 1
+    rest = substr(s, i, n)
+    bits: int = 0
+    if str_eq(rest, "inf") or str_eq(rest, "infinity"):
+        bits = 9218868437227405312
+    elif str_eq(rest, "nan"):
+        bits = 9221120237041090560
+    else:
+        mant = []
+        mi: int = 0
+        nd: int = 0
+        e10: int = 0
+        seen: int = 0
+        dot: int = 0
+        while i < n:
+            c: int = char_at(s, i)
+            if c >= 48 and c <= 57:
+                mant = __bn_add(__bn_muls(mant, 10), __bn(c - 48))
+                if len(mant) > 0:
+                    nd += 1
+                    if nd <= 18:
+                        mi = mi * 10 + c - 48
+                if dot:
+                    e10 -= 1
+                seen = 1
+            elif c == 46 and not dot:
+                dot = 1
+            elif c == 95 and seen:
+                pass
+            else:
+                break
+            i += 1
+        if i < n and char_at(s, i) == 101 and seen:
+            i += 1
+            en: int = 0
+            if i < n and (char_at(s, i) == 45 or char_at(s, i) == 43):
+                en = char_at(s, i) == 45
+                i += 1
+            ev: int = 0
+            sd: int = 0
+            while i < n and char_at(s, i) >= 48 and char_at(s, i) <= 57:
+                if ev < 100000:
+                    ev = ev * 10 + char_at(s, i) - 48
+                sd = 1
+                i += 1
+            if not sd:
+                seen = 0
+            if en:
+                ev = 0 - ev
+            e10 += ev
+        if not seen or i != n:
+            __err(line, concat(concat("could not convert string to float: ", __repr(s0)), ""))
+        if len(mant) == 0:
+            bits = 0
+        elif nd <= 15 and e10 >= -22 and e10 <= 22:
+            # Clinger's fast path: both operands exact, one correctly rounded op
+            fm = __itof(mi)
+            if e10 >= 0:
+                fm = fm * __fpow10(e10)
+            else:
+                fm = fm / __fpow10(0 - e10)
+            bits = __fbits(fm)
+        elif nd + e10 > 310:
+            bits = 9218868437227405312
+        elif nd + e10 < -330:
+            bits = 0
+        elif e10 >= 0:
+            bits = __bn_ratio_bits(__bn_mulpow(mant, e10), [1])
+        else:
+            bits = __bn_ratio_bits(mant, __bn_pow10(0 - e10))
+    if neg:
+        bits = bits | (1 << 63)
+    return __ffrombits(bits)
+
+def __fpow10(k: int):
+    if k <= 18:
+        return __itof(__ipow(10, k))
+    return __itof(__ipow(10, 18)) * __itof(__ipow(10, k - 18))
+
+def __bn_mulpow(a, k: int):
+    while k >= 9:
+        a = __bn_muls(a, 1000000000)
+        k -= 9
+    while k > 0:
+        a = __bn_muls(a, 10)
+        k -= 1
+    return a
+
+def float(x):
+    t: int = __tag(x)
+    if t == 5:
+        return x
+    if t == 1:
+        return __fparse(x, 0)
+    if t == 6:
+        v: int = x
+        return __itof(v & 1)
+    return __itof(x)
 
 def __add(a, b, line):
     ta: int = __tag(a)

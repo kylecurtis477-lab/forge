@@ -1,0 +1,16 @@
+blob with 0 sides, area 0
+rect with 4 sides, area 6
+Square! square with 4 sides, area 25
+circle with 0 sides, area 7.068577499999999
+total 38.068577499999996
+20 rect 4
+9 Square! square with 4 sides, area 9
+True True False False
+True True True True
+True True False True
+True False True
+Shape(square) Shape(circle) [Circle(r=1), Circle(r=2)]
+I say Woof I say Woof I say ...
+['...', 'Woof', 'Woof']
+Hello, Bob! Hi, Ann! Hello, Cy? Hello, Di.
+Yo, Ed!!
