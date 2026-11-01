@@ -195,6 +195,52 @@ def soft_die(line, msg):
         soft_line = line
         soft_msg = msg
 
+HT_N = 16384
+gtab = list(16384)
+ftab = list(16384)
+ftl = list(16384)
+ftk = list(16384)
+fnx = list(MAXF)
+
+def shash(sx):
+    n = len(sx)
+    h = n
+    i = 0
+    while i < n:
+        h = (h * 31 + char_at(sx, i)) % 1000003
+        i += 1
+    return h % HT_N
+
+def g_reg(name, gi):
+    q = shash(name)
+    while gtab[q]:
+        if str_eq(globs[gtab[q] - 1], name):
+            return 0
+        q = (q + 1) % HT_N
+    gtab[q] = gi + 1
+
+def gfind(name):
+    q = shash(name)
+    while gtab[q]:
+        if str_eq(globs[gtab[q] - 1], name):
+            return gtab[q] - 1
+        q = (q + 1) % HT_N
+    return -1
+
+def f_reg(fi):
+    name = fnames[fi]
+    fnx[fi] = 0
+    q = shash(name)
+    while ftab[q]:
+        if str_eq(ftk[q], name):
+            fnx[ftl[q] - 1] = fi + 1
+            ftl[q] = fi + 1
+            return 0
+        q = (q + 1) % HT_N
+    ftab[q] = fi + 1
+    ftl[q] = fi + 1
+    ftk[q] = name
+
 def find(lst, n, name):
     i = 0
     while i < n:
@@ -840,7 +886,7 @@ def var_ref(name):
                 vkind = 5
                 vidx = i
                 return concat(str(8 * i), "(%r12)")
-    i = find(globs, nglobs, name)
+    i = gfind(name)
     if i >= 0:
         vty = gtype[i]
         if gint[i] and vty == 0:
@@ -924,16 +970,22 @@ def conflict_var(kind, idx):
         if pintf[k]:
             pintf[k] = 0
             nconf += 1
+            if ir_stats > 2:
+                eputs(concat("conf site 0 p", str(passno)))
     elif kind == 2:
         ltyp[idx] = 0
         fi = flag_index(idx)
         if fi >= 0 and lint[fi]:
             lint[fi] = 0
         nconf += 1
+        if ir_stats > 2:
+            eputs(concat("conf site 1 p", str(passno)))
     elif kind == 3:
         if gint[idx]:
             gint[idx] = 0
             nconf += 1
+            if ir_stats > 2:
+                eputs(concat("conf site 2 p", str(passno)))
 
 def store_var(name, line, t, mark):
     # value in %rax (or the single instruction out[mark]) with static type t
@@ -1362,11 +1414,17 @@ def add_edge(t):
 
 def fn_lookup(name, n):
     # a plain (non-method) function with this name and arity that is not shadowed
-    i = 0
-    while i < nfuncs:
-        if fmeth[i] != 1 and fmin[i] <= n and n <= fargs[i] and not fshadow[i] and str_eq(fnames[i], name):
-            return i
-        i += 1
+    q = shash(name)
+    while ftab[q]:
+        if str_eq(ftk[q], name):
+            j = ftab[q]
+            while j:
+                i = j - 1
+                if fmeth[i] != 1 and fmin[i] <= n and n <= fargs[i] and not fshadow[i] and str_eq(fnames[i], name):
+                    return i
+                j = fnx[i]
+            return -1
+        q = (q + 1) % HT_N
     return -1
 
 def resolve_fn(name, n):
@@ -1429,6 +1487,8 @@ def arg_check(f, i):
         if pintf[k]:
             pintf[k] = 0
             nconf += 1
+            if ir_stats > 2:
+                eputs(concat("conf site 3 p", str(passno)))
 
 def push_args():
     # parses "(a, b, ...)" pushing each value; returns the count
@@ -2926,6 +2986,8 @@ def clear_pints(f):
         if pintf[fpb[f] + i]:
             pintf[fpb[f] + i] = 0
             nconf += 1
+            if ir_stats > 2:
+                eputs(concat("conf site 4 p", str(passno)))
         i += 1
 
 def dynm_add(name, n, plain):
@@ -4024,6 +4086,8 @@ def stmt_raise(line):
 def conflict_ret():
     global nconf
     nconf += 1
+    if ir_stats > 2:
+        eputs(concat("conf site 5 p", str(passno)))
 
 def stmt_if():
     global pos
@@ -4635,9 +4699,11 @@ def func_end(fi):
             if lint[flb[fi] + i] and ltyp[i] != T_INT:
                 lint[flb[fi] + i] = 0
             ok = lsl[i] and not lnl[i] and not lfix[i] and not lint[flb[fi] + i] and not has_child(fi)
-            if ok != llst[flb[fi] + i]:
+            if ok != llst[flb[fi] + i] and not (ok and hyb_fe):
                 llst[flb[fi] + i] = ok
                 nconf += 1
+                if ir_stats > 2:
+                    eputs(concat(concat(concat(concat("conf site 6 p", str(passno)), fnames[fi]), locs[i]), concat(concat(str(lsl[i]), str(lnl[i])), concat(str(lfix[i]), str(lint[flb[fi] + i])))))
             i += 1
     rank_regs(fi)
     curf = -1
@@ -4699,7 +4765,7 @@ def declare_locals(p0, p1, isfn):
     while i < n:
         name = nm[i]
         if find(params, nparams, name) < 0 and find(fglob, nfglob, name) < 0 and find(locs, nlocs, name) < 0:
-            if isfn or find(globs, nglobs, name) < 0:
+            if isfn or gfind(name) < 0:
                 if ty[i] < 0:
                     new_local(name, 0, 0)
                 else:
@@ -5115,6 +5181,7 @@ def reg_func(p, c):
     nfuncs += 1
     name = tv[p + 1]
     fnames[fi] = name
+    f_reg(fi)
     fpos[fi] = p
     fcls[fi] = c
     fpre[fi] = p < PRETOK
@@ -5271,6 +5338,7 @@ def reg_class(p):
     fi = nfuncs
     nfuncs += 1
     fnames[fi] = cnm[c]
+    f_reg(fi)
     flabel[fi] = concat("f_", cnm[c])
     fmeth[fi] = 2
     fcls[fi] = c
@@ -5374,7 +5442,7 @@ def prescan():
                     if k >= 0:
                         used[k] = 1
                     elif tok_is_id(p - 1, "global") or (tok_is_op(p - 1, ",") and in_global(p)):
-                        if find(globs, nglobs, tv[p]) < 0:
+                        if gfind(tv[p]) < 0:
                             add_glob(tv[p], 0)
                 p += 1
         else:
@@ -5391,7 +5459,7 @@ def prescan():
     i = 0
     while i < n:
         if used[i] or tops_pre(nm[i]):
-            if find(globs, nglobs, nm[i]) < 0:
+            if gfind(nm[i]) < 0:
                 t = ty[i]
                 if t < 0:
                     t = 0
@@ -5405,6 +5473,7 @@ def prescan():
     fi = nfuncs
     nfuncs += 1
     fnames[fi] = "__main"
+    f_reg(fi)
     flabel[fi] = "f___main"
     fmeth[fi] = 0
     fcls[fi] = -1
@@ -5442,6 +5511,7 @@ def add_glob(name, t):
     globs[nglobs] = name
     gtype[nglobs] = t
     gint[nglobs] = t == 0
+    g_reg(name, nglobs)
     nglobs += 1
 
 # ---------------- closures, lambdas, function values ----------------
@@ -6494,7 +6564,7 @@ def tc_set_name(name, t, at, fresh):
 def tc_sig(name):
     i = 0
     while i < n_sg:
-        if str_eq(sg_cls[i], "") and str_eq(sg_name[i], name):
+        if str_eq(sg_name[i], name) and str_eq(sg_cls[i], ""):
             if sg_dup[i]:
                 return -1
             return i
@@ -8337,6 +8407,10 @@ hyb = 0
 hH = list(1000)
 nH = 0
 hgrow = 0
+hy_its = 0
+no_hyb = 0
+hyb_on = 0
+hyb_fe = 0
 irfatal = 0
 hvn = list(40000)
 nhvn = 0
@@ -9567,6 +9641,9 @@ def s_simple():
         if tok_is_op(q, "="):
             if find_top_eq(q + 1) >= 0:
                 o_fail("chained =")
+                return 0
+            if hyb and h_home(name) and tok_is_id(q + 1, "list") and tok_is_op(q + 2, "("):
+                o_fail("home list")
                 return 0
             if tok_is_id(q + 1, "list") and tok_is_op(q + 2, "(") and xfind("list") < 0 and not (hyb and h_home(name)):
                 rp = match_close(q + 2)
@@ -11074,8 +11151,8 @@ def hyb_reset(fi, p, endp):
         i += 1
 
 def hyb_compile(fi, p, endp):
-    global hyb, nH, hgrow, ip, pos, nout, nlabel, curf, ir_cslo, ir_sb, nslots, hyb_pro, hyb_epi, hyb_noreg, ncs, ncold, no_ov, nspill, irfail
-    if not hyb_ok(fi):
+    global hyb_fe, hy_its, hyb, nH, hgrow, ip, pos, nout, nlabel, curf, ir_cslo, ir_sb, nslots, hyb_pro, hyb_epi, hyb_noreg, ncs, ncold, no_ov, nspill, irfail
+    if not hyb_on or not hyb_ok(fi):
         return 0
     hs_out = nout
     hs_lab = nlabel
@@ -11100,6 +11177,7 @@ def hyb_compile(fi, p, endp):
     ok = 0
     while it < 8 and not ok:
         it += 1
+        hy_its += 1
         hyb_reset(fi, p, endp)
         hgrow = 0
         ip = p
@@ -11168,7 +11246,9 @@ def hyb_compile(fi, p, endp):
     hyb_noreg = 0
     hyb = 0
     fisl[fi] = cur_isl
+    hyb_fe = 1
     func_end(fi)
+    hyb_fe = 0
     hyb_pro = ""
     hyb_epi = ""
     ir_sb = 0
@@ -11211,9 +11291,10 @@ def ir_report():
         f += 1
     eputs(concat(concat(concat(concat("ir: pure ", str(np_)), " hybrid "), str(nh_)), concat(concat(" (fully native ", str(nh0)), ")")))
     eputs(concat(concat(concat(" token ", str(nt_)), " islands "), str(ni_)))
+    eputs(concat(concat(concat("hyb iterations ", str(hy_its)), " passes "), str(passno)))
 
 def forge_main():
-    global PRETOK, PRE, passno, soft_line, ir_stats
+    global PRETOK, PRE, passno, soft_line, ir_stats, no_hyb, hyb_on
     if argc() < 3:
         eputs("usage: forgec <input.forge> <output.s>")
         exit(2)
@@ -11224,6 +11305,10 @@ def forge_main():
             set_opt(0)
         elif str_eq(argv(ai), "--irstats"):
             ir_stats = 1
+        elif str_eq(argv(ai), "--nohyb"):
+            no_hyb = 1
+        elif str_eq(argv(ai), "--irstats3"):
+            ir_stats = 3
         elif str_eq(argv(ai), "--irstats2"):
             ir_stats = 2
         ai += 1
@@ -11249,12 +11334,16 @@ def forge_main():
     passno = 0
     while 1:
         soft_line = -1
+        if ir_stats > 2:
+            eputs("=== pass")
         one_pass()
         passno += 1
         if soft_line >= 0 and nconf == 0:
             die(soft_line, soft_msg)
         if passno >= 2 and nconf == 0:
-            break
+            if hyb_on or no_hyb or not opt_on:
+                break
+            hyb_on = 1
         if passno > 40:
             die(0, "internal: type inference did not converge")
     reach_all()

@@ -497,10 +497,10 @@ rt_gc_core:
     inc %r13
     jmp 11b
 30: mov %r11, rt_inuse(%rip)
-    add %r11, %r11
-    cmp $0x2000000, %r11
+    lea (%r11,%r11,2), %r11
+    cmp $0x4000000, %r11
     jae 31f
-    mov $0x2000000, %r11d
+    mov $0x4000000, %r11d
 31: mov %r11, rt_gcnext(%rip)
     ret
 rt_freerun:
@@ -902,14 +902,32 @@ rt_chr:
 rt_str_eq:
     mov 16(%rsp), %rsi
     mov 8(%rsp), %rdi
+    cmp %rsi, %rdi
+    je 3f
     mov -8(%rsi), %rcx
     cmp -8(%rdi), %rcx
     jne 2f
     shl $8, %rcx
     shr $8, %rcx
-    repe cmpsb
+4:  cmp $8, %rcx
+    jb 5f
+    mov (%rsi), %rax
+    cmp (%rdi), %rax
     jne 2f
-    mov $1, %eax
+    add $8, %rsi
+    add $8, %rdi
+    sub $8, %rcx
+    jmp 4b
+5:  test %rcx, %rcx
+    jz 3f
+    movzbl (%rsi), %eax
+    cmp (%rdi), %al
+    jne 2f
+    inc %rsi
+    inc %rdi
+    dec %rcx
+    jmp 5b
+3:  mov $1, %eax
     ret
 2:  xor %eax, %eax
     ret
@@ -1760,7 +1778,7 @@ rt_sigact: .quad 0, 0, 0, 0
 rt_hp: .quad 0
 rt_hlo: .quad 0
 rt_inuse: .quad 0
-rt_gcnext: .quad 0x2000000
+rt_gcnext: .quad 0x4000000
 rt_ngc: .quad 0
 rt_stk0: .quad 0
 rt_gcur: .quad 0
