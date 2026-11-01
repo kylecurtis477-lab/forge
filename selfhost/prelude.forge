@@ -223,6 +223,8 @@ def __repr(x) -> str:
         return __itos_raw(x)
     if t == 6:
         return __brepr(x)
+    if t == 7:
+        return "None"
     if t == 5:
         return __frepr(x)
     parts = []
@@ -1363,6 +1365,8 @@ def __truth(x) -> int:
     if t == 6:
         w: int = x
         return w & 1
+    if t == 7:
+        return 0
     if t == 5:
         return (__fbits(x) << 1) != 0
     if t == 1:
@@ -1397,7 +1401,7 @@ def __listof(x):
     return __slice(it, 0, __ld(it, 0), 0)
 
 def get__2(d, k):
-    return get(d, k, 0)
+    return get(d, k, None)
 
 def count(xs, x) -> int:
     c: int = 0
@@ -1951,3 +1955,6 @@ def __math_gcd(a: int, b: int) -> int:
         a = b
         b = t
     return a
+
+def bool(x) -> bool:
+    return __truth(x) != 0

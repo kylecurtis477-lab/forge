@@ -102,8 +102,12 @@ rt_tag_r:
     btr $62, %rax
     jnc 0f
     cmp $1, %rax
-    jne 0f
+    jne 7f
     mov $6, %eax
+    ret
+7:  cmp $3, %rax
+    jne 0f
+    mov $7, %eax
     ret
 0:  test $7, %dil
     jnz 9f

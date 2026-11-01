@@ -22,6 +22,7 @@ T_FLOAT = 5
 T_BOOL = 6
 B_FALSE = "$4611686018427387904"
 B_TRUE = "$4611686018427387905"
+B_NONE = "$4611686018427387906"
 T_STR = 2
 T_LIST = 3
 T_DICT = 4
@@ -57,6 +58,7 @@ fargs = list(MAXF)
 fret = list(MAXF)
 fint = list(MAXF)
 fbret = list(MAXF)
+fnone = list(MAXF)
 fpos = list(MAXF)
 fpb = list(MAXF)
 fcls = list(MAXF)
@@ -2792,8 +2794,8 @@ def primary():
             ety = T_BOOL
             return 0
         if str_eq(name, "None"):
-            e("mov $0, %rax")
-            ety = T_INT
+            e2(concat("mov ", B_NONE), ", %rax")
+            ety = 0
             return 0
         if str_eq(name, "super") and tok_is_op(pos, "(") and tok_is_op(pos + 1, ")") and tok_is_op(pos + 2, ".") and tk[pos + 3] == K_ID:
             if curf < 0 or fmeth[curf] != 1 or cpar[fcls[curf]] < 0:
@@ -3198,8 +3200,12 @@ def stmt():
         if str_eq(w, "return"):
             pos += 1
             if tk[pos] == K_NL or tk[pos] == K_EOF or tk[pos] == K_DED:
-                e("xor %eax, %eax")
-                ety = T_INT
+                if curf >= 0 and fnone[curf]:
+                    e2(concat("mov ", B_NONE), ", %rax")
+                    ety = 0
+                else:
+                    e("xor %eax, %eax")
+                    ety = T_INT
             else:
                 expr()
                 if is_op(","):
@@ -4003,7 +4009,10 @@ def func_begin(fi):
 
 def func_end(fi):
     global curf, nlint
-    e("xor %eax, %eax")
+    if fnone[fi]:
+        e2(concat("mov ", B_NONE), ", %rax")
+    else:
+        e("xor %eax, %eax")
     put_label(retlab)
     fs = nslots + nused
     pro = ""
@@ -4220,6 +4229,28 @@ def block_end(p):
             return p
         p += 1
 
+def falls_none(p):
+    # p at the ':' ending a def header: can the body finish without returning a value?
+    be = block_end(p)
+    last = p + 1
+    d = 0
+    q = p + 1
+    bare = 0
+    while q < be:
+        t = tk[q]
+        if t == K_IND:
+            d += 1
+        elif t == K_DED:
+            d -= 1
+        if (t == K_NL or t == K_DED or t == K_IND) and d <= 1 and q + 1 < be:
+            u = tk[q + 1]
+            if u != K_DED and u != K_NL and u != K_IND:
+                last = q + 1
+        if t == K_ID and str_eq(tv[q], "return") and (tk[q + 1] == K_NL or tk[q + 1] == K_DED):
+            bare = 1
+        q += 1
+    return bare or not (tok_is_id(last, "return") or tok_is_id(last, "raise"))
+
 def skip_stmt(p):
     p = block_end(p)
     while tok_is_id(p, "elif") or tok_is_id(p, "else") or tok_is_id(p, "except") or tok_is_id(p, "finally"):
@@ -4368,6 +4399,11 @@ def reg_func(p, c):
         fret[fi] = parse_type()
     fint[fi] = fret[fi] == 0 or fret[fi] == T_INT
     fbret[fi] = fret[fi] == 0
+    fnone[fi] = 0
+    if fret[fi] == 0 and not fpre[fi] and falls_none(pos):
+        fnone[fi] = 1
+        fint[fi] = 0
+        fbret[fi] = 0
     if c < 0 and not fpre[fi]:
         check_inline(fi, pos)
     return fi
