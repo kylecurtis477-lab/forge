@@ -9118,13 +9118,13 @@ def s_if():
     if q < 0:
         o_fail("if")
         return 0
-    lend = new_lab_ir()
+    x_lend = new_lab_ir()
     lf = new_lab_ir()
     cond_range(ip, q, lf, 0)
     ip = q
     s_block()
     while tok_is_id(ip, "elif") and not irfail:
-        ibr(lend)
+        ibr(x_lend)
         ilabel(lf)
         ip += 1
         q = find_colon(ip)
@@ -9136,13 +9136,13 @@ def s_if():
         ip = q
         s_block()
     if tok_is_id(ip, "else"):
-        ibr(lend)
+        ibr(x_lend)
         ilabel(lf)
         ip += 1
         s_block()
     else:
         ilabel(lf)
-    ilabel(lend)
+    ilabel(x_lend)
 
 def s_while():
     global ip, nlp
@@ -10635,12 +10635,12 @@ def o_emit(fi):
             csreg[ncs] = q
             ncs += 1
         q += 1
-    o_epi = new_label()
+    x_epi = new_label()
     fos[fi] = nout
     emit_raw(concat(flabel[fi], ":    # opt\n"))
     e("push %rbp")
     e("mov %rsp, %rbp")
-    prolog = nout
+    x_prol = nout
     emit_raw("")
     n = fargs[fi]
     k = 0
@@ -10700,9 +10700,9 @@ def o_emit(fi):
         elif op == O_RET:
             mv_to(ia[k], "%rax", 0)
             if k + 1 < nir:
-                e2("jmp ", lab(o_epi))
+                e2("jmp ", lab(x_epi))
         k += 1
-    put_label(o_epi)
+    put_label(x_epi)
     fs = ncs + nspill
     pro = ""
     epi = ""
@@ -10714,7 +10714,7 @@ def o_emit(fi):
         pro = concat(pro, concat(concat(concat(concat("    mov ", RN[csreg[i]]), ", "), sl), "\n"))
         epi = concat(epi, concat(concat(concat(concat("    mov ", sl), ", "), RN[csreg[i]]), "\n"))
         i += 1
-    out[prolog] = pro
+    out[x_prol] = pro
     emit_raw(epi)
     e("leave")
     e("ret")
@@ -10825,8 +10825,9 @@ def forge_main():
     if argc() < 3:
         eputs("usage: forgec <input.forge> <output.s>")
         exit(2)
-    if argc() > 3 and str_eq(argv(3), "-O"):
-        set_opt(1)
+    set_opt(1)
+    if argc() > 3 and str_eq(argv(3), "-O0"):
+        set_opt(0)
     src = read_file(argv(1))
     pre = prelude_text()
     lex(pre, 1, 0)
