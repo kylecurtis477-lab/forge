@@ -1,0 +1,64 @@
+def g(a: float, b: float) -> float:
+    c = a * b - a / b
+    c += 1.5
+    c -= a
+    c *= 2
+    return c
+
+def h(n):
+    s = 0.0
+    t = 1.0
+    i = 0
+    while i < n:
+        s = s + t / (i + 1)
+        t = -t
+        if s > 0.5:
+            print(s)
+        i += 1
+    return s
+
+def cmpz():
+    nan = float("nan")
+    x = 1.0
+    r = 0
+    if nan < x:
+        r += 1
+    if nan == nan:
+        r += 2
+    if nan != nan:
+        r += 4
+    if not (nan >= x):
+        r += 8
+    if x <= 1:
+        r += 16
+    if 2 > x:
+        r += 32
+    print(r)
+
+def dz(z):
+    q = 1.0
+    try:
+        q = q / (z * 1.0)
+    except ZeroDivisionError as e:
+        print("zde", e)
+    print(q)
+
+def mix():
+    a = 3
+    b = 2.5
+    c = a + b
+    d = a / b
+    e = -b
+    print(c, d, e, (a + 0.5) * 2)
+    lst = [b, c]
+    lst.append(d * 2)
+    print(lst)
+    m = b if a > 1 else 0.0
+    print(m)
+
+print(g(3.0, 4.0))
+print(h(6))
+cmpz()
+dz(0)
+dz(2)
+mix()
