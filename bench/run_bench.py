@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forge (self-hosted compiler) vs Rust (rustc -C opt-level=3) vs CPython. Best-of-3 wall clock."""
+"""Forge (self-hosted compiler) vs Rust (rustc -C opt-level=3) vs CPython. Best-of-5 wall clock."""
 import os, subprocess as sp, time
 os.chdir(os.path.dirname(os.path.abspath(__file__))); os.makedirs("out", exist_ok=True)
 def timed(cmd):
