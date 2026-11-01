@@ -1,0 +1,35 @@
+# Self-hosted: any-length scan (minimal nesting)
+
+def is_digit(c):
+    if c >= 48:
+        return 1
+    return 0
+
+def digit_val(c):
+    return c - 48
+
+def scan_any(buf, maxn):
+    v = 0
+    i = 0
+    while i < maxn:
+        c = buf[i]
+        d = is_digit(c)
+        if d == 1:
+            v = v * 10 + digit_val(c)
+        i = i + 1
+    return v
+
+def emit_header():
+    write_file("out.s", ".section .text\n.global _start\n_start:\n")
+
+def emit_exit():
+    write_file("out.s", "    mov $60, %rax\n    syscall\n")
+
+def compile_num():
+    buf = [49, 50, 51]
+    n = scan_any(buf, 3)
+    emit_header()
+    emit_exit()
+
+compile_num()
+print("scan loop fixed")

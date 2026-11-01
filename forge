@@ -1,0 +1,8 @@
+#!/bin/sh
+# forge <file.forge> [-o out] : compile with the self-hosted compiler, then assemble+link (binutils as/ld)
+set -e
+D="$(cd "$(dirname "$0")" && pwd)"
+src="$1"; out="${src%.forge}"
+[ "$2" = "-o" ] && out="$3"
+"$D/build/forgec" "$src" "$out.s"
+as -o "$out.o" "$out.s" && ld -Ttext-segment=0x100000000000 -o "$out" "$out.o" && rm -f "$out.o"

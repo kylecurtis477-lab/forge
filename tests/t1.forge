@@ -1,0 +1,41 @@
+# basic test
+class Point:
+    x: int
+    y: int
+
+def fib(n: int) -> int:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+def total(p):
+    return p.x + p.y
+
+print(fib(20))
+s = 0
+for i in range(10):
+    if i == 3:
+        continue
+    elif i == 8:
+        break
+    s += i
+print(s)
+p = Point(3, 4)
+p.y = 10
+print(total(p))
+xs = [5, 6, 7]
+xs[1] = xs[0] * 10
+print(xs[1])
+print("hello")
+puts(concat("ab", str(-42)))
+t = "xyz"
+print(char_at(t, 1) == ord("y") and not False)
+print(17 % 5 - 7 / 2)
+write_file("build/ft.txt", "data\n")
+puts(read_file("build/ft.txt"))
+parts = list(3)
+parts[0] = "a"
+parts[1] = "b"
+parts[2] = substr("hello", 1, 3)
+puts(join(parts, 3))
+print(argc())

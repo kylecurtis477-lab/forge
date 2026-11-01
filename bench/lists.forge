@@ -1,0 +1,10 @@
+def run(n):
+    xs = list(n)
+    for i in range(n):
+        xs[i] = i * 3 % 1000
+    t = 0
+    for r in range(10):
+        for i in range(n):
+            t += xs[i]
+    return t
+print(run(10000000))

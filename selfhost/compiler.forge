@@ -1,0 +1,3843 @@
+# Forge self-hosted compiler (written in Forge).
+# usage: forgec <input.forge> <output.s>
+# Pipeline: lex (prelude + user source) -> prescan (classes, functions, globals) -> compile passes.
+# Code is emitted as GNU as text. Each pass re-runs codegen with refined type facts
+# (which variables / params / returns always hold ints) and register choices, until
+# no assumption is contradicted. The final pass is the one written out.
+# NOTE: this file must stay inside the subset the Rust bootstrap understands
+# (no f-strings, dicts, string +, for-in-list, char literals; use ord("x")).
+
+K_NUM = 1
+K_STR = 2
+K_ID = 3
+K_OP = 4
+K_NL = 5
+K_IND = 6
+K_DED = 7
+K_EOF = 8
+
+T_INT = 1
+T_STR = 2
+T_LIST = 3
+T_DICT = 4
+
+MAXT = 3000000
+tk = list(MAXT)
+tv = list(MAXT)
+tl = list(MAXT)
+ntok = 0
+PRE = 0
+PRETOK = 0
+
+out = list(8000000)
+nout = 0
+dat = list(1000000)
+ndat = 0
+nlabel = 0
+nstr = 0
+pos = 0
+ety = 0
+vty = 0
+vkind = 0
+vidx = 0
+
+# ---- program tables (prescan, kept across passes) ----
+MAXF = 20000
+fnames = list(MAXF)
+flabel = list(MAXF)
+fargs = list(MAXF)
+fret = list(MAXF)
+fint = list(MAXF)
+fpos = list(MAXF)
+fpb = list(MAXF)
+fcls = list(MAXF)
+fmeth = list(MAXF)
+fpre = list(MAXF)
+fshadow = list(MAXF)
+finl = list(MAXF)
+finle = list(MAXF)
+fregn = list(MAXF)
+flb = list(MAXF)
+flcnt = list(MAXF)
+fos = list(MAXF)
+foe = list(MAXF)
+freach = list(MAXF)
+nfuncs = 0
+pnames = list(200000)
+ptypes = list(200000)
+pintf = list(200000)
+npall = 0
+lint = list(2000000)
+nlint = 0
+
+cnm = list(2000)
+cfb = list(2000)
+cnf = list(2000)
+cdecl = list(2000)
+cinit = list(2000)
+nclass = 0
+cfld = list(50000)
+ncfld = 0
+
+globs = list(20000)
+gtype = list(20000)
+gint = list(20000)
+nglobs = 0
+mainloc = list(20000)
+nmainloc = 0
+tops = list(200000)
+ntops = 0
+
+ce_from = list(400000)
+ce_to = list(400000)
+nce = 0
+dynm = list(5000)
+ndynm = 0
+dynf = list(5000)
+ndynf = 0
+u_getidx = 0
+u_setidx = 0
+u_add = 0
+u_eq = 0
+u_truth = 0
+nconf = 0
+passno = 0
+
+# ---- per-function state ----
+curf = -1
+params = list(256)
+ptyp = list(256)
+preg = list(256)
+pw = list(256)
+nparams = 0
+locs = list(8192)
+ltyp = list(8192)
+lfix = list(8192)
+lreg = list(8192)
+lslot = list(8192)
+lw = list(8192)
+nlocs = 0
+fglob = list(4096)
+nfglob = 0
+anames = list(1024)
+arefs = list(1024)
+atys = list(1024)
+nal = 0
+hnames = list(256)
+hrefs = list(256)
+nh = 0
+nslots = 0
+nused = 0
+nhid = 0
+lcont = list(1000)
+lend = list(1000)
+nloops = 0
+retlab = 0
+REGS = ["%rbx", "%r12", "%r13", "%r14", "%r15"]
+NREGS = 5
+
+def uline(line):
+    if line > PRE:
+        return line - PRE
+    return line
+
+lphase = 0
+
+def die(line, msg):
+    if lphase == 0 or (lphase == 2 and pos < PRETOK):
+        msg = concat(concat(msg, " (in prelude) tok "), str(pos))
+    eputs(concat(concat(concat("error: line ", str(uline(line))), ": "), msg))
+    exit(1)
+
+def find(lst, n, name):
+    i = 0
+    while i < n:
+        if str_eq(lst[i], name):
+            return i
+        i += 1
+    return -1
+
+def add_tok(k, v, line):
+    global ntok
+    tk[ntok] = k
+    tv[ntok] = v
+    tl[ntok] = line
+    ntok += 1
+
+def is_digit(c):
+    return c >= 48 and c <= 57
+
+def is_alpha(c):
+    return (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or c == 95
+
+def is_hex(c):
+    return is_digit(c) or (c >= 97 and c <= 102) or (c >= 65 and c <= 70)
+
+def hexval(c):
+    if is_digit(c):
+        return c - 48
+    if c >= 97:
+        return c - 87
+    return c - 55
+
+def esc_char(d):
+    if d == ord("n"):
+        return 10
+    if d == ord("t"):
+        return 9
+    if d == ord("r"):
+        return 13
+    if d == ord("0"):
+        return 0
+    return d
+
+def lex_fstring(src, i, q, line, buf):
+    # src[i] is the first char after the opening quote; returns index after the closing quote.
+    # f"a{x}b" becomes the tokens ( "" + "a" + str(x) + "b" )
+    n = len(src)
+    add_tok(K_OP, "(", line)
+    add_tok(K_STR, "", line)
+    k = 0
+    while i < n and char_at(src, i) != q:
+        d = char_at(src, i)
+        if d == 10:
+            die(line, "unterminated string")
+        if d == ord("{") and i + 1 < n and char_at(src, i + 1) == ord("{"):
+            set_byte(buf, k, d)
+            k += 1
+            i += 2
+        elif d == ord("}") and i + 1 < n and char_at(src, i + 1) == ord("}"):
+            set_byte(buf, k, d)
+            k += 1
+            i += 2
+        elif d == ord("}"):
+            die(line, "single '}' in f-string")
+        elif d == ord("{"):
+            if k > 0:
+                add_tok(K_OP, "+", line)
+                add_tok(K_STR, substr(buf, 0, k), line)
+                k = 0
+            j = i + 1
+            dep = 0
+            while j < n and not (dep == 0 and char_at(src, j) == ord("}")):
+                c = char_at(src, j)
+                if c == 10 or c == q:
+                    die(line, "unterminated f-string expression")
+                if c == ord("(") or c == ord("[") or c == ord("{"):
+                    dep += 1
+                elif c == ord(")") or c == ord("]") or c == ord("}"):
+                    dep -= 1
+                elif c == 34 or c == 39:
+                    j += 1
+                    while j < n and char_at(src, j) != c:
+                        j += 1
+                j += 1
+            add_tok(K_OP, "+", line)
+            add_tok(K_ID, "str", line)
+            add_tok(K_OP, "(", line)
+            lex(substr(src, i + 1, j), line, 1)
+            add_tok(K_OP, ")", line)
+            i = j + 1
+        else:
+            if d == 92:
+                i += 1
+                d = esc_char(char_at(src, i))
+            set_byte(buf, k, d)
+            k += 1
+            i += 1
+    if i >= n:
+        die(line, "unterminated string")
+    if k > 0:
+        add_tok(K_OP, "+", line)
+        add_tok(K_STR, substr(buf, 0, k), line)
+    add_tok(K_OP, ")", line)
+    return i + 1
+
+OPS3 = ["//=", "<<=", ">>=", "**="]
+OPS2 = ["==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "->", "//", "**", "<<", ">>"]
+OPS1 = "+-*/%()[]{}:,=<>.&|^~;"
+
+def lex(src, line, inner):
+    n = len(src)
+    i = 0
+    ind = list(1000)
+    ind[0] = 0
+    nind = 1
+    bol = 1
+    if inner:
+        bol = 0
+    depth = 0
+    buf = alloc(n + 1)
+    while i < n:
+        if bol:
+            sp = 0
+            while i < n and char_at(src, i) == 32:
+                sp += 1
+                i += 1
+            if i >= n:
+                break
+            c = char_at(src, i)
+            if c == 10 or c == 13 or c == ord("#"):
+                while i < n and char_at(src, i) != 10:
+                    i += 1
+                i += 1
+                line += 1
+                continue
+            bol = 0
+            if sp > ind[nind - 1]:
+                ind[nind] = sp
+                nind += 1
+                add_tok(K_IND, 0, line)
+            while sp < ind[nind - 1]:
+                nind -= 1
+                add_tok(K_DED, 0, line)
+            if sp != ind[nind - 1]:
+                die(line, "inconsistent indentation")
+        c = char_at(src, i)
+        if c == 32 or c == 13 or c == 9:
+            i += 1
+        elif c == ord("#"):
+            while i < n and char_at(src, i) != 10:
+                i += 1
+        elif c == 92 and i + 1 < n and char_at(src, i + 1) == 10:
+            i += 2
+            line += 1
+        elif c == 10:
+            i += 1
+            if inner:
+                die(line, "newline in f-string expression")
+            if depth == 0:
+                add_tok(K_NL, 0, line)
+                bol = 1
+            line += 1
+        elif is_digit(c):
+            v = 0
+            if c == 48 and i + 1 < n and (char_at(src, i + 1) == ord("x") or char_at(src, i + 1) == ord("X")):
+                i += 2
+                while i < n and (is_hex(char_at(src, i)) or char_at(src, i) == 95):
+                    if char_at(src, i) != 95:
+                        v = v * 16 + hexval(char_at(src, i))
+                    i += 1
+            else:
+                while i < n and (is_digit(char_at(src, i)) or char_at(src, i) == 95):
+                    if char_at(src, i) != 95:
+                        v = v * 10 + char_at(src, i) - 48
+                    i += 1
+            add_tok(K_NUM, v, line)
+        elif is_alpha(c):
+            st = i
+            while i < n and (is_alpha(char_at(src, i)) or is_digit(char_at(src, i))):
+                i += 1
+            if i - st == 1 and c == ord("f") and i < n and (char_at(src, i) == 34 or char_at(src, i) == 39):
+                i = lex_fstring(src, i + 1, char_at(src, i), line, buf)
+            else:
+                add_tok(K_ID, substr(src, st, i), line)
+        elif c == 34 or c == 39:
+            q = c
+            i += 1
+            k = 0
+            while i < n and char_at(src, i) != q:
+                d = char_at(src, i)
+                if d == 10:
+                    die(line, "unterminated string")
+                if d == 92:
+                    i += 1
+                    d = esc_char(char_at(src, i))
+                set_byte(buf, k, d)
+                k += 1
+                i += 1
+            if i >= n:
+                die(line, "unterminated string")
+            i += 1
+            add_tok(K_STR, substr(buf, 0, k), line)
+        else:
+            t3 = 0
+            t2 = 0
+            if i + 2 < n:
+                t3 = substr(src, i, i + 3)
+            if i + 1 < n:
+                t2 = substr(src, i, i + 2)
+            if t3 and find(OPS3, 4, t3) >= 0:
+                add_tok(K_OP, t3, line)
+                i += 3
+            elif t2 and find(OPS2, 17, t2) >= 0:
+                add_tok(K_OP, t2, line)
+                i += 2
+            elif find_char(OPS1, c) >= 0:
+                if c == ord("(") or c == ord("[") or c == ord("{"):
+                    depth += 1
+                if c == ord(")") or c == ord("]") or c == ord("}"):
+                    depth -= 1
+                if c == ord(";"):
+                    add_tok(K_NL, 0, line)
+                else:
+                    add_tok(K_OP, chr(c), line)
+                i += 1
+            else:
+                die(line, concat("unexpected character ", chr(c)))
+    if inner:
+        return 0
+    if not bol:
+        add_tok(K_NL, 0, line)
+    while nind > 1:
+        nind -= 1
+        add_tok(K_DED, 0, line)
+    return line
+
+def find_char(s, c):
+    n = len(s)
+    i = 0
+    while i < n:
+        if char_at(s, i) == c:
+            return i
+        i += 1
+    return -1
+
+# ---------------- emission helpers ----------------
+def emit_raw(s):
+    global nout
+    out[nout] = s
+    nout += 1
+
+def e(s):
+    global nout
+    out[nout] = concat(concat("    ", s), "\n")
+    nout += 1
+
+def e2(a, b):
+    global nout
+    out[nout] = concat(concat(concat("    ", a), b), "\n")
+    nout += 1
+
+def e3(a, b, c):
+    global nout
+    out[nout] = concat(concat(concat(concat("    ", a), b), c), "\n")
+    nout += 1
+
+def emit_dat(s):
+    global ndat
+    dat[ndat] = s
+    ndat += 1
+
+def new_label():
+    global nlabel
+    nlabel += 1
+    return nlabel
+
+def lab(n):
+    return concat("L", str(n))
+
+def put_label(n):
+    emit_raw(concat(lab(n), ":\n"))
+
+def cur_line():
+    return tl[pos]
+
+def is_op(o):
+    return tk[pos] == K_OP and str_eq(tv[pos], o)
+
+def is_id(o):
+    return tk[pos] == K_ID and str_eq(tv[pos], o)
+
+def tok_is_op(p, o):
+    return tk[p] == K_OP and str_eq(tv[p], o)
+
+def tok_is_id(p, o):
+    return tk[p] == K_ID and str_eq(tv[p], o)
+
+def expect(o):
+    global pos
+    if not is_op(o):
+        die(cur_line(), concat(concat("expected '", o), "'"))
+    pos += 1
+
+def ident():
+    global pos
+    if tk[pos] != K_ID:
+        die(cur_line(), "expected identifier")
+    pos += 1
+    return tv[pos - 1]
+
+def starts(s, p):
+    n = len(p)
+    if len(s) < n:
+        return 0
+    i = 0
+    while i < n:
+        if char_at(s, i) != char_at(p, i):
+            return 0
+        i += 1
+    return 1
+
+def ends(s, p):
+    n = len(p)
+    m = len(s)
+    if m < n:
+        return 0
+    i = 0
+    while i < n:
+        if char_at(s, m - n + i) != char_at(p, i):
+            return 0
+        i += 1
+    return 1
+
+def contains(s, p):
+    n = len(p)
+    m = len(s) - n
+    i = 0
+    while i <= m:
+        j = 0
+        while j < n and char_at(s, i + j) == char_at(p, j):
+            j += 1
+        if j == n:
+            return 1
+        i += 1
+    return 0
+
+def atoi(s):
+    i = 0
+    neg = 0
+    if char_at(s, 0) == ord("-"):
+        neg = 1
+        i = 1
+    v = 0
+    while char_at(s, i):
+        v = v * 10 + char_at(s, i) - 48
+        i += 1
+    if neg:
+        return 0 - v
+    return v
+
+def type_of_name(t):
+    if str_eq(t, "int") or str_eq(t, "bool"):
+        return T_INT
+    if str_eq(t, "str"):
+        return T_STR
+    if str_eq(t, "list") or str_eq(t, "List"):
+        return T_LIST
+    if str_eq(t, "dict") or str_eq(t, "Dict"):
+        return T_DICT
+    c = find(cnm, nclass, t)
+    if c >= 0:
+        return 11 + c
+    return 0
+
+def parse_type():
+    # returns a type code; skips generic arguments like list[int]
+    global pos
+    t = type_of_name(ident())
+    while is_op("."):
+        pos += 1
+        ident()
+    if is_op("["):
+        d = 0
+        while 1:
+            if is_op("["):
+                d += 1
+            elif is_op("]"):
+                d -= 1
+            pos += 1
+            if d == 0:
+                break
+    return t
+
+# ---------------- variables ----------------
+def slot_ref(k):
+    return concat(concat("-", str(8 * k)), "(%rbp)")
+
+def var_ref(name):
+    # returns an operand for name (or 0); sets vty, vkind, vidx
+    global vty, vkind, vidx
+    i = nal - 1
+    while i >= 0:
+        if str_eq(anames[i], name):
+            vty = atys[i]
+            vkind = 4
+            vidx = i
+            return arefs[i]
+        i -= 1
+    if curf >= 0:
+        i = find(params, nparams, name)
+        if i >= 0:
+            vty = ptyp[i]
+            vkind = 1
+            vidx = i
+            pw[i] = pw[i] + weight()
+            if preg[i]:
+                return preg[i]
+            return concat(str(16 + 8 * (nparams - 1 - i)), "(%rbp)")
+        i = find(locs, nlocs, name)
+        if i >= 0:
+            vty = ltyp[i]
+            vkind = 2
+            vidx = i
+            lw[i] = lw[i] + weight()
+            if lreg[i]:
+                return lreg[i]
+            return slot_ref(lslot[i])
+    i = find(globs, nglobs, name)
+    if i >= 0:
+        vty = gtype[i]
+        if gint[i] and vty == 0:
+            vty = T_INT
+        vkind = 3
+        vidx = i
+        return concat(concat("g_", name), "(%rip)")
+    return 0
+
+def weight():
+    d = nloops
+    if d > 4:
+        d = 4
+    w = 1
+    while d > 0:
+        w = w * 8
+        d -= 1
+    return w
+
+def flag_index(i):
+    # index into lint[] for local i of the current function, or -1
+    if flb[curf] < 0 or i >= flcnt[curf]:
+        return -1
+    return flb[curf] + i
+
+def new_local(name, t, fixed):
+    global nlocs, nused, nslots
+    i = nlocs
+    locs[i] = name
+    lfix[i] = fixed
+    lw[i] = 0
+    if not fixed:
+        t = 0
+        if flb[curf] < 0:
+            t = T_INT
+        else:
+            fi = flag_index(i)
+            if fi >= 0 and lint[fi]:
+                t = T_INT
+    ltyp[i] = t
+    lreg[i] = 0
+    if want_reg(name):
+        lreg[i] = REGS[nused]
+        nused += 1
+    else:
+        nslots += 1
+        lslot[i] = nslots
+    nlocs += 1
+    return i
+
+def want_reg(name):
+    if nused >= NREGS:
+        return 0
+    rl = fregn[curf]
+    if not rl:
+        return 1
+    i = 1
+    while i <= rl[0]:
+        if str_eq(rl[i], name):
+            return 1
+        i += 1
+    return 0
+
+def hidden_local(prefix, t):
+    global nhid
+    nhid += 1
+    name = concat(prefix, str(nhid))
+    new_local(name, t, t != 0)
+    return name
+
+def conflict_var(kind, idx):
+    # a non-int value was stored into a variable that was assumed to hold ints
+    global nconf
+    if kind == 1:
+        ptyp[idx] = 0
+        k = fpb[curf] + idx
+        if pintf[k]:
+            pintf[k] = 0
+            nconf += 1
+    elif kind == 2:
+        ltyp[idx] = 0
+        fi = flag_index(idx)
+        if fi >= 0 and lint[fi]:
+            lint[fi] = 0
+        nconf += 1
+    elif kind == 3:
+        if gint[idx]:
+            gint[idx] = 0
+            nconf += 1
+
+def store_var(name, line, t, mark):
+    # value in %rax (or the single instruction out[mark]) with static type t
+    global nout
+    r = var_ref(name)
+    if not r:
+        die(line, concat(concat("internal: cannot assign '", name), "'"))
+    if vkind == 4:
+        die(line, "cannot assign to inlined parameter")
+    if vty == T_INT and t != T_INT:
+        if vkind == 1 and ptypes[fpb[curf] + vidx] == T_INT:
+            pass
+        elif vkind == 2 and lfix[vidx]:
+            pass
+        elif vkind == 3 and gtype[vidx] == T_INT:
+            pass
+        else:
+            conflict_var(vkind, vidx)
+    src = 0
+    if mark >= 0 and nout == mark + 1:
+        src = simple_src(out[mark])
+    if src and starts(r, "%") and not str_eq(src, r):
+        nout = mark
+        e3("mov ", src, concat(", ", r))
+    elif src and starts(src, "$") and small_imm(src):
+        nout = mark
+        e3("movq ", src, concat(", ", r))
+    else:
+        e2("mov %rax, ", r)
+
+# ---------------- peepholes and operand helpers ----------------
+def simple_src(line):
+    # "    mov SRC, %rax\n" where SRC is an immediate, a callee-saved register or a frame/global slot
+    if not starts(line, "    mov ") or not ends(line, ", %rax\n"):
+        return 0
+    src = substr(line, 8, len(line) - 7)
+    if starts(src, "%"):
+        if str_eq(src, "%rbx") or str_eq(src, "%r12") or str_eq(src, "%r13") or str_eq(src, "%r14") or str_eq(src, "%r15"):
+            return src
+        return 0
+    if starts(src, "$") or ends(src, "(%rbp)") or ends(src, "(%rip)"):
+        if contains(src, ",") or starts(src, "$L") or starts(src, "$S"):
+            return 0
+        return src
+    return 0
+
+def small_imm(src):
+    if char_at(src, 0) != ord("$"):
+        return 0
+    v = atoi(substr(src, 1, len(src)))
+    return v < 1000000000 and v > -1000000000
+
+def is_imm(src):
+    return char_at(src, 0) == ord("$")
+
+def region_has_call(mark):
+    i = mark + 1
+    while i < nout:
+        if starts(out[i], "    call "):
+            return 1
+        i += 1
+    return 0
+
+def free_temp(mark):
+    # a scratch register (r8-r11) that the code after out[mark] neither uses nor loses across a call
+    u8 = 0
+    u9 = 0
+    u10 = 0
+    u11 = 0
+    i = mark + 1
+    while i < nout:
+        l = out[i]
+        if starts(l, "    call ") and not starts(l, "    call rtp_"):
+            return 0
+        if contains(l, "%r8"):
+            u8 = 1
+        if contains(l, "%r9"):
+            u9 = 1
+        if contains(l, "%r10"):
+            u10 = 1
+        if contains(l, "%r11"):
+            u11 = 1
+        i += 1
+    if not u8:
+        return "%r8"
+    if not u9:
+        return "%r9"
+    if not u10:
+        return "%r10"
+    if not u11:
+        return "%r11"
+    return 0
+
+def tpop(mark, dest):
+    # out[mark] is "push %rax"; restore that value into dest, via a scratch register when possible
+    r = free_temp(mark)
+    if r:
+        out[mark] = concat(concat("    mov %rax, ", r), "\n")
+        e3("mov ", r, concat(", ", dest))
+        return r
+    e2("pop ", dest)
+    return 0
+
+def remove2(start):
+    global nout
+    i = start
+    while i + 2 < nout:
+        out[i] = out[i + 2]
+        i += 1
+    nout -= 2
+
+def lr(start, mark):
+    # left operand code is out[start..mark), out[mark] = push, right operand follows (in %rax).
+    # leaves left in %rax and right in %rcx
+    global nout
+    if nout == mark + 2:
+        src = simple_src(out[mark + 1])
+        if src:
+            nout = mark
+            e3("mov ", src, ", %rcx")
+            return 0
+    if mark == start + 1:
+        lsrc = simple_src(out[start])
+        if lsrc and (not ends(lsrc, "(%rip)") or not region_has_call(mark)):
+            remove2(start)
+            e("mov %rax, %rcx")
+            e3("mov ", lsrc, ", %rax")
+            return 0
+    e("mov %rax, %rcx")
+    tpop(mark, "%rax")
+
+def fold_ok(op):
+    return str_eq(op, "add") or str_eq(op, "sub") or str_eq(op, "imul")
+
+def binop(op, start, mark):
+    # integer op: result in %rax
+    global nout
+    if nout == mark + 2:
+        src = simple_src(out[mark + 1])
+        if src and (not is_imm(src) or small_imm(src)):
+            if mark == start + 1 and is_imm(src) and fold_ok(op):
+                lsrc = simple_src(out[start])
+                if lsrc and small_imm(lsrc):
+                    a = atoi(substr(lsrc, 1, len(lsrc)))
+                    b = atoi(substr(src, 1, len(src)))
+                    r = 0
+                    if str_eq(op, "add"):
+                        r = a + b
+                    elif str_eq(op, "sub"):
+                        r = a - b
+                    elif str_eq(op, "imul"):
+                        r = a * b
+                    elif str_eq(op, "and"):
+                        r = band(a, b)
+                    elif str_eq(op, "or"):
+                        r = a + b - band(a, b)
+                    else:
+                        r = a + b - 2 * band(a, b)
+                    nout = start
+                    e3("mov $", str(r), ", %rax")
+                    return 0
+            nout = mark
+            e3(op, " ", concat(src, ", %rax"))
+            return 0
+    if mark == start + 1 and not str_eq(op, "cmp"):
+        lsrc = simple_src(out[start])
+        if lsrc and (not is_imm(lsrc) or small_imm(lsrc)) and (str_eq(op, "add") or str_eq(op, "imul") or str_eq(op, "and") or str_eq(op, "or") or str_eq(op, "xor")) and (not ends(lsrc, "(%rip)") or not region_has_call(mark)):
+            remove2(start)
+            e3(op, " ", concat(lsrc, ", %rax"))
+            return 0
+    lr(start, mark)
+    e2(op, " %rcx, %rax")
+
+def band(a, b):
+    # bitwise and without using & (the bootstrap has no bit operators)
+    r = 0
+    bit = 1
+    k = 0
+    neg = 0
+    if a < 0 and b < 0:
+        neg = 1
+    while k < 62:
+        if odd(a) and odd(b):
+            r = r + bit
+        a = half(a)
+        b = half(b)
+        bit = bit * 2
+        k += 1
+    if neg:
+        r = r - bit - bit
+    return r
+
+def odd(a):
+    return a - half(a) * 2 != 0
+
+def half(a):
+    # floor(a / 2) under both truncating and flooring division
+    q = a / 2
+    if q * 2 > a:
+        q -= 1
+    return q
+
+def jump_if_false(l):
+    global nout
+    if nout >= 2 and str_eq(out[nout - 1], "    movzbq %al, %rax\n") and starts(out[nout - 2], "    set"):
+        cc = substr(out[nout - 2], 7, len(out[nout - 2]) - 5)
+        nout -= 2
+        e2(concat(concat("j", negcc(cc)), " "), lab(l))
+    else:
+        e("test %rax, %rax")
+        e2("jz ", lab(l))
+
+def jump_if_true(l):
+    global nout
+    if nout >= 2 and str_eq(out[nout - 1], "    movzbq %al, %rax\n") and starts(out[nout - 2], "    set"):
+        cc = substr(out[nout - 2], 7, len(out[nout - 2]) - 5)
+        nout -= 2
+        e2(concat(concat("j", cc), " "), lab(l))
+    else:
+        e("test %rax, %rax")
+        e2("jnz ", lab(l))
+
+def negcc(cc):
+    if str_eq(cc, "e"):
+        return "ne"
+    if str_eq(cc, "ne"):
+        return "e"
+    if str_eq(cc, "l"):
+        return "ge"
+    if str_eq(cc, "g"):
+        return "le"
+    if str_eq(cc, "le"):
+        return "g"
+    if str_eq(cc, "ge"):
+        return "l"
+    if str_eq(cc, "b"):
+        return "ae"
+    if str_eq(cc, "ae"):
+        return "b"
+    return "z"
+
+def value_jump(l, sense):
+    # and/or in value context: the operand value must survive in %rax
+    if ety == T_INT:
+        e("test %rax, %rax")
+        if sense:
+            e2("jnz ", lab(l))
+        else:
+            e2("jz ", lab(l))
+    elif sense:
+        jump_true(l)
+    else:
+        jump_false(l)
+
+def cond_end(p):
+    # index of the ':' ending a condition that starts at p
+    d = 0
+    while 1:
+        if tk[p] == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                d -= 1
+            elif d == 0 and str_eq(v, ":"):
+                return p
+        elif tk[p] == K_NL or tk[p] == K_EOF:
+            die(tl[p], "expected ':'")
+        p += 1
+
+def has_top(kw):
+    # does the expression at pos contain kw at bracket depth 0 (before its end / a weaker operator)?
+    p = pos
+    d = 0
+    while 1:
+        k = tk[p]
+        if k == K_NL or k == K_EOF or k == K_IND or k == K_DED:
+            return 0
+        if k == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                if d == 0:
+                    return 0
+                d -= 1
+            elif d == 0 and (str_eq(v, ":") or str_eq(v, ",") or str_eq(v, "=")):
+                return 0
+        elif k == K_ID and d == 0:
+            v = tv[p]
+            if str_eq(v, kw):
+                return 1
+            if str_eq(v, "if") or str_eq(v, "else") or str_eq(v, "for"):
+                return 0
+            if str_eq(kw, "and") and str_eq(v, "or"):
+                return 0
+        p += 1
+
+def cond_top(l, sense):
+    # compile a full condition; jump to l when its truth equals sense, else fall through
+    if has_top("if"):
+        expr()
+        if sense:
+            jump_true(l)
+        else:
+            jump_false(l)
+        return 0
+    cond_or(l, sense)
+
+def cond_or(l, sense):
+    global pos
+    if not has_top("or"):
+        cond_and(l, sense)
+        return 0
+    lt = new_label()
+    while 1:
+        if sense:
+            cond_and(l, 1)
+        elif has_top("or"):
+            cond_and(lt, 1)
+        else:
+            cond_and(l, 0)
+        if not is_id("or"):
+            break
+        pos += 1
+    put_label(lt)
+
+def cond_and(l, sense):
+    global pos
+    if not has_top("and"):
+        cond_not(l, sense)
+        return 0
+    lf = new_label()
+    while 1:
+        if not sense:
+            cond_not(l, 0)
+        elif has_top("and"):
+            cond_not(lf, 0)
+        else:
+            cond_not(l, 1)
+        if not is_id("and"):
+            break
+        pos += 1
+    put_label(lf)
+
+def cond_not(l, sense):
+    global pos
+    if is_id("not") and not tok_is_id(pos + 1, "in"):
+        pos += 1
+        cond_not(l, 1 - sense)
+        return 0
+    cmp_expr()
+    if sense:
+        jump_true(l)
+    else:
+        jump_false(l)
+
+def jump_false(l):
+    # Python truthiness: 0, None, "", [] and {} are false
+    global u_truth
+    if ety == T_INT:
+        jump_if_false(l)
+        return 0
+    t = new_label()
+    e("test %rax, %rax")
+    e2("jz ", lab(l))
+    e("mov %rax, %rdx")
+    e("shr $44, %rdx")
+    e2("jz ", lab(t))
+    e("call rtp_truth")
+    u_truth = 1
+    e("test %rdx, %rdx")
+    e2("jz ", lab(l))
+    put_label(t)
+
+def jump_true(l):
+    global u_truth
+    if ety == T_INT:
+        jump_if_true(l)
+        return 0
+    f = new_label()
+    e("test %rax, %rax")
+    e2("jz ", lab(f))
+    e("mov %rax, %rdx")
+    e("shr $44, %rdx")
+    e2("jz ", lab(l))
+    e("call rtp_truth")
+    u_truth = 1
+    e("test %rdx, %rdx")
+    e2("jnz ", lab(l))
+    put_label(f)
+
+# ---------------- calls ----------------
+def add_edge(t):
+    global nce
+    if curf >= 0:
+        ce_from[nce] = curf
+        ce_to[nce] = t
+        nce += 1
+
+def fn_lookup(name, n):
+    # a plain (non-method) function with this name and arity that is not shadowed
+    i = 0
+    while i < nfuncs:
+        if fmeth[i] != 1 and fargs[i] == n and not fshadow[i] and str_eq(fnames[i], name):
+            return i
+        i += 1
+    return -1
+
+def resolve_fn(name, n):
+    f = fn_lookup(name, n)
+    if f >= 0:
+        return f
+    return fn_lookup(concat(concat(name, "__"), str(n)), n)
+
+def internal(name, n):
+    f = resolve_fn(name, n)
+    if f < 0:
+        die(cur_line(), concat("internal: missing prelude function ", name))
+    return f
+
+def call_f(f, n):
+    e2("call ", flabel[f])
+    add_edge(f)
+    if n > 0:
+        e3("add $", str(8 * n), ", %rsp")
+
+def call_rt(name, n):
+    e2("call ", name)
+    if n > 0:
+        e3("add $", str(8 * n), ", %rsp")
+
+def call_internal(name, n):
+    call_f(internal(name, n), n)
+
+def ret_type(f):
+    if fret[f]:
+        return fret[f]
+    if fint[f]:
+        return T_INT
+    return 0
+
+argf = -1
+
+def arg_check(f, i):
+    # a non-int argument contradicts the "always int" assumption for that parameter
+    global nconf
+    if f >= 0 and i < fargs[f] and ety != T_INT:
+        k = fpb[f] + i
+        if pintf[k]:
+            pintf[k] = 0
+            nconf += 1
+
+def push_args():
+    # parses "(a, b, ...)" pushing each value; returns the count
+    global pos, argf
+    f = argf
+    argf = -1
+    expect("(")
+    n = 0
+    while not is_op(")"):
+        expr()
+        arg_check(f, n)
+        e("push %rax")
+        n += 1
+        if is_op(","):
+            pos += 1
+        elif not is_op(")"):
+            die(cur_line(), "expected ',' or ')' in call")
+    pos += 1
+    return n
+
+def count_args(p):
+    # number of top-level arguments of the call whose '(' is at p
+    if tok_is_op(p + 1, ")"):
+        return 0
+    d = 0
+    n = 1
+    while 1:
+        if tk[p] == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                d -= 1
+                if d == 0:
+                    return n
+            elif str_eq(v, ",") and d == 1:
+                n += 1
+        if tk[p] == K_EOF:
+            return n
+        p += 1
+
+BI_NAMES = ["puts", "eputs", "concat", "write_file", "read_file", "substr", "alloc", "join", "argc", "argv", "exit", "str_eq", "chr", "mark", "release", "set_byte", "__new", "__copy", "__tag", "__aux", "__itos_raw", "__writes", "__wint"]
+BI_ARGS = [1, 1, 2, 2, 1, 3, 1, 2, 0, 1, 1, 2, 1, 0, 1, 3, 3, 3, 1, 1, 1, 1, 1]
+BI_RT = ["rt_puts", "rt_eputs", "rt_concat", "rt_write_file", "rt_read_file", "rt_substr", "rt_alloc", "rt_join", "rt_argc", "rt_argv", "rt_exit", "rt_str_eq", "rt_chr", "rt_mark", "rt_release", "rt_set_byte", "rt_new", "rt_copy", "rt_tag", "rt_aux", "rt_itos", "rt_writes", "rt_wint"]
+BI_TY = [0, 0, 2, 1, 2, 2, 0, 2, 1, 2, 0, 1, 2, 1, 0, 0, 0, 0, 1, 1, 2, 0, 0, 0]
+NBI = 23
+
+def builtin_call(name, line):
+    # returns 1 if name( ... ) was compiled as a builtin
+    global pos, ety, nout
+    if str_eq(name, "print"):
+        compile_print(line)
+        return 1
+    if str_eq(name, "len"):
+        if tk[pos + 1] == K_ID and tok_is_op(pos + 2, ")"):
+            h = find(hnames, nh, tv[pos + 1])
+            if h >= 0:
+                pos += 3
+                e3("mov ", hrefs[h], ", %rax")
+                ety = T_INT
+                return 1
+        expect("(")
+        expr()
+        expect(")")
+        emit_len()
+        return 1
+    if str_eq(name, "char_at"):
+        expect("(")
+        start = nout
+        expr()
+        mark = nout
+        e("push %rax")
+        expect(",")
+        expr()
+        expect(")")
+        lr(start, mark)
+        e("movzbq (%rax,%rcx), %rax")
+        ety = T_INT
+        return 1
+    if str_eq(name, "__ld"):
+        expect("(")
+        start = nout
+        expr()
+        mark = nout
+        e("push %rax")
+        expect(",")
+        expr()
+        expect(")")
+        lr(start, mark)
+        e("mov (%rax,%rcx,8), %rax")
+        ety = 0
+        return 1
+    if str_eq(name, "__st"):
+        n = push_args()
+        if n != 3:
+            die(line, "__st takes 3 arguments")
+        e("pop %rax")
+        e("pop %rcx")
+        e("pop %rdx")
+        e("mov %rax, (%rdx,%rcx,8)")
+        ety = 0
+        return 1
+    if str_eq(name, "ord"):
+        if tk[pos + 1] == K_STR and tok_is_op(pos + 2, ")") and len(tv[pos + 1]) == 1:
+            e3("mov $", str(char_at(tv[pos + 1], 0)), ", %rax")
+            pos += 3
+        else:
+            expect("(")
+            expr()
+            expect(")")
+            e("movzbq (%rax), %rax")
+        ety = T_INT
+        return 1
+    if str_eq(name, "str"):
+        expect("(")
+        expr()
+        expect(")")
+        if ety == T_STR:
+            return 1
+        e("push %rax")
+        if ety == T_INT:
+            call_rt("rt_itos", 1)
+        else:
+            call_internal("__str", 1)
+        ety = T_STR
+        return 1
+    if str_eq(name, "list"):
+        if tok_is_op(pos + 1, ")"):
+            pos += 2
+            e("push $0")
+            call_rt("rt_list", 1)
+            ety = T_LIST
+            return 1
+        expect("(")
+        expr()
+        expect(")")
+        e("push %rax")
+        if ety == T_INT:
+            call_rt("rt_list", 1)
+        else:
+            call_internal("__listof", 1)
+        ety = T_LIST
+        return 1
+    if str_eq(name, "dict") and tok_is_op(pos + 1, ")"):
+        pos += 2
+        call_internal("__dict", 0)
+        ety = T_DICT
+        return 1
+    b = find(BI_NAMES, NBI, name)
+    if b >= 0:
+        n = push_args()
+        if n != BI_ARGS[b]:
+            die(line, concat(concat("wrong number of arguments to ", name), "()"))
+        call_rt(BI_RT[b], n)
+        ety = BI_TY[b]
+        return 1
+    return 0
+
+def emit_len():
+    global ety
+    if ety == T_LIST or ety == T_DICT:
+        e("mov (%rax), %rax")
+    elif ety == T_STR:
+        e("mov -8(%rax), %rax")
+        e("shl $8, %rax")
+        e("shr $8, %rax")
+    else:
+        e("push %rax")
+        call_rt("rt_len", 1)
+    ety = T_INT
+
+def compile_print(line):
+    global pos
+    expect("(")
+    first = 1
+    endnl = 1
+    while not is_op(")"):
+        if tk[pos] == K_ID and tok_is_op(pos + 1, "=") and (tok_is_id(pos, "end") or tok_is_id(pos, "sep")):
+            if tok_is_id(pos, "sep"):
+                die(line, "print(sep=...) is not supported")
+            pos += 2
+            expr()
+            e("push %rax")
+            call_rt("rt_writes", 1)
+            endnl = 0
+        else:
+            if not first:
+                call_rt("rt_sp", 0)
+            first = 0
+            expr()
+            e("push %rax")
+            if ety == T_STR:
+                call_rt("rt_writes", 1)
+            elif ety == T_INT:
+                call_rt("rt_wint", 1)
+            else:
+                call_internal("__pr", 1)
+        if is_op(","):
+            pos += 1
+    pos += 1
+    if endnl:
+        call_rt("rt_nl", 0)
+
+def call_named(name, line):
+    # pos is at '(' after name
+    global pos, ety, argf
+    if builtin_call(name, line):
+        return 0
+    n = count_args(pos)
+    f = resolve_fn(name, n)
+    if f < 0:
+        if any_fn(name):
+            die(line, concat(concat(concat(concat("wrong number of arguments (", str(n)), ") to "), name), "()"))
+        die(line, concat(concat("undefined function '", name), "'"))
+    if finl[f] > 0 and curf != f:
+        inline_call(f, line)
+        return 0
+    argf = f
+    k = push_args()
+    call_f(f, k)
+    ety = ret_type(f)
+
+def any_fn(name):
+    i = 0
+    while i < nfuncs:
+        if fmeth[i] != 1 and str_eq(fnames[i], name):
+            return 1
+        i += 1
+    return 0
+
+def inline_call(f, line):
+    global pos, nal, nout, ety
+    expect("(")
+    k = 0
+    tmpr = list(64)
+    tmpt = list(64)
+    while not is_op(")"):
+        mark = nout
+        expr()
+        arg_check(f, k)
+        src = 0
+        if nout == mark + 1:
+            src = simple_src(out[mark])
+            if src and ends(src, "(%rip)"):
+                src = 0
+        if src:
+            nout = mark
+            tmpr[k] = src
+        else:
+            hn = hidden_local("__inl", ety)
+            r = var_ref(hn)
+            e2("mov %rax, ", r)
+            tmpr[k] = r
+        tmpt[k] = ety
+        k += 1
+        if is_op(","):
+            pos += 1
+    pos += 1
+    base = nal
+    i = 0
+    while i < k:
+        anames[nal] = pnames[fpb[f] + i]
+        arefs[nal] = tmpr[i]
+        t = tmpt[i]
+        if ptypes[fpb[f] + i]:
+            t = ptypes[fpb[f] + i]
+        atys[nal] = t
+        nal += 1
+        i += 1
+    save = pos
+    pos = finl[f]
+    expr()
+    pos = save
+    nal = base
+    if fret[f]:
+        ety = fret[f]
+
+# ---------------- expressions ----------------
+def expr():
+    global pos, ety, nout
+    start = nout
+    or_expr()
+    if is_id("if"):
+        t1 = ety
+        n = nout - start
+        saved = list(n + 1)
+        i = 0
+        while i < n:
+            saved[i] = out[start + i]
+            i += 1
+        nout = start
+        pos += 1
+        lf = new_label()
+        le = new_label()
+        cond_or(lf, 0)
+        i = 0
+        while i < n:
+            emit_raw(saved[i])
+            i += 1
+        e2("jmp ", lab(le))
+        put_label(lf)
+        if not is_id("else"):
+            die(cur_line(), "expected 'else' in conditional expression")
+        pos += 1
+        expr()
+        put_label(le)
+        if ety != t1:
+            ety = 0
+
+def or_expr():
+    global pos, ety
+    and_expr()
+    while is_id("or"):
+        t1 = ety
+        pos += 1
+        l = new_label()
+        value_jump(l, 1)
+        and_expr()
+        put_label(l)
+        if ety != t1:
+            ety = 0
+
+def and_expr():
+    global pos, ety
+    not_expr()
+    while is_id("and"):
+        t1 = ety
+        pos += 1
+        l = new_label()
+        value_jump(l, 0)
+        not_expr()
+        put_label(l)
+        if ety != t1:
+            ety = 0
+
+def not_expr():
+    global pos, ety
+    if is_id("not"):
+        pos += 1
+        not_expr()
+        if ety == T_INT:
+            e("test %rax, %rax")
+            e("sete %al")
+            e("movzbq %al, %rax")
+        else:
+            lf = new_label()
+            le = new_label()
+            jump_false(lf)
+            e("xor %eax, %eax")
+            e2("jmp ", lab(le))
+            put_label(lf)
+            e("mov $1, %eax")
+            put_label(le)
+        ety = T_INT
+        return 0
+    cmp_expr()
+
+def cmp_op():
+    # returns the comparison at pos (and its token length) or 0
+    global cmplen
+    cmplen = 1
+    if tk[pos] == K_OP:
+        v = tv[pos]
+        if str_eq(v, "==") or str_eq(v, "!=") or str_eq(v, "<") or str_eq(v, ">") or str_eq(v, "<=") or str_eq(v, ">="):
+            return v
+        return 0
+    if is_id("in"):
+        return "in"
+    if is_id("not") and tok_is_id(pos + 1, "in"):
+        cmplen = 2
+        return "not in"
+    if is_id("is"):
+        if tok_is_id(pos + 1, "not"):
+            cmplen = 2
+            return "is not"
+        return "is"
+    return 0
+
+cmplen = 0
+
+def setcc(op):
+    if str_eq(op, "==") or str_eq(op, "is"):
+        return "e"
+    if str_eq(op, "!=") or str_eq(op, "is not"):
+        return "ne"
+    if str_eq(op, "<"):
+        return "l"
+    if str_eq(op, ">"):
+        return "g"
+    if str_eq(op, "<="):
+        return "le"
+    return "ge"
+
+def cmp_expr():
+    global pos, ety, u_eq
+    start = nout
+    bor_expr()
+    op = cmp_op()
+    if not op:
+        return 0
+    line = cur_line()
+    lt = ety
+    pos += cmplen
+    mark = nout
+    e("push %rax")
+    bor_expr()
+    rt = ety
+    if cmp_op():
+        die(line, "chained comparisons are not supported; use 'and'")
+    if str_eq(op, "in") or str_eq(op, "not in"):
+        lr(start, mark)
+        e("push %rcx")
+        e("push %rax")
+        call_internal("__contains", 2)
+        if str_eq(op, "not in"):
+            e("xor $1, %rax")
+        ety = T_INT
+        return 0
+    if str_eq(op, "==") or str_eq(op, "!="):
+        known = lt == T_INT or rt == T_INT or ((lt == T_LIST or lt == T_DICT or lt > 10) and (rt == T_LIST or rt == T_DICT or rt > 10))
+        if not known:
+            lr(start, mark)
+            e("cmp %rcx, %rax")
+            e("je 1f")
+            e("mov %rax, %rdx")
+            e("or %rcx, %rdx")
+            e("shr $44, %rdx")
+            e("jz 2f")
+            e("call rtp_eq")
+            u_eq = 1
+            e("jmp 3f")
+            emit_raw("1:\n")
+            e("mov $1, %eax")
+            e("jmp 3f")
+            emit_raw("2:\n")
+            e("xor %eax, %eax")
+            emit_raw("3:\n")
+            if str_eq(op, "!="):
+                e("xor $1, %rax")
+            ety = T_INT
+            return 0
+    elif not str_eq(op, "is") and not str_eq(op, "is not"):
+        if lt == T_STR or rt == T_STR or (lt != T_INT and rt != T_INT):
+            lr(start, mark)
+            e("push %rax")
+            e("push %rcx")
+            if lt == T_STR and rt == T_STR:
+                call_internal("__strcmp", 2)
+            else:
+                call_internal("__cmp", 2)
+            e("cmp $0, %rax")
+            e2(concat("set", setcc(op)), " %al")
+            e("movzbq %al, %rax")
+            ety = T_INT
+            return 0
+    binop("cmp", start, mark)
+    e2(concat("set", setcc(op)), " %al")
+    e("movzbq %al, %rax")
+    ety = T_INT
+
+def bor_expr():
+    global pos, ety
+    start = nout
+    bxor_expr()
+    while is_op("|"):
+        pos += 1
+        mark = nout
+        e("push %rax")
+        bxor_expr()
+        binop("or", start, mark)
+        ety = T_INT
+
+def bxor_expr():
+    global pos, ety
+    start = nout
+    band_expr()
+    while is_op("^"):
+        pos += 1
+        mark = nout
+        e("push %rax")
+        band_expr()
+        binop("xor", start, mark)
+        ety = T_INT
+
+def band_expr():
+    global pos, ety
+    start = nout
+    shift_expr()
+    while is_op("&"):
+        pos += 1
+        mark = nout
+        e("push %rax")
+        shift_expr()
+        binop("and", start, mark)
+        ety = T_INT
+
+def shift_expr():
+    global pos, ety, nout
+    start = nout
+    add_expr()
+    while is_op("<<") or is_op(">>"):
+        ins = "sar"
+        if is_op("<<"):
+            ins = "shl"
+        pos += 1
+        mark = nout
+        e("push %rax")
+        add_expr()
+        src = 0
+        if nout == mark + 2:
+            src = simple_src(out[mark + 1])
+        if src and is_imm(src):
+            nout = mark
+            e3(ins, " ", concat(src, ", %rax"))
+        else:
+            lr(start, mark)
+            e2(ins, " %cl, %rax")
+        ety = T_INT
+
+def add_expr():
+    global pos, ety
+    start = nout
+    mul_expr()
+    while is_op("+") or is_op("-"):
+        line = cur_line()
+        plus = is_op("+")
+        lt = ety
+        pos += 1
+        mark = nout
+        e("push %rax")
+        mul_expr()
+        if plus:
+            apply_add(start, mark, lt, ety, line)
+        else:
+            if lt == T_STR or ety == T_STR:
+                die(line, "unsupported operand '-' for str")
+            binop("sub", start, mark)
+            ety = T_INT
+
+def apply_add(start, mark, lt, rt, line):
+    global ety, u_add
+    if lt == T_INT or rt == T_INT:
+        if lt == T_STR or rt == T_STR or lt == T_LIST or rt == T_LIST:
+            die(line, "cannot add int and a non-int")
+        binop("add", start, mark)
+        ety = T_INT
+    elif lt == T_STR or rt == T_STR:
+        lr(start, mark)
+        e("push %rax")
+        e("push %rcx")
+        call_rt("rt_concat", 2)
+        ety = T_STR
+    elif lt == T_LIST or rt == T_LIST:
+        lr(start, mark)
+        e("push %rax")
+        e("push %rcx")
+        call_internal("__list_add", 2)
+        ety = T_LIST
+    else:
+        lr(start, mark)
+        e("mov %rax, %rdx")
+        e("or %rcx, %rdx")
+        e("shr $44, %rdx")
+        e("jnz 1f")
+        e("add %rcx, %rax")
+        e("jmp 2f")
+        emit_raw("1:\n")
+        e3("mov $", str(uline(line)), ", %rdx")
+        e("call rtp_add")
+        u_add = 1
+        emit_raw("2:\n")
+        ety = 0
+
+def mul_expr():
+    global pos, ety
+    start = nout
+    unary_expr()
+    while is_op("*") or is_op("/") or is_op("//") or is_op("%"):
+        line = cur_line()
+        op = tv[pos]
+        lt = ety
+        pos += 1
+        mark = nout
+        e("push %rax")
+        unary_expr()
+        apply_mul(op, start, mark, lt, ety, line)
+
+def apply_mul(op, start, mark, lt, rt, line):
+    global ety
+    if str_eq(op, "*"):
+        if lt == T_STR or lt == T_LIST:
+            lr(start, mark)
+            e("push %rax")
+            e("push %rcx")
+            if lt == T_STR:
+                call_internal("__strmul", 2)
+            else:
+                call_internal("__list_mul", 2)
+            ety = lt
+        elif rt == T_STR or rt == T_LIST:
+            lr(start, mark)
+            e("push %rcx")
+            e("push %rax")
+            if rt == T_STR:
+                call_internal("__strmul", 2)
+            else:
+                call_internal("__list_mul", 2)
+            ety = rt
+        else:
+            binop("imul", start, mark)
+            ety = T_INT
+        return 0
+    if lt == T_STR:
+        die(line, "string % formatting is not supported; use f-strings")
+    divmod(start, mark, str_eq(op, "%"), line)
+    ety = T_INT
+
+def divmod(start, mark, ismod, line):
+    global nout
+    if nout == mark + 2:
+        src = simple_src(out[mark + 1])
+        if src and is_imm(src):
+            d = atoi(substr(src, 1, len(src)))
+            if d > 0 and d < 2147483648:
+                nout = mark
+                const_div(d, ismod)
+                return 0
+    lr(start, mark)
+    e("test %rcx, %rcx")
+    e("jnz 1f")
+    e3("mov $", str(uline(line)), ", %rdx")
+    e("call rt_divzero")
+    emit_raw("1:\n")
+    e("cqo")
+    e("idiv %rcx")
+    e("test %rdx, %rdx")
+    e("jz 2f")
+    e("mov %rdx, %rsi")
+    e("xor %rcx, %rsi")
+    e("jns 2f")
+    e("dec %rax")
+    e("add %rcx, %rdx")
+    emit_raw("2:\n")
+    if ismod:
+        e("mov %rdx, %rax")
+
+def const_div(d, ismod):
+    # floor division / modulo by a positive constant (value in %rax)
+    if d == 1:
+        if ismod:
+            e("xor %eax, %eax")
+        return 0
+    k = 0
+    p = 1
+    while p < d:
+        p = p * 2
+        k += 1
+    if p == d:
+        if ismod:
+            if d - 1 < 2147483648:
+                e3("and $", str(d - 1), ", %rax")
+            else:
+                e3("mov $", str(d - 1), ", %rcx")
+                e("and %rcx, %rax")
+        else:
+            e3("sar $", str(k), ", %rax")
+        return 0
+    # k = ceil(log2 d); m = floor(2^(63+k) / d) + 1 (fits in 64 bits, computed by long division)
+    s = 63 + k
+    r = 0
+    q = 0
+    b = s
+    while b >= 0:
+        r = r * 2
+        if b == s:
+            r += 1
+        q = q * 2
+        if r >= d:
+            r -= d
+            q += 1
+        b -= 1
+    m = q + 1
+    if ismod:
+        e("mov %rax, %rsi")
+    e("cqo")
+    e("xor %rdx, %rax")
+    e("mov %rdx, %rdi")
+    e3("mov $", str(m), ", %rcx")
+    e("mul %rcx")
+    if k > 1:
+        e3("shr $", str(k - 1), ", %rdx")
+    e("xor %rdi, %rdx")
+    e("mov %rdx, %rax")
+    if ismod:
+        e3("imul $", str(d), ", %rax")
+        e("sub %rax, %rsi")
+        e("mov %rsi, %rax")
+
+def unary_expr():
+    global pos, ety, nout
+    if is_op("-"):
+        pos += 1
+        mark = nout
+        unary_expr()
+        if nout == mark + 1:
+            src = simple_src(out[mark])
+            if src and is_imm(src) and char_at(src, 1) != ord("-"):
+                nout = mark
+                e3("mov $-", substr(src, 1, len(src)), ", %rax")
+                ety = T_INT
+                return 0
+        e("neg %rax")
+        ety = T_INT
+        return 0
+    if is_op("+"):
+        pos += 1
+        unary_expr()
+        return 0
+    if is_op("~"):
+        pos += 1
+        unary_expr()
+        e("not %rax")
+        ety = T_INT
+        return 0
+    power_expr()
+
+def power_expr():
+    global pos, ety
+    postfix_expr()
+    if is_op("**"):
+        pos += 1
+        e("push %rax")
+        unary_expr()
+        e("push %rax")
+        call_internal("__pow", 2)
+        ety = T_INT
+
+pstop = -1
+
+def emit_getidx(line):
+    global u_getidx
+    e("cmpb $0, -1(%rax)")
+    e("jne 1f")
+    e("cmp (%rax), %rcx")
+    e("jae 1f")
+    e("mov 16(%rax), %rax")
+    e("mov (%rax,%rcx,8), %rax")
+    e("jmp 2f")
+    emit_raw("1:\n")
+    e3("mov $", str(uline(line)), ", %rdx")
+    e("call rtp_getidx")
+    u_getidx = 1
+    emit_raw("2:\n")
+
+def emit_setidx(line):
+    # rdx = object, rcx = index, rax = value
+    global u_setidx
+    e("cmpb $0, -1(%rdx)")
+    e("jne 1f")
+    e("cmp (%rdx), %rcx")
+    e("jae 1f")
+    e("mov 16(%rdx), %rdx")
+    e("mov %rax, (%rdx,%rcx,8)")
+    e("jmp 2f")
+    emit_raw("1:\n")
+    e3("mov $", str(uline(line)), ", %rsi")
+    e("call rtp_setidx")
+    u_setidx = 1
+    emit_raw("2:\n")
+
+def field_offset(name, t, line):
+    # byte offset of field name for an object of static type t, or -1 if it needs a table lookup
+    if t > 10:
+        c = t - 11
+        k = find_field(c, name)
+        if k >= 0:
+            return 8 * k
+    off = -2
+    c = 0
+    while c < nclass:
+        k = find_field(c, name)
+        if k >= 0:
+            if off == -2:
+                off = 8 * k
+            elif off != 8 * k:
+                off = -1
+        c += 1
+    if off == -2:
+        die(line, concat(concat("no class has a field '", name), "'"))
+    if off == -1:
+        if find(dynf, ndynf, name) < 0:
+            dynf_add(name)
+    return off
+
+def dynf_add(name):
+    global ndynf
+    dynf[ndynf] = name
+    ndynf += 1
+
+def find_field(c, name):
+    i = 0
+    while i < cnf[c]:
+        if str_eq(cfld[cfb[c] + i], name):
+            return i
+        i += 1
+    return -1
+
+def field_type(name, t):
+    return 0
+
+def field_addr(name, t, line, reg):
+    # returns an operand addressing the field of the object in reg
+    off = field_offset(name, t, line)
+    if off >= 0:
+        return concat(concat(str(off), "("), concat(reg, ")"))
+    e3("movzwl -8(", reg, "), %esi")
+    e3("lea FT_", name, "(%rip), %rdi")
+    e("mov (%rdi,%rsi,8), %rsi")
+    return concat(concat("(", reg), ",%rsi)")
+
+def postfix_expr():
+    global pos, ety
+    pstart = nout
+    primary()
+    while 1:
+        if pstop >= 0 and pos >= pstop:
+            return 0
+        if is_op("["):
+            line = cur_line()
+            pos += 1
+            ot = ety
+            if is_op(":") or slice_ahead():
+                compile_slice(line)
+                ety = ot
+                continue
+            mark = nout
+            e("push %rax")
+            expr()
+            expect("]")
+            if ot == T_STR:
+                e("mov %rax, %rcx")
+                e("pop %rax")
+                e3("mov $", str(uline(line)), ", %rdx")
+                e("call rtp_getidx")
+                globals_used_getidx()
+                ety = T_STR
+                continue
+            if ot == T_DICT:
+                e("mov %rax, %rcx")
+                e("pop %rax")
+                e("push %rax")
+                e("push %rcx")
+                e3("push $", str(uline(line)), "")
+                call_internal("__dget", 3)
+                ety = 0
+                continue
+            lr(pstart, mark)
+            emit_getidx(line)
+            ety = 0
+        elif is_op("."):
+            pos += 1
+            line = cur_line()
+            name = ident()
+            if is_op("("):
+                method_call(name, line)
+            else:
+                ot = ety
+                a = field_addr(name, ot, line, "%rax")
+                e3("mov ", a, ", %rax")
+                ety = field_type(name, ot)
+        else:
+            return 0
+
+def globals_used_getidx():
+    global u_getidx
+    u_getidx = 1
+
+def slice_ahead():
+    # is there a ':' at depth 0 before the matching ']'?
+    p = pos
+    d = 0
+    while 1:
+        if tk[p] == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                if d == 0:
+                    return 0
+                d -= 1
+            elif str_eq(v, ":") and d == 0:
+                return 1
+        if tk[p] == K_NL or tk[p] == K_EOF:
+            return 0
+        p += 1
+
+def compile_slice(line):
+    # object in %rax, pos after '['
+    global pos
+    e("push %rax")
+    if is_op(":"):
+        e("push $0")
+    else:
+        expr()
+        e("push %rax")
+    expect(":")
+    if is_op("]"):
+        e("mov $9223372036854775807, %rax")
+        e("push %rax")
+    else:
+        expr()
+        e("push %rax")
+    expect("]")
+    e3("push $", str(uline(line)), "")
+    call_internal("__slice", 4)
+
+def method_call(name, line):
+    # receiver in %rax, pos at '('
+    global ety
+    rt = ety
+    e("push %rax")
+    n = push_args()
+    f = -1
+    if rt > 10:
+        f = method_of(rt - 11, name)
+        if f < 0:
+            die(line, concat(concat(concat("class ", cnm[rt - 11]), " has no method "), name))
+    cnt = 0
+    one = -1
+    if f < 0 and rt <= 10 and rt != T_STR and rt != T_LIST and rt != T_DICT:
+        c = 0
+        while c < nclass:
+            g = method_of(c, name)
+            if g >= 0:
+                cnt += 1
+                one = g
+            c += 1
+    plain = resolve_fn(concat("__m_", name), n + 1)
+    if plain < 0:
+        plain = resolve_fn(name, n + 1)
+    if f < 0 and cnt == 1 and plain < 0:
+        f = one
+    if f >= 0:
+        if fargs[f] != n + 1:
+            die(line, concat(concat("wrong number of arguments to method ", name), "()"))
+        call_f(f, n + 1)
+        ety = ret_type(f)
+        return 0
+    if cnt > 0:
+        if find(dynm, ndynm, name) < 0:
+            dynm_add(name, n + 1, plain)
+        e3("mov ", str(8 * n), "(%rsp), %rax")
+        e("xor %ecx, %ecx")
+        e("cmpb $2, -1(%rax)")
+        e("jne 1f")
+        e("movzwl -8(%rax), %ecx")
+        emit_raw("1:\n")
+        e3("lea MT_", name, "(%rip), %rax")
+        e("call *(%rax,%rcx,8)")
+        c = 0
+        while c < nclass:
+            g = method_of(c, name)
+            if g >= 0:
+                add_edge(g)
+            c += 1
+        if plain >= 0:
+            add_edge(plain)
+            clear_pints(plain)
+        e3("add $", str(8 * (n + 1)), ", %rsp")
+        ety = 0
+        return 0
+    if plain < 0:
+        die(line, concat(concat("unknown method '", name), "'"))
+    clear_pints(plain)
+    call_f(plain, n + 1)
+    ety = ret_type(plain)
+
+dynm_fb = list(5000)
+
+def clear_pints(f):
+    global nconf
+    i = 0
+    while i < fargs[f]:
+        if pintf[fpb[f] + i]:
+            pintf[fpb[f] + i] = 0
+            nconf += 1
+        i += 1
+
+def dynm_add(name, n, plain):
+    global ndynm
+    dynm[ndynm] = name
+    dynm_fb[ndynm] = plain
+    ndynm += 1
+
+def method_of(c, name):
+    i = 0
+    while i < nfuncs:
+        if fmeth[i] == 1 and fcls[i] == c and str_eq(fnames[i], name):
+            return i
+        i += 1
+    return -1
+
+def emit_str(s):
+    global nstr
+    nstr += 1
+    n = len(s)
+    parts = list(n + 1)
+    i = 0
+    while i < n:
+        parts[i] = concat(str(char_at(s, i)), ",")
+        i += 1
+    parts[n] = "0\n"
+    emit_dat(".p2align 3\n")
+    emit_dat(concat(concat("    .quad ", str(72057594037927936 + n)), "\n"))
+    emit_dat(concat(concat("S", str(nstr)), ": .byte "))
+    emit_dat(join(parts, n + 1))
+    return concat("S", str(nstr))
+
+def primary():
+    global pos, ety
+    line = cur_line()
+    k = tk[pos]
+    if k == K_NUM:
+        e3("mov $", str(tv[pos]), ", %rax")
+        pos += 1
+        ety = T_INT
+        return 0
+    if k == K_STR:
+        s = tv[pos]
+        pos += 1
+        while tk[pos] == K_STR:
+            s = concat(s, tv[pos])
+            pos += 1
+        e3("lea ", emit_str(s), "(%rip), %rax")
+        ety = T_STR
+        return 0
+    if k == K_ID:
+        name = tv[pos]
+        pos += 1
+        if str_eq(name, "True"):
+            e("mov $1, %rax")
+            ety = T_INT
+            return 0
+        if str_eq(name, "False") or str_eq(name, "None"):
+            e("mov $0, %rax")
+            ety = T_INT
+            return 0
+        if str_eq(name, "__name__"):
+            e3("lea ", emit_str("__main__"), "(%rip), %rax")
+            ety = T_STR
+            return 0
+        if is_op("("):
+            c = find(cnm, nclass, name)
+            if c >= 0 and not var_ref(name):
+                f = ctor_of(c)
+                n = push_args()
+                if n != fargs[f]:
+                    die(line, concat(concat("wrong number of arguments to ", name), "()"))
+                call_f(f, n)
+                ety = 11 + c
+                return 0
+            call_named(name, line)
+            return 0
+        r = var_ref(name)
+        if not r:
+            if any_fn(name):
+                die(line, concat(concat("function '", name), "' used as a value (not supported)"))
+            die(line, concat(concat("undefined name '", name), "'"))
+        e3("mov ", r, ", %rax")
+        ety = vty
+        return 0
+    if k == K_OP:
+        if is_op("("):
+            pos += 1
+            if is_op(")"):
+                pos += 1
+                e("push $0")
+                call_rt("rt_list", 1)
+                ety = T_LIST
+                return 0
+            expr()
+            if is_op(","):
+                e("push %rax")
+                n = 1
+                while is_op(","):
+                    pos += 1
+                    if is_op(")"):
+                        break
+                    expr()
+                    e("push %rax")
+                    n += 1
+                expect(")")
+                build_list(n)
+                return 0
+            expect(")")
+            return 0
+        if is_op("["):
+            pos += 1
+            if is_op("]"):
+                pos += 1
+                e("push $0")
+                call_rt("rt_list", 1)
+                ety = T_LIST
+                return 0
+            fp = comp_for(pos)
+            if fp >= 0:
+                compile_comprehension(fp, line)
+                return 0
+            n = 0
+            while not is_op("]"):
+                expr()
+                e("push %rax")
+                n += 1
+                if is_op(","):
+                    pos += 1
+                elif not is_op("]"):
+                    die(cur_line(), "expected ',' or ']'")
+            pos += 1
+            build_list(n)
+            return 0
+        if is_op("{"):
+            pos += 1
+            call_internal("__dict", 0)
+            while not is_op("}"):
+                e("push %rax")
+                e("pushq (%rsp)")
+                expr()
+                e("push %rax")
+                expect(":")
+                expr()
+                e("push %rax")
+                call_internal("__dset", 3)
+                e("pop %rax")
+                if is_op(","):
+                    pos += 1
+                elif not is_op("}"):
+                    die(cur_line(), "expected ',' or '}'")
+            pos += 1
+            ety = T_DICT
+            return 0
+    if k == K_NL or k == K_EOF:
+        die(line, "unexpected end of line")
+    die(line, concat(concat("unexpected '", str(tv[pos])), "'"))
+
+def build_list(n):
+    # n values pushed (first pushed = element 0)
+    global ety
+    e3("push $", str(n), "")
+    call_rt("rt_list", 1)
+    if n > 0:
+        e("mov 16(%rax), %rdx")
+        i = 0
+        while i < n:
+            e3("mov ", str(8 * (n - 1 - i)), "(%rsp), %rcx")
+            e3("mov %rcx, ", str(8 * i), "(%rdx)")
+            i += 1
+        e3("add $", str(8 * n), ", %rsp")
+    ety = T_LIST
+
+def ctor_of(c):
+    i = 0
+    while i < nfuncs:
+        if fmeth[i] == 2 and fcls[i] == c:
+            return i
+        i += 1
+    return -1
+
+def comp_for(p):
+    # position of a top-level 'for' inside [ ... ] starting at p, or -1
+    d = 0
+    while 1:
+        if tk[p] == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                if d == 0:
+                    return -1
+                d -= 1
+        elif tk[p] == K_ID and d == 0 and str_eq(tv[p], "for"):
+            return p
+        elif tk[p] == K_NL or tk[p] == K_EOF:
+            return -1
+        p += 1
+
+def compile_comprehension(fp, line):
+    global pos, ety
+    lc = hidden_local("__lc", T_LIST)
+    lref = var_ref(lc)
+    e("push $0")
+    call_rt("rt_list", 1)
+    e2("mov %rax, ", lref)
+    epos = pos
+    pos = fp
+    info = for_header()
+    if is_id("if"):
+        pos += 1
+        cond_or(info[2], 0)
+    endp = pos
+    pos = epos
+    expr()
+    if pos != fp:
+        die(line, "bad list comprehension")
+    e("mov %rax, %rcx")
+    e2("push ", lref)
+    e("push %rcx")
+    call_f(internal("append", 2), 2)
+    for_footer(info)
+    pos = endp
+    expect("]")
+    e3("mov ", lref, ", %rax")
+    ety = T_LIST
+
+def for_header():
+    # pos at 'for'. Emits the loop head; returns [kind, top, cont, end, var/idx, limit/iter, step]
+    global pos, nloops, nout
+    line = cur_line()
+    pos += 1
+    names = list(16)
+    nn = 0
+    paren = is_op("(")
+    if paren:
+        pos += 1
+    while 1:
+        names[nn] = ident()
+        nn += 1
+        if is_op(","):
+            pos += 1
+        else:
+            break
+    if paren:
+        expect(")")
+    if not is_id("in"):
+        die(line, "expected 'in' in for")
+    pos += 1
+    info = list(8)
+    top = new_label()
+    cont = new_label()
+    endl = new_label()
+    test = new_label()
+    info[1] = top
+    info[2] = cont
+    info[3] = endl
+    info[7] = test
+    lcont[nloops] = cont
+    lend[nloops] = endl
+    nloops += 1
+    if is_id("range") and tok_is_op(pos + 1, "(") and nn == 1:
+        pos += 2
+        na = count_args(pos - 1)
+        step = 1
+        if na > 1:
+            expr()
+            e("push %rax")
+            expect(",")
+        mark = nout
+        expr()
+        lim = 0
+        if nout == mark + 1:
+            src = simple_src(out[mark])
+            if src and is_imm(src) and small_imm(src):
+                lim = src
+                nout = mark
+        if not lim:
+            hn = hidden_local("__lim", T_INT)
+            lim = var_ref(hn)
+            e2("mov %rax, ", lim)
+        if na > 1:
+            e("pop %rax")
+        else:
+            e("xor %eax, %eax")
+        store_var(names[0], line, T_INT, -1)
+        if na == 3:
+            expect(",")
+            neg = 0
+            if is_op("-"):
+                neg = 1
+                pos += 1
+            if tk[pos] != K_NUM:
+                die(line, "range() step must be a constant")
+            step = tv[pos]
+            if neg:
+                step = 0 - step
+            if step == 0:
+                die(line, "range() step must not be zero")
+            pos += 1
+        expect(")")
+        info[0] = 1
+        info[4] = names[0]
+        info[5] = lim
+        info[6] = step
+        e2("jmp ", lab(test))
+        put_label(top)
+        return info
+    # general iterable
+    enum = 0
+    if is_id("enumerate") and tok_is_op(pos + 1, "("):
+        enum = 1
+        pos += 2
+    it = hidden_local("__it", 0)
+    itr = var_ref(it)
+    or_expr()
+    if enum:
+        expect(")")
+    if ety != T_LIST:
+        e("push %rax")
+        e3("push $", str(uline(line)), "")
+        call_internal("__iter", 2)
+    e2("mov %rax, ", itr)
+    ix = hidden_local("__ix", T_INT)
+    ixr = var_ref(ix)
+    e2("movq $0, ", ixr)
+    e2("jmp ", lab(test))
+    put_label(top)
+    e3("mov ", itr, ", %rax")
+    e("mov 16(%rax), %rax")
+    e3("mov ", ixr, ", %rcx")
+    e("mov (%rax,%rcx,8), %rax")
+    first = 0
+    if enum:
+        if nn != 2:
+            die(line, "enumerate() needs two loop variables")
+        e("push %rax")
+        e3("mov ", ixr, ", %rax")
+        store_var(names[0], line, T_INT, -1)
+        e("pop %rax")
+        first = 1
+        nn = nn - 1
+        names[0] = names[1]
+    if nn == 1:
+        store_var(names[0], line, 0, -1)
+    else:
+        e("push %rax")
+        j = 0
+        while j < nn:
+            e("mov (%rsp), %rax")
+            e3("mov $", str(j), ", %rcx")
+            emit_getidx(line)
+            store_var(names[j], line, 0, -1)
+            j += 1
+        e("add $8, %rsp")
+    info[0] = 2
+    info[4] = ixr
+    info[5] = itr
+    return info
+
+def for_footer(info):
+    global nloops
+    put_label(info[2])
+    if info[0] == 1:
+        r = var_ref(info[4])
+        step = info[6]
+        if step == 1:
+            e2("incq ", r)
+        else:
+            e3("addq $", str(step), concat(", ", r))
+        put_label(info[7])
+        lim = info[5]
+        if starts(r, "%"):
+            e3("cmp ", lim, concat(", ", r))
+        else:
+            e3("mov ", r, ", %rax")
+            e3("cmp ", lim, ", %rax")
+        if step > 0:
+            e2("jl ", lab(info[1]))
+        else:
+            e2("jg ", lab(info[1]))
+    else:
+        e2("incq ", info[4])
+        put_label(info[7])
+        e3("mov ", info[5], ", %rax")
+        e3("mov ", info[4], ", %rcx")
+        e("cmp (%rax), %rcx")
+        e2("jl ", lab(info[1]))
+    put_label(info[3])
+    nloops -= 1
+
+# ---------------- statements ----------------
+def end_stmt():
+    global pos
+    if tk[pos] == K_NL:
+        pos += 1
+    elif tk[pos] != K_EOF and tk[pos] != K_DED:
+        die(cur_line(), concat(concat("unexpected '", str(tv[pos])), "' at end of statement"))
+
+def block():
+    # pos at ':'
+    global pos
+    expect(":")
+    if tk[pos] != K_NL:
+        stmt()
+        return 0
+    pos += 1
+    if tk[pos] != K_IND:
+        die(cur_line(), "expected an indented block")
+    pos += 1
+    while tk[pos] != K_DED and tk[pos] != K_EOF:
+        stmt()
+    if tk[pos] == K_DED:
+        pos += 1
+
+def skip_line():
+    global pos
+    while tk[pos] != K_NL and tk[pos] != K_EOF:
+        pos += 1
+    end_stmt()
+
+def stmt():
+    global pos, ety
+    line = cur_line()
+    if tk[pos] == K_NL:
+        pos += 1
+        return 0
+    if tk[pos] == K_ID:
+        w = tv[pos]
+        if str_eq(w, "if"):
+            stmt_if()
+            return 0
+        if str_eq(w, "while"):
+            stmt_while()
+            return 0
+        if str_eq(w, "for"):
+            info = for_header()
+            block()
+            for_footer(info)
+            return 0
+        if str_eq(w, "return"):
+            pos += 1
+            if tk[pos] == K_NL or tk[pos] == K_EOF or tk[pos] == K_DED:
+                e("xor %eax, %eax")
+                ety = T_INT
+            else:
+                expr()
+                if is_op(","):
+                    e("push %rax")
+                    n = 1
+                    while is_op(","):
+                        pos += 1
+                        expr()
+                        e("push %rax")
+                        n += 1
+                    build_list(n)
+            if curf >= 0 and fint[curf] and ety != T_INT and fret[curf] == 0:
+                fint[curf] = 0
+                conflict_ret()
+            e2("jmp ", lab(retlab))
+            end_stmt()
+            return 0
+        if str_eq(w, "break") or str_eq(w, "continue"):
+            if nloops == 0:
+                die(line, concat(w, " outside loop"))
+            pos += 1
+            if str_eq(w, "break"):
+                e2("jmp ", lab(lend[nloops - 1]))
+            else:
+                e2("jmp ", lab(lcont[nloops - 1]))
+            end_stmt()
+            return 0
+        if str_eq(w, "pass") or str_eq(w, "global") or str_eq(w, "import") or str_eq(w, "from") or str_eq(w, "nonlocal"):
+            skip_line()
+            return 0
+        if str_eq(w, "assert"):
+            pos += 1
+            l = new_label()
+            cond_top(l, 1)
+            msg = "assertion failed"
+            if is_op(","):
+                pos += 1
+                expr()
+            else:
+                e3("lea ", emit_str(msg), "(%rip), %rax")
+            e3("push $", str(uline(line)), "")
+            e("push %rax")
+            call_internal("__err", 2)
+            put_label(l)
+            end_stmt()
+            return 0
+        if str_eq(w, "def") or str_eq(w, "class"):
+            die(line, "nested def/class is not supported")
+        if str_eq(w, "del") or str_eq(w, "try") or str_eq(w, "with") or str_eq(w, "lambda") or str_eq(w, "yield"):
+            die(line, concat(concat("'", w), "' is not supported"))
+    if tk[pos] == K_STR and (tk[pos + 1] == K_NL or tk[pos + 1] == K_EOF):
+        pos += 1
+        end_stmt()
+        return 0
+    stmt_simple(line)
+
+def conflict_ret():
+    global nconf
+    nconf += 1
+
+def stmt_if():
+    global pos
+    pos += 1
+    endl = new_label()
+    l = new_label()
+    cond_top(l, 0)
+    block()
+    while is_id("elif"):
+        e2("jmp ", lab(endl))
+        put_label(l)
+        pos += 1
+        l = new_label()
+        cond_top(l, 0)
+        block()
+    if is_id("else"):
+        e2("jmp ", lab(endl))
+        put_label(l)
+        pos += 1
+        block()
+    else:
+        put_label(l)
+    put_label(endl)
+
+def stmt_while():
+    # rotated loop: jmp test; top: body; cont/test: cond; jtrue top; end:
+    global pos, nloops, nout, nh
+    line = cur_line()
+    pos += 1
+    top = new_label()
+    cont = new_label()
+    endl = new_label()
+    hbase = nh
+    hoist_lens(pos)
+    cpos = pos
+    q = cond_end(pos)
+    n = 1
+    if q == cpos + 1 and ((tk[cpos] == K_NUM and tv[cpos] != 0) or tok_is_id(cpos, "True")):
+        n = 0
+    pos = q
+    if n > 0:
+        e2("jmp ", lab(cont))
+    put_label(top)
+    lcont[nloops] = cont
+    lend[nloops] = endl
+    nloops += 1
+    block()
+    nloops -= 1
+    put_label(cont)
+    if n > 0:
+        save = pos
+        pos = cpos
+        cond_top(top, 1)
+        pos = save
+    else:
+        e2("jmp ", lab(top))
+    put_label(endl)
+    nh = hbase
+
+def set_ety(t):
+    global ety
+    ety = t
+
+SAFE_CALLS = ["len", "char_at", "ord", "abs", "min", "max", "str", "print", "substr", "chr", "int", "range", "str_eq", "concat"]
+
+def hoist_lens(p):
+    # while COND: if COND contains len(X) for a local list X that the body only reads as X[...]
+    # (and the body makes no calls that could resize it), compute len(X) once before the loop.
+    global nh
+    q = p
+    while tk[q] != K_NL and not (tk[q] == K_OP and str_eq(tv[q], ":") and q > p):
+        q += 1
+    if not tok_is_op(q, ":") or tk[q + 1] != K_NL or tk[q + 2] != K_IND:
+        return 0
+    b0 = q + 2
+    d = 0
+    b1 = b0
+    while 1:
+        if tk[b1] == K_IND:
+            d += 1
+        elif tk[b1] == K_DED:
+            d -= 1
+            if d == 0:
+                break
+        elif tk[b1] == K_EOF:
+            return 0
+        b1 += 1
+    # calls in the body must be safe builtins
+    i = b0
+    while i < b1:
+        if tk[i] == K_OP and str_eq(tv[i], "(") and tk[i - 1] == K_ID:
+            if find(SAFE_CALLS, 14, tv[i - 1]) < 0 or tok_is_op(i - 2, "."):
+                return 0
+        i += 1
+    i = p
+    while i + 3 < q:
+        if tok_is_id(i, "len") and tok_is_op(i + 1, "(") and tk[i + 2] == K_ID and tok_is_op(i + 3, ")"):
+            x = tv[i + 2]
+            if hoistable(x, p, q, b0, b1) and find(hnames, nh, x) < 0:
+                r = var_ref(x)
+                if r and (vkind == 1 or vkind == 2) and vty == T_LIST:
+                    hn = hidden_local("__len", T_INT)
+                    hr = var_ref(hn)
+                    e3("mov ", r, ", %rax")
+                    e("mov (%rax), %rax")
+                    e2("mov %rax, ", hr)
+                    hnames[nh] = x
+                    hrefs[nh] = hr
+                    nh += 1
+        i += 1
+
+def hoistable(x, p, q, b0, b1):
+    i = p
+    while i < b1:
+        if tk[i] == K_ID and str_eq(tv[i], x):
+            ok = tok_is_op(i + 1, "[") or (i >= 2 and tok_is_id(i - 2, "len") and tok_is_op(i - 1, "(") and tok_is_op(i + 1, ")"))
+            if not ok:
+                return 0
+            if tok_is_op(i + 1, "[") and i >= b0:
+                # X[...] = ... is fine (no resize); X[a:b] slices are reads
+                pass
+        i += 1
+    return 1
+
+AUG_OPS = ["+=", "-=", "*=", "/=", "//=", "%=", "&=", "|=", "^=", "<<=", ">>="]
+
+def stmt_simple(line):
+    global pos, ety, nout
+    # scan the statement: top-level '=' positions, augmented op, commas
+    tb = pos
+    p = pos
+    d = 0
+    eqs = list(16)
+    neq = 0
+    aug = -1
+    while tk[p] != K_NL and tk[p] != K_EOF and tk[p] != K_DED:
+        if tk[p] == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                d -= 1
+            elif d == 0 and str_eq(v, "="):
+                eqs[neq] = p
+                neq += 1
+            elif d == 0 and aug < 0 and neq == 0 and find(AUG_OPS, 11, v) >= 0:
+                aug = p
+        p += 1
+    stend = p
+    # annotated: NAME : type [= expr]
+    if tk[pos] == K_ID and tok_is_op(pos + 1, ":"):
+        name = tv[pos]
+        if neq == 0:
+            skip_line()
+            return 0
+        pos = eqs[0] + 1
+        mark = nout
+        expr()
+        store_var(name, line, ety, mark)
+        end_stmt()
+        return 0
+    if aug >= 0:
+        stmt_aug(line, aug)
+        return 0
+    if neq == 0:
+        expr()
+        end_stmt()
+        return 0
+    # value: everything after the last '='
+    vstart = eqs[neq - 1] + 1
+    pos = vstart
+    nvals = count_top_commas(vstart, stend)
+    mark = nout
+    if nvals > 1:
+        i = 0
+        while i < nvals:
+            expr()
+            e("push %rax")
+            if is_op(","):
+                pos += 1
+            i += 1
+        build_list(nvals)
+    else:
+        expr()
+    vt = ety
+    if neq > 1:
+        hn = hidden_local("__mv", vt)
+        e2("mov %rax, ", var_ref(hn))
+    j = 0
+    while j < neq:
+        tstart = tb
+        if j > 0:
+            tstart = eqs[j - 1] + 1
+        tend = eqs[j]
+        if j > 0:
+            e3("mov ", var_ref(hn), ", %rax")
+        assign_targets(tstart, tend, vt, line, mark)
+        j += 1
+    pos = stend
+    end_stmt()
+
+def count_top_commas(a, b):
+    d = 0
+    n = 1
+    p = a
+    while p < b:
+        if tk[p] == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                d -= 1
+            elif d == 0 and str_eq(v, ","):
+                if p + 1 < b:
+                    n += 1
+        p += 1
+    return n
+
+def assign_targets(a, b, vt, line, mark):
+    # value in %rax; targets are tokens [a, b)
+    global pos
+    n = count_top_commas(a, b)
+    if n == 1:
+        assign_one(a, b, vt, line, mark)
+        return 0
+    hn = hidden_local("__tup", 0)
+    hr = var_ref(hn)
+    e2("mov %rax, ", hr)
+    i = 0
+    p = a
+    while i < n:
+        q = p
+        d = 0
+        while q < b and not (d == 0 and tok_is_op(q, ",")):
+            if tk[q] == K_OP and (str_eq(tv[q], "(") or str_eq(tv[q], "[")):
+                d += 1
+            elif tk[q] == K_OP and (str_eq(tv[q], ")") or str_eq(tv[q], "]")):
+                d -= 1
+            q += 1
+        e3("mov ", hr, ", %rax")
+        e3("mov $", str(i), ", %rcx")
+        emit_getidx(line)
+        assign_one(p, q, 0, line, -1)
+        p = q + 1
+        i += 1
+
+def assign_one(a, b, vt, line, mark):
+    global pos, pstop, nout
+    if b == a + 1 and tk[a] == K_ID:
+        store_var(tv[a], line, vt, mark)
+        return 0
+    if tok_is_op(a, "(") and tok_is_op(b - 1, ")"):
+        assign_targets(a + 1, b - 1, vt, line, mark)
+        return 0
+    # find the last top-level postfix ('[' or '.')
+    lp = -1
+    d = 0
+    p = a
+    while p < b:
+        if tk[p] == K_OP:
+            v = tv[p]
+            if d == 0 and (str_eq(v, "[") or str_eq(v, ".")) and p > a:
+                lp = p
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                d -= 1
+        p += 1
+    if lp < 0:
+        die(line, "cannot assign to this expression")
+    vmark = nout
+    e("push %rax")
+    if lp == a + 1 and tk[a] == K_ID and tok_is_op(lp, "["):
+        # NAME[idx] = value
+        r = var_ref(tv[a])
+        if not r:
+            die(line, concat(concat("undefined name '", tv[a]), "'"))
+        ot = vty
+        pos = lp + 1
+        expr()
+        expect("]")
+        if ot == T_DICT:
+            store_dict(r, vmark, line)
+            return 0
+        e("mov %rax, %rcx")
+        tpop(vmark, "%rax")
+        e3("mov ", r, ", %rdx")
+        emit_setidx(line)
+        return 0
+    pos = a
+    pstop = lp
+    postfix_expr()
+    pstop = -1
+    ot = ety
+    if tok_is_op(lp, "."):
+        pos = lp + 1
+        name = ident()
+        e("mov %rax, %rdx")
+        tpop(vmark, "%rax")
+        fa = field_addr(name, ot, line, "%rdx")
+        e3("mov %rax, ", fa, "")
+        return 0
+    omark = nout
+    e("push %rax")
+    pos = lp + 1
+    expr()
+    expect("]")
+    if ot == T_DICT:
+        e("mov %rax, %rcx")
+        e("pop %rdx")
+        e("pop %rax")
+        e("push %rdx")
+        e("push %rcx")
+        e("push %rax")
+        call_internal("__dset", 3)
+        return 0
+    e("mov %rax, %rcx")
+    tpop(omark, "%rdx")
+    tpop(vmark, "%rax")
+    emit_setidx(line)
+
+def store_dict(r, vmark, line):
+    # key in %rax, value pushed at vmark, dict in operand r
+    e("mov %rax, %rcx")
+    e("pop %rax")
+    e2("push ", r)
+    e("push %rcx")
+    e("push %rax")
+    call_internal("__dset", 3)
+
+def aug_op_name(v):
+    return substr(v, 0, len(v) - 1)
+
+def stmt_aug(line, ap):
+    global pos, ety, nout, pstop
+    op = aug_op_name(tv[ap])
+    a = pos
+    if ap == a + 1 and tk[a] == K_ID:
+        name = tv[a]
+        r = var_ref(name)
+        if not r:
+            die(line, concat(concat("undefined name '", name), "'"))
+        lt = vty
+        pos = ap + 1
+        if lt == T_INT and (str_eq(op, "+") or str_eq(op, "-") or str_eq(op, "&") or str_eq(op, "|") or str_eq(op, "^")):
+            mark = nout
+            expr()
+            if ety == T_INT:
+                ins = int_ins(op)
+                src = 0
+                if nout == mark + 1:
+                    src = simple_src(out[mark])
+                if src and ((is_imm(src) and small_imm(src)) or starts(src, "%") or starts(r, "%")):
+                    nout = mark
+                    if str_eq(src, "$1") and str_eq(ins, "add"):
+                        e2("incq ", r)
+                    elif str_eq(src, "$1") and str_eq(ins, "sub"):
+                        e2("decq ", r)
+                    else:
+                        e3(concat(ins, "q "), src, concat(", ", r))
+                else:
+                    e3(concat(ins, "q "), "%rax", concat(", ", r))
+                end_stmt()
+                return 0
+            nout = mark
+            pos = ap + 1
+        start = nout
+        e3("mov ", r, ", %rax")
+        mark = nout
+        e("push %rax")
+        expr()
+        apply_binary(op, start, mark, lt, ety, line)
+        store_var(name, line, ety, -1)
+        end_stmt()
+        return 0
+    # complex target: find last postfix
+    lp = -1
+    d = 0
+    p = a
+    while p < ap:
+        if tk[p] == K_OP:
+            v = tv[p]
+            if d == 0 and (str_eq(v, "[") or str_eq(v, ".")) and p > a:
+                lp = p
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                d -= 1
+        p += 1
+    if lp < 0:
+        die(line, "cannot assign to this expression")
+    pos = a
+    pstop = lp
+    postfix_expr()
+    set_pstop(-1)
+    ot = ety
+    if tok_is_op(lp, "."):
+        pos = lp + 1
+        name = ident()
+        e("push %rax")
+        fa = field_addr(name, ot, line, "%rax")
+        start = nout
+        e3("mov ", fa, ", %rax")
+        mark = nout
+        e("push %rax")
+        pos = ap + 1
+        expr()
+        apply_binary(op, start, mark, 0, ety, line)
+        e("pop %rdx")
+        fa = field_addr(name, ot, line, "%rdx")
+        e3("mov %rax, ", fa, "")
+        end_stmt()
+        return 0
+    e("push %rax")
+    pos = lp + 1
+    expr()
+    expect("]")
+    e("push %rax")
+    start = nout
+    e("mov 8(%rsp), %rax")
+    e("mov (%rsp), %rcx")
+    if ot == T_DICT:
+        e("push %rax")
+        e("push %rcx")
+        e3("push $", str(uline(line)), "")
+        call_internal("__dget", 3)
+    else:
+        emit_getidx(line)
+    mark = nout
+    e("push %rax")
+    pos = ap + 1
+    expr()
+    apply_binary(op, start, mark, 0, ety, line)
+    e("pop %rcx")
+    e("pop %rdx")
+    if ot == T_DICT:
+        e("push %rdx")
+        e("push %rcx")
+        e("push %rax")
+        call_internal("__dset", 3)
+    else:
+        emit_setidx(line)
+    end_stmt()
+
+def set_pstop(v):
+    global pstop
+    pstop = v
+
+def int_ins(op):
+    if str_eq(op, "+"):
+        return "add"
+    if str_eq(op, "-"):
+        return "sub"
+    if str_eq(op, "&"):
+        return "and"
+    if str_eq(op, "|"):
+        return "or"
+    return "xor"
+
+def apply_binary(op, start, mark, lt, rt, line):
+    global ety
+    if str_eq(op, "+"):
+        apply_add(start, mark, lt, rt, line)
+    elif str_eq(op, "-"):
+        binop("sub", start, mark)
+        ety = T_INT
+    elif str_eq(op, "*") or str_eq(op, "/") or str_eq(op, "//") or str_eq(op, "%"):
+        apply_mul(op, start, mark, lt, rt, line)
+    elif str_eq(op, "&"):
+        binop("and", start, mark)
+        ety = T_INT
+    elif str_eq(op, "|"):
+        binop("or", start, mark)
+        ety = T_INT
+    elif str_eq(op, "^"):
+        binop("xor", start, mark)
+        ety = T_INT
+    else:
+        ins = "sar"
+        if str_eq(op, "<<"):
+            ins = "shl"
+        lr(start, mark)
+        e2(ins, " %cl, %rax")
+        ety = T_INT
+
+# ---------------- functions ----------------
+prolog = 0
+
+def func_begin(fi):
+    global curf, nlocs, nslots, nused, nhid, nal, nh, nloops, nfglob, nparams, prolog, retlab
+    curf = fi
+    nlocs = 0
+    nslots = 0
+    nused = 0
+    nhid = 0
+    nal = 0
+    nh = 0
+    nloops = 0
+    nfglob = 0
+    retlab = new_label()
+    fos[fi] = nout
+    emit_raw(concat(flabel[fi], ":\n"))
+    e("push %rbp")
+    e("mov %rsp, %rbp")
+    prolog = nout
+    emit_raw("")
+    nparams = fargs[fi]
+    i = 0
+    while i < nparams:
+        k = fpb[fi] + i
+        params[i] = pnames[k]
+        t = ptypes[k]
+        if t == 0 and pintf[k]:
+            t = T_INT
+        if i == 0 and fmeth[fi] == 1:
+            t = 11 + fcls[fi]
+        ptyp[i] = t
+        pw[i] = 0
+        preg[i] = 0
+        if want_reg(params[i]):
+            preg[i] = REGS[nused]
+            nused += 1
+        i += 1
+
+def func_end(fi):
+    global curf, nlint
+    e("xor %eax, %eax")
+    put_label(retlab)
+    fs = nslots + nused
+    pro = ""
+    epi = ""
+    if fs > 0:
+        pro = concat(concat("    sub $", str(8 * fs)), ", %rsp\n")
+    k = 0
+    i = 0
+    while i < nparams:
+        if preg[i]:
+            k += 1
+            pro = concat(pro, concat(concat(concat(concat("    mov ", preg[i]), ", "), slot_ref(nslots + k)), "\n"))
+            epi = concat(epi, concat(concat(concat(concat("    mov ", slot_ref(nslots + k)), ", "), preg[i]), "\n"))
+            pro = concat(pro, concat(concat(concat(concat("    mov ", str(16 + 8 * (nparams - 1 - i))), "(%rbp), "), preg[i]), "\n"))
+        i += 1
+    i = 0
+    while i < nlocs:
+        if lreg[i]:
+            k += 1
+            pro = concat(pro, concat(concat(concat(concat("    mov ", lreg[i]), ", "), slot_ref(nslots + k)), "\n"))
+            epi = concat(epi, concat(concat(concat(concat("    mov ", slot_ref(nslots + k)), ", "), lreg[i]), "\n"))
+        i += 1
+    out[prolog] = pro
+    emit_raw(epi)
+    e("leave")
+    e("ret")
+    foe[fi] = nout
+    # remember which unannotated locals stayed int (first pass only fixes the layout)
+    if flb[fi] < 0:
+        flb[fi] = nlint
+        flcnt[fi] = nlocs
+        i = 0
+        while i < nlocs:
+            lint[nlint + i] = ltyp[i] == T_INT and not lfix[i]
+            i += 1
+        nlint += nlocs
+    else:
+        i = 0
+        while i < nlocs and i < flcnt[fi]:
+            if lint[flb[fi] + i] and ltyp[i] != T_INT:
+                lint[flb[fi] + i] = 0
+            i += 1
+    rank_regs(fi)
+    curf = -1
+
+def rank_regs(fi):
+    # pick the NREGS heaviest params/locals for registers in the next pass
+    n = nparams + nlocs
+    ws = list(n + 1)
+    i = 0
+    while i < n:
+        if i < nparams:
+            ws[i] = pw[i]
+        else:
+            ws[i] = lw[i - nparams]
+        i += 1
+    res = list(NREGS + 1)
+    cnt = 0
+    while cnt < NREGS:
+        best = -1
+        i = 0
+        while i < n:
+            if ws[i] > 0 and (best < 0 or ws[i] > ws[best]):
+                best = i
+            i += 1
+        if best < 0:
+            break
+        if best < nparams:
+            res[cnt + 1] = params[best]
+        else:
+            res[cnt + 1] = locs[best - nparams]
+        ws[best] = 0
+        cnt += 1
+    res[0] = cnt
+    fregn[fi] = res
+
+def declare_locals(p0, p1, isfn):
+    # predeclare every name assigned in tokens [p0, p1) (Python scoping)
+    global nfglob
+    nm = list(4096)
+    ty = list(4096)
+    n = scan_assigned(p0, p1, nm, ty, 4096)
+    # global declarations
+    p = p0
+    while p < p1:
+        if tok_is_id(p, "global") and stmt_start(p):
+            q = p + 1
+            while tk[q] != K_NL:
+                if tk[q] == K_ID:
+                    fglob[nfglob] = tv[q]
+                    nfglob += 1
+                q += 1
+        p += 1
+    i = 0
+    while i < n:
+        name = nm[i]
+        if find(params, nparams, name) < 0 and find(fglob, nfglob, name) < 0 and find(locs, nlocs, name) < 0:
+            if isfn or find(globs, nglobs, name) < 0:
+                if ty[i] < 0:
+                    new_local(name, 0, 0)
+                else:
+                    new_local(name, ty[i], 1)
+        i += 1
+
+def stmt_start(p):
+    if p == 0:
+        return 1
+    k = tk[p - 1]
+    return k == K_NL or k == K_IND or k == K_DED or tok_is_op(p - 1, ":")
+
+def scan_assigned(p0, p1, nm, ty, cap):
+    return scan_more(p0, p1, nm, ty, 0)
+
+def scan_more(p0, p1, nm, ty, n0):
+    # names bound in [p0, p1): NAME = / NAME op= / a, b = / NAME: T / for NAME[, NAME] in
+    # ty[i] = annotated type, or -1 if unannotated
+    global pos
+    n = n0
+    p = p0
+    while p < p1:
+        if tk[p] == K_ID and stmt_start(p):
+            if tok_is_op(p + 1, ":") and not is_kw(tv[p]):
+                save = pos
+                pos = p + 2
+                t = parse_type()
+                pos = save
+                n = add_name(nm, ty, n, tv[p], t)
+            else:
+                # a, b, c = ...   or  NAME op= ...
+                q = p
+                ok = 1
+                names = list(64)
+                nn = 0
+                while ok:
+                    if tok_is_op(q, "("):
+                        q += 1
+                    if tk[q] != K_ID:
+                        ok = 0
+                        break
+                    names[nn] = tv[q]
+                    nn += 1
+                    q += 1
+                    if tok_is_op(q, ")"):
+                        q += 1
+                    if tok_is_op(q, ","):
+                        q += 1
+                    else:
+                        break
+                if ok and tk[q] == K_OP and (str_eq(tv[q], "=") or (nn == 1 and find(AUG_OPS, 11, tv[q]) >= 0)):
+                    j = 0
+                    while j < nn:
+                        if not is_kw(names[j]):
+                            n = add_name(nm, ty, n, names[j], -1)
+                        j += 1
+                    # chained a = b = ...
+                    r = q + 1
+                    while tk[r] == K_ID and tok_is_op(r + 1, "="):
+                        n = add_name(nm, ty, n, tv[r], -1)
+                        r += 2
+        if tok_is_id(p, "for"):
+            q = p + 1
+            if tok_is_op(q, "("):
+                q += 1
+            while tk[q] == K_ID and not str_eq(tv[q], "in"):
+                n = add_name(nm, ty, n, tv[q], -1)
+                q += 1
+                if tok_is_op(q, ","):
+                    q += 1
+                elif tok_is_op(q, ")"):
+                    q += 1
+        p += 1
+    return n
+
+def add_name(nm, ty, n, name, t):
+    i = 0
+    while i < n:
+        if str_eq(nm[i], name):
+            if t >= 0 and ty[i] < 0:
+                ty[i] = t
+            return n
+        i += 1
+    nm[n] = name
+    ty[n] = t
+    return n + 1
+
+KW = ["if", "elif", "else", "while", "for", "in", "return", "def", "class", "and", "or", "not", "is", "pass", "break", "continue", "global", "import", "from", "assert", "try", "except", "finally", "with", "lambda", "True", "False", "None", "del", "yield", "nonlocal", "print"]
+
+def is_kw(s):
+    return find(KW, 31, s) >= 0
+
+def block_end(p):
+    # p at ':' of a compound statement; returns the token index after its block
+    while tk[p] != K_NL and tk[p] != K_EOF:
+        p += 1
+    if tk[p] == K_NL:
+        p += 1
+    if tk[p] != K_IND:
+        return p
+    d = 0
+    while 1:
+        if tk[p] == K_IND:
+            d += 1
+        elif tk[p] == K_DED:
+            d -= 1
+            if d == 0:
+                return p + 1
+        elif tk[p] == K_EOF:
+            return p
+        p += 1
+
+def skip_stmt(p):
+    p = block_end(p)
+    while tok_is_id(p, "elif") or tok_is_id(p, "else"):
+        p = block_end(p)
+    return p
+
+def compile_def(fi):
+    global pos
+    pos = fpos[fi]
+    endp = skip_stmt(pos)
+    # body starts after the ':' that ends the header
+    p = pos
+    d = 0
+    while not (d == 0 and tok_is_op(p, ":")):
+        if tok_is_op(p, "("):
+            d += 1
+        elif tok_is_op(p, ")"):
+            d -= 1
+        p += 1
+    func_begin(fi)
+    declare_locals(p, endp, 1)
+    pos = p
+    block()
+    func_end(fi)
+    pos = endp
+
+def compile_main(fi):
+    global pos
+    func_begin(fi)
+    i = 0
+    while i < nmainloc:
+        if find(locs, nlocs, mainloc[i]) < 0:
+            new_local(mainloc[i], mainty[i], mainty[i] >= 0)
+        i += 1
+    i = 0
+    while i < ntops:
+        pos = tops[i]
+        stmt()
+        i += 1
+    func_end(fi)
+
+mainty = list(20000)
+
+def compile_ctor(c):
+    fi = ctor_of(c)
+    fos[fi] = nout
+    emit_raw(concat(flabel[fi], ":\n"))
+    nf = cnf[c]
+    e3("push $", str(8 * nf), "")
+    e("push $2")
+    e3("push $", str(c + 1), "")
+    call_rt("rt_new", 3)
+    i = 0
+    if cinit[c] < 0:
+        n = cdecl[c]
+        while i < nf:
+            if i < n:
+                e3("mov ", str(8 * (n - i)), "(%rsp), %rcx")
+                e3("mov %rcx, ", str(8 * i), "(%rax)")
+            else:
+                e3("movq $0, ", str(8 * i), "(%rax)")
+            i += 1
+        e("ret")
+        foe[fi] = nout
+        return 0
+    while i < nf:
+        e3("movq $0, ", str(8 * i), "(%rax)")
+        i += 1
+    n = fargs[fi]
+    e("push %rax")
+    e("push %rax")
+    i = 0
+    while i < n:
+        e3("pushq ", str(8 * n + 16), "(%rsp)")
+        i += 1
+    set_curf(fi)
+    call_f(cinit[c], n + 1)
+    set_curf(-1)
+    e("pop %rax")
+    e("ret")
+    foe[fi] = nout
+
+def set_curf(f):
+    global curf
+    curf = f
+
+
+# ---------------- prescan ----------------
+fmain = -1
+
+def reg_func(p, c):
+    # p at 'def'; c = class index or -1
+    global nfuncs, npall, pos
+    fi = nfuncs
+    nfuncs += 1
+    name = tv[p + 1]
+    fnames[fi] = name
+    fpos[fi] = p
+    fcls[fi] = c
+    fpre[fi] = p < PRETOK
+    fshadow[fi] = 0
+    flb[fi] = -1
+    fregn[fi] = 0
+    finl[fi] = -1
+    if c >= 0:
+        fmeth[fi] = 1
+        flabel[fi] = concat(concat(concat("f_", cnm[c]), "__"), name)
+    else:
+        fmeth[fi] = 0
+        flabel[fi] = concat("f_", name)
+    fpb[fi] = npall
+    pos = p + 2
+    expect("(")
+    n = 0
+    while not is_op(")"):
+        pn = ident()
+        t = 0
+        if is_op(":"):
+            pos += 1
+            t = parse_type()
+        if is_op("="):
+            die(tl[pos], "default parameter values are not supported")
+        pnames[npall] = pn
+        ptypes[npall] = t
+        pintf[npall] = c < 0 and t == 0 and not starts(name, "__")
+        npall += 1
+        n += 1
+        if is_op(","):
+            pos += 1
+    pos += 1
+    fargs[fi] = n
+    fret[fi] = 0
+    if is_op("->"):
+        pos += 1
+        fret[fi] = parse_type()
+    fint[fi] = fret[fi] == 0 or fret[fi] == T_INT
+    if c < 0 and not fpre[fi]:
+        check_inline(fi, pos)
+    return fi
+
+INL_OPS = ["+", "-", "*", "//", "%", "<", ">", "<=", ">=", "==", "!=", "(", ")", "&", "|", "^", "<<", ">>", "~"]
+
+def check_inline(fi, p):
+    # body is exactly "return <expr over params, ints and operators>"
+    if not tok_is_op(p, ":") or tk[p + 1] != K_NL or tk[p + 2] != K_IND or not tok_is_id(p + 3, "return"):
+        return 0
+    q = p + 4
+    while tk[q] != K_NL:
+        k = tk[q]
+        if k == K_NUM:
+            pass
+        elif k == K_ID:
+            v = tv[q]
+            if find(pnames, npall, v) < fpb[fi] and not (str_eq(v, "and") or str_eq(v, "or") or str_eq(v, "not") or str_eq(v, "if") or str_eq(v, "else") or str_eq(v, "True") or str_eq(v, "False")):
+                return 0
+        elif k == K_OP:
+            if find(INL_OPS, 19, tv[q]) < 0:
+                return 0
+        else:
+            return 0
+        q += 1
+    if tk[q + 1] != K_DED or q == p + 4:
+        return 0
+    finl[fi] = p + 4
+    finle[fi] = q
+
+def pname_index(fi, v):
+    i = 0
+    while i < fargs[fi]:
+        if str_eq(pnames[fpb[fi] + i], v):
+            return i
+        i += 1
+    return -1
+
+def reg_class(p):
+    global nclass, ncfld, nfuncs, pos
+    c = nclass
+    nclass += 1
+    cnm[c] = tv[p + 1]
+    cinit[c] = -1
+    cfb[c] = ncfld
+    q = p + 2
+    while not tok_is_op(q, ":"):
+        q += 1
+    endp = block_end(q)
+    r = q + 1
+    if tk[r] == K_NL:
+        r += 1
+    if tk[r] == K_IND:
+        r += 1
+    m0 = nfuncs
+    while r < endp and tk[r] != K_DED and tk[r] != K_EOF:
+        if tok_is_id(r, "def"):
+            fi = reg_func(r, c)
+            if str_eq(fnames[fi], "__init__"):
+                cinit[c] = fi
+            r = skip_stmt(r)
+        elif tk[r] == K_ID and (tok_is_op(r + 1, ":") or tok_is_op(r + 1, "=")) and not is_kw(tv[r]):
+            add_field(c, tv[r])
+            r = skip_stmt(r)
+        else:
+            r = skip_stmt(r)
+    cdecl[c] = ncfld - cfb[c]
+    # fields assigned through self.X in methods
+    m = m0
+    while m < nfuncs:
+        if fargs[m] > 0:
+            self = pnames[fpb[m]]
+            a = fpos[m]
+            b = skip_stmt(a)
+            while a < b:
+                if tk[a] == K_ID and str_eq(tv[a], self) and tok_is_op(a + 1, ".") and tk[a + 2] == K_ID:
+                    if tok_is_op(a + 3, "=") or (tk[a + 3] == K_OP and find(AUG_OPS, 11, tv[a + 3]) >= 0):
+                        if find_field(c, tv[a + 2]) < 0:
+                            add_field(c, tv[a + 2])
+                a += 1
+        m += 1
+    # the constructor
+    fi = nfuncs
+    nfuncs += 1
+    fnames[fi] = cnm[c]
+    flabel[fi] = concat("f_", cnm[c])
+    fmeth[fi] = 2
+    fcls[fi] = c
+    fpos[fi] = p
+    fpre[fi] = p < PRETOK
+    fshadow[fi] = 0
+    flb[fi] = -1
+    finl[fi] = -1
+    fpb[fi] = npall
+    fret[fi] = 11 + c
+    fint[fi] = 0
+    if cinit[c] >= 0:
+        fargs[fi] = fargs[cinit[c]] - 1
+    else:
+        fargs[fi] = cdecl[c]
+    return endp
+
+def add_field(c, name):
+    global ncfld
+    if find_field(c, name) >= 0:
+        return 0
+    cfld[ncfld] = name
+    ncfld += 1
+    cnf[c] = ncfld - cfb[c]
+
+def prescan():
+    global ntops, nglobs, nmainloc, fmain, nfuncs
+    p = 0
+    while tk[p] != K_EOF:
+        if tok_is_id(p, "class"):
+            reg_class(p)
+        p = skip_stmt(p)
+    p = 0
+    while tk[p] != K_EOF:
+        if tok_is_id(p, "def"):
+            reg_func(p, -1)
+        elif tok_is_id(p, "class"):
+            pass
+        elif tk[p] == K_NL:
+            pass
+        else:
+            tops[ntops] = p
+            ntops += 1
+        p = skip_stmt(p)
+    # user functions shadow prelude functions of the same name and arity
+    i = 0
+    while i < nfuncs:
+        if fmeth[i] != 1:
+            j = 0
+            while j < nfuncs:
+                if j != i and fmeth[j] != 1 and fargs[j] == fargs[i] and str_eq(fnames[j], fnames[i]) and not fshadow[j]:
+                    if fpre[i] and not fpre[j]:
+                        fshadow[i] = 1
+                    elif fpre[i] == fpre[j] and j > i:
+                        die(tl[fpos[j]], concat("duplicate definition of ", fnames[j]))
+                j += 1
+        i += 1
+    # top-level names: globals if used inside some function, else locals of main
+    nm = list(20000)
+    ty = list(20000)
+    n = 0
+    i = 0
+    while i < ntops:
+        n = scan_more(tops[i], skip_stmt(tops[i]), nm, ty, n)
+        i += 1
+    used = list(n + 1)
+    p = PRETOK
+    while tk[p] != K_EOF:
+        if tok_is_id(p, "def") or tok_is_id(p, "class"):
+            q = skip_stmt(p)
+            while p < q:
+                if tk[p] == K_ID:
+                    k = find(nm, n, tv[p])
+                    if k >= 0:
+                        used[k] = 1
+                    elif tok_is_id(p - 1, "global") or (tok_is_op(p - 1, ",") and in_global(p)):
+                        if find(globs, nglobs, tv[p]) < 0:
+                            add_glob(tv[p], 0)
+                p += 1
+        else:
+            p = skip_stmt(p)
+    # prelude globals (tables used by prelude code) are always globals
+    i = 0
+    while i < n:
+        if used[i] or tops_pre(nm[i]):
+            if find(globs, nglobs, nm[i]) < 0:
+                t = ty[i]
+                if t < 0:
+                    t = 0
+                add_glob(nm[i], t)
+        else:
+            mainloc[nmainloc] = nm[i]
+            mainty[nmainloc] = ty[i]
+            nmainloc += 1
+        i += 1
+    # the main function
+    fi = nfuncs
+    nfuncs += 1
+    fnames[fi] = "__main"
+    flabel[fi] = "f___main"
+    fmeth[fi] = 0
+    fcls[fi] = -1
+    fargs[fi] = 0
+    fpb[fi] = npall
+    fret[fi] = 0
+    fint[fi] = 1
+    flb[fi] = -1
+    finl[fi] = -1
+    fshadow[fi] = 0
+    fpre[fi] = 0
+    fmain = fi
+
+def tops_pre(name):
+    # assigned at top level inside the prelude
+    i = 0
+    while i < ntops and tops[i] < PRETOK:
+        p = tops[i]
+        if tk[p] == K_ID and str_eq(tv[p], name):
+            return 1
+        i += 1
+    return 0
+
+def in_global(p):
+    while tk[p] != K_NL and p > 0:
+        if tok_is_id(p, "global"):
+            return 1
+        p -= 1
+    return 0
+
+def add_glob(name, t):
+    global nglobs
+    globs[nglobs] = name
+    gtype[nglobs] = t
+    gint[nglobs] = t == 0
+    nglobs += 1
+
+# ---------------- driver ----------------
+def reach_all():
+    i = 0
+    while i < nfuncs:
+        freach[i] = 0
+        i += 1
+    freach[fmain] = 1
+    i = 0
+    while i < nfuncs:
+        if fmeth[i] == 1:
+            freach[i] = 1
+        i += 1
+    mark_root("__err", 2, 1)
+    mark_root("__getidx", 3, 1)
+    mark_root("__setidx", 4, 1)
+    mark_root("__add", 3, 1)
+    mark_root("__eq", 2, 1)
+    mark_root("__truth", 1, 1)
+    i = 0
+    while i < ndynm:
+        if dynm_fb[i] >= 0:
+            freach[dynm_fb[i]] = 1
+        i += 1
+    ch = 1
+    while ch:
+        ch = 0
+        i = 0
+        while i < nce:
+            if freach[ce_from[i]] and not freach[ce_to[i]]:
+                freach[ce_to[i]] = 1
+                ch = 1
+            i += 1
+
+def mark_root(name, n, used):
+    if used:
+        f = fn_lookup(name, n)
+        if f >= 0:
+            freach[f] = 1
+
+def one_pass():
+    global nout, ndat, nlabel, nstr, nce, ndynm, ndynf, u_getidx, u_setidx, u_add, u_eq, u_truth, nconf
+    nout = 0
+    ndat = 0
+    nlabel = 0
+    nstr = 0
+    nce = 0
+    ndynm = 0
+    ndynf = 0
+    u_getidx = 0
+    u_setidx = 0
+    u_add = 0
+    u_eq = 0
+    u_truth = 0
+    nconf = 0
+    emit_raw(".text\n.globl _start\n_start:\n    mov %rsp, %rdi\n    call rt_init\n    call f___main\n    jmp rt_exit0\n")
+    f = 0
+    while f < nfuncs:
+        fos[f] = 0
+        foe[f] = 0
+        if fmeth[f] == 2:
+            compile_ctor(fcls[f])
+        elif f != fmain and not fshadow[f]:
+            compile_def(f)
+        f += 1
+    compile_main(fmain)
+
+def forge_main():
+    global PRETOK, PRE, passno
+    if argc() < 3:
+        eputs("usage: forgec <input.forge> <output.s>")
+        exit(2)
+    src = read_file(argv(1))
+    pre = prelude_text()
+    lex(pre, 1, 0)
+    PRETOK = ntok
+    set_lphase(1)
+    lex(src, 1, 0)
+    add_tok(K_EOF, 0, 0)
+    set_lphase(2)
+    prescan()
+    passno = 0
+    while 1:
+        one_pass()
+        passno += 1
+        if passno >= 2 and nconf == 0:
+            break
+        if passno > 40:
+            die(0, "internal: type inference did not converge")
+    reach_all()
+    f = 0
+    while f < nfuncs:
+        if not freach[f] and foe[f] > fos[f]:
+            i = fos[f]
+            while i < foe[f]:
+                out[i] = ""
+                i += 1
+        f += 1
+    emit_raw(runtime_text())
+    emit_raw(".data\n.p2align 3\nrt_dlo:\n")
+    i = 0
+    while i < nglobs:
+        emit_raw(concat(concat("g_", globs[i]), ": .quad 0\n"))
+        i += 1
+    i = 0
+    while i < ndynf:
+        emit_raw(concat(concat("FT_", dynf[i]), ": .quad 0\n"))
+        c = 0
+        while c < nclass:
+            k = find_field(c, dynf[i])
+            if k < 0:
+                emit_raw("    .quad 0\n")
+            else:
+                emit_raw(concat(concat("    .quad ", str(8 * k)), "\n"))
+            c += 1
+        i += 1
+    i = 0
+    while i < ndynm:
+        fb = "rt_nometh"
+        if dynm_fb[i] >= 0:
+            fb = flabel[dynm_fb[i]]
+        emit_raw(concat(concat(concat("MT_", dynm[i]), ": .quad "), concat(fb, "\n")))
+        c = 0
+        while c < nclass:
+            g = method_of(c, dynm[i])
+            if g < 0:
+                emit_raw(concat(concat("    .quad ", fb), "\n"))
+            else:
+                emit_raw(concat(concat("    .quad ", flabel[g]), "\n"))
+            c += 1
+        i += 1
+    i = 0
+    while i < ndat:
+        emit_raw(dat[i])
+        i += 1
+    emit_raw("rt_dhi:\n")
+    write_file(argv(2), join(out, nout))
+
+def set_lphase(v):
+    global lphase
+    lphase = v

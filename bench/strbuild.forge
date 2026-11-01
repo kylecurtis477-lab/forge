@@ -1,0 +1,7 @@
+def run(n):
+    parts = list(n)
+    for i in range(n):
+        parts[i] = concat(str(i), ",")
+    s = join(parts, n)
+    return len(s)
+print(run(1000000))

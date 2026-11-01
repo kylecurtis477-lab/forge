@@ -1,0 +1,709 @@
+# Forge prelude: library code written in Forge and compiled into every program.
+# Unreferenced functions are dropped from the output. A user function with the same name replaces a public one here.
+# Internals use only __-prefixed helpers so user code cannot change their behaviour.
+
+def __err(line, msg):
+    eputs(concat(concat(concat("error: line ", __itos(line)), ": "), msg))
+    exit(1)
+
+def __lst(xs: list, i: int):
+    return __ld(__ld(xs, 2), i)
+
+def __grow(xs, need: int):
+    cap: int = __ld(xs, 1)
+    if need <= cap:
+        return 0
+    nc: int = cap * 2
+    if nc < need:
+        nc = need
+    d = __new(nc * 8, 4, nc * 8)
+    __copy(d, __ld(xs, 2), __ld(xs, 0) * 8)
+    __st(xs, 2, d)
+    __st(xs, 1, nc)
+    return 0
+
+def append(xs, v):
+    n: int = __ld(xs, 0)
+    if n >= __ld(xs, 1):
+        __grow(xs, n + 1)
+    __st(__ld(xs, 2), n, v)
+    __st(xs, 0, n + 1)
+    return 0
+
+def pop(xs):
+    n: int = __ld(xs, 0) - 1
+    if n < 0:
+        __err(0, "pop from empty list")
+    __st(xs, 0, n)
+    return __ld(__ld(xs, 2), n)
+
+def insert(xs, i: int, v):
+    n: int = __ld(xs, 0)
+    if i < 0:
+        i = i + n
+    if i < 0:
+        i = 0
+    if i > n:
+        i = n
+    append(xs, 0)
+    d = __ld(xs, 2)
+    j: int = n
+    while j > i:
+        __st(d, j, __ld(d, j - 1))
+        j -= 1
+    __st(d, i, v)
+    return 0
+
+def __list_add(a, b):
+    na: int = __ld(a, 0)
+    nb: int = __ld(b, 0)
+    r = list(na + nb)
+    __copy(__ld(r, 2), __ld(a, 2), na * 8)
+    __copy(__ld(r, 2) + na * 8, __ld(b, 2), nb * 8)
+    return r
+
+def __list_mul(a, k: int):
+    n: int = __ld(a, 0)
+    if k < 0:
+        k = 0
+    r = list(n * k)
+    d = __ld(r, 2)
+    s = __ld(a, 2)
+    i: int = 0
+    while i < k:
+        __copy(d + i * n * 8, s, n * 8)
+        i += 1
+    return r
+
+def __itos(x) -> str:
+    return __itos_raw(x)
+
+def __str(x) -> str:
+    t: int = __tag(x)
+    if t == 1:
+        return x
+    if t < 0:
+        return __itos_raw(x)
+    return __repr(x)
+
+def __repr(x) -> str:
+    t: int = __tag(x)
+    if t == 1:
+        return concat(concat("'", x), "'")
+    if t < 0:
+        return __itos_raw(x)
+    parts = []
+    if t == 0:
+        n: int = __ld(x, 0)
+        append(parts, "[")
+        i: int = 0
+        while i < n:
+            if i > 0:
+                append(parts, ", ")
+            append(parts, __repr(__lst(x, i)))
+            i += 1
+        append(parts, "]")
+    elif t == 3:
+        ks = __ld(x, 5)
+        n: int = __ld(ks, 0)
+        append(parts, "{")
+        i: int = 0
+        while i < n:
+            if i > 0:
+                append(parts, ", ")
+            k = __lst(ks, i)
+            append(parts, __repr(k))
+            append(parts, ": ")
+            append(parts, __repr(__dget(x, k, 0)))
+            i += 1
+        append(parts, "}")
+    else:
+        return "<object>"
+    return join(parts, __ld(parts, 0))
+
+def __pr(x):
+    t: int = __tag(x)
+    if t == 1:
+        __writes(x)
+    elif t < 0:
+        __wint(x)
+    else:
+        __writes(__repr(x))
+    return 0
+
+def __add(a, b, line):
+    ta: int = __tag(a)
+    tb: int = __tag(b)
+    if ta < 0 and tb < 0:
+        return a - (0 - b)
+    if ta == 1 and tb == 1:
+        return concat(a, b)
+    if ta == 0 and tb == 0:
+        return __list_add(a, b)
+    __err(line, "unsupported operand types for +")
+
+def __eq(a, b):
+    if a - b == 0:
+        return 1
+    if __tag(a) == 1 and __tag(b) == 1:
+        return str_eq(a, b)
+    return 0
+
+def __lt(a, b):
+    if __tag(a) == 1 and __tag(b) == 1:
+        return __strcmp(a, b) < 0
+    return a - b < 0
+
+def __strcmp(a, b):
+    na: int = __aux(a)
+    nb: int = __aux(b)
+    i: int = 0
+    while i < na and i < nb:
+        d: int = char_at(a, i) - char_at(b, i)
+        if d != 0:
+            return d
+        i += 1
+    return na - nb
+
+def __getidx(o, i: int, line):
+    t: int = __tag(o)
+    if t == 0:
+        n: int = __ld(o, 0)
+        j: int = i
+        if j < 0:
+            j = j + n
+        if j < 0 or j >= n:
+            __err(line, concat(concat(concat("list index ", __itos_raw(i)), " out of range for length "), __itos_raw(n)))
+        return __lst(o, j)
+    if t == 1:
+        n: int = __aux(o)
+        j: int = i
+        if j < 0:
+            j = j + n
+        if j < 0 or j >= n:
+            __err(line, "string index out of range")
+        return chr(char_at(o, j))
+    if t == 3:
+        return __dget(o, i, line)
+    __err(line, "value is not indexable")
+
+def __setidx(o, i: int, v, line):
+    t: int = __tag(o)
+    if t == 0:
+        n: int = __ld(o, 0)
+        j: int = i
+        if j < 0:
+            j = j + n
+        if j < 0 or j >= n:
+            __err(line, concat(concat(concat("list assignment index ", __itos_raw(i)), " out of range for length "), __itos_raw(n)))
+        __st(__ld(o, 2), j, v)
+        return 0
+    if t == 3:
+        __dset(o, i, v)
+        return 0
+    __err(line, "value does not support item assignment")
+
+def __slice(o, a: int, b: int, line):
+    t: int = __tag(o)
+    n: int = 0
+    if t == 0:
+        n = __ld(o, 0)
+    elif t == 1:
+        n = __aux(o)
+    else:
+        __err(line, "value cannot be sliced")
+    if a < 0:
+        a = a + n
+    if b < 0:
+        b = b + n
+    if a < 0:
+        a = 0
+    if b > n:
+        b = n
+    if b < a:
+        b = a
+    if t == 1:
+        return substr(o, a, b)
+    r = list(b - a)
+    __copy(__ld(r, 2), __ld(o, 2) + a * 8, (b - a) * 8)
+    return r
+
+def __iter(x, line):
+    t: int = __tag(x)
+    if t == 0:
+        return x
+    if t == 3:
+        return __ld(x, 5)
+    if t == 1:
+        n: int = __aux(x)
+        r = list(n)
+        i: int = 0
+        while i < n:
+            __st(__ld(r, 2), i, chr(char_at(x, i)))
+            i += 1
+        return r
+    __err(line, "value is not iterable")
+
+def __contains(c, x):
+    t: int = __tag(c)
+    if t == 3:
+        i: int = __dfind(c, x, __hash(x))
+        return __ld(__ld(c, 2), i) != 0
+    if t == 0:
+        n: int = __ld(c, 0)
+        i: int = 0
+        while i < n:
+            if __eq(__lst(c, i), x):
+                return 1
+            i += 1
+        return 0
+    if t == 1:
+        return __find(c, x, 0) >= 0
+    return 0
+
+# ---- dict: open addressing, insertion-ordered keys ----
+# layout: [count, cap, hashes, keys, values, order(list of keys)]
+def __zeros(n: int):
+    p = __new(n * 8, 4, n * 8)
+    i: int = 0
+    while i < n:
+        __st(p, i, 0)
+        i += 1
+    return p
+
+def __dict():
+    d = __new(48, 3, 0)
+    __st(d, 0, 0)
+    __st(d, 1, 8)
+    __st(d, 2, __zeros(8))
+    __st(d, 3, __zeros(8))
+    __st(d, 4, __zeros(8))
+    __st(d, 5, list(0))
+    return d
+
+def __hash(k) -> int:
+    h: int = 0
+    if __tag(k) == 1:
+        h = 5381
+        n: int = __aux(k)
+        i: int = 0
+        while i < n:
+            h = h * 33 + char_at(k, i)
+            i += 1
+    else:
+        h = k * -7046029254386353131
+        h = h ^ (h >> 29)
+    return h | 1
+
+def __dfind(d, k, h: int) -> int:
+    m: int = __ld(d, 1) - 1
+    hs = __ld(d, 2)
+    ks = __ld(d, 3)
+    i: int = h & m
+    while 1:
+        x: int = __ld(hs, i)
+        if x == 0:
+            return i
+        if x == h and __eq(__ld(ks, i), k):
+            return i
+        i = (i + 1) & m
+
+def __dget(d, k, line):
+    i: int = __dfind(d, k, __hash(k))
+    if __ld(__ld(d, 2), i) == 0:
+        __err(line, concat("key not found: ", __repr(k)))
+    return __ld(__ld(d, 4), i)
+
+def get(d, k, dflt):
+    i: int = __dfind(d, k, __hash(k))
+    if __ld(__ld(d, 2), i) == 0:
+        return dflt
+    return __ld(__ld(d, 4), i)
+
+def __dset(d, k, v):
+    if (__ld(d, 0) + 1) * 4 > __ld(d, 1) * 3:
+        __dresize(d)
+    h: int = __hash(k)
+    i: int = __dfind(d, k, h)
+    hs = __ld(d, 2)
+    if __ld(hs, i) == 0:
+        __st(hs, i, h)
+        __st(__ld(d, 3), i, k)
+        __st(d, 0, __ld(d, 0) + 1)
+        append(__ld(d, 5), k)
+    __st(__ld(d, 4), i, v)
+    return 0
+
+def __dresize(d):
+    oc: int = __ld(d, 1)
+    ohs = __ld(d, 2)
+    oks = __ld(d, 3)
+    ovs = __ld(d, 4)
+    nc: int = oc * 2
+    __st(d, 1, nc)
+    __st(d, 2, __zeros(nc))
+    __st(d, 3, __zeros(nc))
+    __st(d, 4, __zeros(nc))
+    j: int = 0
+    while j < oc:
+        h: int = __ld(ohs, j)
+        if h != 0:
+            k = __ld(oks, j)
+            i: int = __dfind(d, k, h)
+            __st(__ld(d, 2), i, h)
+            __st(__ld(d, 3), i, k)
+            __st(__ld(d, 4), i, __ld(ovs, j))
+        j += 1
+    return 0
+
+def keys(d):
+    return __slice(__ld(d, 5), 0, __ld(__ld(d, 5), 0), 0)
+
+def values(d):
+    ks = __ld(d, 5)
+    n: int = __ld(ks, 0)
+    r = list(n)
+    i: int = 0
+    while i < n:
+        __st(__ld(r, 2), i, __dget(d, __lst(ks, i), 0))
+        i += 1
+    return r
+
+def items(d):
+    ks = __ld(d, 5)
+    n: int = __ld(ks, 0)
+    r = list(n)
+    i: int = 0
+    while i < n:
+        k = __lst(ks, i)
+        __st(__ld(r, 2), i, [k, __dget(d, k, 0)])
+        i += 1
+    return r
+
+# ---- strings ----
+def __find(s, sub, start: int) -> int:
+    n: int = __aux(s)
+    m: int = __aux(sub)
+    i: int = start
+    while i + m <= n:
+        j: int = 0
+        while j < m and char_at(s, i + j) == char_at(sub, j):
+            j += 1
+        if j == m:
+            return i
+        i += 1
+    return -1
+
+def find(s, sub) -> int:
+    return __find(s, sub, 0)
+
+def startswith(s, p) -> int:
+    m: int = __aux(p)
+    if m > __aux(s):
+        return 0
+    i: int = 0
+    while i < m:
+        if char_at(s, i) != char_at(p, i):
+            return 0
+        i += 1
+    return 1
+
+def endswith(s, p) -> int:
+    m: int = __aux(p)
+    o: int = __aux(s) - m
+    if o < 0:
+        return 0
+    i: int = 0
+    while i < m:
+        if char_at(s, o + i) != char_at(p, i):
+            return 0
+        i += 1
+    return 1
+
+def __isspace(c: int) -> int:
+    return c == 32 or c == 10 or c == 9 or c == 13
+
+def strip(s) -> str:
+    a: int = 0
+    b: int = __aux(s)
+    while a < b and __isspace(char_at(s, a)):
+        a += 1
+    while b > a and __isspace(char_at(s, b - 1)):
+        b -= 1
+    return substr(s, a, b)
+
+def split(s, sep):
+    r = []
+    n: int = __aux(s)
+    m: int = __aux(sep)
+    if m == 0:
+        __err(0, "empty separator")
+    a: int = 0
+    i: int = __find(s, sep, 0)
+    while i >= 0:
+        append(r, substr(s, a, i))
+        a = i + m
+        i = __find(s, sep, a)
+    append(r, substr(s, a, n))
+    return r
+
+def split__1(s):
+    r = []
+    n: int = __aux(s)
+    i: int = 0
+    while i < n:
+        while i < n and __isspace(char_at(s, i)):
+            i += 1
+        if i >= n:
+            break
+        a: int = i
+        while i < n and not __isspace(char_at(s, i)):
+            i += 1
+        append(r, substr(s, a, i))
+    return r
+
+def __m_join(sep, xs) -> str:
+    n: int = __ld(xs, 0)
+    if n == 0:
+        return ""
+    parts = list(2 * n - 1)
+    pd = __ld(parts, 2)
+    i: int = 0
+    while i < n:
+        if i > 0:
+            __st(pd, 2 * i - 1, sep)
+        __st(pd, 2 * i, __str(__lst(xs, i)))
+        i += 1
+    return join(parts, 2 * n - 1)
+
+def replace(s, a, b) -> str:
+    return __m_join(b, split(s, a))
+
+def __mapcase(s, lo: int, hi: int, d: int) -> str:
+    n: int = __aux(s)
+    r = substr(s, 0, n)
+    i: int = 0
+    while i < n:
+        c: int = char_at(r, i)
+        if c >= lo and c <= hi:
+            set_byte(r, i, c + d)
+        i += 1
+    return r
+
+def upper(s) -> str:
+    return __mapcase(s, 97, 122, -32)
+
+def lower(s) -> str:
+    return __mapcase(s, 65, 90, 32)
+
+def isdigit(s) -> int:
+    n: int = __aux(s)
+    i: int = 0
+    while i < n:
+        c: int = char_at(s, i)
+        if c < 48 or c > 57:
+            return 0
+        i += 1
+    return n > 0
+
+def isalpha(s) -> int:
+    n: int = __aux(s)
+    i: int = 0
+    while i < n:
+        c: int = char_at(s, i) | 32
+        if c < 97 or c > 122:
+            return 0
+        i += 1
+    return n > 0
+
+def int(x) -> int:
+    if __tag(x) != 1:
+        return x
+    s = strip(x)
+    n: int = __aux(s)
+    i: int = 0
+    neg: int = 0
+    if n > 0 and char_at(s, 0) == 45:
+        neg = 1
+        i = 1
+    v: int = 0
+    if i >= n:
+        __err(0, concat("invalid literal for int(): ", __repr(x)))
+    while i < n:
+        c: int = char_at(s, i) - 48
+        if c < 0 or c > 9:
+            __err(0, concat("invalid literal for int(): ", __repr(x)))
+        v = v * 10 + c
+        i += 1
+    if neg:
+        return 0 - v
+    return v
+
+# ---- numbers and lists ----
+def abs(x: int) -> int:
+    if x < 0:
+        return 0 - x
+    return x
+
+def min(a, b):
+    if __lt(b, a):
+        return b
+    return a
+
+def max(a, b):
+    if __lt(a, b):
+        return b
+    return a
+
+def min__1(xs):
+    m = __lst(xs, 0)
+    for x in xs:
+        if __lt(x, m):
+            m = x
+    return m
+
+def max__1(xs):
+    m = __lst(xs, 0)
+    for x in xs:
+        if __lt(m, x):
+            m = x
+    return m
+
+def sum(xs) -> int:
+    s: int = 0
+    n: int = __ld(xs, 0)
+    d = __ld(xs, 2)
+    i: int = 0
+    while i < n:
+        s += __ld(d, i)
+        i += 1
+    return s
+
+def __pow(a: int, b: int) -> int:
+    r: int = 1
+    while b > 0:
+        if b & 1:
+            r = r * a
+        a = a * a
+        b = b >> 1
+    return r
+
+def __msort(d, t, lo: int, hi: int):
+    if hi - lo < 2:
+        return 0
+    mid: int = (lo + hi) // 2
+    __msort(d, t, lo, mid)
+    __msort(d, t, mid, hi)
+    i: int = lo
+    j: int = mid
+    k: int = lo
+    while k < hi:
+        if j >= hi or (i < mid and not __lt(__ld(d, j), __ld(d, i))):
+            __st(t, k, __ld(d, i))
+            i += 1
+        else:
+            __st(t, k, __ld(d, j))
+            j += 1
+        k += 1
+    __copy(d + lo * 8, t + lo * 8, (hi - lo) * 8)
+    return 0
+
+def sort(xs):
+    n: int = __ld(xs, 0)
+    __msort(__ld(xs, 2), __new(n * 8 + 8, 4, n * 8), 0, n)
+    return 0
+
+def sorted(xs):
+    r = __slice(xs, 0, __ld(xs, 0), 0)
+    sort(r)
+    return r
+
+def reverse(xs):
+    d = __ld(xs, 2)
+    i: int = 0
+    j: int = __ld(xs, 0) - 1
+    while i < j:
+        t = __ld(d, i)
+        __st(d, i, __ld(d, j))
+        __st(d, j, t)
+        i += 1
+        j -= 1
+    return 0
+
+def extend(xs, ys):
+    for y in ys:
+        append(xs, y)
+    return 0
+
+def range(n: int):
+    return range__3(0, n, 1)
+
+def range__2(a: int, b: int):
+    return range__3(a, b, 1)
+
+def range__3(a: int, b: int, s: int):
+    if s == 0:
+        __err(0, "range() step must not be zero")
+    r = []
+    i: int = a
+    if s > 0:
+        while i < b:
+            append(r, i)
+            i += s
+    else:
+        while i > b:
+            append(r, i)
+            i += s
+    return r
+
+# ---- helpers the code generator calls ----
+def __truth(x) -> int:
+    t: int = __tag(x)
+    if t < 0:
+        v: int = x
+        return v != 0
+    if t == 1:
+        return __aux(x) != 0
+    if t == 0 or t == 3:
+        return __ld(x, 0) != 0
+    return 1
+
+def __cmp(a, b) -> int:
+    if __lt(a, b):
+        return -1
+    if __lt(b, a):
+        return 1
+    return 0
+
+def __strmul(s, k: int) -> str:
+    if k <= 0:
+        return ""
+    parts = list(k)
+    d = __ld(parts, 2)
+    i: int = 0
+    while i < k:
+        __st(d, i, s)
+        i += 1
+    return join(parts, k)
+
+def __listof(x):
+    it = __iter(x, 0)
+    return __slice(it, 0, __ld(it, 0), 0)
+
+def get__2(d, k):
+    return get(d, k, 0)
+
+def count(xs, x) -> int:
+    c: int = 0
+    for y in xs:
+        if __eq(y, x):
+            c += 1
+    return c
+
+def index(xs, x) -> int:
+    i: int = 0
+    for y in xs:
+        if __eq(y, x):
+            return i
+        i += 1
+    __err(0, "value not in list")

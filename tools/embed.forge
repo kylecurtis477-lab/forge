@@ -1,0 +1,39 @@
+# embed: builds selfhost/forgec.forge = compiler.forge + runtime/prelude text as string functions
+# usage: embed <compiler.forge> <prelude.forge> <runtime.s> <out.forge>
+
+def quote(s):
+    n = len(s)
+    parts = list(n + 2)
+    k = 0
+    parts[k] = "\""
+    k += 1
+    i = 0
+    while i < n:
+        c = char_at(s, i)
+        if c == 10:
+            parts[k] = "\\n"
+        elif c == 9:
+            parts[k] = "\\t"
+        elif c == 92:
+            parts[k] = "\\\\"
+        elif c == 34:
+            parts[k] = "\\\""
+        else:
+            parts[k] = chr(c)
+        k += 1
+        i += 1
+    parts[k] = "\""
+    k += 1
+    return join(parts, k)
+
+comp = read_file(argv(1))
+pre = read_file(argv(2))
+rt = read_file(argv(3))
+outp = list(8)
+outp[0] = comp
+outp[1] = "\ndef runtime_text():\n    return "
+outp[2] = quote(rt)
+outp[3] = "\n\ndef prelude_text():\n    return "
+outp[4] = quote(pre)
+outp[5] = "\n\nforge_main()\n"
+write_file(argv(4), join(outp, 6))

@@ -1,0 +1,900 @@
+##### response 29
+--- old
+
+--- new
+// Simple codegen for expressions + basic statements (control flow uses labels)
+struct Codegen {
+    label_count: i32,
+    vars: HashMap<String, i32>,
+    next_offset: i32,
+    functions: HashMap<String, (Vec<String>, Vec<Stmt>)>,
+}
+
+impl Codegen {
+    fn new() -> Self {
+        Self {
+            label_count: 0,
+            vars: HashMap::new(),
+            next_offset: -8,
+            functions: HashMap::new(),
+        }
+    }
+
+    fn new_label(&mut self) -> String {
+        self.label_count += 1;
+        format!("L{}", self.label_count)
+    }
+
+    fn get_var(&mut self, name: &str) -> i32 {
+        if let Some(&o) = self.vars.get(name) {
+            o
+        } else {
+            let o = self.next_offset;
+            self.vars.insert(name.to_string(), o);
+            self.next_offset -= 8;
+            o
+        }
+    }
+
+    fn generate(&mut self, stmts: &[Stmt]) -> String {
+        // First pass: collect function definitions
+        for s in stmts {
+            if let Stmt::FuncDef(name, params, body) = s {
+                self.functions.insert(name.clone(), (params.clone(), body.clone()));
+            }
+        }
+
+        let mut asm = String::from(".section .text\n.global _start\n_start:\n    sub $512, %rsp\n");
+        // Generate main statements (skip pure func defs in main flow)
+        for s in stmts {
+            if !matches!(s, Stmt::FuncDef(_, _, _)) {
+                self.gen_stmt(s, &mut asm);
+            }
+        }
+        asm.push_str("    mov $0, %rdi\n    mov $60, %rax\n    syscall\n");
+
+        // Emit function bodies
+        for (name, (params, body)) in &self.functions {
+            asm.push_str(&format!("\n{}:\n", name));
+            asm.push_str("    push %rbp\n    mov %rsp, %rbp\n");
+            // Simple: params in rdi, rsi, rdx, rcx (up to 4)
+            for (i, p) in params.iter().enumerate() {
+                let off = self.get_var(p);
+                match i {
+                    0 => asm.push_str(&format!("    mov %rdi, {}(%rsp)\n", off + 512)),
+                    1 => asm.push_str(&format!("    mov %rsi, {}(%rsp)\n", off + 512)),
+                    2 => asm.push_str(&format!("    mov %rdx, {}(%rsp)\n", off + 512)),
+                    3 => asm.push_str(&format!("    mov %rcx, {}(%rsp)\n", off + 512)),
+                    _ => {}
+                }
+            }
+            // Note: body gen uses shared vars map; for demo this is simplified
+            let mut body_asm = String::new();
+            // Temporarily generate body (simplified, no nested funcs)
+            for stmt in body {
+                // Reuse gen but careful with state
+            }
+            asm.push_str("    # function body (basic support)\n");
+            asm.push_str("    pop %rbp\n    ret\n");
+        }
+
+        // simple print_int that exits with value for demo
+        asm.push_str("\nprint_int:\n    mov %rdi, %rax\n    mov %rax, %rdi\n    mov $60, %rax\n    syscall\n    ret\n");
+        asm
+    }
+
+    fn gen_stmts(&mut self, stmts: &[Stmt], asm: &mut String) {
+        for s in stmts {
+            self.gen_stmt(s, asm);
+        }
+    }
+
+    fn gen_stmt(&mut self, stmt: &Stmt, asm: &mut String) {
+        match stmt {
+            Stmt::Assign(name, expr) => {
+                self.gen_expr(expr, asm);
+                let off = self.get_var(name);
+                asm.push_str(&format!("    mov %rax, {}(%rsp)\n", off + 512));
+            }
+            Stmt::Print(expr) => {
+                self.gen_expr(expr, asm);
+                asm.push_str("    mov %rax, %rdi\n    call print_int\n");
+            }
+            Stmt::If(cond, then_b, else_b) => {
+                let else_l = self.new_label();
+                let end_l = self.new_label();
+                self.gen_expr(cond, asm);
+                asm.push_str(&format!("    cmp $0, %rax\n    je {}\n", else_l));
+                self.gen_stmts(then_b, asm);
+                asm.push_str(&format!("    jmp {}\n{}:\n", end_l, else_l));
+                if let Some(eb) = else_b {
+                    self.gen_stmts(eb, asm);
+                }
+                asm.push_str(&format!
+... 
+##### response 31
+--- old
+
+--- new
+// Constant folding for efficiency
+fn fold(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Binary(l, op, r) => {
+            let fl = fold(l);
+            let fr = fold(r);
+            if let (Expr::Number(a), Expr::Number(b)) = (&fl, &fr) {
+                let res = match op.as_str() {
+                    "+" => a + b,
+                    "-" => a - b,
+                    "*" => a * b,
+                    "/" => if *b != 0 { a / b } else { return Expr::Binary(Box::new(fl), op.clone(), Box::new(fr)); },
+                    ">" => if a > b { 1 } else { 0 },
+                    "<" => if a < b { 1 } else { 0 },
+                    ">=" => if a >= b { 1 } else { 0 },
+                    "<=" => if a <= b { 1 } else { 0 },
+                    "==" => if a == b { 1 } else { 0 },
+                    "!=" => if a != b { 1 } else { 0 },
+                    _ => return Expr::Binary(Box::new(fl), op.clone(), Box::new(fr)),
+                };
+                return Expr::Number(res);
+            }
+            Expr::Binary(Box::new(fl), op.clone(), Box::new(fr))
+        }
+        Expr::Call(n, args) => Expr::Call(n.clone(), args.iter().map(fold).collect()),
+        _ => expr.clone(),
+    }
+}
+
+fn fold_stmts(stmts: &[Stmt]) -> Vec<Stmt> {
+    stmts.iter().map(|s| match s {
+        Stmt::Assign(n, e) => Stmt::Assign(n.clone(), fold(e)),
+        Stmt::Print(e) => Stmt::Print(fold(e)),
+        Stmt::If(c, t, e) => Stmt::If(fold(c), fold_stmts(t), e.as_ref().map(|eb| fold_stmts(eb))),
+        Stmt::While(c, b) => Stmt::While(fold(c), fold_stmts(b)),
+        Stmt::FuncDef(n, p, b) => Stmt::FuncDef(n.clone(), p.clone(), fold_stmts(b)),
+        Stmt::Return(e) => Stmt::Return(e.as_ref().map(fold)),
+        Stmt::ExprStmt(e) => Stmt::ExprStmt(fold(e)),
+    }).collect()
+}
+##### response 31
+--- old
+    let mut parser = Parser::new(Lexer::new(input));
+    let stmts = parser.parse_program();
+    let mut cg = Codegen::new();
+--- new
+    let mut parser = Parser::new(Lexer::new(input));
+    let stmts = fold_stmts(&parser.parse_program());
+    let mut cg = Codegen::new();
+##### response 31
+--- old
+        asm.push_str("\nprint_int:\n    mov %rdi, %rax\n    mov %rax, %rdi\n    mov $60, %rax\n    syscall\n    ret\n");
+--- new
+        asm.push_str("\nprint_int:\n");
+        asm.push_str("    # Efficient print: convert rax to decimal and write\n");
+        asm.push_str("    mov %rdi, %rax\n");
+        asm.push_str("    push %rax\n");
+        asm.push_str("    mov $1, %rax\n");          // sys_write
+        asm.push_str("    mov $1, %rdi\n");          // stdout
+        asm.push_str("    # simple single-digit for demo efficiency path; full itoa later\n");
+        asm.push_str("    pop %rax\n");
+        asm.push_str("    add $48, %rax\n");         // '0'
+        asm.push_str("    push %rax\n");
+        asm.push_str("    mov %rsp, %rsi\n");
+        asm.push_str("    mov $1, %rdx\n");
+        asm.push_str("    syscall\n");
+        asm.push_str("    pop %rax\n");
+        asm.push_str("    # newline\n");
+        asm.push_str("    mov $10, %rax\n");
+        asm.push_str("    push %rax\n");
+        asm.push_str("    mov %rsp, %rsi\n");
+        asm.push_str("    mov $1, %rax\n");
+        asm.push_str("    mov $1, %rdi\n");
+        asm.push_str("    mov $1, %rdx\n");
+        asm.push_str("    syscall\n");
+        asm.push_str("    pop %rax\n");
+        asm.push_str("    ret\n");
+##### response 37
+--- old
+            Expr::List(elems) => {
+                // Simple: store length in rax, elements on stack (demo)
+                asm.push_str(&format!("    mov ${}, %rax\n", elems.len()));
+                for (i, e) in elems.iter().enumerate() {
+                    self.gen_expr(e, asm);
+                    asm.push_str("    push %rax\n");
+                }
+            }
+            Expr::Index(base, idx) => {
+                self.gen_expr(idx, asm);
+                asm.push_str("    push %rax\n");
+                self.gen_expr(base, asm);
+                // demo: just return the index for now (full list memory later)
+                asm.push_str("    pop %rax\n");
+            }
+--- new
+            Expr::List(elems) => {
+                // Allocate list on stack: [len, e0, e1, ...]
+                let size = (elems.len() + 1) * 8;
+                asm.push_str(&format!("    sub ${}, %rsp\n", size));
+                asm.push_str(&format!("    mov ${}, (%rsp)\n", elems.len())); // length at [0]
+                for (i, e) in elems.iter().enumerate() {
+                    self.gen_expr(e, asm);
+                    asm.push_str(&format!("    mov %rax, {}(%rsp)\n", (i + 1) * 8));
+                }
+                asm.push_str("    mov %rsp, %rax\n"); // pointer to list
+            }
+            Expr::Index(base, idx) => {
+                self.gen_expr(base, asm);
+                asm.push_str("    push %rax\n");          // save list ptr
+                self.gen_expr(idx, asm);
+                asm.push_str("    pop %rbx\n");           // list ptr
+                asm.push_str("    inc %rax\n");           // skip length slot
+                asm.push_str("    shl $3, %rax\n");       // * 8
+                asm.push_str("    add %rbx, %rax\n");
+                asm.push_str("    mov (%rax), %rax\n");   // load element
+            }
+##### response 39
+--- old
+enum Stmt {
+    Assign(String, Expr), Print(Expr),
+    If(Expr, Vec<Stmt>, Option<Vec<Stmt>>),
+    While(Expr, Vec<Stmt>),
+    FuncDef(String, Vec<String>, Vec<Stmt>),
+    Return(Option<Expr>),
+    ExprStmt(Expr),
+}
+--- new
+enum Stmt {
+    Assign(String, Expr),
+    IndexAssign(String, Expr, Expr), // name[idx] = value
+    Print(Expr),
+    If(Expr, Vec<Stmt>, Option<Vec<Stmt>>),
+    While(Expr, Vec<Stmt>),
+    FuncDef(String, Vec<String>, Vec<Stmt>),
+    Return(Option<Expr>),
+    ExprStmt(Expr),
+}
+##### response 39
+--- old
+                } else if self.current == Token::LBracket {
+                    // index assign later if needed
+                    panic!("line {}: index assignment not yet supported", self.lexer.line);
+                } else { panic!("line {}: unexpected after identifier", self.lexer.line); }
+--- new
+                } else if self.current == Token::LBracket {
+                    self.advance();
+                    let idx = self.parse_expr();
+                    if self.current != Token::RBracket { panic!("line {}: expected ]", self.lexer.line); }
+                    self.advance();
+                    if self.current != Token::Eq { panic!("line {}: expected =", self.lexer.line); }
+                    self.advance();
+                    let val = self.parse_expr();
+                    Stmt::IndexAssign(name, idx, val)
+                } else { panic!("line {}: unexpected after identifier", self.lexer.line); }
+##### response 39
+--- old
+        Stmt::Assign(n, e) => Stmt::Assign(n.clone(), fold(e)),
+        Stmt::Print(e) => Stmt::Print(fold(e)),
+--- new
+        Stmt::Assign(n, e) => Stmt::Assign(n.clone(), fold(e)),
+        Stmt::IndexAssign(n, i, v) => Stmt::IndexAssign(n.clone(), fold(i), fold(v)),
+        Stmt::Print(e) => Stmt::Print(fold(e)),
+##### response 39
+--- old
+            Stmt::Assign(n, e) => { self.gen_expr(e, asm); let o = self.get_var(n); asm.push_str(&format!("    mov %rax, {}(%rsp)\n", o + 256)); }
+            Stmt::Print(e) => { self.gen_expr(e, asm); asm.push_str("    mov %rax, %rdi\n    call print_int\n"); }
+--- new
+            Stmt::Assign(n, e) => { self.gen_expr(e, asm); let o = self.get_var(n); asm.push_str(&format!("    mov %rax, {}(%rsp)\n", o + 256)); }
+            Stmt::IndexAssign(name, idx, val) => {
+                self.gen_expr(val, asm);
+                asm.push_str("    push %rax\n");
+                self.gen_expr(idx, asm);
+                asm.push_str("    push %rax\n");
+                // load list pointer
+                let o = self.get_var(name);
+                asm.push_str(&format!("    mov {}(%rsp), %rbx\n", o + 256));
+                asm.push_str("    pop %rax\n"); // idx
+                asm.push_str("    inc %rax\n");
+                asm.push_str("    shl $3, %rax\n");
+                asm.push_str("    add %rbx, %rax\n");
+                asm.push_str("    pop %rcx\n"); // value
+                asm.push_str("    mov %rcx, (%rax)\n");
+            }
+            Stmt::Print(e) => { self.gen_expr(e, asm); asm.push_str("    mov %rax, %rdi\n    call print_int\n"); }
+##### response 41
+--- old
+struct Codegen { label_count: i32, vars: HashMap<String, i32>, next_offset: i32, functions: HashMap<String, (Vec<String>, Vec<Stmt>)> }
+--- new
+struct Codegen {
+    label_count: i32,
+    vars: HashMap<String, i32>,
+    next_offset: i32,
+    functions: HashMap<String, (Vec<String>, Vec<Stmt>)>,
+    string_count: i32,
+    rodata: String,
+}
+##### response 41
+--- old
+    fn new() -> Self { Self { label_count: 0, vars: HashMap::new(), next_offset: -8, functions: HashMap::new() } }
+--- new
+    fn new() -> Self {
+        Self {
+            label_count: 0,
+            vars: HashMap::new(),
+            next_offset: -8,
+            functions: HashMap::new(),
+            string_count: 0,
+            rodata: String::from(".section .rodata\n"),
+        }
+    }
+##### response 41
+--- old
+            Expr::String(_) => asm.push_str("    mov $0, %rax\n"),
+--- new
+            Expr::String(s) => {
+                self.string_count += 1;
+                let label = format!("str{}", self.string_count);
+                self.rodata.push_str(&format!("{}:\n    .asciz \"{}\"\n", label, s.replace('"', "\\\"")));
+                asm.push_str(&format!("    lea {}(%rip), %rax\n", label));
+            }
+##### response 41
+--- old
+        asm
+--- new
+        let mut full = self.rodata.clone();
+        full.push_str("\n");
+        full.push_str(&asm);
+        full
+##### response 41
+--- old
+        asm.push_str(r#"
+print_int:
+    push %rbp
+    mov %rsp, %rbp
+    sub $32, %rsp
+    mov %rdi, %rax
+    mov $0, %rcx
+    mov $10, %rbx
+.itoa:
+    xor %rdx, %rdx
+    div %rbx
+    add $'0', %dl
+    push %rdx
+    inc %rcx
+    test %rax, %rax
+    jnz .itoa
+    mov %rcx, %rdx
+    mov %rsp, %rsi
+.wloop:
+    mov $1, %rax
+    mov $1, %rdi
+    syscall
+    pop %rax
+    dec %rcx
+    jnz .wloop
+    mov $10, %al
+    push %rax
+    mov $1, %rax
+    mov $1, %rdi
+    mov %rsp, %rsi
+    mov $1, %rdx
+    syscall
+    pop %rax
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+"#);
+        asm
+    }
+--- new
+        asm.push_str(r#"
+print_int:
+    push %rbp
+    mov %rsp, %rbp
+    sub $32, %rsp
+    mov %rdi, %rax
+    mov $0, %rcx
+    mov $10, %rbx
+.itoa:
+    xor %rdx, %rdx
+    div %rbx
+    add $'0', %dl
+    push %rdx
+    inc %rcx
+    test %rax, %rax
+    jnz .itoa
+    mov %rcx, %rdx
+    mov %rsp, %rsi
+.wloop:
+    mov $1, %rax
+    mov $1, %rdi
+    syscall
+    pop %rax
+    dec %rcx
+    jnz .wloop
+    mov $10, %al
+    push %rax
+    mov $1, %rax
+    mov $1, %rdi
+    mov %rsp, %rsi
+    mov $1, %rdx
+    syscall
+    pop %rax
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+
+print_str:
+    push %rbp
+    mov %rsp, %rbp
+    mov %rdi, %rsi
+    mov $1, %rax
+    mov $1, %rdi
+    # length via simple scan or fixed for demo
+    mov $64, %rdx
+    syscall
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+"#);
+        let mut full = self.rodata.clone();
+        full.push('\n');
+        full.push_str(&asm);
+        full
+    }
+##### response 41
+--- old
+            Stmt::Print(e) => { self.gen_expr(e, asm); asm.push_str("    mov %rax, %rdi\n    call print_int\n"); }
+--- new
+            Stmt::Print(e) => {
+                self.gen_expr(e, asm);
+                // crude type dispatch: if string pointer high, else number
+                asm.push_str("    mov %rax, %rdi\n    call print_int\n");
+            }
+##### response 43
+--- old
+            Stmt::Print(e) => {
+                self.gen_expr(e, asm);
+                // crude type dispatch: if string pointer high, else number
+                asm.push_str("    mov %rax, %rdi\n    call print_int\n");
+            }
+--- new
+            Stmt::Print(e) => {
+                // Detect strings for proper print path
+                let is_str = matches!(e, Expr::String(_));
+                self.gen_expr(e, asm);
+                if is_str {
+                    asm.push_str("    mov %rax, %rdi\n    call print_str\n");
+                } else {
+                    asm.push_str("    mov %rax, %rdi\n    call print_int\n");
+                }
+            }
+##### response 43
+--- old
+print_str:
+    push %rbp
+    mov %rsp, %rbp
+    mov %rdi, %rsi
+    mov $1, %rax
+    mov $1, %rdi
+    # length via simple scan or fixed for demo
+    mov $64, %rdx
+    syscall
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+"#);
+--- new
+print_str:
+    push %rbp
+    mov %rsp, %rbp
+    mov %rdi, %rsi
+    # compute length
+    mov %rsi, %rdx
+.len:
+    cmpb $0, (%rdx)
+    je .done_len
+    inc %rdx
+    jmp .len
+.done_len:
+    sub %rsi, %rdx
+    mov $1, %rax
+    mov $1, %rdi
+    syscall
+    # newline
+    mov $10, %al
+    push %rax
+    mov $1, %rax
+    mov $1, %rdi
+    mov %rsp, %rsi
+    mov $1, %rdx
+    syscall
+    pop %rax
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+"#);
+##### response 45
+--- old
+            Expr::Binary(l, op, r) => {
+                self.gen_expr(l, asm); asm.push_str("    push %rax\n");
+                self.gen_expr(r, asm); asm.push_str("    pop %rbx\n");
+                match op.as_str() {
+                    "+" => asm.push_str("    add %rbx, %rax\n"),
+                    "-" => asm.push_str("    sub %rax, %rbx\n    mov %rbx, %rax\n"),
+                    "*" => asm.push_str("    imul %rbx, %rax\n"),
+                    "/" => asm.push_str("    mov %rax, %rcx\n    mov %rbx, %rax\n    cqo\n    idiv %rcx\n"),
+                    ">" => asm.push_str("    cmp %rax, %rbx\n    setg %al\n    movzx %al, %rax\n"),
+                    "<" => asm.push_str("    cmp %rax, %rbx\n    setl %al\n    movzx %al, %rax\n"),
+                    ">=" => asm.push_str("    cmp %rax, %rbx\n    setge %al\n    movzx %al, %rax\n"),
+                    "<=" => asm.push_str("    cmp %rax, %rbx\n    setle %al\n    movzx %al, %rax\n"),
+                    "==" => asm.push_str("    cmp %rax, %rbx\n    sete %al\n    movzx %al, %rax\n"),
+                    "!=" => asm.push_str("    cmp %rax, %rbx\n    setne %al\n    movzx %al, %rax\n"),
+                    _ => {}
+                }
+            }
+--- new
+            Expr::Binary(l, op, r) => {
+                // Prefer register if right side is simple
+                if matches!(r.as_ref(), Expr::Number(_) | Expr::Var(_)) {
+                    self.gen_expr(l, asm);
+                    asm.push_str("    mov %rax, %rbx\n");
+                    self.gen_expr(r, asm);
+                    // swap so left is in rax, right in rbx for most ops
+                    asm.push_str("    xchg %rax, %rbx\n");
+                } else {
+                    self.gen_expr(l, asm); asm.push_str("    push %rax\n");
+                    self.gen_expr(r, asm); asm.push_str("    pop %rbx\n");
+                }
+                match op.as_str() {
+                    "+" => asm.push_str("    add %rbx, %rax\n"),
+                    "-" => asm.push_str("    sub %rax, %rbx\n    mov %rbx, %rax\n"),
+                    "*" => asm.push_str("    imul %rbx, %rax\n"),
+                    "/" => asm.push_str("    mov %rax, %rcx\n    mov %rbx, %rax\n    cqo\n    idiv %rcx\n"),
+                    ">" => asm.push_str("    cmp %rax, %rbx\n    setg %al\n    movzx %al, %rax\n"),
+                    "<" => asm.push_str("    cmp %rax, %rbx\n    setl %al\n    movzx %al, %rax\n"),
+                    ">=" => asm.push_str("    cmp %rax, %rbx\n    setge %al\n    movzx %al, %rax\n"),
+                    "<=" => asm.push_str("    cmp %rax, %rbx\n    setle %al\n    movzx %al, %rax\n"),
+                    "==" => asm.push_str("    cmp %rax, %rbx\n    sete %al\n    movzx %al, %rax\n"),
+                    "!=" => asm.push_str("    cmp %rax, %rbx\n    setne %al\n    movzx %al, %rax\n"),
+                    _ => {}
+                }
+            }
+##### response 129
+--- old
+            Expr::Call(n, args) => {
+                for (i, a) in args.iter().enumerate() {
+                    self.gen_expr(a, asm);
+                    match i { 0 => asm.push_str("    mov %rax, %rdi\n"), 1 => asm.push_str("    mov %rax, %rsi\n"), 2 => asm.push_str("    mov %rax, %rdx\n"), 3 => asm.push_str("    mov %rax, %rcx\n"), _ => asm.push_str("    push %rax\n") }
+                }
+                asm.push_str(&format!("    call {}\n", n));
+            }
+--- new
+            Expr::Call(n, args) => {
+                if n == "write_file" && args.len() == 2 {
+                    // write_file(filename, content) - both strings
+                    self.gen_expr(&args[0], asm);
+                    asm.push_str("    mov %rax, %rdi\n"); // filename
+                    self.gen_expr(&args[1], asm);
+                    asm.push_str("    mov %rax, %rsi\n"); // content
+                    asm.push_str("    call write_file_impl\n");
+                } else {
+                    for (i, a) in args.iter().enumerate() {
+                        self.gen_expr(a, asm);
+                        match i { 0 => asm.push_str("    mov %rax, %rdi\n"), 1 => asm.push_str("    mov %rax, %rsi\n"), 2 => asm.push_str("    mov %rax, %rdx\n"), 3 => asm.push_str("    mov %rax, %rcx\n"), _ => asm.push_str("    push %rax\n") }
+                    }
+                    asm.push_str(&format!("    call {}\n", n));
+                }
+            }
+##### response 129
+--- old
+
+--- new
+        asm.push_str(r#"
+write_file_impl:
+    # rdi = filename, rsi = content
+    push %rbp
+    mov %rsp, %rbp
+    # open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644)
+    mov $2, %rax
+    mov $577, %rsi          # O_WRONLY|O_CREAT|O_TRUNC
+    mov $420, %rdx          # 0644
+    syscall
+    mov %rax, %rdi          # fd
+    # write(fd, content, len) - simple fixed len for demo
+    mov $1, %rax
+    mov 16(%rbp), %rsi      # content ptr (adjust as needed)
+    mov $64, %rdx
+    syscall
+    # close
+    mov $3, %rax
+    syscall
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+"#);
+##### response 133
+--- old
+write_file_impl:
+    # rdi=filename, rsi=content
+    push %rbp
+    mov %rsp, %rbp
+    mov $2, %rax
+    mov $577, %rsi
+    mov $420, %rdx
+    syscall
+    mov %rax, %r8
+    mov $1, %rax
+    mov %r8, %rdi
+    mov 16(%rbp), %rsi
+    mov $128, %rdx
+    syscall
+    mov $3, %rax
+    mov %r8, %rdi
+    syscall
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+"#);
+--- new
+write_file_impl:
+    # rdi = filename, rsi = content
+    push %rbp
+    mov %rsp, %rbp
+    push %rsi
+    # open
+    mov $2, %rax
+    mov $577, %rsi
+    mov $420, %rdx
+    syscall
+    mov %rax, %r8          # fd
+    pop %rsi               # content
+    # compute length
+    mov %rsi, %rdx
+.wlen:
+    cmpb $0, (%rdx)
+    je .wdone
+    inc %rdx
+    jmp .wlen
+.wdone:
+    sub %rsi, %rdx
+    # write
+    mov $1, %rax
+    mov %r8, %rdi
+    syscall
+    # close
+    mov $3, %rax
+    mov %r8, %rdi
+    syscall
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+"#);
+##### response 137
+--- old
+            Expr::Call(n, args) => {
+                if n == "write_file" && args.len() == 2 {
+                    self.gen_expr(&args[0], asm); asm.push_str("    mov %rax, %rdi\n");
+                    self.gen_expr(&args[1], asm); asm.push_str("    mov %rax, %rsi\n");
+                    asm.push_str("    call write_file_impl\n");
+                } else {
+                    for (i, a) in args.iter().enumerate() { self.gen_expr(a, asm); match i { 0 => asm.push_str("    mov %rax, %rdi\n"), 1 => asm.push_str("    mov %rax, %rsi\n"), 2 => asm.push_str("    mov %rax, %rdx\n"), 3 => asm.push_str("    mov %rax, %rcx\n"), _ => asm.push_str("    push %rax\n") } }
+                    asm.push_str(&format!("    call {}\n", n));
+                }
+            }
+--- new
+            Expr::Call(n, args) => {
+                if n == "write_file" && args.len() == 2 {
+                    self.gen_expr(&args[0], asm); asm.push_str("    mov %rax, %rdi\n");
+                    self.gen_expr(&args[1], asm); asm.push_str("    mov %rax, %rsi\n");
+                    asm.push_str("    call write_file_impl\n");
+                } else if n == "concat" && args.len() == 2 {
+                    self.gen_expr(&args[0], asm); asm.push_str("    mov %rax, %rdi\n");
+                    self.gen_expr(&args[1], asm); asm.push_str("    mov %rax, %rsi\n");
+                    asm.push_str("    call concat_impl\n");
+                } else {
+                    for (i, a) in args.iter().enumerate() { self.gen_expr(a, asm); match i { 0 => asm.push_str("    mov %rax, %rdi\n"), 1 => asm.push_str("    mov %rax, %rsi\n"), 2 => asm.push_str("    mov %rax, %rdx\n"), 3 => asm.push_str("    mov %rax, %rcx\n"), _ => asm.push_str("    push %rax\n") } }
+                    asm.push_str(&format!("    call {}\n", n));
+                }
+            }
+##### response 137
+--- old
+write_file_impl:
+    # rdi = filename, rsi = content
+    push %rbp
+    mov %rsp, %rbp
+    push %rsi
+    # open
+    mov $2, %rax
+    mov $577, %rsi
+    mov $420, %rdx
+    syscall
+    mov %rax, %r8          # fd
+    pop %rsi               # content
+    # compute length
+    mov %rsi, %rdx
+.wlen:
+    cmpb $0, (%rdx)
+    je .wdone
+    inc %rdx
+    jmp .wlen
+.wdone:
+    sub %rsi, %rdx
+    # write
+    mov $1, %rax
+    mov %r8, %rdi
+    syscall
+    # close
+    mov $3, %rax
+    mov %r8, %rdi
+    syscall
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+"#);
+--- new
+write_file_impl:
+    # rdi = filename, rsi = content
+    push %rbp
+    mov %rsp, %rbp
+    push %rsi
+    mov $2, %rax
+    mov $577, %rsi
+    mov $420, %rdx
+    syscall
+    mov %rax, %r8
+    pop %rsi
+    mov %rsi, %rdx
+.wlen:
+    cmpb $0, (%rdx)
+    je .wdone
+    inc %rdx
+    jmp .wlen
+.wdone:
+    sub %rsi, %rdx
+    mov $1, %rax
+    mov %r8, %rdi
+    syscall
+    mov $3, %rax
+    mov %r8, %rdi
+    syscall
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+
+concat_impl:
+    # rdi = s1, rsi = s2 -> rax = new string
+    push %rbp
+    mov %rsp, %rbp
+    # simple: just return s1 for demo (full impl would alloc+copy)
+    mov %rdi, %rax
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+"#);
+##### response 139
+--- old
+concat_impl:
+    # rdi = s1, rsi = s2 -> rax = new string
+    push %rbp
+    mov %rsp, %rbp
+    # simple: just return s1 for demo (full impl would alloc+copy)
+    mov %rdi, %rax
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+"#);
+--- new
+concat_impl:
+    # rdi = s1, rsi = s2 -> rax = new string in static buffer
+    push %rbp
+    mov %rsp, %rbp
+    push %rbx
+    push %r12
+    push %r13
+    mov %rdi, %r12
+    mov %rsi, %r13
+    lea concat_buf(%rip), %rbx
+    # copy s1
+.c1:
+    movb (%r12), %al
+    movb %al, (%rbx)
+    test %al, %al
+    jz .c1done
+    inc %r12
+    inc %rbx
+    jmp .c1
+.c1done:
+    # copy s2
+.c2:
+    movb (%r13), %al
+    movb %al, (%rbx)
+    test %al, %al
+    jz .c2done
+    inc %r13
+    inc %rbx
+    jmp .c2
+.c2done:
+    lea concat_buf(%rip), %rax
+    pop %r13
+    pop %r12
+    pop %rbx
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+
+.section .bss
+concat_buf:
+    .space 4096
+"#);
+##### response 145
+--- old
+write_file_impl:
+    # rdi = filename, rsi = content
+    push %rbp
+    mov %rsp, %rbp
+    push %rsi
+    mov $2, %rax
+    mov $577, %rsi
+    mov $420, %rdx
+    syscall
+    mov %rax, %r8
+    pop %rsi
+    mov %rsi, %rdx
+.wlen:
+    cmpb $0, (%rdx)
+    je .wdone
+    inc %rdx
+    jmp .wlen
+.wdone:
+    sub %rsi, %rdx
+    mov $1, %rax
+    mov %r8, %rdi
+    syscall
+    mov $3, %rax
+    mov %r8, %rdi
+    syscall
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+
+--- new
+write_file_impl:
+    # rdi = filename, rsi = content
+    push %rbp
+    mov %rsp, %rbp
+    push %rsi                  # save content
+    # open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644)
+    mov $2, %rax
+    mov $577, %rsi             # flags
+    mov $420, %rdx             # mode
+    syscall
+    cmp $0, %rax
+    jl .wfail
+    mov %rax, %r8              # fd
+    pop %rsi                   # content
+    # length
+    mov %rsi, %rcx
+.wlen:
+    cmpb $0, (%rcx)
+    je .wdone
+    inc %rcx
+    jmp .wlen
+.wdone:
+    sub %rsi, %rcx
+    mov %rcx, %rdx             # len
+    # write(fd, content, len)
+    mov $1, %rax
+    mov %r8, %rdi
+    syscall
+    # close
+    mov $3, %rax
+    mov %r8, %rdi
+    syscall
+    jmp .wret
+.wfail:
+    pop %rsi
+.wret:
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+

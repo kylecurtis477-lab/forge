@@ -1,0 +1,56 @@
+def ack(m, n):
+    if m == 0:
+        return n + 1
+    if n == 0:
+        return ack(m - 1, 1)
+    return ack(m - 1, ack(m, n - 1))
+
+def many(a, b, c, d, e, f, g):
+    x = a + b
+    y = c * d
+    z = e - f
+    w = g
+    v = x + y + z + w
+    u = v * 2
+    t = u - 1
+    return t + a * 0
+
+def sum_to(n: int) -> int:
+    s: int = 0
+    i = 0
+    while i <= n:
+        s += i
+        i += 1
+    return s
+
+print(ack(2, 3))
+print(many(1, 2, 3, 4, 5, 6, 7))
+print(sum_to(100))
+print(2 + 3 * 4 - 10 / 3)
+print(-7 % 3)
+x = 5
+if x > 3 and x < 10 or False:
+    print(1)
+else:
+    print(0)
+if not x == 5:
+    print(99)
+elif x != 4:
+    print(42)
+def fact(n):
+    r = 1
+    for i in range(1, n + 1):
+        r = r * i
+    return r
+print(fact(10))
+k = 0
+while True:
+    k += 3
+    if k > 20:
+        break
+print(k)
+def sdiv(a, b):
+    q = a / b
+    m = a % b
+    return q * 100 + m
+print(sdiv(47, 5))
