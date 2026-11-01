@@ -1,0 +1,3 @@
+error: line 11 col 13: argument 1 to 'shout' has type int, expected str
+print(shout(n))
+            ^

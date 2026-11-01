@@ -1,0 +1,89 @@
+from typing import Optional, Callable
+
+class Shape:
+    def __init__(self, name: str):
+        self.name: str = name
+    def area(self) -> float:
+        return 0.0
+    def describe(self) -> str:
+        return self.name + " " + str(round(self.area(), 2))
+
+class Rect(Shape):
+    def __init__(self, w: float, h: float):
+        super().__init__("rect")
+        self.w: float = w
+        self.h: float = h
+    def area(self) -> float:
+        return self.w * self.h
+
+class Circle(Shape):
+    def __init__(self, r: float):
+        super().__init__("circle")
+        self.r: float = r
+    def area(self) -> float:
+        return 3.14159 * self.r * self.r
+
+def total_area(shapes: list[Shape]) -> float:
+    t: float = 0
+    for s in shapes:
+        t += s.area()
+    return t
+
+def find_index(xs: list[int], v: int) -> Optional[int]:
+    i = 0
+    for x in xs:
+        if x == v:
+            return i
+        i += 1
+    return None
+
+def maybe_len(s: str | None) -> int:
+    if s is None:
+        return -1
+    return len(s)
+
+def apply(f: Callable[[int], int], xs: list[int]) -> list[int]:
+    return [f(x) for x in xs]
+
+def stats(xs: list[int]) -> tuple[int, int, float]:
+    lo = min(xs)
+    hi = max(xs)
+    return (lo, hi, sum(xs) / len(xs))
+
+def count_words(text: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for w in text.split():
+        counts[w] = counts.get(w, 0) + 1
+    return counts
+
+def greet(name: str, times: int = 1, sep: str = " ") -> str:
+    return sep.join([name] * times)
+
+def fact(n: int) -> int:
+    if n <= 1:
+        return 1
+    return n * fact(n - 1)
+
+shapes: list[Shape] = [Rect(2.0, 3.0), Circle(1.0), Rect(1.5, 1.5)]
+for s in shapes:
+    print(s.describe())
+print(round(total_area(shapes), 3))
+print(find_index([4, 5, 6], 5), find_index([4, 5, 6], 9))
+print(maybe_len("abc"), maybe_len(None))
+print(apply(lambda x: x * x + 1, [1, 2, 3]))
+lo, hi, avg = stats([3, 9, 4, 8])
+print(lo, hi, avg)
+wc = count_words("a b a c b a")
+for k in sorted(wc.keys()):
+    print(k, wc[k])
+print(greet("hi"), greet("ho", 3), greet("x", times=2, sep="-"))
+seen: set[int] = set()
+for v in [1, 2, 2, 3, 1]:
+    seen.add(v)
+print(len(seen))
+n: int = 10
+f: float = n
+b: bool = n > 5
+print(fact(n), f / 4, b)
+names: list[str] = [str(i) for i in range(4)]
+print(",".join(names))

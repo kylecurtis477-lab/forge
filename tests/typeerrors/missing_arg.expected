@@ -1,0 +1,3 @@
+error: line 4 col 12: missing argument 'name' in call to 'greet'
+print(greet(times=3))
+           ^

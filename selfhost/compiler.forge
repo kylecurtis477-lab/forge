@@ -302,6 +302,8 @@ def add_tok(k, v, line):
     tk[ntok] = k
     tv[ntok] = v
     tl[ntok] = line
+    tcol[ntok] = tokst
+    tsid[ntok] = cur_sid
     ntok += 1
 
 def is_digit(c):
@@ -454,7 +456,12 @@ def flt_text(t):
     return join(parts, k)
 
 def lex(src, line, inner):
+    global tokst, cur_sid, nlsrc
     n = len(src)
+    if not inner and nlsrc < 4096:
+        lsrcs[nlsrc] = src
+        cur_sid = nlsrc
+        nlsrc += 1
     i = 0
     ind = list(1000)
     ind[0] = 0
@@ -480,6 +487,8 @@ def lex(src, line, inner):
                 line += 1
                 continue
             bol = 0
+            if not inner:
+                tokst = i
             if sp > ind[nind - 1]:
                 ind[nind] = sp
                 nind += 1
@@ -489,6 +498,8 @@ def lex(src, line, inner):
                 add_tok(K_DED, 0, line)
             if sp != ind[nind - 1]:
                 die(line, "inconsistent indentation")
+        if not inner:
+            tokst = i
         c = char_at(src, i)
         if c == 32 or c == 13 or c == 9:
             i += 1
@@ -756,6 +767,9 @@ def type_of_name(t):
 def parse_type():
     # returns a type code; skips generic arguments like list[int]
     global pos
+    if tk[pos] == K_STR:
+        pos += 1
+        return 0
     t = type_of_name(ident())
     while is_op("."):
         pos += 1
@@ -770,6 +784,11 @@ def parse_type():
             pos += 1
             if d == 0:
                 break
+    if is_op("|"):
+        # unions (T | None) are dynamic at the machine level
+        pos += 1
+        parse_type()
+        return 0
     return t
 
 # ---------------- variables ----------------
@@ -5836,6 +5855,1759 @@ def load_imports(src, dir):
             if len(w) > 0:
                 load_mod(w, dir)
 
+
+# ---------------- static type checker (gradual) ----------------
+# Runs on the user's tokens before codegen. Types are strings: "int", "float", "str",
+# "bool", "None", "list[T]", "dict[K,V]", "set[T]", "tuple[A,B]", "Optional[T]",
+# "Callable", a class name, or "?" (dynamic: unannotated / unknown, always compatible).
+tcol = list(MAXT)
+tsid = list(MAXT)
+lsrcs = list(4096)
+nlsrc = 0
+cur_sid = 0
+tokst = 0
+tp = 0
+tc_mode = 0
+tc_colv = 0
+# environment frames
+en_name = list(100000)
+en_ty = list(100000)
+en_ann = list(100000)
+n_en = 0
+fr_base = list(4096)
+n_fr = 0
+# function signatures
+sg_name = list(MAXF)
+sg_cls = list(MAXF)
+sg_np = list(MAXF)
+sg_pb = list(MAXF)
+sg_ret = list(MAXF)
+sg_star = list(MAXF)
+sg_min = list(MAXF)
+sg_dup = list(MAXF)
+n_sg = 0
+sp_name = list(200000)
+sp_ty = list(200000)
+sp_def = list(200000)
+n_sp = 0
+# classes and fields
+tcc_name = list(2000)
+tcc_par = list(2000)
+n_tcc = 0
+tf_cls = list(50000)
+tf_name = list(50000)
+tf_ty = list(50000)
+n_tf = 0
+dyn_names = list(20000)
+n_dyn = 0
+ret_stack = list(1024)
+n_ret = 0
+tc_static = 0
+tc_inclass = ""
+
+def cat3(a, b, c):
+    return concat(concat(a, b), c)
+
+def tc_err(p, msg):
+    if tc_mode == 0:
+        return 0
+    s = lsrcs[tsid[p]]
+    o = tcol[p]
+    a = o
+    while a > 0 and char_at(s, a - 1) != 10:
+        a -= 1
+    b = o
+    n = len(s)
+    while b < n and char_at(s, b) != 10:
+        b += 1
+    col = o - a + 1
+    car = ""
+    i = a
+    while i < o:
+        if char_at(s, i) == 9:
+            car = concat(car, "\t")
+        else:
+            car = concat(car, " ")
+        i += 1
+    eputs(concat(concat(concat(concat(concat("error: line ", str(uline(tl[p]))), " col "), str(col)), ": "), msg))
+    eputs(substr(s, a, b))
+    eputs(concat(car, "^"))
+    exit(1)
+
+# ---- type strings ----
+def ty_head(t):
+    n = len(t)
+    i = 0
+    while i < n and char_at(t, i) != 91:
+        i += 1
+    return substr(t, 0, i)
+
+def ty_nargs(t):
+    n = len(t)
+    i = len(ty_head(t))
+    if i >= n:
+        return 0
+    if i + 2 == n:
+        return 0
+    d = 0
+    k = 1
+    i += 1
+    while i < n - 1:
+        c = char_at(t, i)
+        if c == 91:
+            d += 1
+        elif c == 93:
+            d -= 1
+        elif c == 44 and d == 0:
+            k += 1
+        i += 1
+    return k
+
+def ty_arg(t, j):
+    n = len(t)
+    i = len(ty_head(t)) + 1
+    d = 0
+    k = 0
+    st = i
+    while i < n - 1:
+        c = char_at(t, i)
+        if c == 91:
+            d += 1
+        elif c == 93:
+            d -= 1
+        elif c == 44 and d == 0:
+            if k == j:
+                return substr(t, st, i)
+            k += 1
+            st = i + 1
+        i += 1
+    if k == j:
+        return substr(t, st, n - 1)
+    return "?"
+
+def mk1(h, a):
+    return concat(concat(concat(h, "["), a), "]")
+
+def mk2(h, a, b):
+    return concat(concat(concat(concat(concat(h, "["), a), ","), b), "]")
+
+def is_dyn(t):
+    return str_eq(t, "?")
+
+def mk_opt(t):
+    if is_dyn(t) or str_eq(t, "None"):
+        return t
+    if str_eq(ty_head(t), "Optional"):
+        return t
+    return mk1("Optional", t)
+
+def tc_class_idx(n):
+    return find(tcc_name, n_tcc, n)
+
+def tcsub(c, d):
+    # class name c is d or derives from d
+    k = 0
+    while k < 100:
+        if str_eq(c, d):
+            return 1
+        i = tc_class_idx(c)
+        if i < 0:
+            return 0
+        c = tcc_par[i]
+        if str_eq(c, ""):
+            return 0
+        k += 1
+    return 0
+
+def tc_isnum(t):
+    return str_eq(t, "int") or str_eq(t, "float") or str_eq(t, "bool")
+
+def assignable(d, s):
+    if is_dyn(d) or is_dyn(s) or str_eq(d, s):
+        return 1
+    if str_eq(d, "float") and (str_eq(s, "int") or str_eq(s, "bool")):
+        return 1
+    if str_eq(d, "int") and str_eq(s, "bool"):
+        return 1
+    hd = ty_head(d)
+    hs = ty_head(s)
+    if str_eq(hd, "Optional"):
+        if str_eq(s, "None"):
+            return 1
+        if str_eq(hs, "Optional"):
+            return assignable(ty_arg(d, 0), ty_arg(s, 0))
+        return assignable(ty_arg(d, 0), s)
+    if str_eq(hs, "Optional"):
+        # no flow narrowing: Optional[T] is accepted where T is expected
+        return assignable(d, ty_arg(s, 0))
+    if str_eq(d, "Callable"):
+        return str_eq(s, "Callable")
+    if str_eq(hd, hs) and (str_eq(hd, "list") or str_eq(hd, "set") or str_eq(hd, "dict") or str_eq(hd, "tuple")):
+        n = ty_nargs(d)
+        if n != ty_nargs(s):
+            return str_eq(hd, "tuple") and (n == 0 or ty_nargs(s) == 0)
+        i = 0
+        while i < n:
+            if not assignable(ty_arg(d, i), ty_arg(s, i)):
+                return 0
+            i += 1
+        return 1
+    if tc_class_idx(s) >= 0 and tc_class_idx(d) >= 0:
+        return tcsub(s, d)
+    if tc_class_idx(d) >= 0 and str_eq(hs, "") and tc_class_idx(s) < 0:
+        # builtin value where a user class is expected
+        return 0
+    if str_eq(d, "object"):
+        return 1
+    return 0
+
+def tc_join(a, b):
+    if str_eq(a, b):
+        return a
+    if is_dyn(a) or is_dyn(b):
+        return "?"
+    if str_eq(a, "None"):
+        return mk_opt(b)
+    if str_eq(b, "None"):
+        return mk_opt(a)
+    if tc_isnum(a) and tc_isnum(b):
+        if str_eq(a, "float") or str_eq(b, "float"):
+            return "float"
+        return "int"
+    if tc_class_idx(a) >= 0 and tc_class_idx(b) >= 0:
+        x = a
+        k = 0
+        while k < 100 and not str_eq(x, ""):
+            if tcsub(b, x):
+                return x
+            i = tc_class_idx(x)
+            if i < 0:
+                return "?"
+            x = tcc_par[i]
+            k += 1
+        return "?"
+    if str_eq(ty_head(a), "Optional") and assignable(a, b):
+        return a
+    if str_eq(ty_head(b), "Optional") and assignable(b, a):
+        return b
+    return "?"
+
+def tc_join_lit(a, b):
+    # element join inside a literal: incompatible known types give "object"
+    r = tc_join(a, b)
+    if is_dyn(r) and not is_dyn(a) and not is_dyn(b):
+        return "object"
+    return r
+
+# ---- annotations ----
+def tc_ann_atom(p):
+    global tp
+    if tk[p] == K_STR:
+        tp = p + 1
+        return tv[p]
+    if tk[p] != K_ID:
+        tp = p + 1
+        return "?"
+    n = tv[p]
+    p += 1
+    while tok_is_op(p, ".") and tk[p + 1] == K_ID:
+        n = tv[p + 1]
+        p += 2
+    args = list(16)
+    na = 0
+    if tok_is_op(p, "["):
+        p += 1
+        while not tok_is_op(p, "]") and tk[p] != K_NL and tk[p] != K_EOF:
+            if tok_is_op(p, "["):
+                # Callable[[...], R]
+                d = 0
+                while 1:
+                    if tok_is_op(p, "["):
+                        d += 1
+                    elif tok_is_op(p, "]"):
+                        d -= 1
+                    p += 1
+                    if d == 0:
+                        break
+                if na < 16:
+                    args[na] = "?"
+                    na += 1
+            elif tok_is_op(p, "..."):
+                p += 1
+                if na < 16:
+                    args[na] = "..."
+                    na += 1
+            else:
+                a = tc_ann(p)
+                p = tp
+                if na < 16:
+                    args[na] = a
+                    na += 1
+            if tok_is_op(p, ","):
+                p += 1
+        p += 1
+    tp = p
+    if str_eq(n, "int") or str_eq(n, "float") or str_eq(n, "str") or str_eq(n, "bool"):
+        return n
+    if str_eq(n, "None"):
+        return "None"
+    if str_eq(n, "Any") or str_eq(n, "object"):
+        return "?"
+    if str_eq(n, "list") or str_eq(n, "List") or str_eq(n, "set") or str_eq(n, "Set") or str_eq(n, "frozenset"):
+        h = "list"
+        if not str_eq(n, "list") and not str_eq(n, "List"):
+            h = "set"
+        if na == 1:
+            return mk1(h, args[0])
+        return mk1(h, "?")
+    if str_eq(n, "dict") or str_eq(n, "Dict"):
+        if na == 2:
+            return mk2("dict", args[0], args[1])
+        return mk2("dict", "?", "?")
+    if str_eq(n, "tuple") or str_eq(n, "Tuple"):
+        if na == 0:
+            return "tuple[]"
+        i = 0
+        while i < na:
+            if str_eq(args[i], "..."):
+                return "tuple[]"
+            i += 1
+        t = concat("tuple[", args[0])
+        i = 1
+        while i < na:
+            t = concat(concat(t, ","), args[i])
+            i += 1
+        return concat(t, "]")
+    if str_eq(n, "Optional"):
+        if na == 1:
+            return mk_opt(args[0])
+        return "?"
+    if str_eq(n, "Union"):
+        if na == 2 and str_eq(args[1], "None"):
+            return mk_opt(args[0])
+        if na == 2 and str_eq(args[0], "None"):
+            return mk_opt(args[1])
+        return "?"
+    if str_eq(n, "Callable"):
+        return "Callable"
+    if tc_class_idx(n) >= 0:
+        return n
+    return "?"
+
+def tc_ann(p):
+    global tp
+    t = tc_ann_atom(p)
+    while tok_is_op(tp, "|"):
+        u = tc_ann_atom(tp + 1)
+        if str_eq(u, "None"):
+            t = mk_opt(t)
+        elif str_eq(t, "None"):
+            t = mk_opt(u)
+        else:
+            t = "?"
+    return t
+
+# ---- environment ----
+def tc_push():
+    global n_fr
+    fr_base[n_fr] = n_en
+    n_fr += 1
+
+def tc_pop():
+    global n_fr, n_en
+    n_fr -= 1
+    n_en = fr_base[n_fr]
+
+def tc_find(name):
+    i = n_en - 1
+    while i >= 0:
+        if str_eq(en_name[i], name):
+            return i
+        i -= 1
+    return -1
+
+def tc_find_local(name):
+    b = 0
+    if n_fr > 0:
+        b = fr_base[n_fr - 1]
+    i = n_en - 1
+    while i >= b:
+        if str_eq(en_name[i], name):
+            return i
+        i -= 1
+    return -1
+
+def tc_declare(name, t, ann):
+    global n_en
+    if n_en >= 100000:
+        return -1
+    en_name[n_en] = name
+    en_ty[n_en] = t
+    en_ann[n_en] = ann
+    n_en += 1
+    return n_en - 1
+
+def tc_lookup(name):
+    if find(dyn_names, n_dyn, name) >= 0:
+        i = tc_find(name)
+        if i >= 0 and en_ann[i]:
+            return en_ty[i]
+        return "?"
+    i = tc_find(name)
+    if i >= 0:
+        return en_ty[i]
+    if tc_sig(name) >= 0 or tc_class_idx(name) >= 0:
+        return "Callable"
+    return "?"
+
+def tc_set_name(name, t, at, fresh):
+    if find(dyn_names, n_dyn, name) >= 0:
+        t = "?"
+    i = -1
+    if fresh:
+        i = tc_find_local(name)
+    else:
+        i = tc_find_local(name)
+        if i < 0 and n_fr > 0:
+            # module-level names assigned at module level live in frame 0
+            i = -1
+    if i < 0:
+        tc_declare(name, t, 0)
+        return 0
+    if en_ann[i]:
+        if not assignable(en_ty[i], t):
+            tc_err(at, concat(concat(concat(concat(concat(concat("incompatible types in assignment (expression has type ", t), ", variable '"), name), "' has type "), en_ty[i]), ")"))
+        return 0
+    if tc_mode == 0 and not fresh:
+        en_ty[i] = tc_join(en_ty[i], t)
+    elif fresh:
+        en_ty[i] = t
+    return 0
+
+def tc_sig(name):
+    i = 0
+    while i < n_sg:
+        if str_eq(sg_cls[i], "") and str_eq(sg_name[i], name):
+            if sg_dup[i]:
+                return -1
+            return i
+        i += 1
+    return -1
+
+def tc_meth(c, name):
+    k = 0
+    while k < 100:
+        i = 0
+        while i < n_sg:
+            if str_eq(sg_cls[i], c) and str_eq(sg_name[i], name):
+                return i
+            i += 1
+        ci = tc_class_idx(c)
+        if ci < 0 or str_eq(tcc_par[ci], ""):
+            return -1
+        c = tcc_par[ci]
+        k += 1
+    return -1
+
+def tc_field(c, name):
+    k = 0
+    while k < 100:
+        i = 0
+        while i < n_tf:
+            if str_eq(tf_cls[i], c) and str_eq(tf_name[i], name):
+                return tf_ty[i]
+            i += 1
+        ci = tc_class_idx(c)
+        if ci < 0 or str_eq(tcc_par[ci], ""):
+            return "?"
+        c = tcc_par[ci]
+        k += 1
+    return "?"
+
+# ---- token helpers ----
+def tc_match(p):
+    # p at an opening bracket; returns the index of its matching close
+    d = 0
+    while tk[p] != K_EOF:
+        if tk[p] == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                d -= 1
+                if d == 0:
+                    return p
+        p += 1
+    return p
+
+def tc_top_for(a, b):
+    # first 'for' at bracket depth 0 within (a, b), or -1
+    p = a
+    while p < b:
+        if tk[p] == K_OP and (tok_is_op(p, "(") or tok_is_op(p, "[") or tok_is_op(p, "{")):
+            p = tc_match(p) + 1
+        else:
+            if tok_is_id(p, "for"):
+                return p
+            p += 1
+    return -1
+
+def tc_top_tok(a, b, op):
+    p = a
+    while p < b:
+        if tk[p] == K_OP and (tok_is_op(p, "(") or tok_is_op(p, "[") or tok_is_op(p, "{")):
+            p = tc_match(p) + 1
+        else:
+            if tok_is_op(p, op):
+                return p
+            if tok_is_id(p, "lambda"):
+                return -1
+            p += 1
+    return -1
+
+def elem_of(t):
+    h = ty_head(t)
+    if str_eq(h, "list") or str_eq(h, "set") or str_eq(h, "dict"):
+        return ty_arg(t, 0)
+    if str_eq(t, "str"):
+        return "str"
+    if str_eq(t, "range"):
+        return "int"
+    if str_eq(h, "tuple"):
+        n = ty_nargs(t)
+        if n == 0:
+            return "?"
+        e = ty_arg(t, 0)
+        i = 1
+        while i < n:
+            if not str_eq(ty_arg(t, i), e):
+                return "?"
+            i += 1
+        return e
+    return "?"
+
+def tc_bind(a, b, t, fresh, at):
+    # assign type t to the target tokens [a, b)
+    while a < b and tok_is_op(a, "(") and tc_match(a) == b - 1:
+        a += 1
+        b -= 1
+    if b - a == 1 and tk[a] == K_ID:
+        tc_set_name(tv[a], t, at, fresh)
+        return 0
+    c = tc_top_tok(a, b, ",")
+    if c < 0 and tok_is_op(a, "[") and tc_match(a) == b - 1:
+        a += 1
+        b -= 1
+        c = tc_top_tok(a, b, ",")
+        if c < 0:
+            tc_bind(a, b, elem_of(t), fresh, at)
+            return 0
+    if c >= 0:
+        k = 0
+        s = a
+        while s < b:
+            e = tc_top_tok(s, b, ",")
+            if e < 0:
+                e = b
+            et = "?"
+            if str_eq(ty_head(t), "tuple") and ty_nargs(t) > k:
+                et = ty_arg(t, k)
+            elif str_eq(ty_head(t), "list"):
+                et = elem_of(t)
+            if tok_is_op(s, "*"):
+                tc_bind(s + 1, e, "?", fresh, at)
+            elif e > s:
+                tc_bind(s, e, et, fresh, at)
+            k += 1
+            s = e + 1
+        return 0
+    if tok_is_op(a, "*"):
+        tc_bind(a + 1, b, "?", fresh, at)
+        return 0
+    # attribute / subscript target
+    if b - a == 3 and tk[a] == K_ID and tok_is_op(a + 1, ".") and tk[a + 2] == K_ID:
+        ot = tc_lookup(tv[a])
+        if tc_class_idx(ot) >= 0:
+            ft = tc_field(ot, tv[a + 2])
+            if not assignable(ft, t):
+                tc_err(at, concat(concat(concat(concat(concat(concat("incompatible types in assignment (expression has type ", t), ", attribute '"), tv[a + 2]), "' has type "), ft), ")"))
+        return 0
+    if tk[b - 1] == K_OP and tok_is_op(b - 1, "]"):
+        # container[index] = value
+        q = b - 1
+        d = 0
+        while q > a:
+            if tok_is_op(q, "]"):
+                d += 1
+            elif tok_is_op(q, "["):
+                d -= 1
+                if d == 0:
+                    break
+            q -= 1
+        if q > a:
+            save = tp
+            ct = tc_post_range(a, q)
+            it = "?"
+            if tc_top_tok(q + 1, b - 1, ":") < 0:
+                it = tcx(q + 1)
+            h = ty_head(ct)
+            if str_eq(h, "list") and not str_eq(it, "?") and tc_top_tok(q + 1, b - 1, ":") < 0:
+                if not assignable(ty_arg(ct, 0), t):
+                    tc_err(at, concat(concat(concat(concat("incompatible types in assignment (expression has type ", t), ", target has type "), ty_arg(ct, 0)), ")"))
+            if str_eq(h, "dict"):
+                if not assignable(ty_arg(ct, 0), it):
+                    tc_err(q + 1, concat(concat(concat(concat("invalid index type ", it), " for "), ct), ""))
+                if not assignable(ty_arg(ct, 1), t):
+                    tc_err(at, concat(concat(concat(concat("incompatible types in assignment (expression has type ", t), ", target has type "), ty_arg(ct, 1)), ")"))
+            tp = save
+        return 0
+    return 0
+
+tc_stop = -1
+
+def tc_post_range(a, b):
+    # type of the postfix expression in tokens [a, b) (best effort)
+    global tc_stop
+    os = tc_stop
+    tc_stop = b
+    t = tc_post(a)
+    tc_stop = os
+    if tp != b:
+        return "?"
+    return t
+
+# ---- expressions ----
+def tcx(p):
+    global tp
+    if tok_is_id(p, "lambda"):
+        return tc_lambda(p)
+    if tok_is_id(p, "yield"):
+        q = p + 1
+        if tok_is_id(q, "from"):
+            q += 1
+        if tk[q] == K_NL or tok_is_op(q, ")") or tk[q] == K_EOF:
+            tp = q
+            return "?"
+        tcx(q)
+        return "?"
+    t = tc_or(p)
+    if tok_is_id(tp, "if"):
+        tc_or(tp + 1)
+        if tok_is_id(tp, "else"):
+            e = tcx(tp + 1)
+            return tc_join(t, e)
+    return t
+
+def tc_lambda(p):
+    global tp
+    tc_push()
+    q = p + 1
+    while not tok_is_op(q, ":") and tk[q] != K_NL and tk[q] != K_EOF:
+        if tk[q] == K_ID and (tok_is_op(q + 1, ",") or tok_is_op(q + 1, ":") or tok_is_op(q + 1, "=")):
+            tc_declare(tv[q], "?", 0)
+        if tok_is_op(q, "="):
+            tc_or(q + 1)
+            q = tp
+        else:
+            q += 1
+    tcx(q + 1)
+    tc_pop()
+    return "Callable"
+
+def tc_or(p):
+    global tp
+    t = tc_and(p)
+    while tok_is_id(tp, "or"):
+        u = tc_and(tp + 1)
+        if str_eq(t, "bool") and str_eq(u, "bool"):
+            t = "bool"
+        else:
+            t = tc_join(t, u)
+    return t
+
+def tc_and(p):
+    global tp
+    t = tc_not(p)
+    while tok_is_id(tp, "and"):
+        u = tc_not(tp + 1)
+        if str_eq(t, "bool") and str_eq(u, "bool"):
+            t = "bool"
+        else:
+            t = tc_join(t, u)
+    return t
+
+def tc_not(p):
+    if tok_is_id(p, "not"):
+        tc_not(p + 1)
+        return "bool"
+    return tc_cmp(p)
+
+def tc_cmp(p):
+    global tp
+    t = tc_bor(p)
+    while 1:
+        q = tp
+        if tk[q] == K_OP and (tok_is_op(q, "<") or tok_is_op(q, ">") or tok_is_op(q, "<=") or tok_is_op(q, ">=") or tok_is_op(q, "==") or tok_is_op(q, "!=")):
+            u = tc_bor(q + 1)
+            t = "bool"
+        elif tok_is_id(q, "in"):
+            u = tc_bor(q + 1)
+            t = "bool"
+        elif tok_is_id(q, "not") and tok_is_id(q + 1, "in"):
+            u = tc_bor(q + 2)
+            t = "bool"
+        elif tok_is_id(q, "is"):
+            if tok_is_id(q + 1, "not"):
+                q += 1
+            u = tc_bor(q + 1)
+            t = "bool"
+        else:
+            return t
+
+def tc_bitres(t, u):
+    if (str_eq(t, "int") or str_eq(t, "bool")) and (str_eq(u, "int") or str_eq(u, "bool")):
+        if str_eq(t, "bool") and str_eq(u, "bool"):
+            return "bool"
+        return "int"
+    if str_eq(ty_head(t), "set") and str_eq(t, u):
+        return t
+    return "?"
+
+def tc_bor(p):
+    global tp
+    t = tc_bxor(p)
+    while tok_is_op(tp, "|"):
+        t = tc_bitres(t, tc_bxor(tp + 1))
+    return t
+
+def tc_bxor(p):
+    global tp
+    t = tc_band(p)
+    while tok_is_op(tp, "^"):
+        t = tc_bitres(t, tc_band(tp + 1))
+    return t
+
+def tc_band(p):
+    global tp
+    t = tc_shift(p)
+    while tok_is_op(tp, "&"):
+        t = tc_bitres(t, tc_shift(tp + 1))
+    return t
+
+def tc_shift(p):
+    global tp
+    t = tc_arith(p)
+    while tok_is_op(tp, "<<") or tok_is_op(tp, ">>"):
+        t = tc_bitres(t, tc_arith(tp + 1))
+    return t
+
+def is_basic(t):
+    h = ty_head(t)
+    return tc_isnum(t) or str_eq(t, "str") or str_eq(t, "None") or str_eq(h, "list") or str_eq(h, "dict") or str_eq(h, "set") or str_eq(h, "tuple")
+
+def tc_binres(op, t, u, at):
+    # result type of t op u; reports clearly unsupported combinations of builtin types
+    if is_dyn(t) or is_dyn(u):
+        return "?"
+    if tc_isnum(t) and tc_isnum(u):
+        if str_eq(op, "/"):
+            return "float"
+        if str_eq(t, "float") or str_eq(u, "float"):
+            return "float"
+        if str_eq(op, "**"):
+            return "int"
+        return "int"
+    h = ty_head(t)
+    if str_eq(op, "+"):
+        if str_eq(t, "str") and str_eq(u, "str"):
+            return "str"
+        if str_eq(h, "list") and str_eq(ty_head(u), "list"):
+            return tc_join(t, u)
+        if str_eq(h, "tuple") and str_eq(ty_head(u), "tuple"):
+            return "tuple[]"
+    if str_eq(op, "*"):
+        if (str_eq(t, "str") or str_eq(h, "list") or str_eq(h, "tuple")) and (str_eq(u, "int") or str_eq(u, "bool")):
+            return t
+        if (str_eq(u, "str") or str_eq(ty_head(u), "list") or str_eq(ty_head(u), "tuple")) and (str_eq(t, "int") or str_eq(t, "bool")):
+            return u
+    if str_eq(op, "%") and str_eq(t, "str"):
+        return "str"
+    if str_eq(op, "-") and str_eq(h, "set") and str_eq(t, u):
+        return t
+    if is_basic(t) and is_basic(u):
+        tc_err(at, concat(concat(concat(concat(concat(concat("unsupported operand types for ", op), ": "), t), " and "), u), ""))
+    return "?"
+
+def tc_arith(p):
+    global tp
+    t = tc_term(p)
+    while tok_is_op(tp, "+") or tok_is_op(tp, "-"):
+        op = tv[tp]
+        at = tp
+        u = tc_term(tp + 1)
+        t = tc_binres(op, t, u, at)
+    return t
+
+def tc_term(p):
+    global tp
+    t = tc_unary(p)
+    while tok_is_op(tp, "*") or tok_is_op(tp, "/") or tok_is_op(tp, "//") or tok_is_op(tp, "%") or tok_is_op(tp, "@"):
+        op = tv[tp]
+        at = tp
+        u = tc_unary(tp + 1)
+        t = tc_binres(op, t, u, at)
+    return t
+
+def tc_unary(p):
+    if tok_is_op(p, "-") or tok_is_op(p, "+") or tok_is_op(p, "~"):
+        t = tc_unary(p + 1)
+        if str_eq(t, "bool"):
+            return "int"
+        if tc_isnum(t):
+            return t
+        if is_basic(t):
+            tc_err(p, concat(concat(concat("bad operand type for unary ", tv[p]), ": "), t))
+        return "?"
+    return tc_pow(p)
+
+def tc_pow(p):
+    global tp
+    t = tc_post(p)
+    if tok_is_op(tp, "**"):
+        at = tp
+        u = tc_unary(tp + 1)
+        return tc_binres("**", t, u, at)
+    return t
+
+def str_meth(m):
+    if str_eq(m, "upper") or str_eq(m, "lower") or str_eq(m, "strip") or str_eq(m, "lstrip") or str_eq(m, "rstrip") or str_eq(m, "join") or str_eq(m, "replace") or str_eq(m, "format") or str_eq(m, "title") or str_eq(m, "capitalize") or str_eq(m, "zfill") or str_eq(m, "center") or str_eq(m, "ljust") or str_eq(m, "rjust"):
+        return "str"
+    if str_eq(m, "split") or str_eq(m, "splitlines") or str_eq(m, "rsplit"):
+        return "list[str]"
+    if str_eq(m, "find") or str_eq(m, "rfind") or str_eq(m, "index") or str_eq(m, "count"):
+        return "int"
+    if str_eq(m, "startswith") or str_eq(m, "endswith") or str_eq(m, "isdigit") or str_eq(m, "isalpha") or str_eq(m, "isspace") or str_eq(m, "isalnum") or str_eq(m, "isupper") or str_eq(m, "islower"):
+        return "bool"
+    return "?"
+
+def tc_post(p):
+    global tp
+    if tk[p] == K_ID and tok_is_op(p + 1, "(") and not tc_kw(tv[p]):
+        t = tc_namecall(p)
+    else:
+        t = tc_atom(p)
+    while 1:
+        q = tp
+        if q == tc_stop:
+            return t
+        if tok_is_op(q, "("):
+            tc_args(q, -1, "", 0)
+            t = "?"
+        elif tok_is_op(q, "["):
+            t = tc_index(t, q)
+        elif tok_is_op(q, ".") and tk[q + 1] == K_ID:
+            m = tv[q + 1]
+            if tok_is_op(q + 2, "("):
+                ci = tc_class_idx(t)
+                h = ty_head(t)
+                if ci >= 0:
+                    g = tc_meth(t, m)
+                    tc_args(q + 2, g, m, 1)
+                    if g >= 0:
+                        t = sg_ret[g]
+                    else:
+                        t = "?"
+                else:
+                    tc_args(q + 2, -1, "", 0)
+                    if str_eq(t, "str"):
+                        t = str_meth(m)
+                    elif str_eq(h, "list") and str_eq(m, "pop"):
+                        t = ty_arg(t, 0)
+                    elif str_eq(h, "list") and (str_eq(m, "append") or str_eq(m, "extend") or str_eq(m, "insert") or str_eq(m, "sort") or str_eq(m, "reverse") or str_eq(m, "clear")):
+                        t = "None"
+                    elif (str_eq(h, "list") or str_eq(h, "tuple")) and (str_eq(m, "index") or str_eq(m, "count")):
+                        t = "int"
+                    elif str_eq(h, "dict") and str_eq(m, "keys"):
+                        t = mk1("list", ty_arg(t, 0))
+                    elif str_eq(h, "dict") and str_eq(m, "values"):
+                        t = mk1("list", ty_arg(t, 1))
+                    else:
+                        t = "?"
+            else:
+                tp = q + 2
+                if tc_class_idx(t) >= 0:
+                    t = tc_field(t, m)
+                else:
+                    t = "?"
+        else:
+            return t
+
+def tc_index(t, q):
+    global tp
+    e = tc_match(q)
+    h = ty_head(t)
+    if tc_top_tok(q + 1, e, ":") >= 0:
+        p = q + 1
+        while p < e:
+            if tok_is_op(p, ":"):
+                p += 1
+            else:
+                tcx(p)
+                if tp <= p:
+                    p += 1
+                else:
+                    p = tp
+        tp = e + 1
+        if str_eq(h, "list") or str_eq(t, "str"):
+            return t
+        if str_eq(h, "tuple"):
+            return "tuple[]"
+        return "?"
+    it = tcx(q + 1)
+    tp = e + 1
+    if str_eq(h, "list"):
+        if not assignable("int", it):
+            tc_err(q + 1, concat(concat(concat("list indices must be integers, not ", it), ""), ""))
+        return ty_arg(t, 0)
+    if str_eq(t, "str"):
+        if not assignable("int", it):
+            tc_err(q + 1, concat("string indices must be integers, not ", it))
+        return "str"
+    if str_eq(h, "dict"):
+        if not assignable(ty_arg(t, 0), it):
+            tc_err(q + 1, concat(concat(concat("invalid index type ", it), " for "), t))
+        return ty_arg(t, 1)
+    if str_eq(h, "tuple") and tk[q + 1] == K_NUM and e == q + 2:
+        k = tv[q + 1]
+        if k < ty_nargs(t):
+            return ty_arg(t, k)
+    return "?"
+
+def tc_kw(n):
+    return str_eq(n, "not") or str_eq(n, "lambda") or str_eq(n, "yield") or str_eq(n, "await") or str_eq(n, "if") or str_eq(n, "in") or str_eq(n, "and") or str_eq(n, "or")
+
+def tc_args(q, g, fname, meth):
+    # q at '('; checks the call's arguments against signature g (or -1)
+    global tp
+    e = tc_match(q)
+    if tc_top_for(q + 1, e) >= 0:
+        tc_comp(q, e, 0)
+        tp = e + 1
+        return 0
+    star = 0
+    npos = 0
+    nkw = 0
+    kwn = list(64)
+    p = q + 1
+    while p < e:
+        if tok_is_op(p, "*") or tok_is_op(p, "**"):
+            star = 1
+            tcx(p + 1)
+        elif tk[p] == K_ID and tok_is_op(p + 1, "="):
+            at = tv[p]
+            vt = tcx(p + 2)
+            if g >= 0:
+                k = 0
+                fnd = -1
+                while k < sg_np[g]:
+                    if str_eq(sp_name[sg_pb[g] + k], at):
+                        fnd = k
+                    k += 1
+                if fnd < 0 and not sg_star[g]:
+                    tc_err(p, concat(concat(concat(concat("unexpected keyword argument '", at), "' for '"), fname), "'"))
+                if fnd >= 0 and not assignable(sp_ty[sg_pb[g] + fnd], vt):
+                    tc_err(p + 2, concat(concat(concat(concat(concat(concat(concat(concat("argument '", at), "' to '"), fname), "' has type "), vt), ", expected "), sp_ty[sg_pb[g] + fnd]), ""))
+            if nkw < 64:
+                kwn[nkw] = at
+                nkw += 1
+        else:
+            vt = tcx(p)
+            if g >= 0 and npos < sg_np[g]:
+                pt = sp_ty[sg_pb[g] + npos]
+                if not assignable(pt, vt):
+                    tc_err(p, concat(concat(concat(concat(concat(concat(concat(concat("argument ", str(npos + 1)), " to '"), fname), "' has type "), vt), ", expected "), pt), ""))
+            npos += 1
+        if tp <= p:
+            tp = p + 1
+        p = tp
+        if tok_is_op(p, ","):
+            p += 1
+        elif p < e:
+            p = e
+    tp = e + 1
+    if g >= 0 and not star and not sg_star[g]:
+        if npos > sg_np[g]:
+            tc_err(q, concat(concat(concat(concat(concat(concat("'", fname), "' takes "), str(sg_np[g])), " positional arguments but "), str(npos)), " were given"))
+        k = npos
+        while k < sg_min[g]:
+            if find(kwn, nkw, sp_name[sg_pb[g] + k]) < 0:
+                tc_err(q, concat(concat(concat(concat("missing argument '", sp_name[sg_pb[g] + k]), "' in call to '"), fname), "'"))
+            k += 1
+    return 0
+
+def tc_namecall(p):
+    global tp
+    n = tv[p]
+    li = tc_find(n)
+    if li >= 0 and not str_eq(en_ty[li], "Callable"):
+        tc_args(p + 1, -1, "", 0)
+        return "?"
+    g = tc_sig(n)
+    if g >= 0:
+        tc_args(p + 1, g, n, 0)
+        return sg_ret[g]
+    if tc_class_idx(n) >= 0:
+        g = tc_meth(n, "__init__")
+        tc_args(p + 1, g, n, 1)
+        return n
+    e = tc_match(p + 1)
+    a0 = "?"
+    if tc_top_for(p + 2, e) < 0 and e > p + 2:
+        a0 = tcx(p + 2)
+    tc_args(p + 1, -1, "", 0)
+    if str_eq(n, "len") or str_eq(n, "ord") or str_eq(n, "int") or str_eq(n, "hash"):
+        return "int"
+    if str_eq(n, "str") or str_eq(n, "repr") or str_eq(n, "chr") or str_eq(n, "input") or str_eq(n, "hex") or str_eq(n, "bin"):
+        return "str"
+    if str_eq(n, "float"):
+        return "float"
+    if str_eq(n, "bool") or str_eq(n, "isinstance") or str_eq(n, "str_eq") or str_eq(n, "callable"):
+        return "bool"
+    if str_eq(n, "abs"):
+        if tc_isnum(a0):
+            return a0
+        return "?"
+    if str_eq(n, "range"):
+        return "range"
+    if str_eq(n, "list") or str_eq(n, "sorted"):
+        if str_eq(n, "sorted") or not tc_isnum(a0):
+            return mk1("list", elem_of(a0))
+        return "list[?]"
+    if str_eq(n, "set"):
+        return mk1("set", elem_of(a0))
+    if str_eq(n, "dict"):
+        return "dict[?,?]"
+    if str_eq(n, "print"):
+        return "None"
+    return "?"
+
+def tc_comp(po, pc, kind):
+    # comprehension in brackets po..pc; kind 0 genexp, 1 list, 2 set, 3 dict; returns its type
+    global tp
+    f = tc_top_for(po + 1, pc)
+    tc_push()
+    while f >= 0 and f < pc:
+        q = f + 1
+        while not tok_is_id(q, "in") and q < pc:
+            if tk[q] == K_OP and (tok_is_op(q, "(") or tok_is_op(q, "[")):
+                q = tc_match(q)
+            q += 1
+        it = tc_or(q + 1)
+        tc_bind(f + 1, q, elem_of(it), 1, f + 1)
+        while tok_is_id(tp, "if"):
+            tc_or(tp + 1)
+        if tok_is_id(tp, "for"):
+            f = tp
+        else:
+            f = -1
+    et = tcx(po + 1)
+    vt = "?"
+    if tok_is_op(tp, ":"):
+        vt = tcx(tp + 1)
+    tc_pop()
+    tp = pc + 1
+    if kind == 1:
+        return mk1("list", et)
+    if kind == 2:
+        return mk1("set", et)
+    if kind == 3:
+        return mk2("dict", et, vt)
+    return "?"
+
+def tc_elems(a, b):
+    # joined type of comma-separated expressions in [a, b); sets tc_cnt
+    global tc_cnt, tp
+    t = ""
+    n = 0
+    p = a
+    while p < b:
+        if tok_is_op(p, "*"):
+            tcx(p + 1)
+            u = "?"
+        else:
+            u = tcx(p)
+        if n == 0:
+            t = u
+        else:
+            t = tc_join_lit(t, u)
+        n += 1
+        if tp <= p:
+            tp = p + 1
+        p = tp
+        if tok_is_op(p, ","):
+            p += 1
+        elif p < b:
+            p = b
+    tc_cnt = n
+    return t
+
+tc_cnt = 0
+
+def tc_atom(p):
+    global tp
+    k = tk[p]
+    tp = p + 1
+    if k == K_NUM:
+        return "int"
+    if k == K_FLT:
+        return "float"
+    if k == K_STR:
+        while tk[tp] == K_STR:
+            tp += 1
+        return "str"
+    if k == K_ID:
+        n = tv[p]
+        if str_eq(n, "True") or str_eq(n, "False"):
+            return "bool"
+        if str_eq(n, "None"):
+            return "None"
+        if str_eq(n, "lambda"):
+            return tc_lambda(p)
+        if str_eq(n, "yield") or str_eq(n, "await"):
+            return tcx(p)
+        return tc_lookup(n)
+    if k == K_OP:
+        e = 0
+        if tok_is_op(p, "("):
+            e = tc_match(p)
+            if e == p + 1:
+                tp = e + 1
+                return "tuple[]"
+            if tc_top_for(p + 1, e) >= 0:
+                return tc_comp(p, e, 0)
+            if tc_top_tok(p + 1, e, ",") < 0:
+                t = tcx(p + 1)
+                tp = e + 1
+                return t
+            # tuple literal
+            t = "tuple["
+            q = p + 1
+            n = 0
+            while q < e:
+                u = tcx(q)
+                if n > 0:
+                    t = concat(t, ",")
+                t = concat(t, u)
+                n += 1
+                if tp <= q:
+                    tp = q + 1
+                q = tp
+                if tok_is_op(q, ","):
+                    q += 1
+                elif q < e:
+                    q = e
+            tp = e + 1
+            return concat(t, "]")
+        if tok_is_op(p, "["):
+            e = tc_match(p)
+            if e == p + 1:
+                tp = e + 1
+                return "list[?]"
+            if tc_top_for(p + 1, e) >= 0:
+                return tc_comp(p, e, 1)
+            t = tc_elems(p + 1, e)
+            tp = e + 1
+            return mk1("list", t)
+        if tok_is_op(p, "{"):
+            e = tc_match(p)
+            if e == p + 1:
+                tp = e + 1
+                return "dict[?,?]"
+            if tc_top_tok(p + 1, e, ":") >= 0 or tok_is_op(p + 1, "**"):
+                if tc_top_for(p + 1, e) >= 0:
+                    return tc_comp(p, e, 3)
+                kt = ""
+                vt = ""
+                n = 0
+                q = p + 1
+                while q < e:
+                    if tok_is_op(q, "**"):
+                        tcx(q + 1)
+                        kt = "?"
+                        vt = "?"
+                        n += 1
+                    else:
+                        a = tcx(q)
+                        b = "?"
+                        if tok_is_op(tp, ":"):
+                            b = tcx(tp + 1)
+                        if n == 0:
+                            kt = a
+                            vt = b
+                        else:
+                            kt = tc_join_lit(kt, a)
+                            vt = tc_join_lit(vt, b)
+                        n += 1
+                    if tp <= q:
+                        tp = q + 1
+                    q = tp
+                    if tok_is_op(q, ","):
+                        q += 1
+                    elif q < e:
+                        q = e
+                tp = e + 1
+                return mk2("dict", kt, vt)
+            if tc_top_for(p + 1, e) >= 0:
+                return tc_comp(p, e, 2)
+            t = tc_elems(p + 1, e)
+            tp = e + 1
+            return mk1("set", t)
+    return "?"
+
+# ---- statements ----
+def tc_colon(p):
+    while tk[p] != K_NL and tk[p] != K_EOF:
+        if tk[p] == K_OP and (tok_is_op(p, "(") or tok_is_op(p, "[") or tok_is_op(p, "{")):
+            p = tc_match(p) + 1
+        elif tok_is_op(p, ":"):
+            return p
+        elif tok_is_id(p, "lambda"):
+            # skip the lambda's own ':'
+            p += 1
+            while not tok_is_op(p, ":") and tk[p] != K_NL:
+                p += 1
+            p += 1
+        else:
+            p += 1
+    return p
+
+def tc_line_end(p):
+    while tk[p] != K_NL and tk[p] != K_EOF:
+        if tk[p] == K_OP and (tok_is_op(p, "(") or tok_is_op(p, "[") or tok_is_op(p, "{")):
+            p = tc_match(p) + 1
+        else:
+            p += 1
+    return p
+
+def tc_body(c):
+    # c at the ':' ending a header; checks the block, returns the index after it
+    if tk[c + 1] == K_NL and tk[c + 2] == K_IND:
+        e = block_end(c)
+        tc_stmts(c + 3, e - 1)
+        return e
+    e = tc_line_end(c + 1)
+    tc_stmts(c + 1, e + 1)
+    return e + 1
+
+def tc_stmts(p, e):
+    while p < e and tk[p] != K_EOF:
+        if tk[p] == K_NL or tk[p] == K_IND or tk[p] == K_DED:
+            p += 1
+        else:
+            p = tc_stmt(p)
+
+def tc_has_yield(a, b):
+    while a < b:
+        if tok_is_id(a, "yield"):
+            return 1
+        if tok_is_id(a, "def") and a > 0 and a != tc_curdef:
+            return 0
+        a += 1
+    return 0
+
+tc_curdef = -1
+
+def tc_params(p, cls, static):
+    # p at '(' of a def; declares the params in the current frame; returns index after ')'
+    q = p + 1
+    k = 0
+    while not tok_is_op(q, ")") and tk[q] != K_EOF:
+        if tok_is_op(q, "*") or tok_is_op(q, "**"):
+            q += 1
+            if tk[q] == K_ID:
+                tc_declare(tv[q], "?", 1)
+                q += 1
+        elif tk[q] == K_ID:
+            n = tv[q]
+            t = "?"
+            q += 1
+            if tok_is_op(q, ":"):
+                t = tc_ann(q + 1)
+                q = tp
+            if k == 0 and not str_eq(cls, "") and not static:
+                t = cls
+            if tok_is_op(q, "="):
+                dt = tcx(q + 1)
+                if not str_eq(t, "?") and not assignable(t, dt):
+                    tc_err(q + 1, concat(concat(concat(concat(concat(concat("default for parameter '", n), "' has type "), dt), ", expected "), t), ""))
+                q = tp
+            tc_declare(n, t, not str_eq(t, "?"))
+            k += 1
+        else:
+            q += 1
+        if tok_is_op(q, ","):
+            q += 1
+    return q + 1
+
+def tc_def(p, cls):
+    global tc_mode, n_ret, tc_static, tc_curdef
+    static = tc_static
+    tc_static = 0
+    if find(dyn_names, n_dyn, tv[p + 1]) < 0 and str_eq(cls, ""):
+        if tc_find_local(tv[p + 1]) < 0:
+            tc_declare(tv[p + 1], "Callable", 0)
+    c = tc_colon(p)
+    e = block_end(c)
+    rt = "?"
+    q = c
+    while q > p and not tok_is_op(q, "->"):
+        q -= 1
+    if q > p:
+        rt = tc_ann(q + 1)
+    od = tc_curdef
+    tc_curdef = p
+    if tc_has_yield(c, e):
+        rt = "?"
+    ret_stack[n_ret] = rt
+    n_ret += 1
+    tc_push()
+    tc_params(p + 2, cls, static)
+    m = tc_mode
+    if m == 1:
+        tc_mode = 0
+        tc_body(c)
+        tc_body(c)
+    tc_mode = m
+    tc_body(c)
+    tc_pop()
+    n_ret -= 1
+    tc_curdef = od
+    return e
+
+def tc_class(p):
+    global tc_static
+    c = tc_colon(p)
+    e = block_end(c)
+    name = tv[p + 1]
+    tc_push()
+    q = c + 1
+    if tk[q] == K_NL and tk[q + 1] == K_IND:
+        q += 2
+    while q < e - 1 and tk[q] != K_EOF:
+        if tk[q] == K_NL or tk[q] == K_IND or tk[q] == K_DED:
+            q += 1
+        elif tok_is_id(q, "def"):
+            q = tc_def(q, name)
+        elif tok_is_op(q, "@"):
+            if tok_is_id(q + 1, "staticmethod"):
+                tc_static = 1
+            q = tc_line_end(q) + 1
+        else:
+            q = tc_stmt(q)
+    tc_pop()
+    return e
+
+def tc_stmt(p):
+    global tp, tc_static
+    nx = skip_stmt(p)
+    if tok_is_op(p, "@"):
+        if tok_is_id(p + 1, "staticmethod"):
+            tc_static = 1
+        return tc_line_end(p) + 1
+    if tk[p] == K_ID:
+        w = tv[p]
+        if str_eq(w, "def"):
+            if tc_skipdefs:
+                if tc_find_local(tv[p + 1]) < 0:
+                    tc_declare(tv[p + 1], "Callable", 0)
+                return nx
+            return tc_def(p, "")
+        if str_eq(w, "class"):
+            if tc_skipdefs:
+                return nx
+            return tc_class(p)
+        if str_eq(w, "if") or str_eq(w, "while"):
+            tcx(p + 1)
+            q = tc_body(tc_colon(p))
+            while tok_is_id(q, "elif") or tok_is_id(q, "else"):
+                if tok_is_id(q, "elif"):
+                    tcx(q + 1)
+                q = tc_body(tc_colon(q))
+            return nx
+        if str_eq(w, "for"):
+            q = p + 1
+            while not tok_is_id(q, "in") and tk[q] != K_NL and tk[q] != K_EOF:
+                if tk[q] == K_OP and (tok_is_op(q, "(") or tok_is_op(q, "[")):
+                    q = tc_match(q)
+                q += 1
+            it = tcx(q + 1)
+            if tok_is_op(tp, ","):
+                it = "?"
+            tc_bind(p + 1, q, elem_of(it), 0, p + 1)
+            q = tc_body(tc_colon(p))
+            while tok_is_id(q, "else"):
+                q = tc_body(tc_colon(q))
+            return nx
+        if str_eq(w, "try"):
+            q = tc_body(tc_colon(p))
+            while tok_is_id(q, "except") or tok_is_id(q, "else") or tok_is_id(q, "finally"):
+                c = tc_colon(q)
+                if tok_is_id(q, "except"):
+                    r = q + 1
+                    while r < c and not tok_is_id(r, "as"):
+                        r += 1
+                    if r < c and tk[r + 1] == K_ID:
+                        et = "?"
+                        if tk[q + 1] == K_ID and r == q + 2 and tc_class_idx(tv[q + 1]) >= 0:
+                            et = tv[q + 1]
+                        tc_set_name(tv[r + 1], et, r + 1, 0)
+                q = tc_body(c)
+            return nx
+        if str_eq(w, "with"):
+            c = tc_colon(p)
+            q = p + 1
+            while q < c:
+                tcx(q)
+                if tp <= q:
+                    tp = q + 1
+                q = tp
+                if tok_is_id(q, "as") and tk[q + 1] == K_ID:
+                    tc_set_name(tv[q + 1], "?", q + 1, 0)
+                    q += 2
+                if tok_is_op(q, ","):
+                    q += 1
+                elif q < c:
+                    q = c
+            tc_body(c)
+            return nx
+        if str_eq(w, "return"):
+            rt = "?"
+            if n_ret > 0:
+                rt = ret_stack[n_ret - 1]
+            if tk[p + 1] == K_NL or tk[p + 1] == K_EOF or tk[p + 1] == K_DED:
+                if not assignable(rt, "None"):
+                    tc_err(p, concat("return value expected (function returns ", concat(rt, ")")))
+                return nx
+            vt = tcx(p + 1)
+            if tok_is_op(tp, ","):
+                vt = "tuple[]"
+                while tok_is_op(tp, ","):
+                    tcx(tp + 1)
+            if not assignable(rt, vt):
+                tc_err(p + 1, concat(concat(concat(concat("incompatible return value type (got ", vt), ", expected "), rt), ")"))
+            return nx
+        if str_eq(w, "pass") or str_eq(w, "break") or str_eq(w, "continue") or str_eq(w, "global") or str_eq(w, "nonlocal") or str_eq(w, "import") or str_eq(w, "from"):
+            if str_eq(w, "import") or str_eq(w, "from"):
+                q = p
+                while tk[q] != K_NL and tk[q] != K_EOF:
+                    if tk[q] == K_ID and (tok_is_op(q + 1, ",") or tk[q + 1] == K_NL) and not tok_is_id(q, "import"):
+                        tc_set_name(tv[q], "?", q, 0)
+                    q += 1
+            return nx
+        if str_eq(w, "raise") or str_eq(w, "del") or str_eq(w, "assert"):
+            if tk[p + 1] != K_NL:
+                tcx(p + 1)
+                while tok_is_op(tp, ",") or tok_is_id(tp, "from"):
+                    tcx(tp + 1)
+            return nx
+    tc_simple(p, tc_line_end(p))
+    return nx
+
+def tc_simple(p, e):
+    global tp
+    # annotated assignment
+    if tk[p] == K_ID and tok_is_op(p + 1, ":"):
+        t = tc_ann(p + 2)
+        q = tp
+        i = tc_find_local(tv[p])
+        if i < 0:
+            i = tc_declare(tv[p], t, 1)
+        else:
+            en_ty[i] = t
+            en_ann[i] = 1
+        if tok_is_op(q, "="):
+            vt = tcx(q + 1)
+            if not assignable(t, vt):
+                tc_err(q + 1, concat(concat(concat(concat(concat(concat("incompatible types in assignment (expression has type ", vt), ", variable '"), tv[p]), "' has type "), t), ")"))
+        return 0
+    if tk[p] == K_ID and tok_is_op(p + 1, ".") and tk[p + 2] == K_ID and tok_is_op(p + 3, ":"):
+        t = tc_ann(p + 4)
+        q = tp
+        ot = tc_lookup(tv[p])
+        if tok_is_op(q, "="):
+            vt = tcx(q + 1)
+            if not assignable(t, vt):
+                tc_err(q + 1, concat(concat(concat(concat(concat(concat("incompatible types in assignment (expression has type ", vt), ", attribute '"), tv[p + 2]), "' has type "), t), ")"))
+        return 0
+    # augmented assignment
+    q = p
+    while q < e:
+        if tk[q] == K_OP and (tok_is_op(q, "(") or tok_is_op(q, "[") or tok_is_op(q, "{")):
+            q = tc_match(q) + 1
+        elif tk[q] == K_OP and len(tv[q]) >= 2 and char_at(tv[q], len(tv[q]) - 1) == 61 and not tok_is_op(q, "==") and not tok_is_op(q, "!=") and not tok_is_op(q, "<=") and not tok_is_op(q, ">=") and not tok_is_op(q, "->"):
+            vt = tcx(q + 1)
+            op = substr(tv[q], 0, len(tv[q]) - 1)
+            if q == p + 1 and tk[p] == K_ID:
+                cur = tc_lookup(tv[p])
+                rt = tc_binres(op, cur, vt, q)
+                tc_set_name(tv[p], rt, q + 1, 0)
+            else:
+                tc_post(p)
+            return 0
+        elif tok_is_id(q, "lambda"):
+            q = e
+        else:
+            q += 1
+    # plain / chained assignment
+    eqs = list(64)
+    ne = 0
+    q = p
+    while q < e:
+        if tk[q] == K_OP and (tok_is_op(q, "(") or tok_is_op(q, "[") or tok_is_op(q, "{")):
+            q = tc_match(q) + 1
+        elif tok_is_op(q, "="):
+            if ne < 64:
+                eqs[ne] = q
+                ne += 1
+            q += 1
+        elif tok_is_id(q, "lambda"):
+            q = e
+        else:
+            q += 1
+    if ne == 0:
+        tcx(p)
+        while tok_is_op(tp, ","):
+            tcx(tp + 1)
+        return 0
+    v = eqs[ne - 1] + 1
+    vt = tcx(v)
+    if tok_is_op(tp, ","):
+        n = 1
+        t = concat("tuple[", vt)
+        while tok_is_op(tp, ","):
+            u = tcx(tp + 1)
+            t = concat(concat(t, ","), u)
+            n += 1
+        vt = concat(t, "]")
+    s = p
+    k = 0
+    while k < ne:
+        tc_bind(s, eqs[k], vt, 0, v)
+        s = eqs[k] + 1
+        k += 1
+    return 0
+
+tc_skipdefs = 0
+
+# ---- signatures (pass A) ----
+def tc_collect_classes():
+    global n_tcc
+    p = PRETOK
+    while tk[p] != K_EOF:
+        if tok_is_id(p, "class") and tk[p + 1] == K_ID and (tk[p - 1] == K_NL or tk[p - 1] == K_IND or tk[p - 1] == K_DED):
+            if n_tcc < 2000:
+                tcc_name[n_tcc] = tv[p + 1]
+                tcc_par[n_tcc] = ""
+                if tok_is_op(p + 2, "(") and tk[p + 3] == K_ID:
+                    tcc_par[n_tcc] = tv[p + 3]
+                n_tcc += 1
+        if (tok_is_id(p, "global") or tok_is_id(p, "nonlocal")) and (tk[p - 1] == K_NL or tk[p - 1] == K_IND or tk[p - 1] == K_DED):
+            q = p + 1
+            while tk[q] == K_ID or tok_is_op(q, ","):
+                if tk[q] == K_ID and n_dyn < 20000:
+                    dyn_names[n_dyn] = tv[q]
+                    n_dyn += 1
+                q += 1
+        p += 1
+
+def tc_cls_at(p):
+    # name of the class whose body directly contains the def at p, or ""
+    # (walk back to the line start, compare indentation via IND/DED nesting)
+    d = 0
+    q = p - 1
+    while q >= PRETOK:
+        if tk[q] == K_DED:
+            d += 1
+        elif tk[q] == K_IND:
+            if d == 0:
+                # q opens the block containing p; header is the line before
+                r = q - 2
+                while r >= PRETOK and tk[r] != K_NL and tk[r] != K_IND and tk[r] != K_DED:
+                    r -= 1
+                r += 1
+                if tok_is_id(r, "class"):
+                    return tv[r + 1]
+                return "-"
+            d -= 1
+        q -= 1
+    return ""
+
+def tc_collect_sigs():
+    global n_sg, n_sp, n_tf, n_ret
+    p = PRETOK
+    stk = list(1000)
+    ns = 0
+    ls = PRETOK
+    hdr = PRETOK
+    while tk[p] != K_EOF:
+        if tk[p] == K_NL:
+            hdr = ls
+            ls = p + 1
+        elif tk[p] == K_IND:
+            if ns < 1000:
+                if tok_is_id(hdr, "class"):
+                    stk[ns] = tv[hdr + 1]
+                else:
+                    stk[ns] = "-"
+            ns += 1
+            ls = p + 1
+        elif tk[p] == K_DED:
+            if ns > 0:
+                ns -= 1
+            ls = p + 1
+        ccls = ""
+        if ns > 0:
+            ccls = stk[ns - 1]
+        scls = ""
+        k = ns - 1
+        while k >= 0 and str_eq(scls, ""):
+            if not str_eq(stk[k], "-"):
+                scls = stk[k]
+            k -= 1
+        if tok_is_id(p, "def") and tk[p + 1] == K_ID and (tk[p - 1] == K_NL or tk[p - 1] == K_IND or tk[p - 1] == K_DED):
+            cls = ccls
+            if not str_eq(cls, "-") and n_sg < MAXF:
+                static = tok_is_op(p - 3, "@") or (tok_is_id(p - 2, "staticmethod"))
+                g = n_sg
+                n_sg += 1
+                sg_name[g] = tv[p + 1]
+                sg_cls[g] = cls
+                sg_pb[g] = n_sp
+                sg_star[g] = 0
+                sg_dup[g] = 0
+                k = 0
+                while k < g:
+                    if str_eq(sg_cls[k], cls) and str_eq(sg_name[k], tv[p + 1]):
+                        sg_dup[k] = 1
+                        sg_dup[g] = 1
+                    k += 1
+                np = 0
+                nmin = 0
+                first = 1
+                q = p + 3
+                while not tok_is_op(q, ")") and tk[q] != K_EOF:
+                    if tok_is_op(q, "*") or tok_is_op(q, "**"):
+                        sg_star[g] = 1
+                        q += 1
+                        if tk[q] == K_ID:
+                            q += 1
+                    elif tk[q] == K_ID:
+                        n = tv[q]
+                        t = "?"
+                        q += 1
+                        if tok_is_op(q, ":"):
+                            t = tc_ann(q + 1)
+                            q = tp
+                        hd = 0
+                        if tok_is_op(q, "="):
+                            hd = 1
+                            dd = 0
+                            q += 1
+                            while not (dd == 0 and (tok_is_op(q, ",") or tok_is_op(q, ")"))) and tk[q] != K_EOF:
+                                if tok_is_op(q, "(") or tok_is_op(q, "[") or tok_is_op(q, "{"):
+                                    dd += 1
+                                elif tok_is_op(q, ")") or tok_is_op(q, "]") or tok_is_op(q, "}"):
+                                    dd -= 1
+                                q += 1
+                        if first and not str_eq(cls, "") and not static:
+                            first = 0
+                        else:
+                            first = 0
+                            if n_sp < 200000:
+                                sp_name[n_sp] = n
+                                sp_ty[n_sp] = t
+                                sp_def[n_sp] = hd
+                                n_sp += 1
+                                np += 1
+                                if not hd:
+                                    nmin = np
+                    else:
+                        q += 1
+                    if tok_is_op(q, ","):
+                        q += 1
+                sg_np[g] = np
+                sg_min[g] = nmin
+                rt = "?"
+                if tok_is_op(q + 1, "->"):
+                    rt = tc_ann(q + 2)
+                c = tc_colon(p)
+                if tc_has_yield(c, block_end(c)):
+                    rt = "?"
+                sg_ret[g] = rt
+        # field annotations: class-level 'name: T' and 'self.name: T'
+        if tk[p] == K_ID and tok_is_op(p + 1, ":") and (tk[p - 1] == K_IND or tk[p - 1] == K_NL or tk[p - 1] == K_DED):
+            cls = ccls
+            if not str_eq(cls, "") and not str_eq(cls, "-") and n_tf < 50000:
+                tf_cls[n_tf] = cls
+                tf_name[n_tf] = tv[p]
+                tf_ty[n_tf] = tc_ann(p + 2)
+                n_tf += 1
+        if tok_is_id(p, "self") and tok_is_op(p + 1, ".") and tk[p + 2] == K_ID and tok_is_op(p + 3, ":") and (tk[p - 1] == K_IND or tk[p - 1] == K_NL or tk[p - 1] == K_DED):
+            # find the enclosing class: the def containing this line
+            cls = scls
+            if not str_eq(cls, "") and not str_eq(cls, "-") and n_tf < 50000:
+                tf_cls[n_tf] = cls
+                tf_name[n_tf] = tv[p + 2]
+                tf_ty[n_tf] = tc_ann(p + 4)
+                n_tf += 1
+        p += 1
+
+def strip_attr_ann():
+    # 'obj.f: T = v' -> 'obj.f = v' and 'obj.f: T' -> 'pass' (after checking)
+    global ntok
+    w = PRETOK
+    p = PRETOK
+    while p < ntok:
+        if tk[p] == K_ID and tok_is_op(p + 1, ".") and tk[p + 2] == K_ID and tok_is_op(p + 3, ":") and (tk[p - 1] == K_NL or tk[p - 1] == K_IND or tk[p - 1] == K_DED):
+            q = p + 4
+            while tk[q] != K_NL and not tok_is_op(q, "=") and tk[q] != K_EOF:
+                q += 1
+            if tok_is_op(q, "="):
+                k = 0
+                while k < 3:
+                    tk[w] = tk[p + k]
+                    tv[w] = tv[p + k]
+                    tl[w] = tl[p + k]
+                    w += 1
+                    k += 1
+            else:
+                tk[w] = K_ID
+                tv[w] = "pass"
+                tl[w] = tl[p]
+                w += 1
+            p = q
+        else:
+            tk[w] = tk[p]
+            tv[w] = tv[p]
+            tl[w] = tl[p]
+            w += 1
+            p += 1
+    ntok = w
+
+def typecheck():
+    global tc_mode, tc_skipdefs
+    tc_collect_classes()
+    tc_collect_sigs()
+    tc_push()
+    tc_mode = 0
+    tc_skipdefs = 1
+    tc_stmts(PRETOK, ntok)
+    tc_stmts(PRETOK, ntok)
+    tc_skipdefs = 0
+    tc_mode = 1
+    tc_stmts(PRETOK, ntok)
+    tc_pop()
+
 # ---------------- token rewriter: generators and 'with' ----------------
 rk = list(1)
 rv = list(1)
@@ -6249,6 +8021,8 @@ def forge_main():
         set_ovf(0)
     lex(src, 1, 0)
     add_tok(K_EOF, 0, 0)
+    typecheck()
+    strip_attr_ann()
     rewrite_tokens()
     set_lphase(2)
     prescan()

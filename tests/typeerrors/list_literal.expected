@@ -1,0 +1,3 @@
+error: line 1 col 20: incompatible types in assignment (expression has type list[object], variable 'names' has type list[str])
+names: list[str] = ["a", "b", 3]
+                   ^

@@ -1,0 +1,9 @@
+class Counter:
+    def __init__(self):
+        self.n: int = 0
+    def add(self, k: int) -> int:
+        self.n += k
+        return self.n
+
+c = Counter()
+c.add(1, 2)

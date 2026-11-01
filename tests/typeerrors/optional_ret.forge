@@ -1,0 +1,5 @@
+def find(xs: list[int], v: int) -> int | None:
+    for x in xs:
+        if x == v:
+            return x
+    return "missing"

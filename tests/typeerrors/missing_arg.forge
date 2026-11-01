@@ -1,0 +1,4 @@
+def greet(name: str, times: int = 1) -> str:
+    return name * times
+
+print(greet(times=3))

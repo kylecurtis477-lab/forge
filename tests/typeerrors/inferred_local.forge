@@ -1,0 +1,11 @@
+def total(xs: list[int]) -> int:
+    s = 0
+    for x in xs:
+        s += x
+    return s
+
+def shout(s: str) -> str:
+    return s.upper()
+
+n = total([1, 2, 3])
+print(shout(n))

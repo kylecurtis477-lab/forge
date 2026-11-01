@@ -1,0 +1,11 @@
+class Animal:
+    pass
+
+class Dog(Animal):
+    pass
+
+def walk(a: Dog) -> None:
+    print("walk")
+
+walk(Dog())
+walk(Animal())
