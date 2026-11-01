@@ -100,7 +100,7 @@ def __rtexc(msg):
         return ValueError(msg)
     if __has(msg, "no such method"):
         return AttributeError(msg)
-    if __has(msg, "unsupported operand") or __has(msg, "not supported") or __has(msg, "not indexable") or __has(msg, "not iterable") or __has(msg, "does not support") or __has(msg, "cannot be sliced") or __has(msg, "cannot be raised"):
+    if __has(msg, "unsupported operand") or __has(msg, "not supported") or __has(msg, "not indexable") or __has(msg, "not iterable") or __has(msg, "does not support") or __has(msg, "cannot be sliced") or __has(msg, "cannot be raised") or __has(msg, "not callable") or __has(msg, "positional arguments"):
         return TypeError(msg)
     return RuntimeError(msg)
 
@@ -225,6 +225,8 @@ def __repr(x) -> str:
         return __brepr(x)
     if t == 7:
         return "None"
+    if t == 8:
+        return "<function>"
     if t == 5:
         return __frepr(x)
     parts = []
@@ -1308,15 +1310,62 @@ def __msort(d, t, lo: int, hi: int):
     __copy(d + lo * 8, t + lo * 8, (hi - lo) * 8)
     return 0
 
-def sort(xs):
+def sort(xs, key=None, reverse=False):
     n: int = __ld(xs, 0)
-    __msort(__ld(xs, 2), __new(n * 8 + 8, 4, n * 8), 0, n)
-    return 0
+    if key is None and not reverse:
+        __msort(__ld(xs, 2), __new(n * 8 + 8, 4, n * 8), 0, n)
+        return None
+    ps = []
+    i: int = 0
+    while i < n:
+        x = __ld(__ld(xs, 2), i)
+        k = x
+        if key is not None:
+            k = key(x)
+        if reverse:
+            append(ps, [k, 0 - i, x])
+        else:
+            append(ps, [k, i, x])
+        i += 1
+    __msort(__ld(ps, 2), __new(n * 8 + 8, 4, n * 8), 0, n)
+    i = 0
+    while i < n:
+        j: int = i
+        if reverse:
+            j = n - 1 - i
+        __st(__ld(xs, 2), i, ps[j][2])
+        i += 1
+    return None
 
-def sorted(xs):
+def sorted(xs, key=None, reverse=False):
     r = __slice(xs, 0, __ld(xs, 0), 0)
-    sort(r)
+    sort(r, key, reverse)
     return r
+
+def map(f, xs):
+    r = []
+    for x in xs:
+        append(r, f(x))
+    return r
+
+def filter(f, xs):
+    r = []
+    for x in xs:
+        if f is None:
+            if x:
+                append(r, x)
+        elif f(x):
+            append(r, x)
+    return r
+
+def __fv_str(x):
+    return str(x)
+
+def __fv_len(x):
+    return len(x)
+
+def __fv_chr(x):
+    return chr(x)
 
 def reverse(xs):
     d = __ld(xs, 2)

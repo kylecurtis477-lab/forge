@@ -561,6 +561,25 @@ rtp_truth:
     mov %rax, %rdx
     pop %rax
     jmp rtp_ret
+rt_callchk:
+    # r10 = callee value, r11 = argument count, edx = line
+    mov %r10, %rdi
+    call rt_tag_r
+    cmp $8, %rax
+    jne 1f
+    cmpq $0, (%r10)
+    je 1f
+    cmp 8(%r10), %r11
+    jne 2f
+    ret
+1:  push %rdx
+    lea rt_nc_msg(%rip), %rax
+    push %rax
+    call f___err
+2:  push %rdx
+    lea rt_na_msg(%rip), %rax
+    push %rax
+    call f___err
 rt_nometh:
     push $0
     lea rt_nm_msg(%rip), %rax
@@ -1089,6 +1108,12 @@ rt_fdz_msg: .asciz "float division by zero"
 .p2align 3
 .quad 0x100000000000019
 rt_nm_msg: .asciz "object has no such method"
+.p2align 3
+.quad 0x100000000000016
+rt_nc_msg: .asciz "object is not callable"
+.p2align 3
+.quad 0x100000000000024
+rt_na_msg: .asciz "wrong number of positional arguments"
 .bss
 .p2align 4
 rt_obuf: .space 65536

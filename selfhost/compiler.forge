@@ -59,6 +59,17 @@ fret = list(MAXF)
 fint = list(MAXF)
 fbret = list(MAXF)
 fnone = list(MAXF)
+fkind = list(MAXF)
+fpar = list(MAXF)
+capl = list(MAXF)
+ncap = list(MAXF)
+fend = list(MAXF)
+fdname = list(MAXF)
+fba = list(MAXF)
+fbe = list(MAXF)
+fvl = list(MAXF)
+nfv = 0
+envslot = 0
 fpos = list(MAXF)
 fpb = list(MAXF)
 fcls = list(MAXF)
@@ -717,6 +728,13 @@ def var_ref(name):
             vidx = i
             return arefs[i]
         i -= 1
+    if curf >= 0 and ncap[curf] > 0:
+        i = find(capl[curf], ncap[curf], name)
+        if i >= 0:
+            vty = 0
+            vkind = 5
+            vidx = i
+            return concat(str(8 * i), "(%rbx)")
     if curf >= 0:
         i = find(params, nparams, name)
         if i >= 0:
@@ -736,6 +754,14 @@ def var_ref(name):
             if lreg[i]:
                 return lreg[i]
             return slot_ref(lslot[i])
+        pp = fpar[curf] - 1
+        if pp >= 0 and ncap[pp] > 0:
+            i = find(capl[pp], ncap[pp], name)
+            if i >= 0:
+                vty = 0
+                vkind = 5
+                vidx = i
+                return concat(str(8 * i), "(%r12)")
     i = find(globs, nglobs, name)
     if i >= 0:
         vty = gtype[i]
@@ -1721,6 +1747,11 @@ def compile_print_n(line):
 def call_named(name, line):
     # pos is at '(' after name
     global pos, ety, argf
+    if closure_var(name):
+        e3("mov ", var_ref(name), ", %rax")
+        e("push %rax")
+        call_value(line)
+        return 0
     if builtin_call(name, line):
         return 0
     n = count_args(pos)
@@ -2458,6 +2489,10 @@ def postfix_expr():
     while 1:
         if pstop >= 0 and pos >= pstop:
             return 0
+        if is_op("("):
+            e("push %rax")
+            call_value(cur_line())
+            continue
         if is_op("["):
             line = cur_line()
             pos += 1
@@ -2582,6 +2617,16 @@ def method_call(name, line):
     elif one >= 0:
         argf = one
         argskip = 1
+    else:
+        na = 0
+        if not tok_is_op(pos + 1, ")"):
+            na = count_args(pos)
+        pf = resolve_fn(concat("__m_", name), na + 1)
+        if pf < 0:
+            pf = resolve_fn(name, na + 1)
+        if pf >= 0:
+            argf = pf
+            argskip = 1
     n = push_args()
     plain = resolve_fn(concat("__m_", name), n + 1)
     if plain < 0:
@@ -2797,6 +2842,13 @@ def primary():
             e2(concat("mov ", B_NONE), ", %rax")
             ety = 0
             return 0
+        if str_eq(name, "lambda"):
+            c = nested_at(pos - 1)
+            if c < 0:
+                die(cur_line(), "lambda is not supported here")
+            emit_closure(c)
+            pos = fend[c]
+            return 0
         if str_eq(name, "super") and tok_is_op(pos, "(") and tok_is_op(pos + 1, ")") and tok_is_op(pos + 2, ".") and tk[pos + 3] == K_ID:
             if curf < 0 or fmeth[curf] != 1 or cpar[fcls[curf]] < 0:
                 die(line, "super() used outside a method of a subclass")
@@ -2836,8 +2888,11 @@ def primary():
             return 0
         r = var_ref(name)
         if not r:
-            if any_fn(name):
-                die(line, concat(concat("function '", name), "' used as a value (not supported)"))
+            fv = fv_func(name)
+            if fv >= 0:
+                e3("lea ", fv_label(fv), "(%rip), %rax")
+                ety = 0
+                return 0
             die(line, concat(concat("undefined name '", name), "'"))
         e3("mov ", r, ", %rax")
         ety = vty
@@ -3259,15 +3314,22 @@ def stmt():
             put_label(l)
             end_stmt()
             return 0
+        if str_eq(w, "def") and curf >= 0:
+            c = nested_at(pos)
+            if c >= 0:
+                emit_closure(c)
+                store_var(fdname[c], line, 0, -1)
+                pos = skip_stmt(pos)
+                return 0
         if str_eq(w, "def") or str_eq(w, "class"):
-            die(line, "nested def/class is not supported")
+            die(line, "nested def/class is not supported here")
         if str_eq(w, "try"):
             stmt_try(line)
             return 0
         if str_eq(w, "raise"):
             stmt_raise(line)
             return 0
-        if str_eq(w, "del") or str_eq(w, "with") or str_eq(w, "lambda") or str_eq(w, "yield"):
+        if str_eq(w, "del") or str_eq(w, "with") or str_eq(w, "yield"):
             die(line, concat(concat("'", w), "' is not supported"))
     if tk[pos] == K_STR and (tk[pos + 1] == K_NL or tk[pos + 1] == K_EOF):
         pos += 1
@@ -4006,6 +4068,18 @@ def func_begin(fi):
             preg[i] = REGS[nused]
             nused += 1
         i += 1
+    if fpar[fi] > 0 or ncap[fi] > 0:
+        env_begin(fi)
+
+def env_begin(fi):
+    global nused, nslots, envslot
+    nused = NREGS
+    i = 0
+    while i < nparams:
+        preg[i] = 0
+        i += 1
+    nslots += 2
+    envslot = nslots - 1
 
 def func_end(fi):
     global curf, nlint
@@ -4035,6 +4109,9 @@ def func_end(fi):
             pro = concat(pro, concat(concat(concat(concat("    mov ", lreg[i]), ", "), slot_ref(nslots + k)), "\n"))
             epi = concat(epi, concat(concat(concat(concat("    mov ", slot_ref(nslots + k)), ", "), lreg[i]), "\n"))
         i += 1
+    if fpar[fi] > 0 or ncap[fi] > 0:
+        pro = concat(pro, env_pro(fi))
+        epi = concat(epi, concat(concat(concat(concat("    mov ", slot_ref(envslot)), ", %rbx\n    mov "), slot_ref(envslot + 1)), ", %r12\n"))
     out[prolog] = pro
     emit_raw(epi)
     e("leave")
@@ -4098,7 +4175,12 @@ def declare_locals(p0, p1, isfn):
     # global declarations
     p = p0
     while p < p1:
-        if tok_is_id(p, "global") and stmt_start(p):
+        if tok_is_id(p, "def") and stmt_start(p) and tk[p + 1] == K_ID and isfn:
+            if find(nm, n, tv[p + 1]) < 0:
+                nm[n] = tv[p + 1]
+                ty[n] = -1
+                n += 1
+        if (tok_is_id(p, "global") or (tok_is_id(p, "nonlocal") and not in_child(curf, p))) and stmt_start(p):
             q = p + 1
             while tk[q] != K_NL:
                 if tk[q] == K_ID:
@@ -4140,6 +4222,7 @@ def scan_more(p0, p1, nm, ty, n0):
                 t = parse_type()
                 pos = save
                 n = add_name(nm, ty, n, tv[p], t)
+                p += 2
             else:
                 # a, b, c = ...   or  NAME op= ...
                 q = p
@@ -4587,7 +4670,15 @@ def prescan():
                             add_glob(tv[p], 0)
                 p += 1
         else:
-            p = skip_stmt(p)
+            q = skip_stmt(p)
+            if has_lambda(p, q):
+                while p < q:
+                    if tk[p] == K_ID:
+                        k = find(nm, n, tv[p])
+                        if k >= 0:
+                            used[k] = 1
+                    p += 1
+            p = q
     # prelude globals (tables used by prelude code) are always globals
     i = 0
     while i < n:
@@ -4619,6 +4710,7 @@ def prescan():
     fshadow[fi] = 0
     fpre[fi] = 0
     fmain = fi
+    reg_all_nested()
 
 def tops_pre(name):
     # assigned at top level inside the prelude
@@ -4643,6 +4735,334 @@ def add_glob(name, t):
     gtype[nglobs] = t
     gint[nglobs] = t == 0
     nglobs += 1
+
+# ---------------- closures, lambdas, function values ----------------
+fbn = list(MAXF)
+fbnn = list(MAXF)
+
+def def_body(p):
+    d = 0
+    while not (d == 0 and tok_is_op(p, ":")):
+        if tok_is_op(p, "("):
+            d += 1
+        elif tok_is_op(p, ")"):
+            d -= 1
+        p += 1
+    return p + 1
+
+def has_lambda(a, b):
+    while a < b:
+        if tok_is_id(a, "lambda"):
+            return 1
+        a += 1
+    return 0
+
+def lambda_end(p):
+    d = 0
+    pend = 0
+    while 1:
+        k = tk[p]
+        if k == K_NL or k == K_EOF or k == K_DED or k == K_IND:
+            return p
+        if k == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                if d == 0:
+                    return p
+                d -= 1
+            elif d == 0 and str_eq(v, ","):
+                return p
+            elif d == 0 and str_eq(v, ":"):
+                if pend == 0:
+                    return p
+                pend -= 1
+        elif k == K_ID and d == 0:
+            if str_eq(tv[p], "lambda"):
+                pend += 1
+            elif str_eq(tv[p], "for"):
+                return p
+        p += 1
+
+def reg_all_nested():
+    nf0 = nfuncs
+    f = 0
+    while f < nf0:
+        if fmeth[f] != 2 and not fpre[f] and f != fmain and not fshadow[f]:
+            fba[f] = def_body(fpos[f])
+            fbe[f] = skip_stmt(fpos[f])
+            reg_nested(f, fba[f], fbe[f])
+        f += 1
+    i = 0
+    while i < ntops:
+        if tops[i] >= PRETOK:
+            reg_nested(fmain, tops[i], skip_stmt(tops[i]))
+        i += 1
+    f = nf0
+    while f < nfuncs:
+        capture(f)
+        f += 1
+
+def reg_nested(par, a, b):
+    global pos
+    q = a
+    while q < b:
+        if tok_is_id(q, "def") and par != fmain and stmt_start(q) and tk[q + 1] == K_ID:
+            sv = pos
+            fi = reg_func(q, -1)
+            pos = sv
+            setup_nested(fi, par, 1)
+            fdname[fi] = tv[q + 1]
+            fba[fi] = def_body(q)
+            fbe[fi] = skip_stmt(q)
+            reg_nested(fi, fba[fi], fbe[fi])
+            q = fbe[fi]
+        elif tok_is_id(q, "lambda"):
+            fi = reg_lambda(q)
+            setup_nested(fi, par, 2)
+            reg_nested(fi, fba[fi], fend[fi])
+            q = fend[fi]
+        else:
+            q += 1
+
+def reg_lambda(q):
+    global nfuncs, npall
+    fi = nfuncs
+    nfuncs += 1
+    fnames[fi] = "<lambda>"
+    fpos[fi] = q
+    fcls[fi] = -1
+    fpre[fi] = q < PRETOK
+    fshadow[fi] = 0
+    flb[fi] = -1
+    fregn[fi] = 0
+    fmeth[fi] = 0
+    fpb[fi] = npall
+    p = q + 1
+    n = 0
+    while not tok_is_op(p, ":"):
+        if tk[p] == K_ID:
+            pnames[npall] = tv[p]
+            ptypes[npall] = 0
+            pdef[npall] = -1
+            pintf[npall] = 0
+            npall += 1
+            n += 1
+        elif not tok_is_op(p, ","):
+            die(tl[p], "unsupported lambda parameter syntax")
+        p += 1
+    fargs[fi] = n
+    fmin[fi] = n
+    fret[fi] = 0
+    fint[fi] = 0
+    fbret[fi] = 0
+    fnone[fi] = 0
+    fba[fi] = p + 1
+    fend[fi] = lambda_end(p + 1)
+    fbe[fi] = fend[fi]
+    return fi
+
+def setup_nested(fi, par, kind):
+    fkind[fi] = kind
+    fpar[fi] = par + 1
+    fnames[fi] = concat("<L>", str(fi))
+    flabel[fi] = concat("f_L", str(fi))
+    finl[fi] = -1
+    finl[par] = -1
+    i = 0
+    while i < fargs[fi]:
+        pintf[fpb[fi] + i] = 0
+        i += 1
+
+def nested_at(p):
+    i = fmain + 1
+    while i < nfuncs:
+        if fpos[i] == p and fkind[i] > 0:
+            return i
+        i += 1
+    return -1
+
+def in_child(f, p):
+    if f < 0:
+        return 0
+    c = f + 1
+    while c < nfuncs:
+        if fpar[c] == f + 1 and p >= fpos[c] and p < nested_end(c):
+            return 1
+        c += 1
+    return 0
+
+def nested_end(c):
+    if fkind[c] == 2:
+        return fend[c]
+    return fbe[c]
+
+def bound_of(f):
+    # params, names assigned in f's own body (not nested bodies), nested def names
+    if fbn[f]:
+        return fbn[f]
+    nm = list(4096)
+    ty = list(4096)
+    n = 0
+    i = 0
+    while i < fargs[f]:
+        nm[n] = pnames[fpb[f] + i]
+        n += 1
+        i += 1
+    q = fba[f]
+    c = f + 1
+    while c < nfuncs:
+        if fpar[c] == f + 1:
+            n = scan_more(q, fpos[c], nm, ty, n)
+            if fkind[c] == 1 and find(nm, n, fdname[c]) < 0:
+                nm[n] = fdname[c]
+                n += 1
+            q = nested_end(c)
+        c += 1
+    n = scan_more(q, fbe[f], nm, ty, n)
+    # nonlocal names are not bound here
+    p = fba[f]
+    while p < fbe[f]:
+        if tok_is_id(p, "nonlocal") and not in_child(f, p):
+            q = p + 1
+            while tk[q] != K_NL:
+                if tk[q] == K_ID:
+                    k = find(nm, n, tv[q])
+                    if k >= 0:
+                        nm[k] = "<nonlocal>"
+                q += 1
+        p += 1
+    fbn[f] = nm
+    fbnn[f] = n
+    return nm
+
+def capture(c):
+    nmc = bound_of(c)
+    nc = fbnn[c]
+    q = fba[c]
+    while q < fbe[c]:
+        if tk[q] == K_ID and not tok_is_op(q - 1, "."):
+            if find(nmc, nc, tv[q]) < 0:
+                need_name(fpar[c] - 1, tv[q])
+        q += 1
+
+def need_name(p, name):
+    if p < 0 or p == fmain:
+        return 0
+    nm = bound_of(p)
+    if find(nm, fbnn[p], name) >= 0:
+        add_cap(p, name)
+        return 1
+    if fpar[p] > 0 and need_name(fpar[p] - 1, name):
+        add_cap(p, name)
+        return 1
+    return 0
+
+def add_cap(p, name):
+    if not capl[p]:
+        capl[p] = list(256)
+    if find(capl[p], ncap[p], name) >= 0:
+        return 0
+    if ncap[p] >= 256:
+        die(tl[fpos[p]], "too many captured variables")
+    capl[p][ncap[p]] = name
+    ncap[p] = ncap[p] + 1
+
+def env_pro(fi):
+    s = concat(concat(concat(concat("    mov %rbx, ", slot_ref(envslot)), "\n    mov %r12, "), slot_ref(envslot + 1)), "\n")
+    if fpar[fi] > 0:
+        s = concat(s, "    mov 16(%r10), %r12\n")
+    n = ncap[fi]
+    if n > 0:
+        s = concat(s, concat(concat("    mov $", str(8 * n)), ", %edi\n"))
+        s = concat(s, concat(concat("    movabs $", str(288230376151711744 + 8 * n)), ", %rsi\n    call rt_new_r\n    mov %rax, %rbx\n"))
+        nm = bound_of(fi)
+        pp = fpar[fi] - 1
+        k = 0
+        while k < n:
+            name = capl[fi][k]
+            i = find(params, nparams, name)
+            d = concat(concat(", ", str(8 * k)), "(%rbx)\n")
+            if i >= 0:
+                s = concat(s, concat(concat(concat("    mov ", str(16 + 8 * (nparams - 1 - i))), "(%rbp), %rax\n    mov %rax"), d))
+            elif find(nm, fbnn[fi], name) < 0 and pp >= 0 and ncap[pp] > 0 and find(capl[pp], ncap[pp], name) >= 0:
+                j = find(capl[pp], ncap[pp], name)
+                s = concat(s, concat(concat(concat("    mov ", str(8 * j)), "(%r12), %rax\n    mov %rax"), d))
+            else:
+                s = concat(s, concat("    movq $0", d))
+            k += 1
+    return s
+
+def emit_closure(c):
+    global ety
+    e("mov $24, %edi")
+    e("movabs $576460752303423491, %rsi")
+    e("call rt_new_r")
+    e3("lea ", flabel[c], "(%rip), %rdx")
+    e("mov %rdx, (%rax)")
+    e3("movq $", str(fargs[c]), ", 8(%rax)")
+    if ncap[curf] > 0:
+        e("mov %rbx, 16(%rax)")
+    else:
+        e("movq $0, 16(%rax)")
+    add_edge(c)
+    ety = 0
+
+def compile_lambda(fi):
+    global pos
+    func_begin(fi)
+    declare_locals(fba[fi], fend[fi], 1)
+    pos = fba[fi]
+    expr()
+    e2("jmp ", lab(retlab))
+    func_end(fi)
+
+def fv_func(name):
+    i = 0
+    while i < nfuncs:
+        if fmeth[i] == 0 and fkind[i] == 0 and i != fmain and not fshadow[i] and str_eq(fnames[i], name):
+            return i
+        i += 1
+    if not starts(name, "__"):
+        return fv_func(concat("__fv_", name))
+    return -1
+
+def fv_label(f):
+    global nfv
+    i = 0
+    while i < nfv and fvl[i] != f:
+        i += 1
+    if i == nfv:
+        fvl[nfv] = f
+        nfv += 1
+    clear_pints(f)
+    add_edge(f)
+    return concat("FV_", flabel[f])
+
+def closure_var(name):
+    r = var_ref(name)
+    if not r:
+        return 0
+    if vkind == 1 or vkind == 2 or vkind == 5 or vkind == 4:
+        return 1
+    if vkind == 3:
+        return not any_fn(name) and find(BI_NAMES, NBI, name) < 0
+    return 0
+
+def call_value(line):
+    # callee value pushed; pos at '('
+    global ety, argf, argskip
+    argf = -1
+    argskip = 0
+    n = push_args()
+    e3("mov ", str(8 * n), "(%rsp), %r10")
+    e3("mov $", str(n), ", %r11d")
+    e3("mov $", str(uline(line)), ", %edx")
+    e("call rt_callchk")
+    e("call *(%r10)")
+    e3("add $", str(8 * (n + 1)), ", %rsp")
+    ety = 0
 
 # ---------------- driver ----------------
 def reach_all():
@@ -4690,7 +5110,7 @@ def mark_root(name, n, used):
             freach[f] = 1
 
 def one_pass():
-    global nflt, nout, ndat, nlabel, nstr, nce, ndynm, ndynf, u_getidx, u_setidx, u_add, u_eq, u_truth, nconf
+    global nfv, nflt, nout, ndat, nlabel, nstr, nce, ndynm, ndynf, u_getidx, u_setidx, u_add, u_eq, u_truth, nconf
     nout = 0
     ndat = 0
     nlabel = 0
@@ -4705,6 +5125,7 @@ def one_pass():
     u_eq = 0
     u_truth = 0
     nconf = 0
+    nfv = 0
     emit_raw(".text\n.globl _start\n_start:\n    mov %rsp, %rdi\n    call rt_init\n    call F_init\n    call f___main\n    jmp rt_exit0\n")
     f = 0
     while f < nfuncs:
@@ -4712,6 +5133,8 @@ def one_pass():
         foe[f] = 0
         if fmeth[f] == 2:
             compile_ctor(fcls[f])
+        elif fkind[f] == 2:
+            compile_lambda(f)
         elif f != fmain and not fshadow[f]:
             compile_def(f)
         f += 1
@@ -4799,6 +5222,14 @@ def forge_main():
     while c < nclass:
         emit_raw(concat(concat("    .quad ", emit_str(cnm[c])), "\n"))
         c += 1
+    i = 0
+    while i < nfv:
+        f = fvl[i]
+        lb = "0"
+        if freach[f]:
+            lb = flabel[f]
+        emit_raw(concat(concat(concat(concat(concat(concat(".p2align 4\n    .quad 576460752303423491\nFV_", flabel[f]), ": .quad "), lb), ", "), str(fargs[f])), ", 0\n"))
+        i += 1
     i = 0
     while i < ndat:
         emit_raw(dat[i])

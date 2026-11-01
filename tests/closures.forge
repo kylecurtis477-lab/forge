@@ -1,0 +1,115 @@
+def make_adder(n):
+    def add(x):
+        return x + n
+    return add
+
+def counter():
+    count = 0
+    def inc():
+        nonlocal count
+        count += 1
+        return count
+    return inc
+
+def compose(f, g):
+    return lambda x: f(g(x))
+
+def apply_twice(f, x):
+    return f(f(x))
+
+def outer(a):
+    def mid(b):
+        def inner(c):
+            return a + b + c
+        return inner
+    return mid
+
+def square(x):
+    return x * x
+
+add5 = make_adder(5)
+add10 = make_adder(10)
+print(add5(1), add10(1), add5(add10(100)))
+c1 = counter()
+c2 = counter()
+print(c1(), c1(), c1(), c2())
+inc_sq = compose(square, add5)
+print(inc_sq(2))
+print(apply_twice(square, 3))
+print(apply_twice(lambda s: s + "!", "hi"))
+print(outer(1)(20)(300))
+f = square
+print(f(7))
+print(list(map(square, [1, 2, 3])))
+print(list(map(lambda x: x * 2.5, [1, 2])))
+print(list(filter(lambda x: x % 2 == 0, range(10))))
+words = ["banana", "kiwi", "apple", "fig"]
+print(sorted(words, key=len))
+print(sorted(words, key=lambda w: w[-1], reverse=True))
+print(sorted([3, 1, 2], reverse=True))
+words.sort(key=len)
+print(words)
+pairs = [[1, "b"], [2, "a"], [0, "c"]]
+print(sorted(pairs, key=lambda p: p[1]))
+ops = {"add": lambda a, b: a + b, "mul": lambda a, b: a * b}
+print(ops["add"](3, 4), ops["mul"](3, 4))
+k = 3
+scale = lambda x: x * k
+print(scale(5))
+print((lambda: 42)())
+fns = [str, len]
+print(fns[0](12) + "x", fns[1]("abcd"))
+def make_acc():
+    total = []
+    def acc(v):
+        total.append(v)
+        return sum(total)
+    return acc
+a = make_acc()
+a(1)
+a(2)
+print(a(3))
+try:
+    nf = 5
+    nf(1)
+except TypeError:
+    print("not callable")
+try:
+    add5(1, 2)
+except TypeError:
+    print("bad arity")
+print(max([1, 5, 3]), bool(lambda: 0))
+class Box:
+    def __init__(self, v):
+        self.v = v
+    def getter(self):
+        return lambda: self.v * 2
+    def adders(self):
+        return [lambda x: x + self.v, lambda x: x - self.v]
+b = Box(21)
+print(b.getter()())
+print([g(100) for g in b.adders()])
+def fib_memo():
+    memo = {}
+    def fib(n):
+        if n < 2:
+            return n
+        if n in memo:
+            return memo[n]
+        r = fib(n - 1) + fib(n - 2)
+        memo[n] = r
+        return r
+    return fib
+print(fib_memo()(80))
+def deco(f):
+    def wrapped(x):
+        return f(x) + 1
+    return wrapped
+def base(x):
+    return x * 10
+base2 = deco(deco(base))
+print(base2(4))
+print(list(map(lambda p: p[0] * p[1], [[2, 3], [4, 5]])))
+print(sorted([[1, "x"], [0, "y"]], key=lambda q: q[1], reverse=True))
+nums = [5, -3, 2, -8]
+print(sorted(nums, key=abs), sum(map(abs, nums)))
