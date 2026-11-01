@@ -306,16 +306,16 @@ def add_tok(k, v, line):
     tsid[ntok] = cur_sid
     ntok += 1
 
-def is_digit(c):
+def is_digit(c: int) -> bool:
     return c >= 48 and c <= 57
 
-def is_alpha(c):
+def is_alpha(c: int) -> bool:
     return (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or c == 95
 
-def is_hex(c):
+def is_hex(c: int) -> bool:
     return is_digit(c) or (c >= 97 and c <= 102) or (c >= 65 and c <= 70)
 
-def hexval(c):
+def hexval(c: int) -> int:
     if is_digit(c):
         return c - 48
     if c >= 97:
@@ -3695,6 +3695,14 @@ def stmt():
             for_footer(info)
             return 0
         if str_eq(w, "return"):
+            if tco_on > 0 and curf >= 0:
+                k = tco_kind(curf, pos)
+                if k == 2 and tco_on != 2:
+                    k = 0
+                if k > 0:
+                    tco_tail(curf, pos, k)
+                    end_stmt()
+                    return 0
             pos += 1
             if tk[pos] == K_NL or tk[pos] == K_EOF or tk[pos] == K_DED:
                 if curf >= 0 and fnone[curf]:
@@ -3724,6 +3732,11 @@ def stmt():
                 e("and $1, %eax")
             elif curf >= 0 and fret[curf] == T_INT and ety == 0:
                 unbool()
+            if tco_on == 2:
+                if ety == T_BOOL:
+                    e("and $1, %eax")
+                e2("add ", concat(var_ref(tco_acc), ", %rax"))
+                ovf_check(line)
             try_unwind(0)
             e2("jmp ", lab(retlab))
             end_stmt()
@@ -4555,7 +4568,9 @@ def has_child(fi):
 
 def func_end(fi):
     global curf, nlint, nconf
-    if fnone[fi]:
+    if tco_on == 2:
+        e2("mov ", concat(var_ref(tco_acc), ", %rax"))
+    elif fnone[fi]:
         e2(concat("mov ", B_NONE), ", %rax")
     else:
         e("xor %eax, %eax")
@@ -4817,8 +4832,162 @@ def skip_stmt(p):
         p = block_end(p)
     return p
 
-def compile_def(fi):
+# ---------------- self tail calls and accumulator recursion ----------------
+# 'return f(args)' in f becomes a parameter update + jump; for int functions
+# 'return X + f(args)' becomes 'acc += X' + jump, and other returns add acc.
+tco_on = 0
+tco_acc = ""
+tco_lab = 0
+
+def tco_line_end(p):
+    while tk[p] != K_NL and tk[p] != K_EOF:
+        if tok_is_op(p, "(") or tok_is_op(p, "[") or tok_is_op(p, "{"):
+            d = 0
+            while 1:
+                if tok_is_op(p, "(") or tok_is_op(p, "[") or tok_is_op(p, "{"):
+                    d += 1
+                elif tok_is_op(p, ")") or tok_is_op(p, "]") or tok_is_op(p, "}"):
+                    d -= 1
+                p += 1
+                if d == 0 or tk[p] == K_EOF:
+                    break
+        else:
+            p += 1
+    return p
+
+tco_call = 0
+tco_plus = 0
+
+def tco_kind(fi, r):
+    # r at 'return': 0 = ordinary, 1 = pure self tail call, 2 = X + self call
+    global tco_call, tco_plus
+    e = tco_line_end(r)
+    if e <= r + 3 or not tok_is_op(e - 1, ")"):
+        return 0
+    q = e - 1
+    d = 0
+    while q > r:
+        if tok_is_op(q, ")") or tok_is_op(q, "]") or tok_is_op(q, "}"):
+            d += 1
+        elif tok_is_op(q, "(") or tok_is_op(q, "[") or tok_is_op(q, "{"):
+            d -= 1
+            if d == 0:
+                break
+        q -= 1
+    if q <= r + 1 or tk[q - 1] != K_ID or not str_eq(tv[q - 1], fnames[fi]):
+        return 0
+    if tok_is_op(q - 2, "."):
+        return 0
+    # arguments: positional only, exactly fargs
+    n = 0
+    a = q + 1
+    if not tok_is_op(a, ")"):
+        n = 1
+    d = 0
+    while a < e - 1:
+        if tok_is_op(a, "(") or tok_is_op(a, "[") or tok_is_op(a, "{"):
+            d += 1
+        elif tok_is_op(a, ")") or tok_is_op(a, "]") or tok_is_op(a, "}"):
+            d -= 1
+        elif d == 0 and tok_is_op(a, ","):
+            n += 1
+        elif d == 0 and (tok_is_op(a, "=") or tok_is_op(a, "*") and (tok_is_op(a - 1, "(") or tok_is_op(a - 1, ",")) or tok_is_op(a, "**") or tok_is_id(a, "for")):
+            return 0
+        a += 1
+    if n != fargs[fi]:
+        return 0
+    tco_call = q - 1
+    if q - 1 == r + 1:
+        return 1
+    if not tok_is_op(q - 2, "+"):
+        return 0
+    tco_plus = q - 2
+    a = r + 1
+    d = 0
+    while a < q - 2:
+        if tok_is_op(a, "(") or tok_is_op(a, "[") or tok_is_op(a, "{"):
+            d += 1
+        elif tok_is_op(a, ")") or tok_is_op(a, "]") or tok_is_op(a, "}"):
+            d -= 1
+        elif d == 0:
+            if tk[a] == K_OP and not tok_is_op(a, "+") and not tok_is_op(a, "."):
+                return 0
+            if tk[a] == K_ID and is_kw(tv[a]):
+                return 0
+        a += 1
+    if a == r + 1:
+        return 0
+    return 2
+
+def tco_scan(fi, p, endp):
+    # p at the ':' ending the header; returns 0, 1 (tail calls) or 2 (accumulator)
+    if fpar[fi] > 0 or ncap[fi] > 0 or fmeth[fi] != 0 or fn_has_try(fi) or fpre[fi]:
+        return 0
+    q = fpos[fi]
+    while q < p:
+        if tok_is_op(q, "*") or tok_is_op(q, "**"):
+            return 0
+        q += 1
+    k = 0
+    while k < fargs[fi]:
+        if str_eq(pnames[fpb[fi] + k], fnames[fi]):
+            return 0
+        k += 1
+    res = 0
+    q = p
+    while q < endp:
+        if tok_is_id(q, "yield") or tok_is_id(q, "def") or tok_is_id(q, "lambda") or tok_is_id(q, "global") or tok_is_id(q, "nonlocal"):
+            return 0
+        if tok_is_id(q, "return"):
+            k = tco_kind(fi, q)
+            if k == 2 and not (fint[fi] or fret[fi] == T_INT):
+                k = 0
+            if k > res:
+                res = k
+        q += 1
+    return res
+
+def tco_tail(fi, r, kind):
+    # emit the tail call at 'return' r; leaves pos after the statement
     global pos
+    line = tl[r]
+    if kind == 2:
+        sv = tk[tco_plus]
+        tk[tco_plus] = K_NL
+        pos = r + 1
+        expr()
+        tk[tco_plus] = sv
+        if ety == T_BOOL:
+            e("and $1, %eax")
+        elif ety != T_INT:
+            unbool()
+        e2("add ", concat(var_ref(tco_acc), ", %rax"))
+        ovf_check(line)
+        store_var(tco_acc, line, T_INT, -1)
+    pos = tco_call + 2
+    n = fargs[fi]
+    tys = list(n + 1)
+    i = 0
+    while i < n:
+        expr()
+        tys[i] = ety
+        if i < n - 1:
+            e("push %rax")
+        if is_op(","):
+            pos += 1
+        i += 1
+    if n > 0:
+        store_var(pnames[fpb[fi] + n - 1], line, tys[n - 1], -1)
+    i = n - 2
+    while i >= 0:
+        e("pop %rax")
+        store_var(pnames[fpb[fi] + i], line, tys[i], -1)
+        i -= 1
+    e2("jmp ", lab(tco_lab))
+    pos = tco_line_end(r)
+
+def compile_def(fi):
+    global pos, tco_on
     pos = fpos[fi]
     endp = skip_stmt(pos)
     # body starts after the ':' that ends the header
@@ -4832,10 +5001,24 @@ def compile_def(fi):
         p += 1
     func_begin(fi)
     declare_locals(p, endp, 1)
+    tco_setup(fi, p, endp)
     pos = p
     block()
     func_end(fi)
+    tco_on = 0
     pos = endp
+
+def tco_setup(fi, p, endp):
+    global tco_on, tco_acc, tco_lab
+    tco_on = tco_scan(fi, p, endp)
+    tco_acc = ""
+    if tco_on == 2:
+        tco_acc = hidden_local("__acc", T_INT)
+        e("xor %eax, %eax")
+        store_var(tco_acc, tl[p], T_INT, -1)
+    if tco_on > 0:
+        tco_lab = new_label()
+        put_label(tco_lab)
 
 def compile_main(fi):
     global pos
@@ -5935,14 +6118,14 @@ def tc_err(p, msg):
     exit(1)
 
 # ---- type strings ----
-def ty_head(t):
+def ty_head(t: str) -> str:
     n = len(t)
     i = 0
     while i < n and char_at(t, i) != 91:
         i += 1
     return substr(t, 0, i)
 
-def ty_nargs(t):
+def ty_nargs(t: str) -> int:
     n = len(t)
     i = len(ty_head(t))
     if i >= n:
@@ -5963,7 +6146,7 @@ def ty_nargs(t):
         i += 1
     return k
 
-def ty_arg(t, j):
+def ty_arg(t: str, j: int) -> str:
     n = len(t)
     i = len(ty_head(t)) + 1
     d = 0
@@ -6022,7 +6205,7 @@ def tcsub(c, d):
 def tc_isnum(t):
     return str_eq(t, "int") or str_eq(t, "float") or str_eq(t, "bool")
 
-def assignable(d, s):
+def assignable(d: str, s: str) -> int:
     if is_dyn(d) or is_dyn(s) or str_eq(d, s):
         return 1
     if str_eq(d, "float") and (str_eq(s, "int") or str_eq(s, "bool")):
@@ -6061,7 +6244,7 @@ def assignable(d, s):
         return 1
     return 0
 
-def tc_join(a, b):
+def tc_join(a: str, b: str) -> str:
     if str_eq(a, b):
         return a
     if is_dyn(a) or is_dyn(b):

@@ -1,0 +1,43 @@
+def fib(n):
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+def gcd(a, b):
+    if b == 0:
+        return a
+    return gcd(b, a % b)
+
+def count(n, acc):
+    if n == 0:
+        return acc
+    return count(n - 1, acc + 1)
+
+def sum_to(n: int) -> int:
+    if n == 0:
+        return 0
+    return n + sum_to(n - 1)
+
+def tri(n):
+    s = 0
+    if n <= 0:
+        return s
+    return n * 2 + tri(n - 1) + 0 + tri(n - 2) if False else n + tri(n - 1)
+
+def join_rev(xs, i, s):
+    if i < 0:
+        return s
+    return join_rev(xs, i - 1, s + xs[i])
+
+def falls(n):
+    if n > 0:
+        return 1 + falls(n - 1)
+
+def swap(a, b, k):
+    if k == 0:
+        return a * 10 + b
+    return swap(b, a, k - 1)
+
+print(fib(25), gcd(1071, 462), count(1000000, 0), sum_to(100000), tri(50))
+print(join_rev(["a", "b", "c"], 2, ""), swap(1, 2, 3), swap(1, 2, 4))
+print(falls(0))
