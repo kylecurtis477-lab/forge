@@ -2086,17 +2086,39 @@ def cmp_one(op, start, mark, lt, rt, line):
     emit_raw("2:\n")
     e("bts $62, %rax")
 
+def bitop(ins, code, start, mark, lt, rt):
+    # & | ^ : inline for ints; sets, dicts and bools go through __bitop
+    global ety
+    if lt == T_INT and rt == T_INT:
+        binop(ins, start, mark)
+        ety = T_INT
+        return 0
+    lr(start, mark)
+    e("mov %rax, %rdx")
+    e("or %rcx, %rdx")
+    e("shr $44, %rdx")
+    e("jnz 1f")
+    e2(ins, " %rcx, %rax")
+    e("jmp 2f")
+    emit_raw("1:\n")
+    e("push %rax")
+    e("push %rcx")
+    e3("push $", str(code), "")
+    call_internal("__bitop", 3)
+    emit_raw("2:\n")
+    ety = 0
+
 def bor_expr():
     global pos, ety
     start = nout
     bxor_expr()
     while is_op("|"):
         pos += 1
+        lt = ety
         mark = nout
         e("push %rax")
         bxor_expr()
-        binop("or", start, mark)
-        ety = T_INT
+        bitop("or", 1, start, mark, lt, ety)
 
 def bxor_expr():
     global pos, ety
@@ -2104,11 +2126,11 @@ def bxor_expr():
     band_expr()
     while is_op("^"):
         pos += 1
+        lt = ety
         mark = nout
         e("push %rax")
         band_expr()
-        binop("xor", start, mark)
-        ety = T_INT
+        bitop("xor", 2, start, mark, lt, ety)
 
 def band_expr():
     global pos, ety
@@ -2116,11 +2138,11 @@ def band_expr():
     shift_expr()
     while is_op("&"):
         pos += 1
+        lt = ety
         mark = nout
         e("push %rax")
         shift_expr()
-        binop("and", start, mark)
-        ety = T_INT
+        bitop("and", 0, start, mark, lt, ety)
 
 def shift_expr():
     global pos, ety, nout
@@ -3022,6 +3044,23 @@ def primary():
         if is_op("{"):
             pos += 1
             call_internal("__dict", 0)
+            if set_lit(pos):
+                e("movb $10, -1(%rax)")
+                while not is_op("}"):
+                    e("push %rax")
+                    e("pushq (%rsp)")
+                    expr()
+                    e("push %rax")
+                    e("push $1")
+                    call_internal("__dset", 3)
+                    e("pop %rax")
+                    if is_op(","):
+                        pos += 1
+                    elif not is_op("}"):
+                        die(cur_line(), "expected ',' or '}'")
+                pos += 1
+                ety = 0
+                return 0
             while not is_op("}"):
                 e("push %rax")
                 e("pushq (%rsp)")
@@ -3042,6 +3081,77 @@ def primary():
     if k == K_NL or k == K_EOF:
         die(line, "unexpected end of line")
     die(line, concat(concat("unexpected '", str(tv[pos])), "'"))
+
+def set_lit(p) -> int:
+    # p is just after '{': a set display has no top-level ':'
+    if tk[p] == K_OP and str_eq(tv[p], "}"):
+        return 0
+    d = 0
+    while tk[p] != K_EOF:
+        if tk[p] == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                d += 1
+            elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                if d == 0:
+                    return 1
+                d -= 1
+            elif d == 0 and str_eq(v, ":"):
+                return 0
+        elif d == 0 and tk[p] == K_ID and str_eq(tv[p], "lambda"):
+            return 0
+        p += 1
+    return 0
+
+def stmt_del(line):
+    global pos
+    pos += 1
+    while True:
+        # find last top-level '[' of this target
+        p = pos
+        d = 0
+        lb = -1
+        while not (d == 0 and tk[p] == K_OP and str_eq(tv[p], ",")) and tk[p] != K_NL and tk[p] != K_EOF:
+            if tk[p] == K_OP:
+                v = tv[p]
+                if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                    if d == 0 and str_eq(v, "["):
+                        lb = p
+                    d += 1
+                elif str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}"):
+                    d -= 1
+            p += 1
+        if lb < 0:
+            die(line, "only 'del x[i]' / 'del x[a:b]' is supported")
+        sk = tk[lb]
+        tk[lb] = K_NL
+        expr()
+        tk[lb] = sk
+        e("push %rax")
+        pos = lb + 1
+        if is_op(":"):
+            e("push $0")
+        else:
+            expr()
+            e("push %rax")
+        if is_op(":"):
+            pos += 1
+            if is_op("]"):
+                e("mov $4611686018427387903, %rax")
+            else:
+                expr()
+            e("push %rax")
+            e3("push $", str(uline(line)), "")
+            call_internal("__delslice", 4)
+        else:
+            e3("push $", str(uline(line)), "")
+            call_internal("__delidx", 3)
+        expect("]")
+        if is_op(","):
+            pos += 1
+        else:
+            break
+    end_stmt()
 
 def build_list(n):
     # n values pushed (first pushed = element 0)
@@ -3410,7 +3520,10 @@ def stmt():
         if str_eq(w, "raise"):
             stmt_raise(line)
             return 0
-        if str_eq(w, "del") or str_eq(w, "with") or str_eq(w, "yield"):
+        if str_eq(w, "del"):
+            stmt_del(line)
+            return 0
+        if str_eq(w, "with") or str_eq(w, "yield"):
             die(line, concat(concat("'", w), "' is not supported"))
     if tk[pos] == K_STR and (tk[pos + 1] == K_NL or tk[pos + 1] == K_EOF):
         pos += 1
@@ -4093,14 +4206,11 @@ def apply_binary(op, start, mark, lt, rt, line):
     if str_eq(op, "+") or str_eq(op, "-") or str_eq(op, "*") or str_eq(op, "/") or str_eq(op, "//") or str_eq(op, "%"):
         arith(op, start, mark, lt, rt, line)
     elif str_eq(op, "&"):
-        binop("and", start, mark)
-        ety = T_INT
+        bitop("and", 0, start, mark, lt, rt)
     elif str_eq(op, "|"):
-        binop("or", start, mark)
-        ety = T_INT
+        bitop("or", 1, start, mark, lt, rt)
     elif str_eq(op, "^"):
-        binop("xor", start, mark)
-        ety = T_INT
+        bitop("xor", 2, start, mark, lt, rt)
     else:
         ins = "sar"
         if str_eq(op, "<<"):
