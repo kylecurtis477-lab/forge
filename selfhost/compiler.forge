@@ -8747,7 +8747,7 @@ def end_line():
         o_fail("stmt end")
 
 def cond_range(a, b, l, sense):
-    global ip
+    global ip, nir, nvr, ncp, nargb, nil, nx, nrf, nlp, irfail
     if irfail:
         return 0
     while tok_is_op(a, "(") and match_close(a) == b - 1:
@@ -8789,6 +8789,54 @@ def cond_range(a, b, l, sense):
         if not sense:
             ibr(l)
         return 0
+    if not hyb or inl_on:
+        cond_leaf(a, b, l, sense)
+        return 0
+    sv1 = nir
+    sv2 = nvr
+    sv3 = ncp
+    sv4 = nargb
+    sv5 = nil
+    sv6 = nx
+    sv7 = nrf
+    sv8 = nlp
+    cond_leaf(a, b, l, sense)
+    if irfatal or not irfail:
+        return 0
+    nir = sv1
+    nvr = sv2
+    ncp = sv3
+    nargb = sv4
+    nil = sv5
+    nx = sv6
+    nrf = sv7
+    nlp = sv8
+    irfail = 0
+    ip = a
+    v = x_texpr(a, 1)
+    if irfail:
+        return 0
+    if ip != b:
+        o_fail("cond tex")
+        return 0
+    t = oty(v)
+    if t == T_BOOL:
+        vtt[v] = T_INT
+        w = ibin(O_AND, v, cst(1), 0)
+        if sense:
+            icbr(w, cst(0), 1, l)
+        else:
+            icbr(w, cst(0), 0, l)
+    elif t == T_INT:
+        if sense:
+            icbr(v, cst(0), 1, l)
+        else:
+            icbr(v, cst(0), 0, l)
+    else:
+        o_fail("cond truth")
+
+def cond_leaf(a, b, l, sense):
+    global ip
     q = find_top_cmp(a, b)
     if q == -2:
         o_fail("in/is")
