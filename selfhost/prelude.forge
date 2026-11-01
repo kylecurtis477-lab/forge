@@ -207,6 +207,8 @@ def __str(x) -> str:
         return __itos_raw(x)
     if t == 2:
         return x.__str__()
+    if t == 12:
+        return __bigstr(x)
     return __repr(x)
 
 def __brepr(x) -> str:
@@ -269,6 +271,8 @@ def __repr(x) -> str:
         return "None"
     if t == 8:
         return "<function>"
+    if t == 12:
+        return __bigstr(x)
     if t == 5:
         return __frepr(x)
     parts = []
@@ -342,6 +346,8 @@ def __typeid(x) -> int:
         return -5
     if t == 6:
         return -6
+    if t == 12:
+        return -1
     return -7
 
 def __m___str__(o) -> str:
@@ -368,6 +374,24 @@ def __isnum(x) -> int:
     return t < 0 or t == 5 or t == 6
 
 def __binop(a, b, op: int, line):
+    ta0: int = __tag(a)
+    tb0: int = __tag(b)
+    if (ta0 == 12 and (tb0 < 0 or tb0 == 12 or tb0 == 6)) or (tb0 == 12 and (ta0 < 0 or ta0 == 6)):
+        return __bigop(__bnorm(a), __bnorm(b), op, line)
+    if (ta0 == 12 and tb0 == 5) or (tb0 == 12 and ta0 == 5):
+        x = float(a)
+        y = float(b)
+        if op == 0:
+            return x + y
+        if op == 1:
+            return x - y
+        if op == 2:
+            return x * y
+        if op == 3:
+            return x / y
+        if op == 4:
+            return x // y
+        return x % y
     if op == 1 and __tag(a) == 10 and __tag(b) == 10:
         return __sop(a, b, 3)
     if op == 2:
@@ -412,6 +436,12 @@ def __cmpop(a, b, op: int) -> int:
     return __lt(a, b) == 0
 
 def __neg(x):
+    if __tag(x) == 12:
+        return __bigmk(0 - __lst(x, 0), __lst(x, 1))
+    if __tag(x) < 0:
+        v: int = x
+        if v == -9223372036854775807 - 1:
+            return __bigop(0, x, 1, 0)
     if __tag(x) == 5:
         return __ffrombits(__fbits(x) ^ (1 << 63))
     return 0 - x
@@ -822,6 +852,181 @@ def __bn_mulpow(a, k: int):
         k -= 1
     return a
 
+# ---- arbitrary-precision ints (tag 12): [sign, limbs] with little-endian base 2^32 magnitude ----
+def __bigmk(sg: int, m):
+    m = __bn_norm(m)
+    n: int = len(m)
+    if n == 0:
+        return 0
+    if n <= 2:
+        hi: int = 0
+        if n == 2:
+            hi = m[1]
+        lo: int = m[0]
+        if hi < 2147483648 and not (sg > 0 and hi == 1073741824 and lo <= 3):
+            # 2**62 .. 2**62+3 would alias the bool/None encodings, so keep them boxed
+            v: int = (hi << 32) | lo
+            if sg < 0:
+                return 0 - v
+            return v
+        if sg < 0 and hi == 2147483648 and lo == 0:
+            return -9223372036854775807 - 1
+    r = [sg, m]
+    set_byte(r, -1, 12)
+    return r
+
+def __bigsg(x) -> int:
+    if __tag(x) == 12:
+        return __lst(x, 0)
+    v: int = x
+    if v < 0:
+        return -1
+    return 1
+
+def __bigmag(x):
+    if __tag(x) == 12:
+        return __lst(x, 1)
+    v: int = x
+    if v < 0:
+        v = 0 - v
+    m = []
+    append(m, v & 4294967295)
+    append(m, (v >> 32) & 4294967295)
+    return __bn_norm(m)
+
+def __bn_mul(a, b):
+    r = []
+    nb: int = len(b)
+    j: int = 0
+    while j < nb:
+        y: int = b[j]
+        if y != 0:
+            p = __bn_add(__bn_muls(a, y & 65535), __bn_shl(__bn_muls(a, y >> 16), 16))
+            r = __bn_add(r, __bn_shl(p, 32 * j))
+        j += 1
+    return __bn_norm(r)
+
+def __bigaddm(sa: int, ma, sb: int, mb):
+    if sa == sb:
+        return __bigmk(sa, __bn_add(ma, mb))
+    c: int = __bn_cmp(ma, mb)
+    if c == 0:
+        return 0
+    if c > 0:
+        return __bigmk(sa, __bn_sub(ma, mb))
+    return __bigmk(sb, __bn_sub(mb, ma))
+
+def __bigop(a, b, op: int, line):
+    # a, b: ints or bigints; op 0 + 1 - 2 * 4 // 5 % 3 /
+    if op == 3:
+        return __bigtof(a) / __bigtof(b)
+    sa: int = __bigsg(a)
+    sb: int = __bigsg(b)
+    ma = __bigmag(a)
+    mb = __bigmag(b)
+    if op == 0:
+        return __bigaddm(sa, ma, sb, mb)
+    if op == 1:
+        return __bigaddm(sa, ma, 0 - sb, mb)
+    if op == 2:
+        return __bigmk(sa * sb, __bn_mul(ma, mb))
+    if len(mb) == 0:
+        __raise_rt(ZeroDivisionError("integer division or modulo by zero"), line, "integer division or modulo by zero")
+    qr = __bn_divmod(ma, mb)
+    q = __bigmk(sa * sb, qr[0])
+    r = __bigmk(sa, qr[1])
+    if len(__bn_norm(qr[1])) != 0 and sa != sb:
+        q = __bigop(q, 1, 1, line)
+        r = __bigop(r, b, 0, line)
+    if op == 4:
+        return q
+    return r
+
+def __bigtof(x):
+    if __tag(x) != 12:
+        return float(x)
+    m = __lst(x, 1)
+    f = __itof(0)
+    i: int = len(m) - 1
+    while i >= 0:
+        f = f * __itof(4294967296) + __itof(m[i])
+        i -= 1
+    if __lst(x, 0) < 0:
+        return 0 - f
+    return f
+
+def __bigstr(x) -> str:
+    m = __lst(x, 1)
+    parts = []
+    while len(m) > 0:
+        qr = __bn_divs(m, 1000000000)
+        m = qr[0]
+        append(parts, qr[1])
+    out = []
+    if __lst(x, 0) < 0:
+        append(out, "-")
+    i: int = len(parts) - 1
+    append(out, __itos_raw(parts[i]))
+    i -= 1
+    while i >= 0:
+        s = __itos_raw(parts[i])
+        append(out, "000000000"[:9 - len(s)])
+        append(out, s)
+        i -= 1
+    return join(out, len(out))
+
+def __bigcmp(a, b) -> int:
+    sa: int = __bigsg(a)
+    sb: int = __bigsg(b)
+    if __tag(a) != 12 and __tag(b) != 12:
+        x: int = a
+        y: int = b
+        if x < y:
+            return -1
+        if x > y:
+            return 1
+        return 0
+    if sa != sb:
+        return sa
+    return __bn_cmp(__bigmag(a), __bigmag(b)) * sa
+
+def __bigparse(s):
+    i: int = 0
+    sg: int = 1
+    if len(s) > 0 and s[0] == "-":
+        sg = -1
+        i = 1
+    elif len(s) > 0 and s[0] == "+":
+        i = 1
+    m = []
+    n: int = len(s)
+    while i < n:
+        c: int = ord(s[i]) - 48
+        if c >= 0 and c <= 9:
+            m = __bn_add(__bn_muls(m, 10), __bn(c))
+        elif c != 47:
+            __err(0, concat("invalid literal for int(): ", __repr(s)))
+        i += 1
+    return __bigmk(sg, m)
+
+def __bigpow(a, b: int):
+    r = 1
+    while b > 0:
+        if b & 1:
+            r = __bigop(r, a, 2, 0)
+        b = b >> 1
+        if b > 0:
+            a = __bigop(a, a, 2, 0)
+    return r
+
+def __bnorm(x):
+    if __tag(x) == 6:
+        return int(x)
+    return x
+
+def __iovf(line):
+    __raise_rt(OverflowError("integer overflow in 64-bit int arithmetic"), line, "integer overflow in 64-bit int arithmetic (value was inferred or declared int; bigints only promote in dynamic code)")
+
 def float(x):
     t: int = __tag(x)
     if t == 5:
@@ -831,11 +1036,15 @@ def float(x):
     if t == 6:
         v: int = x
         return __itof(v & 1)
+    if t == 12:
+        return __bigtof(x)
     return __itof(x)
 
 def __add(a, b, line):
     ta: int = __tag(a)
     tb: int = __tag(b)
+    if ta == 12 or tb == 12:
+        return __binop(a, b, 0, line)
     if ta < 0 and tb < 0:
         return a - (0 - b)
     if ta == 1 and tb == 1:
@@ -855,6 +1064,12 @@ def __eq(a, b) -> int:
     tb: int = __tag(b)
     if ta == 1 and tb == 1:
         return str_eq(a, b)
+    if ta == 12 or tb == 12:
+        if ta == 5 or tb == 5:
+            return __bigtof(a) == __bigtof(b)
+        if (ta < 0 or ta == 12 or ta == 6) and (tb < 0 or tb == 12 or tb == 6):
+            return __bigcmp(__bnorm(a), __bnorm(b)) == 0
+        return 0
     if __isnum(a) and __isnum(b):
         return a == b
     if (ta == 10 and tb == 10) or (ta == 3 and tb == 3):
@@ -884,6 +1099,10 @@ def __lt(a, b) -> int:
     tb: int = __tag(b)
     if ta == 1 and tb == 1:
         return __strcmp(a, b) < 0
+    if ta == 12 or tb == 12:
+        if ta == 5 or tb == 5:
+            return __bigtof(a) < __bigtof(b)
+        return __bigcmp(__bnorm(a), __bnorm(b)) < 0
     if __isnum(a) and __isnum(b):
         return a < b
     if ta == 10 and tb == 10:
@@ -1071,10 +1290,20 @@ def __hash(k) -> int:
         while i < n:
             h = (h ^ __hash(__lst(k, i))) * 1000003
             i += 1
+    elif t == 12:
+        h = __lst(k, 0)
+        ws = __lst(k, 1)
+        nw: int = len(ws)
+        j: int = 0
+        while j < nw:
+            wv: int = __lst(ws, j)
+            h = (h ^ wv) * 1000003
+            j += 1
     elif t == 0 or t == 3 or t == 10:
         __err(0, "unhashable type")
     else:
-        h = k * -7046029254386353131
+        kv: int = k
+        h = kv * -7046029254386353131
         h = h ^ (h >> 29)
     return h | 1
 
@@ -1824,6 +2053,8 @@ def isalpha(s) -> bool:
 
 def int(x) -> int:
     t: int = __tag(x)
+    if t == 12:
+        __iovf(0)
     if t == 6:
         v: int = x
         return v & 1
@@ -1856,6 +2087,8 @@ def abs(x):
     t: int = __tag(x)
     if t == 5:
         return __math(x, 10)
+    if t == 12:
+        return __bigmk(1, __lst(x, 1))
     v: int = int(x)
     if v < 0:
         return 0 - v
@@ -1916,24 +2149,30 @@ def sum(xs):
     i: int = 0
     while i < n:
         v = __ld(d, i)
-        if __tag(v) >= 0:
-            acc = s
+        vi: int = v
+        t: int = s + vi
+        if __tag(v) >= 0 or (vi >= 0 and t < s) or (vi < 0 and t >= s):
+            acc = __add(s, 0, 0)
             while i < n:
                 acc = acc + __ld(d, i)
                 i += 1
             return acc
-        s += v
+        s = t
         i += 1
     return s
 
 def __pow(a, b):
     ta: int = __tag(a)
     tb: int = __tag(b)
+    if ta == 12 and tb != 5:
+        return __bigpow(a, int(b))
     if ta != 5 and tb != 5:
         ia: int = int(a)
         ib: int = int(b)
         if ib >= 0:
-            return __ipow(ia, ib)
+            if __powfits(ia, ib):
+                return __ipow(ia, ib)
+            return __bigpow(ia, ib)
         return __itof(1) / __ipow(ia, 0 - ib)
     if a == 0:
         if b < 0:
@@ -1951,13 +2190,28 @@ def __pow(a, b):
     return r
 
 def __ipow(a: int, b: int) -> int:
+    if b > 2 or a > 3037000499 or a < -3037000499:
+        if not __powfits(a, b):
+            __iovf(0)
     r: int = 1
     while b > 0:
         if b & 1:
             r = r * a
-        a = a * a
         b = b >> 1
+        if b > 0:
+            a = a * a
     return r
+
+def __powfits(a: int, b: int) -> int:
+    if a < 0:
+        a = 0 - a
+    if a <= 1:
+        return 1
+    k: int = 0
+    while a > 0:
+        k += 1
+        a = a >> 1
+    return k * b <= 62
 
 def __msort(d, t, lo: int, hi: int):
     if hi - lo < 2:

@@ -1222,14 +1222,29 @@ rtp_binop:
     cmp $0, %esi
     jne 1f
     add %rcx, %rax
-    jmp 9f
+    jo 2f
+    jmp 6f
 1:  cmp $1, %esi
     jne 1f
     sub %rcx, %rax
-    jmp 9f
+    jo 2f
+    jmp 6f
 1:  cmp $2, %esi
     jne 1f
     imul %rcx, %rax
+    jo 2f
+    jmp 6f
+6:  mov %rax, %rdx
+    shr $2, %rdx
+    mov $0x1000000000000000, %r10
+    cmp %r10, %rdx
+    jne 9f
+2:  pushq 24(%rsp)
+    pushq 24(%rsp)
+    pushq 24(%rsp)
+    pushq 24(%rsp)
+    call f___bigop
+    add $32, %rsp
     jmp 9f
 1:  test %rcx, %rcx
     jz 8f

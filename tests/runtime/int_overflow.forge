@@ -1,0 +1,9 @@
+def f(a: int, b: int) -> int:
+    return a * b
+
+x: int = 3037000500
+try:
+    f(x, x)
+except OverflowError as e:
+    print("caught", e)
+print(f(x, x))

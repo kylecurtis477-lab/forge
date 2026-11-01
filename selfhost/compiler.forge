@@ -1,4 +1,5 @@
 # Forge self-hosted compiler (written in Forge).
+# forge: wrapping-ints  (this file relies on 64-bit wraparound, e.g. magic-number division)
 # usage: forgec <input.forge> <output.s>
 # Pipeline: lex (prelude + user source) -> prescan (classes, functions, globals) -> compile passes.
 # Code is emitted as GNU as text. Each pass re-runs codegen with refined type facts
@@ -538,6 +539,11 @@ def lex(src, line, inner):
                     v = flt_text(substr(src, st, i))
             if isf:
                 add_tok(K_FLT, v, line)
+            elif c != 48 and (i - st > 19 or (i - st == 19 and v < 0)):
+                add_tok(K_ID, "__bigparse", line)
+                add_tok(K_OP, "(", line)
+                add_tok(K_STR, substr(src, st, i), line)
+                add_tok(K_OP, ")", line)
             else:
                 add_tok(K_NUM, v, line)
         elif is_alpha(c):
@@ -721,10 +727,11 @@ def atoi(s):
         i = 1
     v = 0
     while char_at(s, i):
-        v = v * 10 + char_at(s, i) - 48
+        if neg:
+            v = v * 10 - (char_at(s, i) - 48)
+        else:
+            v = v * 10 + char_at(s, i) - 48
         i += 1
-    if neg:
-        return 0 - v
     return v
 
 def type_of_name(t):
@@ -2259,6 +2266,27 @@ def arith_code(op):
         return 4
     return 5
 
+ovf_on = 1
+
+def set_ovf(v):
+    global ovf_on
+    ovf_on = v
+
+def ovf_check(line):
+    # typed int add/sub/mul in user code: raise OverflowError instead of wrapping
+    if pos >= PRETOK and ovf_on:
+        l = new_label()
+        e2("jno ", lab(l))
+        e3("push $", str(uline(line)), "")
+        call_internal("__iovf", 1)
+        put_label(l)
+
+def last_is_arith():
+    if nout == 0:
+        return 0
+    l = out[nout - 1]
+    return starts(l, "    add ") or starts(l, "    sub ") or starts(l, "    imul ")
+
 def call_binop(code, line):
     e3("mov $", str(code), ", %esi")
     e3("mov $", str(uline(line)), ", %edx")
@@ -2277,6 +2305,8 @@ def arith(op, start, mark, lt, rt, line):
             binop("imul", start, mark)
         else:
             divmod(start, mark, code == 5, line)
+        if code <= 2 and last_is_arith():
+            ovf_check(line)
         ety = T_INT
         return 0
     if code == 0 and (lt == T_STR or rt == T_STR):
@@ -2339,7 +2369,12 @@ def arith(op, start, mark, lt, rt, line):
         elif code == 1:
             e("sub %rcx, %rax")
         elif code == 2:
-            e("imul %rcx, %rax")
+            e("mov %rax, %rdx")
+            e("imul %rcx, %rdx")
+            e("jo 1f")
+            e("bt $62, %rdx")
+            e("jc 1f")
+            e("mov %rdx, %rax")
         else:
             e("test %rcx, %rcx")
             e("jz 1f")
@@ -2480,7 +2515,9 @@ def unary_expr():
 
 def power_expr():
     global pos, ety
+    b0 = pos
     postfix_expr()
+    litb = tk[b0] == K_NUM and pos == b0 + 1
     if is_op("**"):
         pos += 1
         lt = ety
@@ -2489,7 +2526,7 @@ def power_expr():
         unary_expr()
         rt = ety
         e("push %rax")
-        if lt == T_INT and rt == T_INT and tk[p0] == K_NUM:
+        if lt == T_INT and rt == T_INT and tk[p0] == K_NUM and not litb and tv[p0] <= 3 and pos == p0 + 1:
             call_internal("__ipow", 2)
             ety = T_INT
             return 0
@@ -4244,6 +4281,8 @@ def stmt_aug(line, ap):
                         e3(concat(ins, "q "), src, concat(", ", r))
                 else:
                     e3(concat(ins, "q "), "%rax", concat(", ", r))
+                if str_eq(ins, "add") or str_eq(ins, "sub"):
+                    ovf_check(line)
                 end_stmt()
                 return 0
             nout = mark
@@ -5429,6 +5468,7 @@ def reach_all():
     mark_root("__eq", 2, 1)
     mark_root("__truth", 1, 1)
     mark_root("__binop", 4, 1)
+    mark_root("__bigop", 4, 1)
     mark_root("__cmpop", 3, 1)
     mark_root("__ffloordiv", 2, 1)
     mark_root("__neg", 1, 1)
@@ -5977,6 +6017,8 @@ def forge_main():
     while sl >= 0 and char_at(path, sl) != 47:
         sl -= 1
     load_imports(src, substr(path, 0, sl + 1))
+    if contains(src, concat("# forge: ", "wrapping-ints")):
+        set_ovf(0)
     lex(src, 1, 0)
     add_tok(K_EOF, 0, 0)
     rewrite_tokens()
