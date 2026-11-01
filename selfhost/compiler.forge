@@ -312,11 +312,47 @@ def lex_fstring(src, i, q, line, buf):
                     while j < n and char_at(src, j) != c:
                         j += 1
                 j += 1
+            ee = j
+            conv = 0
+            colon = -1
+            m = i + 1
+            dep = 0
+            while m < j:
+                c = char_at(src, m)
+                if c == ord("(") or c == ord("[") or c == ord("{"):
+                    dep += 1
+                elif c == ord(")") or c == ord("]") or c == ord("}"):
+                    dep -= 1
+                elif c == 34 or c == 39:
+                    m += 1
+                    while m < j and char_at(src, m) != c:
+                        m += 1
+                elif dep == 0 and c == ord("!") and m + 1 < j and char_at(src, m + 1) != ord("="):
+                    conv = char_at(src, m + 1)
+                    ee = m
+                    if m + 2 < j and char_at(src, m + 2) == ord(":"):
+                        colon = m + 2
+                    m = j
+                elif dep == 0 and c == ord(":"):
+                    colon = m
+                    ee = m
+                    m = j
+                m += 1
             add_tok(K_OP, "+", line)
-            add_tok(K_ID, "str", line)
+            if colon >= 0:
+                add_tok(K_ID, "__format", line)
+                add_tok(K_OP, "(", line)
+            if conv == ord("r"):
+                add_tok(K_ID, "repr", line)
+            elif colon < 0 or conv == ord("s"):
+                add_tok(K_ID, "str", line)
             add_tok(K_OP, "(", line)
-            lex(substr(src, i + 1, j), line, 1)
+            lex(substr(src, i + 1, ee), line, 1)
             add_tok(K_OP, ")", line)
+            if colon >= 0:
+                add_tok(K_OP, ",", line)
+                add_tok(K_STR, substr(src, colon + 1, j), line)
+                add_tok(K_OP, ")", line)
             i = j + 1
         else:
             if d == 92:
@@ -2118,6 +2154,14 @@ def arith(op, start, mark, lt, rt, line):
         e("push %rax")
         e("push %rcx")
         call_rt("rt_concat", 2)
+        ety = T_STR
+        return 0
+    if code == 5 and lt == T_STR:
+        lr(start, mark)
+        e("push %rax")
+        e("push %rcx")
+        e3("push $", str(uline(line)), "")
+        call_internal("__pctfmt", 3)
         ety = T_STR
         return 0
     if code == 0 and (lt == T_LIST or rt == T_LIST):

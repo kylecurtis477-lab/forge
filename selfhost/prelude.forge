@@ -308,6 +308,8 @@ def __binop(a, b, op: int, line):
             return __list_mul(a, int(b))
         if tb == 0 and __isnum(a):
             return __list_mul(b, int(a))
+    if op == 5 and __tag(a) == 1:
+        return __pctfmt(a, b, line)
     names = ["+", "-", "*", "/", "//", "%"]
     __err(line, concat(concat("unsupported operand type(s) for ", __lst(names, op)), ""))
 
@@ -1411,3 +1413,541 @@ def index(xs, x) -> int:
             return i
         i += 1
     __err(0, "value not in list")
+
+# ---- float formatting: exact decimal conversion via bignums ----
+def __bn_shr(a, k: int):
+    w: int = k >> 5
+    b: int = k & 31
+    n: int = len(a)
+    r = []
+    i: int = w
+    while i < n:
+        x: int = a[i]
+        t: int = x >> b
+        if i + 1 < n and b > 0:
+            y: int = a[i + 1]
+            t = t | ((y << (32 - b)) & 4294967295)
+        append(r, t)
+        i += 1
+    return __bn_norm(r)
+
+def __bn_divs(a, d: int):
+    n: int = len(a)
+    q = __list_mul([0], n)
+    r: int = 0
+    i: int = n - 1
+    while i >= 0:
+        x: int = a[i]
+        cur: int = (r << 32) | x
+        q[i] = cur // d
+        r = cur % d
+        i -= 1
+    return [__bn_norm(q), r]
+
+def __bn_divmod(a, b):
+    if __bn_cmp(a, b) < 0:
+        return [[], a]
+    if len(b) == 1:
+        y: int = b[0]
+        if y < 2147483648:
+            qr = __bn_divs(a, y)
+            return [qr[0], __bn(qr[1])]
+    nbits: int = __bn_bitlen(a)
+    r = []
+    q = __list_mul([0], len(a))
+    i: int = nbits - 1
+    while i >= 0:
+        r = __bn_shl(r, 1)
+        x: int = a[i >> 5]
+        if (x >> (i & 31)) & 1:
+            if len(r) == 0:
+                r = [1]
+            else:
+                z: int = r[0]
+                r[0] = z | 1
+        if __bn_cmp(r, b) >= 0:
+            r = __bn_sub(r, b)
+            w: int = q[i >> 5]
+            q[i >> 5] = w | (1 << (i & 31))
+        i -= 1
+    return [__bn_norm(q), r]
+
+def __bn_str(a) -> str:
+    if len(a) == 0:
+        return "0"
+    parts = []
+    while len(a) > 0:
+        qr = __bn_divs(a, 1000000000)
+        a = qr[0]
+        s: str = __itos(qr[1])
+        if len(a) > 0:
+            s = concat(__strmul("0", 9 - len(s)), s)
+        append(parts, s)
+    out: str = ""
+    i: int = len(parts) - 1
+    while i >= 0:
+        out = concat(out, parts[i])
+        i -= 1
+    return out
+
+def __fscaled(x, k: int):
+    # round-half-even of |x| * 10**k as a bignum
+    bits: int = __fbits(x)
+    er: int = (bits >> 52) & 2047
+    m: int = bits & 4503599627370495
+    e: int = -1074
+    if er > 0:
+        m = m | 4503599627370496
+        e = er - 1075
+    num = __bn(m)
+    den = [1]
+    if e >= 0:
+        num = __bn_shl(num, e)
+    else:
+        den = __bn_shl(den, 0 - e)
+    if k >= 0:
+        num = __bn_mulpow(num, k)
+    else:
+        den = __bn_mulpow(den, 0 - k)
+    if len(num) == 0:
+        return []
+    if e < 0 and k >= 0:
+        q = __bn_shr(num, 0 - e)
+        r = __bn_sub(num, __bn_shl(q, 0 - e))
+    else:
+        qr = __bn_divmod(num, den)
+        q = qr[0]
+        r = qr[1]
+    c: int = __bn_cmp(__bn_shl(r, 1), den)
+    if len(r) == 0:
+        c = -1
+    if c > 0 or (c == 0 and len(q) > 0 and (__lst(q, 0) & 1)):
+        q = __bn_add(q, [1])
+    return q
+
+def __fspecial(x) -> int:
+    return ((__fbits(x) >> 52) & 2047) == 2047
+
+def __ffix(x, p: int) -> str:
+    if __fspecial(x):
+        return __frepr(__math(x, 10))
+    d: str = __bn_str(__fscaled(x, p))
+    if p == 0:
+        return d
+    if len(d) <= p:
+        d = concat(__strmul("0", p + 1 - len(d)), d)
+    n: int = len(d)
+    return concat(concat(substr(d, 0, n - p), "."), substr(d, n - p, n))
+
+def __fexpd(x, p: int):
+    # [digits (p+1 of them), exponent]
+    if __fbits(x) << 1 == 0:
+        return [__strmul("0", p + 1), 0]
+    ex: int = __ftoi(__math(__math(__math(x, 10), 9), 1), 0)
+    while True:
+        q: str = __bn_str(__fscaled(x, p - ex))
+        if len(q) > p + 1:
+            ex += 1
+        elif len(q) < p + 1:
+            ex -= 1
+        else:
+            return [q, ex]
+
+def __fexp(x, p: int, alt: int, up: int) -> str:
+    if __fspecial(x):
+        return __frepr(__math(x, 10))
+    de = __fexpd(x, p)
+    q: str = de[0]
+    ex: int = de[1]
+    s: str = substr(q, 0, 1)
+    if p > 0 or alt:
+        s = concat(concat(s, "."), substr(q, 1, len(q)))
+    return concat(s, __fexps(ex, up))
+
+def __fexps(ex: int, up: int) -> str:
+    s: str = "e"
+    if up:
+        s = "E"
+    if ex < 0:
+        s = concat(s, "-")
+        ex = 0 - ex
+    else:
+        s = concat(s, "+")
+    if ex < 10:
+        s = concat(s, "0")
+    return concat(s, __itos(ex))
+
+def __strip0(s: str) -> str:
+    if __find(s, ".", 0) < 0:
+        return s
+    n: int = len(s)
+    while n > 0 and char_at(s, n - 1) == 48:
+        n -= 1
+    if n > 0 and char_at(s, n - 1) == 46:
+        n -= 1
+    return substr(s, 0, n)
+
+def __fgen(x, p: int, alt: int, up: int) -> str:
+    if __fspecial(x):
+        return __frepr(__math(x, 10))
+    if p == 0:
+        p = 1
+    de = __fexpd(x, p - 1)
+    ex: int = de[1]
+    if ex >= -4 and ex < p:
+        s: str = __ffix(x, p - 1 - ex)
+        if alt:
+            return s
+        return __strip0(s)
+    q: str = de[0]
+    m: str = substr(q, 0, 1)
+    if len(q) > 1:
+        m = concat(concat(m, "."), substr(q, 1, len(q)))
+    if not alt:
+        m = __strip0(m)
+    return concat(m, __fexps(ex, up))
+
+def round(x):
+    if __tag(x) == 5:
+        return __ftoi(x, 2)
+    return int(x)
+
+def round__2(x, n: int):
+    if __tag(x) == 5:
+        if __fspecial(x) or n > 300:
+            return x
+        if n < -308:
+            return __ffrombits(__fbits(x) & (1 << 63))
+        neg: int = __fbits(x) < 0
+        s: str = "0"
+        if n >= 0:
+            s = __ffix(x, n)
+        else:
+            s = concat(__bn_str(__fscaled(x, n)), __strmul("0", 0 - n))
+        v = __fparse(s, 0)
+        if neg:
+            return __neg(v)
+        return v
+    v: int = int(x)
+    if n >= 0:
+        return v
+    p: int = __ipow(10, 0 - n)
+    r: int = v % p
+    b: int = v - r
+    if r * 2 > p or (r * 2 == p and (b // p) % 2 == 1):
+        b += p
+    return b
+
+def __grp(s: str, sep: str) -> str:
+    n: int = len(s)
+    out: str = ""
+    i: int = 0
+    while i < n:
+        if i > 0 and (n - i) % 3 == 0:
+            out = concat(out, sep)
+        out = concat(out, substr(s, i, i + 1))
+        i += 1
+    return out
+
+def __radix(v: int, b: int, up: int) -> str:
+    if v == 0:
+        return "0"
+    dg: str = "0123456789abcdef"
+    if up:
+        dg = "0123456789ABCDEF"
+    s: str = ""
+    while v > 0:
+        s = concat(substr(dg, v % b, v % b + 1), s)
+        v = v // b
+    return s
+
+def __isdig(c: int) -> int:
+    return c >= 48 and c <= 57
+
+def format(x):
+    return __str(x)
+
+def format__2(x, spec):
+    return __format(x, spec)
+
+def __format(x, spec) -> str:
+    n: int = len(spec)
+    if n == 0:
+        return __str(x)
+    fill: str = " "
+    align: int = 0
+    sign: int = 45
+    alt: int = 0
+    width: int = 0
+    grp: str = ""
+    prec: int = -1
+    typ: int = 0
+    i: int = 0
+    if n >= 2 and __find("<>^=", substr(spec, 1, 2), 0) >= 0:
+        fill = substr(spec, 0, 1)
+        align = char_at(spec, 1)
+        i = 2
+    elif __find("<>^=", substr(spec, 0, 1), 0) >= 0:
+        align = char_at(spec, 0)
+        i = 1
+    if i < n and (char_at(spec, i) == 43 or char_at(spec, i) == 45 or char_at(spec, i) == 32):
+        sign = char_at(spec, i)
+        i += 1
+    if i < n and char_at(spec, i) == 35:
+        alt = 1
+        i += 1
+    if i < n and char_at(spec, i) == 48:
+        if align == 0:
+            fill = "0"
+            align = 61
+        i += 1
+    while i < n and __isdig(char_at(spec, i)):
+        width = width * 10 + char_at(spec, i) - 48
+        i += 1
+    if i < n and (char_at(spec, i) == 44 or char_at(spec, i) == 95):
+        grp = substr(spec, i, i + 1)
+        i += 1
+    if i < n and char_at(spec, i) == 46:
+        i += 1
+        prec = 0
+        while i < n and __isdig(char_at(spec, i)):
+            prec = prec * 10 + char_at(spec, i) - 48
+            i += 1
+    if i < n:
+        typ = char_at(spec, i)
+    t: int = __tag(x)
+    neg: int = 0
+    body: str = ""
+    numeric: int = 1
+    if t == 1 or (typ == 0 and t != 5 and t >= 0) or typ == 115:
+        numeric = 0
+        body = __str(x)
+        if prec >= 0:
+            body = substr(body, 0, prec)
+    elif t == 5 or typ == 102 or typ == 70 or typ == 101 or typ == 69 or typ == 103 or typ == 71 or typ == 37:
+        f = float(x)
+        neg = __fbits(f) < 0
+        a = __math(f, 10)
+        if typ == 102 or typ == 70:
+            if prec < 0:
+                prec = 6
+            body = __ffix(a, prec)
+            if alt and prec == 0:
+                body = concat(body, ".")
+        elif typ == 101 or typ == 69:
+            if prec < 0:
+                prec = 6
+            body = __fexp(a, prec, alt, typ == 69)
+        elif typ == 37:
+            if prec < 0:
+                prec = 6
+            body = concat(__ffix(a * 100.0, prec), "%")
+        elif typ == 103 or typ == 71:
+            if prec < 0:
+                prec = 6
+            body = __fgen(a, prec, alt, typ == 71)
+        elif prec >= 0:
+            body = __fgen(a, prec, alt, 0)
+            if __find(body, ".", 0) < 0 and __find(body, "e", 0) < 0 and __find(body, "n", 0) < 0:
+                body = concat(body, ".0")
+        else:
+            body = __frepr(a)
+        if typ == 70 or typ == 69 or typ == 71:
+            body = upper(body)
+        if grp != "":
+            k: int = __find(body, ".", 0)
+            if k < 0:
+                k = __find(body, "e", 0)
+            if k < 0:
+                k = len(body)
+            if __isdig(char_at(body, 0)):
+                body = concat(__grp(substr(body, 0, k), grp), substr(body, k, len(body)))
+    else:
+        v: int = int(x)
+        if v < 0:
+            neg = 1
+            v = 0 - v
+        if typ == 120 or typ == 88:
+            body = __radix(v, 16, typ == 88)
+            if alt:
+                body = concat(concat("0", substr(spec, n - 1, n)), body)
+        elif typ == 111:
+            body = __radix(v, 8, 0)
+            if alt:
+                body = concat("0o", body)
+        elif typ == 98:
+            body = __radix(v, 2, 0)
+            if alt:
+                body = concat("0b", body)
+        elif typ == 99:
+            body = chr(v)
+        else:
+            body = __itos(v)
+            if grp != "":
+                body = __grp(body, grp)
+    pre: str = ""
+    if numeric:
+        if neg:
+            pre = "-"
+        elif sign == 43:
+            pre = "+"
+        elif sign == 32:
+            pre = " "
+    if align == 0:
+        align = 60
+        if numeric:
+            align = 62
+    pad: int = width - len(pre) - len(body)
+    if pad <= 0:
+        return concat(pre, body)
+    if align == 60:
+        return concat(concat(pre, body), __strmul(fill, pad))
+    if align == 62:
+        return concat(__strmul(fill, pad), concat(pre, body))
+    if align == 94:
+        return concat(concat(__strmul(fill, pad // 2), concat(pre, body)), __strmul(fill, pad - pad // 2))
+    return concat(concat(pre, __strmul(fill, pad)), body)
+
+def __pctfmt(s, args, line) -> str:
+    if __tag(args) != 0:
+        args = [args]
+    out: str = ""
+    n: int = len(s)
+    i: int = 0
+    j: int = 0
+    while i < n:
+        c: int = char_at(s, i)
+        if c != 37:
+            k: int = __find(s, "%", i)
+            if k < 0:
+                k = n
+            out = concat(out, substr(s, i, k))
+            i = k
+            continue
+        i += 1
+        if i < n and char_at(s, i) == 37:
+            out = concat(out, "%")
+            i += 1
+            continue
+        st: int = i
+        while i < n and __find("-+ #0123456789.", substr(s, i, i + 1), 0) >= 0:
+            i += 1
+        fl: str = substr(s, st, i)
+        ty: int = char_at(s, i)
+        i += 1
+        if j >= len(args):
+            __err(line, "not enough arguments for format string")
+        a = args[j]
+        j += 1
+        if __find(fl, "-", 0) >= 0:
+            fl = concat("<", replace(fl, "-", ""))
+        if ty == 115:
+            out = concat(out, __format(__str(a), fl))
+        elif ty == 114:
+            out = concat(out, __format(__repr(a), fl))
+        elif ty == 100 or ty == 105 or ty == 117:
+            out = concat(out, __format(int(a), concat(fl, "d")))
+        else:
+            out = concat(out, __format(a, concat(fl, chr(ty))))
+    if j < len(args):
+        __err(line, "not all arguments converted during string formatting")
+    return out
+
+# ---- math module (math.f / from math import f map to __math_f) ----
+def __fl(x):
+    if __tag(x) == 5:
+        return x
+    return float(x)
+
+def __math_sqrt(x):
+    f = __fl(x)
+    if f < 0.0:
+        raise ValueError("math domain error")
+    return __math(f, 0)
+
+def __math_floor(x) -> int:
+    if __tag(x) != 5:
+        return int(x)
+    return __ftoi(x, 1)
+
+def __math_ceil(x) -> int:
+    if __tag(x) != 5:
+        return int(x)
+    return 0 - __ftoi(__neg(x), 1)
+
+def __math_trunc(x) -> int:
+    return int(x)
+
+def __math_sin(x):
+    return __math(__fl(x), 2)
+
+def __math_cos(x):
+    return __math(__fl(x), 3)
+
+def __math_tan(x):
+    return __math(__fl(x), 4)
+
+def __math_atan(x):
+    return __math(__fl(x), 5)
+
+def __math_atan2(y, x):
+    return __math2(__fl(y), __fl(x), 0)
+
+def __math_exp(x):
+    return __math(__fl(x), 6)
+
+def __math_log(x):
+    f = __fl(x)
+    if f <= 0.0:
+        raise ValueError("math domain error")
+    return __math(f, 7)
+
+def __math_log__2(x, b):
+    return __math_log(x) / __math_log(b)
+
+def __math_log2(x):
+    f = __fl(x)
+    if f <= 0.0:
+        raise ValueError("math domain error")
+    return __math(f, 8)
+
+def __math_log10(x):
+    f = __fl(x)
+    if f <= 0.0:
+        raise ValueError("math domain error")
+    return __math(f, 9)
+
+def __math_fabs(x):
+    return __math(__fl(x), 10)
+
+def __math_pow(x, y):
+    return __fl(__pow(__fl(x), __fl(y)))
+
+def __math_hypot(x, y):
+    a = __fl(x)
+    b = __fl(y)
+    return __math(a * a + b * b, 0)
+
+def __math_isnan(x) -> bool:
+    f = __fl(x)
+    return f != f
+
+def __math_isinf(x) -> bool:
+    return __fspecial(__fl(x)) and (__fbits(__fl(x)) & 4503599627370495) == 0
+
+def __math_isfinite(x) -> bool:
+    return not __fspecial(__fl(x))
+
+def __math_nan():
+    return __ffrombits(9221120237041090560)
+
+def __math_gcd(a: int, b: int) -> int:
+    if a < 0:
+        a = 0 - a
+    if b < 0:
+        b = 0 - b
+    while b != 0:
+        t: int = a % b
+        a = b
+        b = t
+    return a
