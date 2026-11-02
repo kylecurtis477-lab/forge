@@ -792,8 +792,10 @@ def drv_test():
 def shell_test():
     # the interactive shell from \EFI\Forge\bin\sh; the boot test types its commands
     input_init()
+    # the block driver runs as a supervised ring-3 service for the whole shell session
     f0 = frames_free
     h0 = heap_live
+    blkd_supervised_start(blkd_img, blkd_sz)
     sz: u64 = 0
     img = fs_read_file("/EFI/Forge/bin/sh", addr(sz))
     if img == 0:
@@ -827,6 +829,7 @@ def shell_test():
     puts(" sleeps, ")
     put_u64(vb_polled)
     puts(" polled\n")
+    blkd_supervised_stop()
     puts("shell session: frames leaked ")
     put_u64(f0 - frames_free)
     puts(", heap leaked ")
@@ -834,6 +837,16 @@ def shell_test():
     putc(10)
     if frames_free != f0 or heap_live != h0:
         panic("shell session leaked memory")
+    puts("supervisor: blkd restarts ")
+    put_u64(sup_restarts)
+    puts(", requests served by blkd ")
+    put_u64(drv_served)
+    puts(", replayed ")
+    put_u64(drv_replays)
+    putc(10)
+    if sup_restarts != 1 or drv_replays != 1:
+        panic("driver restart test failed")
+    puts("supervised driver restart OK\n")
     if vb_msix == 0 or vb_irqs == 0 or vb_sleeps == 0:
         panic("virtio-blk interrupts not used")
     if code != 0 or kbd_irqs == 0 or com_irqs == 0:

@@ -53,6 +53,10 @@ def vb_read_drv(lba: u64, n: u64, dst: u64) -> u64:
         if blk_crash_next:
             rq_flags = 1
             blk_crash_next = 0
+        if blk_crash_after != 0:
+            blk_crash_after -= 1
+            if blk_crash_after == 0:
+                rq_flags = 1
         rq_state = RQ_POSTED
         wq_wake_all_l(addr(rq_drvq))
         while rq_state != RQ_DONE:
@@ -76,10 +80,13 @@ def drv_died(p: ptr[Proc]):
     outb(u16(vb_io + VIO_STATUS), 0)       # device reset: stops all DMA into the driver's frames
     blkd_up = 0
     drv_deaths += 1
-    if rq_state == RQ_TAKEN or rq_state == RQ_POSTED:
+    if (rq_flags & 2) != 0:
+        rq_state = RQ_IDLE
+    elif rq_state == RQ_TAKEN or rq_state == RQ_POSTED:
         if blkd_replay:
             rq_state = RQ_POSTED
             drv_replays += 1
+            rq_flags = rq_flags & ~u64(1)  # an injected fault is one-shot
         else:
             rq_status = EIO
             rq_state = RQ_DONE
@@ -94,6 +101,10 @@ def drv_port_ok(port: u64, w: u64) -> u64:
 
 def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
     p = cur_proc()
+    if nr == 408:
+        # test hook (any process): make the block driver crash on the a-th next request
+        blk_crash_after = a
+        return 0
     if u64(p) == 0 or p.drv != DRV_BLK:
         return EPERM
     if nr == 400:
@@ -219,3 +230,118 @@ def blkd_start(img: u64, sz: u64) -> ptr[Thread]:
         blkd_mode = 1
     mutex_unlock(addr(vb_m))
     return t
+
+# ---- Supervisor (Phase 2.3) ----
+# A kernel thread waits for the driver's death, reaps it, and respawns it from the cached image.
+# The kernel keeps the request journal (the IPC slot): a request the dead driver had taken is put
+# back to POSTED, so the new instance replays it. Block reads are idempotent and replies carry the
+# request's sequence number, so a late reply from an old instance can never complete a newer request.
+# The device is the driver's only state and is reset + re-initialised on every start; the restart
+# generation and the journal position are handed to the new instance as its arguments.
+SUP_MAX_RESTARTS = 5
+sup_img: u64
+sup_sz: u64
+sup_stop: u64
+sup_restarts: u64
+sup_thread: u64
+blkd_thread: u64
+blk_crash_after: u64  # fault injection: crash on the n-th next request (0 = off)
+
+def blkd_spawn(args: ptr[u8]) -> ptr[Thread]:
+    spawn_drv = DRV_BLK
+    t = proc_spawn_args(sup_img, sup_sz, args)
+    spawn_drv = 0
+    return t
+
+def supervisor(arg: u64):
+    while 1:
+        f = irq_save()
+        spin_lock(u64(addr(rq_lock)))
+        while blkd_up:
+            wq_block_l(addr(drv_supq))
+        spin_unlock(u64(addr(rq_lock)))
+        irq_restore(f)
+        old = ptr[Thread](blkd_thread)
+        code = proc_reap(old)
+        if sup_stop:
+            return
+        sup_restarts += 1
+        if sup_restarts > SUP_MAX_RESTARTS:
+            puts("supervisor: blkd keeps dying, giving up\n")
+            f = irq_save()
+            spin_lock(u64(addr(rq_lock)))
+            blkd_replay = 0
+            if rq_state == RQ_POSTED:
+                rq_status = EIO
+                rq_state = RQ_DONE
+                wq_wake_all_l(addr(rq_cliq))
+            spin_unlock(u64(addr(rq_lock)))
+            irq_restore(f)
+            return
+        a: u8[64]
+        memset(u64(addr(a[0])), 0, 64)
+        memcpy(u64(addr(a[0])), u64("restart "), 8)
+        a[8] = u8(48 + sup_restarts)
+        puts("supervisor: blkd (pid ")
+        put_u64(old.id)
+        puts(") died with ")
+        put_hex8(code)
+        puts(", restart ")
+        put_u64(sup_restarts)
+        puts(", replaying request ")
+        put_u64(rq_seq)
+        putc(10)
+        t = blkd_spawn(addr(a[0]))
+        if u64(t) == 0:
+            panic("supervisor: blkd image rejected")
+        f = irq_save()
+        spin_lock(u64(addr(rq_lock)))
+        blkd_thread = u64(t)
+        blkd_pid = t.id
+        blkd_up = 1
+        spin_unlock(u64(addr(rq_lock)))
+        irq_restore(f)
+
+def blkd_supervised_start(img: u64, sz: u64):
+    sup_img = img
+    sup_sz = sz
+    sup_stop = 0
+    sup_restarts = 0
+    if rq_buf == 0:
+        rq_buf = kmalloc(4096)
+    mutex_lock(addr(vb_m))
+    blkd_replay = 1
+    t = blkd_spawn("")
+    if u64(t) == 0:
+        panic("blkd rejected by the ELF loader")
+    blkd_thread = u64(t)
+    blkd_pid = t.id
+    blkd_up = 1
+    blkd_mode = 1
+    mutex_unlock(addr(vb_m))
+    sup_thread = u64(thread_spawn(u64(supervisor), 0))
+
+def blkd_supervised_stop():
+    # ask the driver to exit (request flag 2); the supervisor sees sup_stop and returns
+    sup_stop = 1
+    mutex_lock(addr(vb_m))
+    f = irq_save()
+    spin_lock(u64(addr(rq_lock)))
+    rq_seq += 1
+    rq_n = 0
+    rq_flags = 2
+    rq_state = RQ_POSTED
+    wq_wake_all_l(addr(rq_drvq))
+    spin_unlock(u64(addr(rq_lock)))
+    irq_restore(f)
+    mutex_unlock(addr(vb_m))
+    thread_reap(ptr[Thread](sup_thread))
+    f = irq_save()
+    spin_lock(u64(addr(rq_lock)))
+    rq_state = RQ_IDLE
+    blkd_replay = 0
+    spin_unlock(u64(addr(rq_lock)))
+    irq_restore(f)
+    vb_reinit()
+    kfree(rq_buf)
+    rq_buf = 0

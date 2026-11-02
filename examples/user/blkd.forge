@@ -51,12 +51,20 @@ def _start():
     out_u64(qsz)
     out(", DMA ")
     out_u64(np)
-    out(" pages\n")
+    out(" pages")
+    av0: u8[64]
+    na = sys_getargs(u64(addr(av0[0])), 64)
+    if is_err(na) == 0 and na > 0:
+        out(", ")
+        out(addr(av0[0]))
+    out("\n")
     flush()
     m: u64[4]
     last: u64 = 0
     while 1:
         syscall3(405, u64(addr(m[0])), 0, 0)
+        if m[3] & 2:
+            sys_exit(0)
         vstore64(req, 0)
         vstore64(req + 8, m[1])
         vstore64(req + 64, 0xFF)

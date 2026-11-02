@@ -1,0 +1,48 @@
+# forge: no-runtime
+# sum FILE: read a file through the VFS and print its size and FNV-1a 64 hash (the boot test compares
+# it with the hash computed on the host).
+include "ulib.fsi"
+
+buf: u8[700]
+
+def hex(v: u64):
+    d: u8[17]
+    i: u64 = 0
+    while i < 16:
+        x = (v >> (60 - 4 * i)) & 15
+        if x < 10:
+            d[i] = u8(48 + x)
+        else:
+            d[i] = u8(87 + x)
+        i += 1
+    d[16] = 0
+    out(addr(d[0]))
+
+@export
+def _start():
+    av: u8[128]
+    sys_getargs(u64(addr(av[0])), 128)
+    fd = sys_open(addr(av[0]))
+    if is_err(fd):
+        out("sum: no such file\n")
+        flush()
+        sys_exit(1)
+    h: u64 = 0xcbf29ce484222325
+    tot: u64 = 0
+    while 1:
+        n = sys_read(fd, u64(addr(buf[0])), 700)
+        if n == 0 or is_err(n):
+            break
+        i: u64 = 0
+        while i < n:
+            h = (h ^ u64(buf[i])) * 0x100000001b3
+            i += 1
+        tot += n
+    sys_close(fd)
+    out("sum: ")
+    out_u64(tot)
+    out(" bytes fnv1a64=")
+    hex(h)
+    out("\n")
+    flush()
+    sys_exit(0)

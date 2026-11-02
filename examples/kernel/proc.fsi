@@ -825,7 +825,7 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         if a == 3:
             return u64(smep_on) | (u64(smap_on) << 1)
         return EINVAL
-    if nr >= 400 and nr <= 407:
+    if nr >= 400 and nr <= 408:
         return sys_drv(nr, a, b, c)
     if nr == 300:
         # getargs(buf, n): the argument string given to exec

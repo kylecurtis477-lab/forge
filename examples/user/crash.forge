@@ -1,0 +1,19 @@
+# forge: no-runtime
+# crash N: fault injection for the boot test -- the block driver service dies on the N-th next request.
+include "ulib.fsi"
+
+@export
+def _start():
+    av: u8[32]
+    sys_getargs(u64(addr(av[0])), 32)
+    n: u64 = 0
+    i: u64 = 0
+    while av[i] >= 48 and av[i] <= 57:
+        n = n * 10 + u64(av[i]) - 48
+        i += 1
+    syscall3(408, n, 0, 0)
+    out("crash: block driver will die on request ")
+    out_u64(n)
+    out("\n")
+    flush()
+    sys_exit(0)

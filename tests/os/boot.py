@@ -53,7 +53,8 @@ def decode_row(path, n, row=0):
 # Interactive shell script: after the n-th "sh$ " prompt, type line n. 'k' lines are typed on the
 # PS/2 keyboard through the QEMU monitor (sendkey), 's' lines arrive on COM1 (serial RX interrupt).
 SCRIPT = [('k', 'ls'), ('s', 'cat /efi/forge/docs/Long File Name Notes.txt'), ('k', 'forktest'),
-          ('s', 'hello a b'), ('k', 'nosuch'), ('k', 'ls /EFI/Forge'), ('s', 'exit')]
+          ('s', 'hello a b'), ('k', 'nosuch'), ('k', 'ls /EFI/Forge'), ('s', 'crash 40'),
+          ('s', 'sum /efi/forge/docs/big.bin'), ('s', 'exit')]
 KEYS = {' ': 'spc', '/': 'slash', '-': 'minus', '.': 'dot', '\n': 'ret'}
 
 def type_keys(line):
