@@ -47,6 +47,7 @@ struct Proc:
     drv: u64
     dma_pa: u64
     dma_n: u64
+    caps: u64  # Phase 6.2: capabilities granted from the sealed manifest
 
 procs: u64[64]
 kx_freeze: u64  # a kexec handoff is collecting every user process at a syscall boundary
@@ -570,6 +571,7 @@ def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> nptr[Thread]:
     map_ustack(pml4)
     p = proc_new(0)
     p.pml4 = pml4
+    p.caps = vc & CAPB_ALL
     p.drv = spawn_drv
     p.brk_base = page_up(elf_end)
     p.brk = p.brk_base
@@ -692,6 +694,7 @@ def sys_fork(frame: u64) -> u64:
     c.brk_base = p.brk_base
     c.brk = p.brk
     c.mmap_next = p.mmap_next
+    c.caps = p.caps
     memcpy(u64(addr(c.args[0])), u64(addr(p.args[0])), 128)
     i = 0
     while i < NFD:
@@ -772,6 +775,7 @@ def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
     p.brk_base = page_up(elf_end)
     p.brk = p.brk_base
     p.mmap_next = MMAP_BASE
+    p.caps = p.caps & vc & CAPB_ALL  # never more than the parent held
     memcpy(u64(addr(p.args[0])), u64(addr(args[0])), 128)
     # fresh registers: rip = entry, rsp = top of the new stack, everything else zero
     memset(frame, 0, SF_SIZE)
@@ -1178,6 +1182,11 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
     st.sc[4] = d
     if kx_should_park():
         kx_park()
+    need = sys_need(nr)
+    if need != 0:
+        sp = cur_proc()
+        if (sp.caps & need) == 0:
+            return cap_sys_deny(sp, nr, need)
     if nr == 0:
         return sys_read(a, b, c)
     if nr == 1:

@@ -832,6 +832,7 @@ def fs_test():
     if code != (id & 0xFF):
         panic("init from disk failed")
     seal_test()
+    cap_test()
     puts("PCI + virtio-blk + FAT32 (read-only) OK\n")
 
 def kabi_future_probe() -> u64:

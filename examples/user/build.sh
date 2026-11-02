@@ -6,7 +6,7 @@ B=../../build/user; mkdir -p $B
 # Phase 6.1 sealing key: generated once per build tree, never committed; the kernel embeds it
 K=$B/seal.key
 [ -s $K ] || head -c 32 /dev/urandom > $K
-for p in hello fault sh cat forktest blkd crash sum bg captest chantest sbtest wxtest; do
+for p in hello fault sh cat forktest blkd crash sum bg captest chantest sbtest wxtest capdeny; do
   ../../build/forgec $p.forge $B/$p.s $FORGEC_FLAGS
   as -o $B/$p.o $B/$p.s
   ld -static -nostdlib -e _start -z noexecstack -z separate-code -o $B/$p.elf $B/$p.o

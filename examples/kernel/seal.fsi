@@ -260,3 +260,74 @@ def seal_test():
     if seal_refused - n0 != 3:
         panic("seal refusals not counted")
     puts("proof manifest: 3 sealed images accepted with their declared caps; unsealed, tampered and forged images refused\n")
+
+# ---- Phase 6.2: the kernel grants exactly the declared capabilities ----
+CAPB_FS = 1
+CAPB_SPAWN = 2
+CAPB_IPC = 4
+CAPB_DRV = 8
+CAPB_KEXEC = 16
+CAPB_PROBE = 32
+CAPB_KTEST = 64
+CAPB_ALL = 127
+cap_sys_denials: u64
+
+def sys_need(nr: u64) -> u64:
+# the capability a syscall needs; 0 = base syscall (read/write/close/mmap/brk/exit/getpid/...)
+    if nr == 2 or nr == 4 or nr == 78 or nr == 421:
+        return CAPB_FS
+    if nr == 57 or nr == 59 or nr == 61 or nr == 426:
+        return CAPB_SPAWN
+    if nr >= 423 and nr <= 425:
+        return CAPB_IPC
+    if nr >= 400 and nr <= 407:
+        return CAPB_DRV
+    if nr == 408:
+        return CAPB_KTEST
+    if nr == 409:
+        return CAPB_KEXEC
+    if nr == 200:
+        return CAPB_PROBE
+    return 0
+
+def cap_name(c: u64) -> ptr[u8]:
+    if c == CAPB_FS:
+        return "fs"
+    if c == CAPB_SPAWN:
+        return "spawn"
+    if c == CAPB_IPC:
+        return "ipc"
+    if c == CAPB_DRV:
+        return "drv"
+    if c == CAPB_KEXEC:
+        return "kexec"
+    if c == CAPB_PROBE:
+        return "probe"
+    return "ktest"
+
+def cap_sys_deny(p: ptr[Proc], nr: u64, need: u64) -> u64:
+    atomic_fetch_add(addr(cap_sys_denials), 1, acq_rel)
+    puts("caps: pid ")
+    put_u64(p.pid)
+    puts(" denied syscall ")
+    put_u64(nr)
+    puts(": capability '")
+    puts(cap_name(need))
+    puts("' not declared in its manifest\n")
+    return EACCES
+
+def cap_test():
+# a sealed program declaring only fs: open works, fork and probe are refused by syscall_dispatch
+    sz: u64 = 0
+    buf = fs_read_file("EFI/Forge/bin/capdeny", addr(sz))
+    if buf == 0:
+        panic("cap test: capdeny missing")
+    d0 = cap_sys_denials
+    t = proc_spawn(buf, sz)
+    kfree(buf)
+    if u64(t) == 0:
+        panic("cap test: capdeny refused")
+    code = proc_reap(t)
+    if code != 0 or cap_sys_denials - d0 != 2:
+        panic("cap test: undeclared capability not denied")
+    puts("capability gate: undeclared spawn and probe denied at the syscall boundary\n")

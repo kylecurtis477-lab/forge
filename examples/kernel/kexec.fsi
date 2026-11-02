@@ -16,12 +16,12 @@
 #   +64 fpu size +72 data hash +80 metadata hash +88 proc page +96 file page +104 index page
 #   +112 data page +128 sender's kernel version (64 B) +384 RSDP copy (64 B)
 # process record: +0 pid +8 ppid +16 state +24 exit code +32 brk_base +40 brk +48 mmap_next
-#   +56 is caller +64 npg +72 first page +80 syscall (nr, a, b, c, d) +128 fds (file index + 1) x16
+#   +56 is caller | caps << 8 +64 npg +72 first page +80 syscall (nr, a, b, c, d) +128 fds (file index + 1) x16
 #   +256 args (128 B) +384 syscall frame
 # file record: +0 type +8 first cluster +16 size +24 position +32 fds referring to it
 KXH_MAGIC = 0x464F48584B475246
-KXH_VERSION = 2  # format written by this kernel
-KXH_MIN_VERSION = 2  # oldest format this kernel can adopt
+KXH_VERSION = 3  # format written by this kernel
+KXH_MIN_VERSION = 3  # oldest format this kernel can adopt
 KXH_BYTES = 448
 KX_FIXED_PAGES = 12
 EBUSY = 0xFFFFFFFFFFFFFFF0
@@ -321,7 +321,7 @@ def sys_kexec(frame: u64, which: u64) -> u64:
             vstore64(r + 32, q.brk_base)
             vstore64(r + 40, q.brk)
             vstore64(r + 48, q.mmap_next)
-            vstore64(r + 56, u64(q) == u64(p))
+            vstore64(r + 56, u64(u64(q) == u64(p)) | (q.caps << 8))
             n = 0
             if q.state == P_ALIVE:
                 n = kx_walk(q.pml4, h + pidx * PAGE + pg * 16, h + (pdata + pg) * PAGE)
@@ -574,7 +574,8 @@ def kx_restore() -> nptr[Thread]:
                 c.fdr[j] = fi >> 32
             j += 1
         isc = vload64(r + 56)
-        if isc:
+        c.caps = (isc >> 8) & CAPB_ALL
+        if isc & 1:
             ct = thread_new(kx_resume_entry_addr(), 0)
         else:
             ct = thread_new(kx_restart_entry_addr(), 0)
@@ -607,7 +608,7 @@ def kx_restore() -> nptr[Thread]:
         if proc_insert(c) == 0:
             panic("kexec: proc table full")
         newp[i] = u64(c)
-        if isc:
+        if isc & 1:
             caller = u64(ct)
         i += 1
     # parents whose pid had to change
