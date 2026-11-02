@@ -62,6 +62,12 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 ## Compiler tooling (Phase 3)
 - `--diagnostics=json`: one schema-v1 JSON object per error (file/line/col span, code, message, fix-its); goldens in `tests/diag`.
 
+
+### AST export (`--emit=ast-json`, `--emit=pretty`)
+- Entry: `forge_main` sees the flag and calls `ast_main`, which lexes only the named file with `ast_raw=1` (`add_id` then skips std-module renaming), parses it with `ast_parse` into flat node arrays (`ak` kind, `av` value, `al` line, `acs`/`acn` child slice into `akid`), and writes JSON (`ast_json`) or source (`pp_s`/`pp_e`).
+- Schema v1: `{"forge_ast":1,"file","pragmas":[lines],"root"}`, nodes `{"k","l"[,"v"][,"c"]}`. Kinds: Module Block Expr Assign AugAssign(v=op) AnnAssign Pass Break Continue Return Raise Global Nonlocal Import ImportFrom Alias Assert Del Include Def(Decorators, Params, ret|Empty, Block) ExternDef Class/Struct(Decorators, Bases, Block) Decorator If(v="elif" in chains) While For Try Handler Else Finally With WithItem Param(v=[*|**]name; type, default) Params Empty Name Const Num Float Str BinOp BoolOp Not Unary Compare(v=comma-joined ops) IfExp Lambda Call Kw Star DStar Attr Sub Slice Tuple List Set Dict Pair ListComp SetComp GenExp DictComp CompFor CompIf Yield YieldFrom.
+- Num values are decimal; values with 19+ digits print back as hex so the lexer reproduces the same 64-bit pattern. Parse errors in this mode use the normal diagnostic path (`expected ...` is code E0105).
+
 ## Dual boot
 - The loader and kernel install into their own vendor directory on an existing ESP: `\EFI\Forge\forgex64.efi` and `\EFI\Forge\kernel.elf`. Add a firmware boot entry, e.g. `efibootmgr -c -d /dev/sdX -p N -L Forge -l '\EFI\Forge\forgex64.efi'`, or `bcdedit /copy {bootmgr}` + `/set {id} path \EFI\Forge\forgex64.efi` on Windows.
 - Nothing else is touched: not `\EFI\Microsoft`, not `\EFI\<distro>`, not the MBR, and no repartitioning. The loader only reads its own kernel file. The kernel's disk access is read-only: it reads only GPT headers and files under `\\EFI\\Forge\\` on the ESP and never writes. `\EFI\BOOT\BOOTX64.EFI` is used only on the throwaway test disk.

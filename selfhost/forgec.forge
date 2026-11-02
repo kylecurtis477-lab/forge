@@ -315,6 +315,9 @@ def add_id(name, line):
     # math.f -> __math_f, sys.argv -> __sys_argv(), os.path.f -> __os_path_f; user module qualifiers are dropped;
     # names from "from math import a, b" -> __math_a, __math_b
     global ntok, nmimp, mimp_on, mimp_cur, nsm, imp_on
+    if ast_raw:
+        add_tok(K_ID, name, line)
+        return 0
     if ntok >= 2 and tk[ntok - 1] == K_OP and str_eq(tv[ntok - 1], ".") and tk[ntok - 2] == K_ID and not tok_id_is(ntok - 3, "import"):
         b = tv[ntok - 2]
         if str_eq(b, "math") or find(smods, nsm, b) >= 0 or str_eq(b, "__os_path"):
@@ -13386,6 +13389,1502 @@ def ir_report():
     eputs(concat(" expr islands ", str(nte_)))
     eputs(concat(concat(concat("hyb iterations ", str(hy_its)), " passes "), str(passno)))
 
+# ---------------- AST (--emit=ast-json / --emit=pretty) ----------------
+# A strict recursive-descent parser over the lexed token stream (the grammar in docs/GRAMMAR.md).
+# Nodes live in flat arrays: kind, value (string or 0), line, and a [start, count) slice of akid.
+# JSON schema "forge-ast" version 1: {"forge_ast":1,"file":F,"root":NODE},
+#   NODE = {"k":KIND,"l":LINE[,"v":VALUE][,"c":[NODE...]]}; node kinds and child order are in docs/GRAMMAR.md.
+AMAX = 1048576
+ak = list(AMAX)
+av = list(AMAX)
+al = list(AMAX)
+acs = list(AMAX)
+acn = list(AMAX)
+akid = list(AMAX)
+nan = 0
+nakid = 0
+astk = list(AMAX)
+nastk = 0
+ap = 0
+ast_raw = 0
+emit_mode = 0
+AHARD = ["if", "elif", "else", "while", "for", "in", "return", "def", "class", "and", "or", "not", "is", "pass", "break", "continue", "global", "import", "from", "assert", "try", "except", "finally", "with", "lambda", "del", "yield", "nonlocal", "raise"]
+NAHARD = 29
+
+def src_err(p, msg):
+    # error at token p with the source line and a caret (shared with the type checker)
+    if diag_json:
+        diag_emit(tsid[p], tcol[p], tl[p], msg, 0)
+    s = lsrcs[tsid[p]]
+    o = tcol[p]
+    a = o
+    while a > 0 and char_at(s, a - 1) != 10:
+        a -= 1
+    b = o
+    n = len(s)
+    while b < n and char_at(s, b) != 10:
+        b += 1
+    car = ""
+    i = a
+    while i < o:
+        if char_at(s, i) == 9:
+            car = concat(car, "\t")
+        else:
+            car = concat(car, " ")
+        i += 1
+    eputs(concat(concat(concat(concat(concat("error: line ", str(uline(tl[p]))), " col "), str(o - a + 1)), ": "), msg))
+    eputs(substr(s, a, b))
+    eputs(concat(car, "^"))
+    exit(1)
+
+def a_tokdesc(p):
+    k = tk[p]
+    if k == K_NL:
+        return "end of line"
+    if k == K_IND:
+        return "indent"
+    if k == K_DED:
+        return "dedent"
+    if k == K_EOF:
+        return "end of file"
+    if k == K_STR:
+        return "string"
+    if k == K_NUM or k == K_FLT:
+        return "number"
+    return concat(concat("'", tv[p]), "'")
+
+def a_fail(what):
+    src_err(ap, concat(concat(concat("expected ", what), ", found "), a_tokdesc(ap)))
+
+def a_push(n):
+    global nastk
+    astk[nastk] = n
+    nastk += 1
+
+def a_mk(kind, v, line, nkids):
+    # new node whose children are the top nkids entries of the stack
+    global nan, nakid, nastk
+    if nan >= AMAX or nakid + nkids >= AMAX:
+        die(line, "AST too large")
+    n = nan
+    nan += 1
+    ak[n] = kind
+    av[n] = v
+    al[n] = line
+    acs[n] = nakid
+    acn[n] = nkids
+    i = nastk - nkids
+    while i < nastk:
+        akid[nakid] = astk[i]
+        nakid += 1
+        i += 1
+    nastk -= nkids
+    return n
+
+def a_leaf(kind, v, line):
+    return a_mk(kind, v, line, 0)
+
+def a_kid(n, i):
+    return akid[acs[n] + i]
+
+def a_op(s):
+    return tk[ap] == K_OP and str_eq(tv[ap], s)
+
+def a_opat(p, s):
+    return tk[p] == K_OP and str_eq(tv[p], s)
+
+def a_kw(s):
+    return tk[ap] == K_ID and str_eq(tv[ap], s)
+
+def a_kwat(p, s):
+    return tk[p] == K_ID and str_eq(tv[p], s)
+
+def a_eat(s):
+    global ap
+    if a_op(s):
+        ap += 1
+        return 1
+    return 0
+
+def a_need(s):
+    global ap
+    if not a_op(s):
+        a_fail(concat(concat("'", s), "'"))
+    ap += 1
+
+def a_needkw(s):
+    global ap
+    if not a_kw(s):
+        a_fail(concat(concat("'", s), "'"))
+    ap += 1
+
+def a_hard(s):
+    return find(AHARD, NAHARD, s) >= 0
+
+def a_name():
+    global ap
+    if tk[ap] != K_ID or a_hard(tv[ap]):
+        a_fail("a name")
+    ap += 1
+    return tv[ap - 1]
+
+def a_empty():
+    return a_leaf("Empty", 0, tl[ap])
+
+def a_endexpr():
+    # tokens that cannot start an expression
+    k = tk[ap]
+    if k == K_NL or k == K_EOF or k == K_DED or k == K_IND:
+        return 1
+    if k == K_OP:
+        t = tv[ap]
+        return not (str_eq(t, "(") or str_eq(t, "[") or str_eq(t, "{") or str_eq(t, "-") or str_eq(t, "+") or str_eq(t, "~") or str_eq(t, "*"))
+    return 0
+
+# ---- expressions ----
+def a_atom():
+    global ap
+    line = tl[ap]
+    k = tk[ap]
+    if k == K_NUM:
+        ap += 1
+        return a_leaf("Num", str(tv[ap - 1]), line)
+    if k == K_FLT:
+        ap += 1
+        return a_leaf("Float", tv[ap - 1], line)
+    if k == K_STR:
+        s = tv[ap]
+        ap += 1
+        while tk[ap] == K_STR:
+            s = concat(s, tv[ap])
+            ap += 1
+        return a_leaf("Str", s, line)
+    if k == K_ID:
+        t = tv[ap]
+        if str_eq(t, "True") or str_eq(t, "False") or str_eq(t, "None"):
+            ap += 1
+            return a_leaf("Const", t, line)
+        if str_eq(t, "lambda"):
+            return a_lambda()
+        if str_eq(t, "yield"):
+            a_fail("an expression ('yield' must be parenthesized here)")
+        return a_leaf("Name", a_name(), line)
+    if a_eat("("):
+        if a_eat(")"):
+            return a_mk("Tuple", 0, line, 0)
+        if a_kw("yield"):
+            y = a_yield()
+            a_need(")")
+            return y
+        e = a_test_or_star()
+        if a_kw("for"):
+            a_push(e)
+            nc = a_comp_clauses()
+            a_need(")")
+            return a_mk("GenExp", 0, line, nc + 1)
+        if a_op(","):
+            a_push(e)
+            n = 1
+            while a_eat(","):
+                if a_op(")"):
+                    break
+                a_push(a_test_or_star())
+                n += 1
+            a_need(")")
+            return a_mk("Tuple", 0, line, n)
+        a_need(")")
+        return e
+    if a_eat("["):
+        if a_eat("]"):
+            return a_mk("List", 0, line, 0)
+        e = a_test_or_star()
+        a_push(e)
+        if a_kw("for"):
+            nc = a_comp_clauses()
+            a_need("]")
+            return a_mk("ListComp", 0, line, nc + 1)
+        n = 1
+        while a_eat(","):
+            if a_op("]"):
+                break
+            a_push(a_test_or_star())
+            n += 1
+        a_need("]")
+        return a_mk("List", 0, line, n)
+    if a_eat("{"):
+        if a_eat("}"):
+            return a_mk("Dict", 0, line, 0)
+        n = 0
+        isd = 0
+        if a_op("**"):
+            isd = 1
+        else:
+            e = a_test_or_star()
+            if a_eat(":"):
+                isd = 1
+                a_push(e)
+                a_push(a_test())
+                if a_kw("for"):
+                    nc = a_comp_clauses()
+                    a_need("}")
+                    return a_mk("DictComp", 0, line, nc + 2)
+                a_push(a_mk("Pair", 0, line, 2))
+                n = 1
+                if not a_eat(","):
+                    a_need("}")
+                    return a_mk("Dict", 0, line, 1)
+            else:
+                a_push(e)
+                if a_kw("for"):
+                    nc = a_comp_clauses()
+                    a_need("}")
+                    return a_mk("SetComp", 0, line, nc + 1)
+                n = 1
+                while a_eat(","):
+                    if a_op("}"):
+                        break
+                    a_push(a_test_or_star())
+                    n += 1
+                a_need("}")
+                return a_mk("Set", 0, line, n)
+        while not a_op("}"):
+            l2 = tl[ap]
+            if a_eat("**"):
+                a_push(a_mk_un("DStar", 0, l2, a_bitor()))
+            else:
+                a_push(a_test())
+                a_need(":")
+                a_push(a_test())
+                a_push(a_mk("Pair", 0, l2, 2))
+            n += 1
+            if not a_eat(","):
+                break
+        a_need("}")
+        return a_mk("Dict", 0, line, n)
+    a_fail("an expression")
+    return 0
+
+def a_mk_un(kind, v, line, e):
+    a_push(e)
+    return a_mk(kind, v, line, 1)
+
+def a_mk_bin(kind, v, line, l, r):
+    a_push(l)
+    a_push(r)
+    return a_mk(kind, v, line, 2)
+
+def a_comp_clauses():
+    # ('for' targets 'in' or_test | 'if' or_test)+ ; returns the number of clause nodes pushed
+    global ap
+    n = 0
+    while a_kw("for") or (n > 0 and a_kw("if")):
+        line = tl[ap]
+        if a_kw("for"):
+            ap += 1
+            a_push(a_targets())
+            a_needkw("in")
+            a_push(a_or())
+            a_push(a_mk("CompFor", 0, line, 2))
+        else:
+            ap += 1
+            a_push(a_or())
+            a_push(a_mk("CompIf", 0, line, 1))
+        n += 1
+    return n
+
+def a_args(closer):
+    # call arguments up to closer; returns the count pushed
+    global ap
+    n = 0
+    while not a_op(closer):
+        line = tl[ap]
+        if a_eat("*"):
+            a_push(a_mk_un("Star", 0, line, a_test()))
+        elif a_eat("**"):
+            a_push(a_mk_un("DStar", 0, line, a_test()))
+        elif tk[ap] == K_ID and a_opat(ap + 1, "=") and not a_hard(tv[ap]):
+            nm = tv[ap]
+            ap += 2
+            a_push(a_mk_un("Kw", nm, line, a_test()))
+        else:
+            e = a_test()
+            if a_kw("for") and n == 0:
+                a_push(e)
+                nc = a_comp_clauses()
+                a_push(a_mk("GenExp", 0, line, nc + 1))
+            else:
+                a_push(e)
+        n += 1
+        if not a_eat(","):
+            break
+    return n
+
+def a_sliceitem():
+    line = tl[ap]
+    lo = 0
+    if not a_op(":"):
+        lo = a_test()
+        if not a_op(":"):
+            return lo
+    a_need(":")
+    if lo == 0:
+        lo = a_leaf("Empty", 0, line)
+    a_push(lo)
+    if a_op(":") or a_op("]") or a_op(","):
+        a_push(a_empty())
+    else:
+        a_push(a_test())
+    if a_eat(":"):
+        if a_op("]") or a_op(","):
+            a_push(a_empty())
+        else:
+            a_push(a_test())
+    else:
+        a_push(a_empty())
+    return a_mk("Slice", 0, line, 3)
+
+def a_primary():
+    global ap
+    e = a_atom()
+    while 1:
+        line = tl[ap]
+        if a_eat("("):
+            a_push(e)
+            n = a_args(")")
+            a_need(")")
+            e = a_mk("Call", 0, line, n + 1)
+        elif a_eat("["):
+            a_push(e)
+            first = a_sliceitem()
+            if a_op(","):
+                a_push(first)
+                n = 1
+                while a_eat(","):
+                    if a_op("]"):
+                        break
+                    a_push(a_sliceitem())
+                    n += 1
+                first = a_mk("Tuple", 0, line, n)
+            a_push(first)
+            a_need("]")
+            e = a_mk("Sub", 0, line, 2)
+        elif a_op(".") and tk[ap + 1] == K_ID:
+            ap += 1
+            nm = tv[ap]
+            ap += 1
+            e = a_mk_un("Attr", nm, line, e)
+        else:
+            return e
+
+def a_power():
+    global ap
+    e = a_primary()
+    if a_op("**"):
+        line = tl[ap]
+        ap += 1
+        return a_mk_bin("BinOp", "**", line, e, a_unary())
+    return e
+
+def a_unary():
+    global ap
+    if a_op("-") or a_op("+") or a_op("~"):
+        line = tl[ap]
+        o = tv[ap]
+        ap += 1
+        return a_mk_un("Unary", o, line, a_unary())
+    return a_power()
+
+def a_binlevel(lv):
+    # 0: | 1: ^ 2: & 3: << >> 4: + - 5: * / // % @
+    global ap
+    if lv > 5:
+        return a_unary()
+    e = a_binlevel(lv + 1)
+    while tk[ap] == K_OP:
+        t = tv[ap]
+        ok = 0
+        if lv == 0:
+            ok = str_eq(t, "|")
+        elif lv == 1:
+            ok = str_eq(t, "^")
+        elif lv == 2:
+            ok = str_eq(t, "&")
+        elif lv == 3:
+            ok = str_eq(t, "<<") or str_eq(t, ">>")
+        elif lv == 4:
+            ok = str_eq(t, "+") or str_eq(t, "-")
+        else:
+            ok = str_eq(t, "*") or str_eq(t, "/") or str_eq(t, "//") or str_eq(t, "%") or str_eq(t, "@")
+        if not ok:
+            break
+        line = tl[ap]
+        ap += 1
+        e = a_mk_bin("BinOp", t, line, e, a_binlevel(lv + 1))
+    return e
+
+def a_bitor():
+    return a_binlevel(0)
+
+def a_compop():
+    # returns the comparison operator at ap (consuming it) or ""
+    global ap
+    if tk[ap] == K_OP:
+        t = tv[ap]
+        if str_eq(t, "<") or str_eq(t, ">") or str_eq(t, "==") or str_eq(t, "!=") or str_eq(t, "<=") or str_eq(t, ">="):
+            ap += 1
+            return t
+        return ""
+    if a_kw("in"):
+        ap += 1
+        return "in"
+    if a_kw("not") and a_kwat(ap + 1, "in"):
+        ap += 2
+        return "not in"
+    if a_kw("is"):
+        ap += 1
+        if a_kw("not"):
+            ap += 1
+            return "is not"
+        return "is"
+    return ""
+
+def a_compare():
+    line = tl[ap]
+    e = a_bitor()
+    o = a_compop()
+    if len(o) == 0:
+        return e
+    a_push(e)
+    ops = o
+    n = 1
+    while len(o) > 0:
+        a_push(a_bitor())
+        n += 1
+        o = a_compop()
+        if len(o) > 0:
+            ops = concat(concat(ops, ","), o)
+    return a_mk("Compare", ops, line, n)
+
+def a_not():
+    global ap
+    if a_kw("not"):
+        line = tl[ap]
+        ap += 1
+        return a_mk_un("Not", 0, line, a_not())
+    return a_compare()
+
+def a_and():
+    global ap
+    e = a_not()
+    while a_kw("and"):
+        line = tl[ap]
+        ap += 1
+        e = a_mk_bin("BoolOp", "and", line, e, a_not())
+    return e
+
+def a_or():
+    global ap
+    e = a_and()
+    while a_kw("or"):
+        line = tl[ap]
+        ap += 1
+        e = a_mk_bin("BoolOp", "or", line, e, a_and())
+    return e
+
+def a_test():
+    global ap
+    if a_kw("lambda"):
+        return a_lambda()
+    e = a_or()
+    if a_kw("if"):
+        line = tl[ap]
+        ap += 1
+        a_push(e)
+        a_push(a_or())
+        a_needkw("else")
+        a_push(a_test())
+        return a_mk("IfExp", 0, line, 3)
+    return e
+
+def a_test_or_star():
+    line = tl[ap]
+    if a_eat("*"):
+        return a_mk_un("Star", 0, line, a_bitor())
+    return a_test()
+
+def a_lambda():
+    line = tl[ap]
+    a_needkw("lambda")
+    a_push(a_params(":", 0))
+    a_need(":")
+    a_push(a_test())
+    return a_mk("Lambda", 0, line, 2)
+
+def a_yield():
+    global ap
+    line = tl[ap]
+    a_needkw("yield")
+    if tok_is_id(ap, "from"):
+        ap += 1
+        a_push(a_test())
+        return a_mk("YieldFrom", 0, line, 1)
+    if a_endexpr() and not a_op("*"):
+        a_push(a_empty())
+    else:
+        a_push(a_exprlist())
+    return a_mk("Yield", 0, line, 1)
+
+def a_exprlist():
+    # test_or_star (',' test_or_star)* [','] -> a Tuple when there is a comma
+    line = tl[ap]
+    e = a_test_or_star()
+    if not a_op(","):
+        return e
+    a_push(e)
+    n = 1
+    while a_eat(","):
+        if a_endexpr() or a_op("=") or a_op(")"):
+            break
+        a_push(a_test_or_star())
+        n += 1
+    return a_mk("Tuple", 0, line, n)
+
+def a_target1():
+    line = tl[ap]
+    if a_eat("*"):
+        return a_mk_un("Star", 0, line, a_bitor())
+    return a_bitor()
+
+def a_targets():
+    # for / comprehension / with targets: (star | or_expr) (',' ...)* [',']
+    line = tl[ap]
+    e = a_target1()
+    if not a_op(","):
+        return e
+    a_push(e)
+    n = 1
+    while a_eat(","):
+        if a_kw("in") or a_op(":") or a_op("="):
+            break
+        a_push(a_target1())
+        n += 1
+    return a_mk("Tuple", 0, line, n)
+
+def a_params(closer, typed):
+    # parameter list up to closer; typed=1 allows annotations
+    global ap
+    line = tl[ap]
+    n = 0
+    while not a_op(closer):
+        l2 = tl[ap]
+        pre = ""
+        if a_eat("**"):
+            pre = "**"
+        elif a_eat("*"):
+            pre = "*"
+        nm = ""
+        if len(pre) == 0 or not (a_op(",") or a_op(closer)):
+            nm = a_name()
+        if typed and len(nm) > 0 and a_eat(":"):
+            a_push(a_test())
+        else:
+            a_push(a_empty())
+        if len(pre) == 0 and a_eat("="):
+            a_push(a_test())
+        else:
+            a_push(a_empty())
+        a_push(a_mk("Param", concat(pre, nm), l2, 2))
+        n += 1
+        if not a_eat(","):
+            break
+    return a_mk("Params", 0, line, n)
+
+# ---- statements ----
+def a_endstmt():
+    global ap
+    if tk[ap] == K_NL:
+        ap += 1
+        return 0
+    if tk[ap] == K_EOF or tk[ap] == K_DED:
+        return 0
+    a_fail("end of statement")
+
+def a_block():
+    global ap
+    line = tl[ap]
+    a_need(":")
+    if tk[ap] != K_NL:
+        s = a_simple()
+        a_push(s)
+        return a_mk("Block", 0, line, 1)
+    ap += 1
+    while tk[ap] == K_NL:
+        ap += 1
+    if tk[ap] != K_IND:
+        a_fail("an indented block")
+    ap += 1
+    n = 0
+    while tk[ap] != K_DED and tk[ap] != K_EOF:
+        if tk[ap] == K_NL:
+            ap += 1
+        else:
+            a_push(a_stmt())
+            n += 1
+    if tk[ap] == K_DED:
+        ap += 1
+    if n == 0:
+        a_fail("a statement")
+    return a_mk("Block", 0, line, n)
+
+def a_dotted():
+    global ap
+    s = ""
+    while a_op("."):
+        s = concat(s, ".")
+        ap += 1
+    s = concat(s, a_name())
+    while a_op(".") and tk[ap + 1] == K_ID:
+        ap += 1
+        s = concat(concat(s, "."), a_name())
+    return s
+
+def a_alias(dotted):
+    global ap
+    line = tl[ap]
+    if dotted:
+        nm = a_dotted()
+    else:
+        nm = a_name()
+    if a_kw("as"):
+        ap += 1
+        nm = concat(concat(nm, " as "), a_name())
+    return a_leaf("Alias", nm, line)
+
+def a_simple():
+    global ap
+    line = tl[ap]
+    t = ""
+    if tk[ap] == K_ID:
+        t = tv[ap]
+    n = 0
+    if str_eq(t, "pass") or str_eq(t, "break") or str_eq(t, "continue"):
+        ap += 1
+        r = a_leaf("Pass", 0, line)
+        if str_eq(t, "break"):
+            ak[r] = "Break"
+        elif str_eq(t, "continue"):
+            ak[r] = "Continue"
+    elif str_eq(t, "return"):
+        ap += 1
+        if a_endexpr() and not a_op("*"):
+            a_push(a_empty())
+        else:
+            a_push(a_exprlist())
+        r = a_mk("Return", 0, line, 1)
+    elif str_eq(t, "raise"):
+        ap += 1
+        if a_endexpr():
+            r = a_mk("Raise", 0, line, 0)
+        else:
+            a_push(a_test())
+            n = 1
+            if a_kw("from"):
+                ap += 1
+                a_push(a_test())
+                n = 2
+            r = a_mk("Raise", 0, line, n)
+    elif str_eq(t, "global") or str_eq(t, "nonlocal"):
+        ap += 1
+        a_push(a_leaf("Name", a_name(), tl[ap - 1]))
+        n = 1
+        while a_eat(","):
+            a_push(a_leaf("Name", a_name(), tl[ap - 1]))
+            n += 1
+        r = a_mk("Global", 0, line, n)
+        if str_eq(t, "nonlocal"):
+            ak[r] = "Nonlocal"
+    elif str_eq(t, "import"):
+        ap += 1
+        a_push(a_alias(1))
+        n = 1
+        while a_eat(","):
+            a_push(a_alias(1))
+            n += 1
+        r = a_mk("Import", 0, line, n)
+    elif str_eq(t, "from"):
+        ap += 1
+        m = a_dotted()
+        a_needkw("import")
+        if a_eat("*"):
+            a_push(a_leaf("Alias", "*", line))
+            n = 1
+        else:
+            par = a_eat("(")
+            a_push(a_alias(0))
+            n = 1
+            while a_eat(","):
+                if a_op(")"):
+                    break
+                a_push(a_alias(0))
+                n += 1
+            if par:
+                a_need(")")
+        r = a_mk("ImportFrom", m, line, n)
+    elif str_eq(t, "assert"):
+        ap += 1
+        a_push(a_test())
+        n = 1
+        if a_eat(","):
+            a_push(a_test())
+            n = 2
+        r = a_mk("Assert", 0, line, n)
+    elif str_eq(t, "del"):
+        ap += 1
+        a_push(a_exprlist())
+        r = a_mk("Del", 0, line, 1)
+    elif str_eq(t, "include") and tk[ap + 1] == K_STR:
+        ap += 2
+        r = a_leaf("Include", tv[ap - 1], line)
+    elif str_eq(t, "yield"):
+        a_push(a_yield())
+        r = a_mk("Expr", 0, line, 1)
+    else:
+        e = a_exprlist()
+        if a_op("=") :
+            a_push(e)
+            n = 1
+            while a_eat("="):
+                if a_kw("yield"):
+                    a_push(a_yield())
+                else:
+                    a_push(a_exprlist())
+                n += 1
+            r = a_mk("Assign", 0, line, n)
+        elif tk[ap] == K_OP and len(tv[ap]) >= 2 and char_at(tv[ap], len(tv[ap]) - 1) == 61 and not str_eq(tv[ap], "==") and not str_eq(tv[ap], "!=") and not str_eq(tv[ap], "<=") and not str_eq(tv[ap], ">="):
+            o = substr(tv[ap], 0, len(tv[ap]) - 1)
+            ap += 1
+            a_push(e)
+            if a_kw("yield"):
+                a_push(a_yield())
+            else:
+                a_push(a_exprlist())
+            r = a_mk("AugAssign", o, line, 2)
+        elif a_op(":"):
+            ap += 1
+            a_push(e)
+            a_push(a_test())
+            n = 2
+            if a_eat("="):
+                if a_kw("yield"):
+                    a_push(a_yield())
+                else:
+                    a_push(a_exprlist())
+                n = 3
+            r = a_mk("AnnAssign", 0, line, n)
+        else:
+            r = a_mk_un("Expr", 0, line, e)
+    a_endstmt()
+    return r
+
+def a_def(decos, ext):
+    global ap
+    line = tl[ap]
+    a_needkw("def")
+    nm = a_name()
+    a_push(decos)
+    a_need("(")
+    a_push(a_params(")", 1))
+    a_need(")")
+    if a_eat("->"):
+        a_push(a_test())
+    else:
+        a_push(a_empty())
+    if ext:
+        a_endstmt()
+        return a_mk("ExternDef", nm, line, 3)
+    a_push(a_block())
+    return a_mk("Def", nm, line, 4)
+
+def a_stmt():
+    global ap
+    line = tl[ap]
+    nd = 0
+    while a_op("@"):
+        l2 = tl[ap]
+        ap += 1
+        a_push(a_mk_un("Decorator", 0, l2, a_test()))
+        nd += 1
+        if tk[ap] != K_NL:
+            a_fail("end of line after a decorator")
+        ap += 1
+    decos = a_mk("Decorators", 0, line, nd)
+    if a_kw("def"):
+        return a_def(decos, 0)
+    if a_kw("extern") and a_kwat(ap + 1, "def"):
+        ap += 1
+        return a_def(decos, 1)
+    if a_kw("class") or (a_kw("struct") and tk[ap + 1] == K_ID and a_opat(ap + 2, ":")):
+        kind = "Class"
+        if a_kw("struct"):
+            kind = "Struct"
+        ap += 1
+        nm = a_name()
+        a_push(decos)
+        n = 0
+        if str_eq(kind, "Class") and a_eat("("):
+            n = a_args(")")
+            a_need(")")
+        a_push(a_mk("Bases", 0, line, n))
+        a_push(a_block())
+        return a_mk(kind, nm, line, 3)
+    if nd > 0:
+        a_fail("'def', 'class' or 'struct' after decorators")
+    if a_kw("if"):
+        return a_if()
+    if a_kw("while"):
+        ap += 1
+        a_push(a_test())
+        a_push(a_block())
+        n = 2
+        if a_kw("else"):
+            ap += 1
+            a_push(a_block())
+            n = 3
+        return a_mk("While", 0, line, n)
+    if a_kw("for"):
+        ap += 1
+        a_push(a_targets())
+        a_needkw("in")
+        a_push(a_exprlist())
+        a_push(a_block())
+        n = 3
+        if a_kw("else"):
+            ap += 1
+            a_push(a_block())
+            n = 4
+        return a_mk("For", 0, line, n)
+    if a_kw("try"):
+        ap += 1
+        a_push(a_block())
+        n = 1
+        while a_kw("except"):
+            l2 = tl[ap]
+            ap += 1
+            nm = 0
+            if a_op(":"):
+                a_push(a_empty())
+            else:
+                a_push(a_test())
+                if a_kw("as"):
+                    ap += 1
+                    nm = a_name()
+            a_push(a_block())
+            a_push(a_mk("Handler", nm, l2, 2))
+            n += 1
+        if a_kw("else"):
+            ap += 1
+            a_push(a_mk_un("Else", 0, tl[ap], a_block()))
+            n += 1
+        if a_kw("finally"):
+            ap += 1
+            a_push(a_mk_un("Finally", 0, tl[ap], a_block()))
+            n += 1
+        if n == 1:
+            a_fail("'except' or 'finally'")
+        return a_mk("Try", 0, line, n)
+    if a_kw("with"):
+        ap += 1
+        n = 0
+        while 1:
+            l2 = tl[ap]
+            a_push(a_test())
+            if a_kw("as"):
+                ap += 1
+                a_push(a_target1())
+            else:
+                a_push(a_empty())
+            a_push(a_mk("WithItem", 0, l2, 2))
+            n += 1
+            if not a_eat(","):
+                break
+        a_push(a_block())
+        return a_mk("With", 0, line, n + 1)
+    if tk[ap] == K_IND:
+        a_fail("a statement (unexpected indent)")
+    return a_simple()
+
+def a_if():
+    global ap
+    line = tl[ap]
+    v = 0
+    if a_kw("elif"):
+        v = "elif"
+    ap += 1
+    a_push(a_test())
+    a_push(a_block())
+    n = 2
+    if a_kw("elif"):
+        a_push(a_if())
+        n = 3
+    elif a_kw("else"):
+        ap += 1
+        a_push(a_block())
+        n = 3
+    return a_mk("If", v, line, n)
+
+def ast_parse():
+    global ap
+    ap = 0
+    n = 0
+    while tk[ap] != K_EOF:
+        if tk[ap] == K_NL:
+            ap += 1
+        elif tk[ap] == K_DED:
+            ap += 1
+        else:
+            a_push(a_stmt())
+            n += 1
+    return a_mk("Module", 0, 1, n)
+
+# ---- output: JSON ----
+aout = list(4194304)
+naout = 0
+
+def ao(s):
+    global naout
+    aout[naout] = s
+    naout += 1
+
+def ast_esc(s):
+    n = len(s)
+    parts = list(n + 2)
+    i = 0
+    while i < n:
+        c = char_at(s, i)
+        if c == 34:
+            parts[i] = "\\\""
+        elif c == 92:
+            parts[i] = "\\\\"
+        elif c == 10:
+            parts[i] = "\\n"
+        elif c == 9:
+            parts[i] = "\\t"
+        elif c < 32 or c == 127:
+            parts[i] = concat("\\u00", concat(chr(a_hexd(c // 16)), chr(a_hexd(c % 16))))
+        else:
+            parts[i] = chr(c)
+        i += 1
+    return concat(concat("\"", join(parts, n)), "\"")
+
+def a_hexd(d):
+    if d < 10:
+        return 48 + d
+    return 87 + d
+
+def ast_json(n):
+    ao(concat(concat("{\"k\":\"", ak[n]), concat("\",\"l\":", str(al[n]))))
+    vi: int = av[n]
+    if vi != 0:
+        ao(",\"v\":")
+        ao(ast_esc(av[n]))
+    if acn[n] > 0:
+        ao(",\"c\":[")
+        i = 0
+        while i < acn[n]:
+            if i > 0:
+                ao(",")
+            ast_json(a_kid(n, i))
+            i += 1
+        ao("]")
+    ao("}")
+
+# ---- output: pretty-printer (canonical source; parses back to the same AST) ----
+def a_prec(n):
+    k = ak[n]
+    if str_eq(k, "Lambda"):
+        return 1
+    if str_eq(k, "IfExp"):
+        return 2
+    if str_eq(k, "BoolOp"):
+        if str_eq(av[n], "or"):
+            return 3
+        return 4
+    if str_eq(k, "Not"):
+        return 5
+    if str_eq(k, "Compare"):
+        return 6
+    if str_eq(k, "BinOp"):
+        o = av[n]
+        if str_eq(o, "|"):
+            return 7
+        if str_eq(o, "^"):
+            return 8
+        if str_eq(o, "&"):
+            return 9
+        if str_eq(o, "<<") or str_eq(o, ">>"):
+            return 10
+        if str_eq(o, "+") or str_eq(o, "-"):
+            return 11
+        if str_eq(o, "**"):
+            return 14
+        return 12
+    if str_eq(k, "Unary"):
+        return 13
+    if str_eq(k, "Tuple") or str_eq(k, "Yield") or str_eq(k, "YieldFrom") or str_eq(k, "Star"):
+        return 0
+    return 16
+
+def a_strlit(s):
+    n = len(s)
+    parts = list(n + 2)
+    i = 0
+    while i < n:
+        c = char_at(s, i)
+        if c == 34:
+            parts[i] = "\\\""
+        elif c == 92:
+            parts[i] = "\\\\"
+        elif c == 10:
+            parts[i] = "\\n"
+        elif c == 9:
+            parts[i] = "\\t"
+        elif c == 13:
+            parts[i] = "\\r"
+        elif c < 32 or c >= 127:
+            parts[i] = concat("\\x", concat(chr(a_hexd(c // 16)), chr(a_hexd(c % 16))))
+        else:
+            parts[i] = chr(c)
+        i += 1
+    return concat(concat("\"", join(parts, n)), "\"")
+
+def pp_list(n, start, sep, mp):
+    s = ""
+    i = start
+    while i < acn[n]:
+        if i > start:
+            s = concat(s, sep)
+        s = concat(s, pp_e(a_kid(n, i), mp))
+        i += 1
+    return s
+
+def pp_tuple_bare(n):
+    # tuple elements without parentheses (statement level, targets, subscripts)
+    if not str_eq(ak[n], "Tuple") or acn[n] == 0:
+        return pp_e(n, 1)
+    s = pp_list(n, 0, ", ", 1)
+    if acn[n] == 1:
+        s = concat(s, ",")
+    return s
+
+def pp_comp(n, start):
+    s = ""
+    i = start
+    while i < acn[n]:
+        c = a_kid(n, i)
+        if str_eq(ak[c], "CompFor"):
+            s = concat(concat(concat(concat(s, " for "), pp_tuple_bare(a_kid(c, 0))), " in "), pp_e(a_kid(c, 1), 3))
+        else:
+            s = concat(concat(s, " if "), pp_e(a_kid(c, 0), 3))
+        i += 1
+    return s
+
+def pp_params(n, typed):
+    s = ""
+    i = 0
+    while i < acn[n]:
+        p = a_kid(n, i)
+        if i > 0:
+            s = concat(s, ", ")
+        s = concat(s, av[p])
+        t = a_kid(p, 0)
+        d = a_kid(p, 1)
+        if not str_eq(ak[t], "Empty"):
+            s = concat(concat(s, ": "), pp_e(t, 1))
+            if not str_eq(ak[d], "Empty"):
+                s = concat(concat(s, " = "), pp_e(d, 1))
+        elif not str_eq(ak[d], "Empty"):
+            s = concat(concat(s, "="), pp_e(d, 1))
+        i += 1
+    return s
+
+def a_dec2hex(d):
+    # decimal digit string -> "0x..." (long division by 16; values up to 2^64-1)
+    hx = "0123456789abcdef"
+    out = ""
+    cur = d
+    while len(cur) > 0 and not str_eq(cur, "0"):
+        q = ""
+        r = 0
+        i = 0
+        while i < len(cur):
+            r = r * 10 + (char_at(cur, i) - 48)
+            dg = r // 16
+            r = r % 16
+            if len(q) > 0 or dg > 0:
+                q = concat(q, chr(48 + dg))
+            i += 1
+        out = concat(substr(hx, r, r + 1), out)
+        cur = q
+    if len(out) == 0:
+        out = "0"
+    return concat("0x", out)
+
+def pp_e(n, mp):
+    k = ak[n]
+    p = a_prec(n)
+    s = ""
+    if str_eq(k, "Num") and len(av[n]) >= 19:
+        s = a_dec2hex(av[n])
+    elif str_eq(k, "Name") or str_eq(k, "Const") or str_eq(k, "Num") or str_eq(k, "Float"):
+        s = av[n]
+    elif str_eq(k, "Str"):
+        s = a_strlit(av[n])
+    elif str_eq(k, "BinOp"):
+        o = av[n]
+        if str_eq(o, "**"):
+            s = concat(concat(pp_e(a_kid(n, 0), 15), " ** "), pp_e(a_kid(n, 1), 13))
+        else:
+            s = concat(concat(concat(concat(pp_e(a_kid(n, 0), p), " "), o), " "), pp_e(a_kid(n, 1), p + 1))
+    elif str_eq(k, "BoolOp"):
+        s = concat(concat(concat(concat(pp_e(a_kid(n, 0), p), " "), av[n]), " "), pp_e(a_kid(n, 1), p + 1))
+    elif str_eq(k, "Not"):
+        s = concat("not ", pp_e(a_kid(n, 0), 5))
+    elif str_eq(k, "Unary"):
+        s = concat(av[n], pp_e(a_kid(n, 0), 13))
+    elif str_eq(k, "Compare"):
+        ops = av[n]
+        s = pp_e(a_kid(n, 0), 7)
+        i = 1
+        a = 0
+        while i < acn[n]:
+            b = a
+            while b < len(ops) and char_at(ops, b) != 44:
+                b += 1
+            s = concat(concat(concat(concat(s, " "), substr(ops, a, b)), " "), pp_e(a_kid(n, i), 7))
+            a = b + 1
+            i += 1
+    elif str_eq(k, "IfExp"):
+        s = concat(concat(concat(concat(pp_e(a_kid(n, 0), 3), " if "), pp_e(a_kid(n, 1), 3)), " else "), pp_e(a_kid(n, 2), 2))
+    elif str_eq(k, "Lambda"):
+        ps = pp_params(a_kid(n, 0), 0)
+        if len(ps) > 0:
+            ps = concat(" ", ps)
+        s = concat(concat(concat("lambda", ps), ": "), pp_e(a_kid(n, 1), 1))
+    elif str_eq(k, "Call"):
+        s = concat(concat(concat(pp_e(a_kid(n, 0), 15), "("), pp_list(n, 1, ", ", 1)), ")")
+    elif str_eq(k, "Kw"):
+        s = concat(concat(av[n], "="), pp_e(a_kid(n, 0), 1))
+    elif str_eq(k, "Star"):
+        s = concat("*", pp_e(a_kid(n, 0), 7))
+    elif str_eq(k, "DStar"):
+        s = concat("**", pp_e(a_kid(n, 0), 7))
+    elif str_eq(k, "Attr"):
+        b = a_kid(n, 0)
+        bs = pp_e(b, 15)
+        if str_eq(ak[b], "Num"):
+            bs = concat(concat("(", bs), ")")
+        s = concat(concat(bs, "."), av[n])
+    elif str_eq(k, "Sub"):
+        ix = pp_e(a_kid(n, 1), 1)
+        if pp_typename(a_kid(n, 0)):
+            ix = pp_tuple_bare(a_kid(n, 1))
+        s = concat(concat(concat(pp_e(a_kid(n, 0), 15), "["), ix), "]")
+    elif str_eq(k, "Slice"):
+        s = ""
+        if not str_eq(ak[a_kid(n, 0)], "Empty"):
+            s = pp_e(a_kid(n, 0), 1)
+        s = concat(s, ":")
+        if not str_eq(ak[a_kid(n, 1)], "Empty"):
+            s = concat(s, pp_e(a_kid(n, 1), 1))
+        if not str_eq(ak[a_kid(n, 2)], "Empty"):
+            s = concat(concat(s, ":"), pp_e(a_kid(n, 2), 1))
+    elif str_eq(k, "Tuple"):
+        s = "()"
+        if acn[n] > 0:
+            s = concat(concat("(", pp_tuple_bare(n)), ")")
+        p = 16
+    elif str_eq(k, "List"):
+        s = concat(concat("[", pp_list(n, 0, ", ", 1)), "]")
+    elif str_eq(k, "Set"):
+        s = concat(concat("{", pp_list(n, 0, ", ", 1)), "}")
+    elif str_eq(k, "Dict"):
+        s = concat(concat("{", pp_list(n, 0, ", ", 1)), "}")
+    elif str_eq(k, "Pair"):
+        s = concat(concat(pp_e(a_kid(n, 0), 1), ": "), pp_e(a_kid(n, 1), 1))
+    elif str_eq(k, "ListComp"):
+        s = concat(concat(concat("[", pp_e(a_kid(n, 0), 1)), pp_comp(n, 1)), "]")
+    elif str_eq(k, "SetComp"):
+        s = concat(concat(concat("{", pp_e(a_kid(n, 0), 1)), pp_comp(n, 1)), "}")
+    elif str_eq(k, "GenExp"):
+        s = concat(concat(concat("(", pp_e(a_kid(n, 0), 1)), pp_comp(n, 1)), ")")
+    elif str_eq(k, "DictComp"):
+        s = concat(concat(concat(concat(concat("{", pp_e(a_kid(n, 0), 1)), ": "), pp_e(a_kid(n, 1), 1)), pp_comp(n, 2)), "}")
+    elif str_eq(k, "YieldFrom"):
+        s = concat("yield from ", pp_e(a_kid(n, 0), 1))
+    elif str_eq(k, "Yield"):
+        s = "yield"
+        if not str_eq(ak[a_kid(n, 0)], "Empty"):
+            s = concat("yield ", pp_tuple_bare(a_kid(n, 0)))
+    else:
+        die(al[n], concat("pretty: unknown node ", k))
+    if p < mp:
+        return concat(concat("(", s), ")")
+    return s
+
+def pp_typename(n):
+    # generic type heads take a bare index tuple (tuple[int, str]); value subscripts keep (a, b)
+    if not str_eq(ak[n], "Name"):
+        return 0
+    v = av[n]
+    return str_eq(v, "tuple") or str_eq(v, "dict") or str_eq(v, "list") or str_eq(v, "set") or str_eq(v, "Callable") or str_eq(v, "Tuple") or str_eq(v, "Dict") or str_eq(v, "List") or str_eq(v, "Optional") or str_eq(v, "Union") or str_eq(v, "Set")
+
+def pp_val(n):
+    # right-hand side / statement-level expression: bare tuples and yield allowed
+    # tuples keep their parentheses: Forge infers a tuple type only from a parenthesised display
+    if str_eq(ak[n], "Yield") or str_eq(ak[n], "YieldFrom"):
+        return pp_e(n, 0)
+    return pp_e(n, 1)
+
+def pp_ind(d):
+    s = ""
+    i = 0
+    while i < d:
+        s = concat(s, "    ")
+        i += 1
+    return s
+
+def pp_line(d, s):
+    ao(pp_ind(d))
+    ao(s)
+    ao("\n")
+
+def pp_block(b, d):
+    i = 0
+    while i < acn[b]:
+        pp_s(a_kid(b, i), d)
+        i += 1
+
+def pp_decos(n, d):
+    i = 0
+    while i < acn[n]:
+        pp_line(d, concat("@", pp_e(a_kid(a_kid(n, i), 0), 1)))
+        i += 1
+
+def pp_s(n, d):
+    k = ak[n]
+    if str_eq(k, "Expr"):
+        pp_line(d, pp_val(a_kid(n, 0)))
+    elif str_eq(k, "Assign"):
+        s = ""
+        i = 0
+        while i < acn[n]:
+            if i > 0:
+                s = concat(s, " = ")
+            if i < acn[n] - 1:
+                s = concat(s, pp_tuple_bare(a_kid(n, i)))
+            else:
+                s = concat(s, pp_val(a_kid(n, i)))
+            i += 1
+        pp_line(d, s)
+    elif str_eq(k, "AugAssign"):
+        pp_line(d, concat(concat(concat(concat(pp_val(a_kid(n, 0)), " "), av[n]), "= "), pp_val(a_kid(n, 1))))
+    elif str_eq(k, "AnnAssign"):
+        s = concat(concat(pp_e(a_kid(n, 0), 1), ": "), pp_e(a_kid(n, 1), 1))
+        if acn[n] > 2:
+            s = concat(concat(s, " = "), pp_val(a_kid(n, 2)))
+        pp_line(d, s)
+    elif str_eq(k, "Pass") or str_eq(k, "Break") or str_eq(k, "Continue"):
+        pp_line(d, lower_kw(k))
+    elif str_eq(k, "Return"):
+        if str_eq(ak[a_kid(n, 0)], "Empty"):
+            pp_line(d, "return")
+        else:
+            pp_line(d, concat("return ", pp_val(a_kid(n, 0))))
+    elif str_eq(k, "Raise"):
+        s = "raise"
+        if acn[n] > 0:
+            s = concat("raise ", pp_e(a_kid(n, 0), 1))
+        if acn[n] > 1:
+            s = concat(concat(s, " from "), pp_e(a_kid(n, 1), 1))
+        pp_line(d, s)
+    elif str_eq(k, "Global") or str_eq(k, "Nonlocal"):
+        pp_line(d, concat(concat(lower_kw(k), " "), pp_list(n, 0, ", ", 1)))
+    elif str_eq(k, "Import"):
+        s = "import "
+        i = 0
+        while i < acn[n]:
+            if i > 0:
+                s = concat(s, ", ")
+            s = concat(s, av[a_kid(n, i)])
+            i += 1
+        pp_line(d, s)
+    elif str_eq(k, "ImportFrom"):
+        s = concat(concat("from ", av[n]), " import ")
+        i = 0
+        while i < acn[n]:
+            if i > 0:
+                s = concat(s, ", ")
+            s = concat(s, av[a_kid(n, i)])
+            i += 1
+        pp_line(d, s)
+    elif str_eq(k, "Assert"):
+        s = concat("assert ", pp_e(a_kid(n, 0), 1))
+        if acn[n] > 1:
+            s = concat(concat(s, ", "), pp_e(a_kid(n, 1), 1))
+        pp_line(d, s)
+    elif str_eq(k, "Del"):
+        pp_line(d, concat("del ", pp_tuple_bare(a_kid(n, 0))))
+    elif str_eq(k, "Include"):
+        pp_line(d, concat("include ", a_strlit(av[n])))
+    elif str_eq(k, "Def") or str_eq(k, "ExternDef"):
+        pp_decos(a_kid(n, 0), d)
+        s = concat(concat(concat(concat("def ", av[n]), "("), pp_params(a_kid(n, 1), 1)), ")")
+        if not str_eq(ak[a_kid(n, 2)], "Empty"):
+            s = concat(concat(s, " -> "), pp_e(a_kid(n, 2), 1))
+        if str_eq(k, "ExternDef"):
+            pp_line(d, concat("extern ", s))
+        else:
+            pp_line(d, concat(s, ":"))
+            pp_block(a_kid(n, 3), d + 1)
+    elif str_eq(k, "Class") or str_eq(k, "Struct"):
+        pp_decos(a_kid(n, 0), d)
+        s = concat(concat(lower_kw(k), " "), av[n])
+        bs = a_kid(n, 1)
+        if acn[bs] > 0:
+            s = concat(concat(concat(s, "("), pp_list(bs, 0, ", ", 1)), ")")
+        pp_line(d, concat(s, ":"))
+        pp_block(a_kid(n, 2), d + 1)
+    elif str_eq(k, "If"):
+        kw = "if "
+        vi: int = av[n]
+        if vi != 0:
+            kw = "elif "
+        pp_line(d, concat(concat(kw, pp_e(a_kid(n, 0), 1)), ":"))
+        pp_block(a_kid(n, 1), d + 1)
+        if acn[n] > 2:
+            o = a_kid(n, 2)
+            if str_eq(ak[o], "If"):
+                pp_s(o, d)
+            else:
+                pp_line(d, "else:")
+                pp_block(o, d + 1)
+    elif str_eq(k, "While"):
+        pp_line(d, concat(concat("while ", pp_e(a_kid(n, 0), 1)), ":"))
+        pp_block(a_kid(n, 1), d + 1)
+        if acn[n] > 2:
+            pp_line(d, "else:")
+            pp_block(a_kid(n, 2), d + 1)
+    elif str_eq(k, "For"):
+        pp_line(d, concat(concat(concat(concat("for ", pp_tuple_bare(a_kid(n, 0))), " in "), pp_val(a_kid(n, 1))), ":"))
+        pp_block(a_kid(n, 2), d + 1)
+        if acn[n] > 3:
+            pp_line(d, "else:")
+            pp_block(a_kid(n, 3), d + 1)
+    elif str_eq(k, "Try"):
+        pp_line(d, "try:")
+        pp_block(a_kid(n, 0), d + 1)
+        i = 1
+        while i < acn[n]:
+            h = a_kid(n, i)
+            if str_eq(ak[h], "Handler"):
+                s = "except"
+                if not str_eq(ak[a_kid(h, 0)], "Empty"):
+                    s = concat("except ", pp_e(a_kid(h, 0), 1))
+                vi2: int = av[h]
+                if vi2 != 0:
+                    s = concat(concat(s, " as "), av[h])
+                pp_line(d, concat(s, ":"))
+                pp_block(a_kid(h, 1), d + 1)
+            else:
+                pp_line(d, concat(lower_kw(ak[h]), ":"))
+                pp_block(a_kid(h, 0), d + 1)
+            i += 1
+    elif str_eq(k, "With"):
+        s = "with "
+        i = 0
+        while i < acn[n] - 1:
+            w = a_kid(n, i)
+            if i > 0:
+                s = concat(s, ", ")
+            s = concat(s, pp_e(a_kid(w, 0), 1))
+            if not str_eq(ak[a_kid(w, 1)], "Empty"):
+                s = concat(concat(s, " as "), pp_e(a_kid(w, 1), 7))
+            i += 1
+        pp_line(d, concat(s, ":"))
+        pp_block(a_kid(n, acn[n] - 1), d + 1)
+    else:
+        die(al[n], concat("pretty: unknown statement ", k))
+
+def lower_kw(k):
+    n = len(k)
+    b = alloc(n + 1)
+    i = 0
+    while i < n:
+        c = char_at(k, i)
+        if c >= 65 and c <= 90:
+            c += 32
+        set_byte(b, i, c)
+        i += 1
+    return substr(b, 0, n)
+
+def ast_main():
+    # forgec in.forge out --emit=ast-json | --emit=pretty
+    global ast_raw, lex_fname, main_sid
+    src = read_file(argv(1))
+    srci: int = src
+    if srci == 0:
+        diag_file_err(concat("cannot read input file ", argv(1)))
+        exit(1)
+    ast_raw = 1
+    set_lphase(1)
+    lex_fname = argv(1)
+    lex(src, 1, 0)
+    main_sid = cur_sid
+    add_tok(K_EOF, 0, 0)
+    add_tok(K_EOF, 0, 0)
+    root = ast_parse()
+    # "# forge: ..." pragma comment lines change code generation, so they are part of the tree
+    prg = list(64)
+    nprg = 0
+    n = len(src)
+    i = 0
+    while i < n and nprg < 64:
+        j = i
+        while j < n and char_at(src, j) != 10:
+            j += 1
+        ln = substr(src, i, j)
+        if len(ln) >= 8 and str_eq(substr(ln, 0, 8), "# forge:"):
+            prg[nprg] = ln
+            nprg += 1
+        i = j + 1
+    if emit_mode == 1:
+        ao("{\"forge_ast\":1,\"file\":")
+        ao(ast_esc(argv(1)))
+        ao(",\"pragmas\":[")
+        i = 0
+        while i < nprg:
+            if i > 0:
+                ao(",")
+            ao(ast_esc(prg[i]))
+            i += 1
+        ao("],\"root\":")
+        ast_json(root)
+        ao("}\n")
+    elif emit_mode == 2:
+        i = 0
+        while i < nprg:
+            ao(concat(prg[i], "\n"))
+            i += 1
+        i = 0
+        while i < acn[root]:
+            c = a_kid(root, i)
+            if i > 0 and (str_eq(ak[c], "Def") or str_eq(ak[c], "Class") or str_eq(ak[c], "Struct") or str_eq(ak[a_kid(root, i - 1)], "Def") or str_eq(ak[a_kid(root, i - 1)], "Class") or str_eq(ak[a_kid(root, i - 1)], "Struct")):
+                ao("\n")
+            pp_s(c, 0)
+            i += 1
+    write_file(argv(2), join(aout, naout))
+    return 0
+
 # ---------------- machine-readable diagnostics (--diagnostics=json) ----------------
 # One JSON object per line on stderr, schema version 1:
 #   {"version":1,"severity":"error","code":"E....","file":F,"line":L,"col":C,"end_line":L,"end_col":C2,
@@ -13397,9 +14896,9 @@ lex_fname = ""
 dg_off = -1
 dg_ind = -1
 main_sid = -1
-DG_PFX = ["unexpected character", "unterminated string", "inconsistent indentation", "newline in f-string", "cannot read input file", "cannot read include file", "include nesting too deep", "undefined function", "undefined name", "unknown method", "argument ", "incompatible types in assignment", "unsupported operand types", "missing argument", "missing return statement", "incompatible return value type", "invalid index type", "integer literal does not fit", "unexpected keyword argument", "bad operand type for unary", "list indices must be integers", "string indices must be integers", "return value expected", "default for parameter"]
-DG_CODE = ["E0101", "E0102", "E0103", "E0104", "E0001", "E0002", "E0003", "E0201", "E0202", "E0203", "E0301", "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0309", "E0310", "E0311", "E0312", "E0313", "E0314"]
-NDG = 24
+DG_PFX = ["unexpected character", "unterminated string", "inconsistent indentation", "newline in f-string", "cannot read input file", "cannot read include file", "include nesting too deep", "undefined function", "undefined name", "unknown method", "argument ", "incompatible types in assignment", "unsupported operand types", "missing argument", "missing return statement", "incompatible return value type", "invalid index type", "integer literal does not fit", "unexpected keyword argument", "bad operand type for unary", "list indices must be integers", "string indices must be integers", "return value expected", "default for parameter", "expected "]
+DG_CODE = ["E0101", "E0102", "E0103", "E0104", "E0001", "E0002", "E0003", "E0201", "E0202", "E0203", "E0301", "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0309", "E0310", "E0311", "E0312", "E0313", "E0314", "E0105"]
+NDG = 25
 
 def dg_sw(s, p):
     return len(p) <= len(s) and str_eq(substr(s, 0, len(p)), p)
@@ -13606,7 +15105,7 @@ def diag_file_err(msg):
         eputs(concat("error: ", msg))
 
 def forge_main():
-    global diag_json, lex_fname, main_sid, PRETOK, PRE, passno, soft_line, ir_stats, no_hyb, hyb_on
+    global diag_json, emit_mode, lex_fname, main_sid, PRETOK, PRE, passno, soft_line, ir_stats, no_hyb, hyb_on
     if argc() < 3:
         eputs("usage: forgec <input.forge> <output.s>")
         exit(2)
@@ -13629,7 +15128,13 @@ def forge_main():
             ir_stats = 2
         elif str_eq(argv(ai), "--diagnostics=json"):
             diag_json = 1
+        elif str_eq(argv(ai), "--emit=ast-json"):
+            emit_mode = 1
+        elif str_eq(argv(ai), "--emit=pretty"):
+            emit_mode = 2
         ai += 1
+    if emit_mode:
+        return ast_main()
     src = read_file(argv(1))
     srci: int = src
     if srci == 0:
