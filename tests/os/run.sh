@@ -46,3 +46,6 @@ NX=$(grep -ah '^kexec: new kernel relocatable, [1-9]' $L/bios.log $L/uefi.log $L
 if [ "$NK" -ge 5 ] && [ "$NI" -ge 5 ] && [ "$NU" -eq 6 ] && [ "$NL" -eq 1 ] && [ "$NX" -eq 3 ]; then
     echo "PASS os/kaslr ($NK heap/stack layouts, $NI image bases in 6 boots)"
 else echo "FAIL os/kaslr (layouts $NK, image bases $NI, unslid unmapped $NU, loader $NL, kexec $NX)"; fi
+
+# Phase 7.3: -g kernel, DWARF line table, gdb breakpoint at schedule over the QEMU gdbstub
+bash tests/dwarf/run.sh

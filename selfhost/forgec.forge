@@ -15516,6 +15516,130 @@ fsb_x = list(256)
 fsb_c = list(256)
 nfsb = 0
 # expanded-line -> (file, line) map built by fs_include, for precise runtime diagnostics
+# Phase 7.3 `-g`: DWARF 4 line table + one DW_TAG_subprogram per function. Each statement gets a
+# local label .Lfsd<n>; fsd_ln[n] is its include-expanded line. Function k spans labels
+# fsgf_a[k]..fsgf_b[k] and starts at symbol fsgf_s[k], ends at .Lfsde<k>.
+fs_g = 0
+fs_gon = 0
+nfsd = 0
+fsd_ln = list(262144)
+nfsgf = 0
+fsgf_s = list(8192)
+fsgf_ln = list(8192)
+fsgf_a = list(8192)
+fsgf_b = list(8192)
+
+def fs_uleb(v):
+    r = ""
+    while 1:
+        b = v % 128
+        v = v // 128
+        if v != 0:
+            b = b + 128
+        r = c3(r, ",", str(b))
+        if v == 0:
+            return c3("    .byte ", substr(r, 1, len(r)), "\n")
+
+def fs_sleb(v):
+# n 7-bit groups of v's two's complement (v small: line deltas)
+    n = 1
+    lim = 64
+    if v >= 0:
+        while v >= lim:
+            n += 1
+            lim = lim * 128
+        u = v
+    else:
+        while 0 - v > lim:
+            n += 1
+            lim = lim * 128
+        u = v + lim * 2
+    r = ""
+    i = 0
+    while i < n:
+        b = u % 128
+        u = u // 128
+        if i + 1 < n:
+            b = b + 128
+        r = c3(r, ",", str(b))
+        i += 1
+    return c3("    .byte ", substr(r, 1, len(r)), "\n")
+
+def fs_dline(ln):
+    if ln >= 1 and ln <= fsx_n:
+        return fsx_l[ln - 1]
+    return ln
+
+def fs_dfile(ln):
+    if ln >= 1 and ln <= fsx_n:
+        return fsx_f[ln - 1] + 1
+    return 1
+
+def fs_dmark():
+# a line-table row at the current address for the statement at fp
+    global nfsd
+    if fs_gon and nfsd < 262144:
+        emit_raw(c3(".Lfsd", str(nfsd), ":\n"))
+        fsd_ln[nfsd] = tl[fp]
+        nfsd += 1
+
+def fs_dwarf():
+    emit_raw(".section .debug_abbrev,\"\",@progbits\n")
+    emit_raw("    .byte 1,0x11,1,0x25,0x08,0x13,0x05,0x03,0x08,0x1b,0x08,0x11,0x01,0x55,0x17,0x10,0x17,0,0\n")
+    emit_raw("    .byte 2,0x2e,0,0x03,0x08,0x3f,0x19,0x3a,0x05,0x3b,0x06,0x11,0x01,0x12,0x06,0,0\n    .byte 0\n")
+    emit_raw(".section .debug_info,\"\",@progbits\n")
+    emit_raw("    .long .Ldie - .Ldis\n.Ldis:\n    .2byte 4\n    .long 0\n    .byte 8\n    .byte 1\n")
+    emit_raw(c3("    .asciz \"forgec -g\"\n    .2byte 0x0c\n    .asciz \"", fsx_fn[0], "\"\n    .asciz \".\"\n    .quad 0\n    .long 0\n    .long 0\n"))
+    k = 0
+    while k < nfsgf:
+        emit_raw(c3("    .byte 2\n    .asciz \"", fsgf_s[k], "\"\n"))
+        emit_raw(c4("    .2byte ", str(fs_dfile(fsgf_ln[k])), "\n    .long ", c3(str(fs_dline(fsgf_ln[k])), "\n    .quad ", fsgf_s[k])))
+        emit_raw(c4("\n    .long .Lfsde", str(k), " - ", concat(fsgf_s[k], "\n")))
+        k += 1
+    emit_raw("    .byte 0\n.Ldie:\n")
+    emit_raw(".section .debug_ranges,\"\",@progbits\n")
+    k = 0
+    while k < nfsgf:
+        emit_raw(c4("    .quad ", fsgf_s[k], "\n    .quad .Lfsde", concat(str(k), "\n")))
+        k += 1
+    emit_raw("    .quad 0\n    .quad 0\n")
+    emit_raw(".section .debug_line,\"\",@progbits\n")
+    emit_raw("    .long .Ldle - .Ldls\n.Ldls:\n    .2byte 4\n    .long .Ldhe - .Ldhs\n.Ldhs:\n")
+    emit_raw("    .byte 1,1,1,0xfb,14,13,0,1,1,1,1,0,0,0,1,0,0,1\n    .byte 0\n")
+    i = 0
+    while i < fsx_nf:
+        emit_raw(c3("    .asciz \"", fsx_fn[i], "\"\n    .byte 0,0,0\n"))
+        i += 1
+    emit_raw("    .byte 0\n.Ldhe:\n")
+    k = 0
+    while k < nfsgf:
+        emit_raw(c3("    .byte 0,9,2\n    .quad ", fsgf_s[k], "\n"))
+        line = 1
+        file = 1
+        prev = fsgf_s[k]
+        j = fsgf_a[k] - 1
+        while j < fsgf_b[k]:
+            if j < fsgf_a[k]:
+                ln = fsgf_ln[k]
+                lab = fsgf_s[k]
+            else:
+                ln = fsd_ln[j]
+                lab = concat(".Lfsd", str(j))
+            fi = fs_dfile(ln)
+            l2 = fs_dline(ln)
+            if fi != file:
+                emit_raw(concat("    .byte 4\n", fs_uleb(fi)))
+                file = fi
+            if l2 != line:
+                emit_raw(concat("    .byte 3\n", fs_sleb(l2 - line)))
+                line = l2
+            emit_raw(c4("    .byte 9\n    .2byte ", lab, " - ", concat(prev, "\n    .byte 1\n")))
+            prev = lab
+            j += 1
+        emit_raw(c4("    .byte 9\n    .2byte .Lfsde", str(k), " - ", concat(prev, "\n    .byte 0,1,1\n")))
+        k += 1
+    emit_raw(".Ldle:\n")
+
 FSXMAX = 262144
 fsx_f = list(FSXMAX)
 fsx_l = list(FSXMAX)
@@ -17955,6 +18079,7 @@ def fs_stmt():
     fs_term = 0
     fs_bpend = -1
     fs_rsrc = -1
+    fs_dmark()
     fs_stmt1()
     fs_bpend = -1
 
@@ -18652,7 +18777,7 @@ def fs_function1(f):
     fs_genv_pop(old)
 
 def fs_function2(f):
-    global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop, nfsdf, fs_sdep, fs_term, fs_spn
+    global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop, nfsdf, fs_sdep, fs_term, fs_spn, fs_gon, nfsgf
     at = fsf_at[f]
     nm = fsf_n[f]
     sec = fsf_sec[f]
@@ -18673,6 +18798,11 @@ def fs_function2(f):
         fs_wrapper(f, nm, body)
     emit_raw(".p2align 4\n")
     emit_raw(concat(body, ":\n"))
+    if fs_g and nfsgf < 8192:
+        fs_gon = 1
+        fsgf_s[nfsgf] = body
+        fsgf_ln[nfsgf] = fsf_ln[f]
+        fsgf_a[nfsgf] = nfsd
     if fs_bop(at, 64, 0):
     # @patchable: one 5-byte nop at entry, which a live patch replaces by a jmp rel32 atomically
         emit_raw("    .byte 0x0f,0x1f,0x44,0x00,0x00\n")
@@ -18725,6 +18855,11 @@ def fs_function2(f):
         emit_raw(concat(ok, ":\n"))
     e("leave")
     e("ret")
+    if fs_gon:
+        fs_gon = 0
+        fsgf_b[nfsgf] = nfsd
+        emit_raw(c3(".Lfsde", str(nfsgf), ":\n"))
+        nfsgf += 1
     while fs_frame % 16 != 0:
         fs_frame += 1
     if fs_frame == 0:
@@ -18789,7 +18924,7 @@ def fs_wrapper(f, nm, body):
     e("iretq")
 
 def fs_main(src):
-    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_ufix, fs_ubare, fs_safe, fs_sp
+    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_ufix, fs_ubare, fs_safe, fs_sp, fs_g
     if contains(src, concat("# forge: ", "checked-ints")):
         fs_chk = 1
     if contains(src, concat("# forge: ", "no-bounds-checks")):
@@ -18808,6 +18943,8 @@ def fs_main(src):
             fs_urep = 1
         if str_eq(argv(ai), "--unsafe-fix"):
             fs_ufix = 1
+        if str_eq(argv(ai), "-g"):
+            fs_g = 1
         ai += 1
     ft_init()
     fs_prescan()
@@ -18850,6 +18987,8 @@ def fs_main(src):
     while i < nfsrod:
         emit_raw(fs_rod[i])
         i += 1
+    if fs_g:
+        fs_dwarf()
     emit_raw(".section .note.GNU-stack,\"\",@progbits\n")
     if fs_urep:
         eputs(c4("unsafe: ", str(fs_ufn), c3(" functions, ", str(fs_ublk), " blocks, "), c3(str(fs_utot), " ops, ", concat(str(fs_ubare), " top-level asm blocks"))))

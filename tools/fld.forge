@@ -4,7 +4,7 @@
 #   --format kernel the Forge kernel layout (GNU ld reference: examples/kernel/linker.ld) (low boot stub at 1 MiB, the rest
 #                   at -2 GiB + phys, W^X PT_LOADs) with the image-KASLR .krel table generated in place
 #   --format pe     PE32+ (EFI application) image: .text, .rdata, .data(+bss), base relocations for R_64
-# .eh_frame is discarded (freestanding: no unwinder)
+# .eh_frame is discarded (freestanding: no unwinder); .debug_* sections are kept (non-alloc) in ELF output
 # usage: fld [--format F] [--base ADDR] [-e SYM] [--subsystem N] [--image-base ADDR] -o OUT in.o...
 KBASE = 0 - 2147483648  # 0xFFFFFFFF80000000; all addresses are carried as signed 64-bit values
 PAGE = 0x1000
@@ -70,6 +70,7 @@ class Sec:
         self.lma = 0  # load address delta (paddr = addr - lma)
         self.relas = []  # [off, type, symidx, addend]
         self.out = None
+        self.dbg = False
 
 class Sym:
     def __init__(self, name, bind, shndx, value):
@@ -206,6 +207,26 @@ def leftovers():
             if s.out is None and (s.flags & 2) != 0 and s.size > 0 and (s.typ == 1 or s.typ == 8) and s.name != ".eh_frame":
                 die(o.path + ": section " + s.name + " has no place in the output layout")
 
+def place_debug():
+# non-alloc .debug_* sections are concatenated per name (offsets from 0, no load address); only
+# their address relocations (into placed code/data) carry link addresses
+    for o in OBJS:
+        for s in o.secs:
+            if s.out is None and (s.flags & 2) == 0 and s.typ == 1 and s.name.startswith(".debug_"):
+                out = None
+                for d in OUTS:
+                    if d.name == s.name and d.flags == 0:
+                        out = d
+                if out is None:
+                    out = Out(s.name, 1, 0)
+                    OUTS.append(out)
+                pos = alignup(out.size, s.align if s.align > 0 else 1)
+                s.addr = pos
+                s.out = out
+                s.dbg = True
+                out.ins.append(s)
+                out.size = pos + s.size
+
 def deflsym(name, out, v):
     LSYM[name] = [out, v]
 
@@ -265,8 +286,13 @@ def relocate(sec, base_of_pe):
         sb = 1
         if is_abs(sec.obj, r[2]):
             sb = 0
+        tsym = sec.obj.syms[r[2]]
+        if tsym.shndx != 0 and tsym.shndx < len(sec.obj.secs) and sec.obj.secs[tsym.shndx].dbg:
+            sb = 0
         A = r[3]
         P = sec.addr + off
+        if sec.dbg and typ != 1 and typ != 10 and typ != 11:
+            die(sec.obj.path + ": PC-relative relocation in " + sec.name)
         if sb == 0 and BIASP != 0 and typ != 1 and typ != 10 and typ != 11 and typ != 12 and typ != 14:
             die(sec.obj.path + ": PC-relative reference to an absolute symbol from a based image")
         pre = ""
@@ -316,7 +342,7 @@ def relocate(sec, base_of_pe):
             n = 1
         else:
             die(sec.obj.path + ": unsupported relocation type " + str(typ))
-        if KMODE and P < 0:
+        if KMODE and P < 0 and not sec.dbg:
             t = (S + A)
             sym = sec.obj.syms[r[2]]
             if sym.shndx != 0xfff1:
@@ -520,6 +546,11 @@ def write_elf(path, segs, entry, hdr_seg):
             if o.foff > cur:
                 parts.append("\x00" * (o.foff - cur))
                 cur = o.foff
+            parts.append(o.data)
+            cur += len(o.data)
+    for o in OUTS:
+        if o.flags == 0 and o.seg == -1 and o.typ == 1:
+            o.foff = cur
             parts.append(o.data)
             cur += len(o.data)
     cur2 = alignup(cur, 8)
@@ -838,11 +869,13 @@ def main():
         load(p)
     if fmt == "exec":
         segs = layout_exec(base)
+        place_debug()
         build_outs(False)
         write_elf(out, segs, glob_value(entry, 1), segs[0])
     elif fmt == "kernel":
         KMODE = True
         de = layout_kernel()
+        place_debug()
         write_kernel(out, de)
     elif fmt == "pe":
         write_pe(out, base, entry, subsys)
