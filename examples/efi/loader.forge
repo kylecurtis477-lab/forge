@@ -305,6 +305,8 @@ def efi_main(image: u64, st: ptr[SystemTable]) -> u64:
     while i < phn:
         ph = file + phoff + i * phsz
         if load32(ph) == 1:
+            if (load32(ph + 4) & 3) == 3:
+                return fail("kernel.elf has a writable+executable segment (W^X)", i)
             pa = load64(ph + 24)
             if pa < lo:
                 lo = pa
