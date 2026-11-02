@@ -68,7 +68,7 @@ def lapic_ipi(apic: u64, cmd: u32):
     lapic_wr(0x310, u32(apic << 24))
     lapic_wr(0x300, cmd)
     guard = 0
-    while (lapic_rd(0x300) & 0x1000) != 0 and guard < 1000000:
+    while x2apic_on == 0 and (lapic_rd(0x300) & 0x1000) != 0 and guard < 1000000:
         cpu_relax()
         guard += 1
 
@@ -92,7 +92,7 @@ def ap_main():
     gdt_load(cpu)
     lidt(addr(idtr))
     cpu_features_cpu()
-    wrmsr(0x1B, rdmsr(0x1B) | 0x800)
+    wrmsr(0x1B, rdmsr(0x1B) | 0x800 | (x2apic_on << 10))
     lapic_wr(0x80, 0)
     lapic_wr(0xF0, 0x100 | VEC_SPURIOUS)
     cpu_syscall_init(cpu)

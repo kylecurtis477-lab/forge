@@ -11,12 +11,36 @@ lapic_per_10ms: u64
 tsc_per_ms: u64
 sched_on: u64
 
+x2apic_on: u64  # Phase 8: x2APIC mode, registers are MSRs 0x800 + offset/16
+x2apic_ipis: u64
+x2_icr_hi: u64[256]
+
+# xAPIC register offsets are kept as the interface; in x2APIC mode they map to MSRs, and the ID register
+# is returned shifted left 24 like xAPIC so every caller that does >> 24 still works (ids < 256 here)
 @unsafe
 def lapic_rd(r: u64) -> u32:
+    if x2apic_on:
+        x = rdmsr(0x800 + (r >> 4))
+        if r == 0x20:
+            x = x << 24
+        return u32(x & 0xFFFFFFFF)
     return vload32(lapic + r)
 
 @unsafe
 def lapic_wr(r: u64, v: u32):
+    if x2apic_on:
+    # x2APIC has one 64-bit ICR (MSR 0x830, destination in bits 63:32); the xAPIC ICR-high write (0x310,
+    # destination in bits 31:24) is kept per CPU and merged into the ICR-low write, so callers are unchanged
+        hi = 0
+        if r == 0x310 or r == 0x300:
+            me = rdmsr(0x802) & 0xFF
+            if r == 0x310:
+                x2_icr_hi[me] = u64(v) >> 24
+                return
+            hi = x2_icr_hi[me]
+            x2apic_ipis += 1
+        wrmsr(0x800 + (r >> 4), u64(v) | (hi << 32))
+        return
     vstore32(lapic + r, v)
 
 apic_to_cpu: u8[256]
@@ -91,10 +115,14 @@ def pit2_wait_10ms_start():
 @unsafe
 def lapic_init():
     lapic = p2v(lapic_phys)
-    # make sure the APIC is globally enabled (IA32_APIC_BASE bit 11)
-    wrmsr(0x1B, rdmsr(0x1B) | 0x800)
+    # make sure the APIC is globally enabled (IA32_APIC_BASE bit 11), in x2APIC mode if available
+    cpuid4(1, 0)
+    x2apic_on = (u64(cpuid_out[2]) >> 21) & 1
+    wrmsr(0x1B, rdmsr(0x1B) | 0x800 | (x2apic_on << 10))  # x2APIC mode is bit 10
     lapic_wr(0x80, 0)
     lapic_wr(0xF0, 0x100 | VEC_SPURIOUS)
+    if x2apic_on:
+        puts("x2APIC mode, ")
     puts("LAPIC id=")
     put_u64(u64(lapic_rd(0x20) >> 24))
     puts(" version=")

@@ -193,7 +193,7 @@ Generic defs/structs are recorded at prescan and skipped; an instance is created
 The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel subset.
 
 1. ~~**Memory:** memory map, frame allocator, 4-level higher-half paging with guard pages and NX, kernel heap, ExitBootServices with the UEFI app as the loader, GOP framebuffer console.~~ **Done.** Reclaim done. Buddy allocator done (Phase 8). Virtual range allocator and PCID done (Phase 8).
-2. ~~**Interrupts and time:** PIC off, LAPIC/IOAPIC via ACPI MADT, LAPIC timer, IST stacks for #DF/NMI.~~ **Done** (atomics landed in the language too). Still open: HPET/TSC-deadline, x2APIC, and MSI.
+2. ~~**Interrupts and time:** PIC off, LAPIC/IOAPIC via ACPI MADT, LAPIC timer, IST stacks for #DF/NMI.~~ **Done** (atomics landed in the language too). x2APIC done (Phase 8). Still open: HPET/TSC-deadline and MSI.
 3. ~~**Scheduler + SMP:** preemptive kernel threads, spinlocks, INIT-SIPI AP bring-up.~~ **Done.** Since done: xsave/fxsave FPU state per thread, TLB shootdown IPIs, pinned threads, wait queues, sleeping mutexes, condvars, sleep_ticks. Still open: per-CPU run queues + load balancing, priorities.
 4. ~~**User mode:** TSS, ring 3, `syscall`/`sysret`, ELF loader, per-process address spaces.~~ **Done.** Since done: SMEP/SMAP with copy-in/out #PF fixups; Proc objects with fork (eager copy), exec, wait4, exit, brk, anonymous mmap/munmap, getargs; an interactive `sh` from `\EFI\Forge\bin\`. Still open: copy-on-write fork, signals, env, file-backed mmap.
 5. ~~**Drivers:** PCI, virtio-blk, read-only FAT32.~~ **Done** (legacy virtio). Since done: MSI-X completions with sleeping requests, FAT32 long names + case-insensitive lookup, a VFS with fds (open/read/close/stat/getdents), PS/2 keyboard and COM1 RX interrupts feeding a tty line queue. Still open: modern virtio 1.0 capability layout, multiple requests in flight, AHCI/NVMe, virtio-net, ext2.
@@ -278,3 +278,6 @@ Big-heap VA comes from a coalescing first-fit free list of ranges (each with a t
 
 ## PCID (Phase 8)
 Per-CPU PCID slots (1..63, from the PML4 frame) let a context switch keep TLB entries when the slot still belongs to the incoming address space; any user shootdown, `user_unmap` or address-space teardown forgets the slot on all CPUs. Enabled only when CPUID reports PCID; not exercised under QEMU TCG (no PCID), so only the bookkeeping is boot-tested.
+
+## x2APIC (Phase 8)
+When CPUID offers it, every CPU runs its local APIC in x2APIC mode. Register access goes through MSRs behind the old xAPIC offset interface; IPIs are one 64-bit ICR write to MSR 0x830 with the destination taken from a per-CPU copy of the ICR-high value. Tested on every boot under QEMU (BIOS, UEFI, kexec).
