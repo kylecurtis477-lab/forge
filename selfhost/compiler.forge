@@ -13391,6 +13391,10 @@ def forge_main():
             ir_stats = 2
         ai += 1
     src = read_file(argv(1))
+    srci: int = src
+    if srci == 0:
+        eputs(concat("error: cannot read input file ", argv(1)))
+        exit(1)
     fsm = contains(src, concat("# forge: ", "no-runtime"))
     ai = 3
     while ai < argc():
@@ -15424,7 +15428,8 @@ def fs_include(src, dir, depth):
                 if char_at(f, 0) != 47:
                     f = concat(dir, f)
                 sub = read_file(f)
-                if sub == None:
+                subi: int = sub
+                if subi == 0:
                     eputs(concat("error: cannot read include file ", f))
                     exit(1)
                 sl = len(f) - 1

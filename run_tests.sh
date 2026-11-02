@@ -23,6 +23,12 @@ for t in tests/fs/*.forge; do
   c=""; [ -f "${t%.forge}.c" ] && gcc -O1 -ffreestanding -fno-pic -fno-stack-protector -c -o build/t_fsc.o "${t%.forge}.c" && c=build/t_fsc.o
   build/forgec "$t" build/t_fs.s $FORGEC_FLAGS && as -o build/t_fs.o build/t_fs.s && ld -o build/t_fs build/t_fs.o $c && build/t_fs | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS $t" || { echo "FAIL $t"; fail=1; }
 done
+# missing input / include files: clean diagnostic, exit 1, no crash
+printf 'include "no_such_file.fsi"\n' > build/t_inc.forge
+build/forgec build/t_inc.forge build/t_inc.s --freestanding > build/t_inc.txt 2>&1; rc=$?
+[ $rc = 1 ] && grep -q "^error: cannot read include file .*no_such_file.fsi" build/t_inc.txt && echo "PASS include-missing" || { echo "FAIL include-missing (rc=$rc)"; fail=1; }
+build/forgec build/no_such_input.forge build/t_inc.s > build/t_inc.txt 2>&1; rc=$?
+[ $rc = 1 ] && grep -q "^error: cannot read input file" build/t_inc.txt && echo "PASS input-missing" || { echo "FAIL input-missing (rc=$rc)"; fail=1; }
 # tests/os: boot the Forge kernel (BIOS + UEFI via GRUB multiboot2) and the native EFI app in headless QEMU
 if [ -z "$SKIP_OS" ] && command -v qemu-system-x86_64 >/dev/null && command -v grub-mkrescue >/dev/null; then
   r=$(tests/os/run.sh); echo "$r"; echo "$r" | grep -q "^FAIL" && fail=1
