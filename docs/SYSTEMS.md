@@ -81,6 +81,17 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 - Gate points: start of `fs_intrin` (list `FS_UNSAFE_FNS`), int→ptr in `fs_conv`, explicit pointer casts, non-`[0]` ptr indexing. `ptr[T](0)` is rejected before the unsafe check.
 - Report: `--unsafe-report` per region + summary (`fs_ufn`, `fs_ublk`, `fs_utot`, `fs_ubare`); baseline in tests/unsafe/baseline.txt.
 
+### Typed atomics (Phase 4.6)
+
+`fs_atyped` (called from `fs_intrin` before the raw `atomic_*32/64` block) handles `atomic_load/store/swap/fetch_add/cas/fence`. `fs_aptr` checks the pointer (non-null, integer element, no writes through `ref[T]`), `fs_aord` reads the ordering word (`FS_ORDN`), `fs_asfx`/`fs_areg` pick the b/w/l/q suffix and sub-register. Mapping on x86-64 (TSO):
+
+| op | relaxed | acquire | release | acq_rel | seq_cst |
+|---|---|---|---|---|---|
+| load | mov | mov | error | error | mov |
+| store | mov | error | mov | error | xchg |
+| swap / fetch_add / cas | xchg / lock xadd / lock cmpxchg (all orderings) |||||
+| fence | error | (none) | (none) | (none) | mfence |
+
 ### Generics (Phase 4.5b)
 
 ```

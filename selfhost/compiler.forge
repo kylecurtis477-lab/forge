@@ -16348,6 +16348,125 @@ def fs_args(maxn, ptys):
 FS_AREG = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]
 FS_WREG = ["%rcx", "%rdx", "%r8", "%r9"]
 
+FS_ATN = ["atomic_load", "atomic_store", "atomic_swap", "atomic_fetch_add", "atomic_cas", "atomic_fence"]
+FS_ORDN = ["relaxed", "acquire", "release", "acq_rel", "seq_cst"]
+
+def fs_aord():
+# memory-ordering argument: one of relaxed/acquire/release/acq_rel/seq_cst (a bare word)
+    global fp
+    if tk[fp] != K_ID:
+        fs_die("expected a memory ordering: relaxed, acquire, release, acq_rel or seq_cst")
+    o = find(FS_ORDN, 5, tv[fp])
+    if o < 0:
+        fs_die(concat("unknown memory ordering ", tv[fp]))
+    fp += 1
+    return o
+
+def fs_aptr(wr):
+# first argument of a typed atomic: a non-null pointer to an integer of 1/2/4/8 bytes; pushed
+    global fp
+    fs_rexpr()
+    t = fs_ety
+    if not ft_isnn(t):
+        fs_die("typed atomics need a non-null ptr[T] (or own/ref/mut) to an integer")
+    if wr and ftsg[t] == 3:
+        fs_die("atomic write through a ref[T]: use mut[T] or ptr[T]")
+    el = ftel[t]
+    if fsk[el] != 0 or el == FT_BOOL:
+        fs_die("typed atomics need an integer element type")
+    fs_push()
+    return el
+
+def fs_asfx(el):
+    sz = ftsz[el]
+    if sz == 1:
+        return "b"
+    if sz == 2:
+        return "w"
+    if sz == 4:
+        return "l"
+    return "q"
+
+def fs_areg(el, r):
+# sub-register of rax/rcx/rdx for el's width (r: "a", "c", "d")
+    sz = ftsz[el]
+    if sz == 1:
+        return c3("%", r, "l")
+    if sz == 2:
+        return c3("%", r, "x")
+    if sz == 4:
+        return c3("%e", r, "x")
+    return c3("%r", r, "x")
+
+def fs_atyped(nm):
+# Phase 4.6 typed atomics with explicit orderings (safe: the pointer is typed and non-null).
+# x86-64 TSO mapping: loads are plain mov (acquire for free); relaxed/release stores are plain mov;
+# seq_cst stores use xchg; RMW ops are lock-prefixed (full barriers); atomic_fence(seq_cst) is mfence,
+# weaker fences only stop compiler reordering (the backend never reorders memory accesses).
+    global fp, fs_ety, fs_mode
+    k = find(FS_ATN, 6, nm)
+    if k < 0:
+        return 0
+    fp += 1
+    if k == 5:
+        o = fs_aord()
+        fs_expect(")")
+        if o == 0:
+            fs_die("atomic_fence(relaxed) orders nothing")
+        if o == 4:
+            e("mfence")
+        fs_ety = FT_VOID
+        fs_mode = 0
+        return 1
+    el = fs_aptr(k != 0)
+    fs_expect(",")
+    sx = fs_asfx(el)
+    if k == 0:
+        o = fs_aord()
+        if o == 2 or o == 3:
+            fs_die("atomic_load cannot be release/acq_rel")
+        fs_pop("%rdx")
+        e(c4("mov", sx, " (%rdx),", fs_areg(el, "a")))
+    else:
+        fs_rexpr()
+        fs_conv(el)
+        if k == 4:
+            fs_push()
+            fs_expect(",")
+            fs_rexpr()
+            fs_conv(el)
+            e("mov %rax,%rcx")
+            fs_pop("%rax")
+        else:
+            e("mov %rax,%rcx")
+        fs_expect(",")
+        o = fs_aord()
+        fs_pop("%rdx")
+        if k == 1:
+            if o == 1 or o == 3:
+                fs_die("atomic_store cannot be acquire/acq_rel")
+            if o == 4:
+                e(c4("xchg", sx, c3(" ", fs_areg(el, "c"), ","), "(%rdx)"))
+            else:
+                e(c4("mov", sx, c3(" ", fs_areg(el, "c"), ","), "(%rdx)"))
+            fs_expect(")")
+            fs_ety = FT_VOID
+            fs_mode = 0
+            return 1
+        if k == 2:
+            e(c4("xchg", sx, c3(" ", fs_areg(el, "c"), ","), "(%rdx)"))
+        elif k == 3:
+            e(c4("lock xadd", sx, c3(" ", fs_areg(el, "c"), ","), "(%rdx)"))
+        else:
+            e(c4("lock cmpxchg", sx, c3(" ", fs_areg(el, "c"), ","), "(%rdx)"))
+        if k != 4:
+            e("mov %rcx,%rax")
+    fs_expect(")")
+    fs_ety = el
+    fs_norm(el)
+    fs_mode = 0
+    return 1
+
 def fs_callf(f):
     global fs_ety, fs_mode
     n = fs_args(6, f)
@@ -16799,6 +16918,8 @@ def fs_intrin(nm):
         fs_pop("%rax")
         e(c3("mov %rax,%cr", substr(nm, 8, 9), ""))
         fs_ety = FT_VOID
+        return 1
+    if fs_atyped(nm):
         return 1
     # atomics (x86-64 is TSO: plain loads are acquire; xchg/lock ops are full barriers)
     an = ["atomic_load32", "atomic_load64", "atomic_store32", "atomic_store64", "atomic_xchg32", "atomic_xchg64", "atomic_add32", "atomic_add64", "atomic_cas32", "atomic_cas64", "atomic_or32", "atomic_or64", "atomic_and32", "atomic_and64"]

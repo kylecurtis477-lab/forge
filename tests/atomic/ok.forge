@@ -1,0 +1,41 @@
+# forge: no-runtime
+# forge: safe
+include "../fs/linux.fsi"
+flag: u32 = 0
+data: u64 = 0
+cnt: u8 = 250
+sv: i16 = 0
+
+def publish(v: u64):
+    data = v
+    atomic_store(addr(flag), 1, release)
+
+def consume() -> u64:
+    if atomic_load(addr(flag), acquire) == 1:
+        return data
+    return 0
+
+def main() -> u64:
+    put_u64(consume())
+    puts(" ")
+    publish(42)
+    put_u64(consume())
+    puts(" ")
+    put_u64(u64(atomic_fetch_add(addr(cnt), 3, relaxed)))
+    puts(" ")
+    put_u64(u64(atomic_fetch_add(addr(cnt), 10, acq_rel)))
+    puts(" ")
+    put_u64(u64(cnt))
+    puts(" ")
+    put_u64(u64(atomic_cas(addr(flag), 1, 7, seq_cst)))
+    put_u64(u64(atomic_cas(addr(flag), 1, 9, seq_cst)))
+    puts(" ")
+    put_u64(u64(atomic_swap(addr(flag), 3, acq_rel)))
+    puts(" ")
+    atomic_store(addr(sv), 0 - 5, seq_cst)
+    atomic_fence(seq_cst)
+    put_i64(i64(atomic_load(addr(sv), relaxed)))
+    puts(" ")
+    put_u64(atomic_load(addr(data), seq_cst))
+    nl()
+    return 0

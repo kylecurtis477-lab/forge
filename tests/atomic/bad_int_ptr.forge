@@ -1,0 +1,8 @@
+# expect: non-null ptr
+# forge: no-runtime
+include "../fs/linux.fsi"
+x: u64 = 0
+b: bool = False
+def main() -> u64:
+    atomic_load(x, relaxed)
+    return 0

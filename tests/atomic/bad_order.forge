@@ -1,0 +1,8 @@
+# expect: unknown memory ordering
+# forge: no-runtime
+include "../fs/linux.fsi"
+x: u64 = 0
+b: bool = False
+def main() -> u64:
+    atomic_load(addr(x), weird)
+    return 0
