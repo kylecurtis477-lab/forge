@@ -1,0 +1,4 @@
+def main():
+    a: int = 4611686018427387904
+    print(a)
+main()

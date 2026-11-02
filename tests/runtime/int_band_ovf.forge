@@ -1,0 +1,4 @@
+def f(x: int) -> int:
+    return x * 2
+y: int = f(2305843009213693952)
+print(y)

@@ -600,7 +600,7 @@ def lex(src, line, inner):
                     v = flt_text(substr(src, st, i))
             if isf:
                 add_tok(K_FLT, v, line)
-            elif c != 48 and (i - st > 19 or (i - st == 19 and v < 0)):
+            elif c != 48 and (i - st > 19 or (i - st == 19 and v < 0) or (v >= 4611686018427387904 and v <= 4611686018427387907)):
                 add_tok(K_ID, "__bigparse", line)
                 add_tok(K_OP, "(", line)
                 add_tok(K_STR, substr(src, st, i), line)
@@ -2210,7 +2210,7 @@ def cmp_one(op, start, mark, lt, rt, line):
         return 0
     raw = str_eq(op, "is") or str_eq(op, "is not") or (lt == T_INT and rt == T_INT)
     if str_eq(op, "==") or str_eq(op, "!="):
-        if (is_ref(lt) and is_ref(rt)) or (lt == T_BOOL and rt == T_BOOL):
+        if (lt > 10 and rt > 10) or (lt == T_BOOL and rt == T_BOOL):
             raw = 1
         if (lt == T_INT and (rt == T_STR or is_ref(rt))) or (rt == T_INT and (lt == T_STR or is_ref(lt))):
             raw = 1
@@ -2384,7 +2384,17 @@ def set_ovf(v):
     global ovf_on
     ovf_on = v
 
+def band_chk(R, l):
+    # 2**62 .. 2**62+3 alias the bool/None encodings: a raw int there cannot be stored safely
+    e2("mov ", concat(R, ", %r11"))
+    e("shr $2, %r11")
+    e("cmp rt_band(%rip), %r11")
+    e2("je ", lab(l))
+
 def ovf_check(line):
+    ovf_check_r(line, "%rax")
+
+def ovf_check_r(line, R):
     # typed int add/sub/mul in user code: raise OverflowError instead of wrapping
     global novf
     if pos >= PRETOK and ovf_on:
@@ -2408,6 +2418,7 @@ def ovf_check(line):
             ovf_ln[novf] = line
             novf += 1
         e2("jo ", lab(l))
+        band_chk(R, l)
 
 def flush_ovf():
     global novf
@@ -4483,7 +4494,7 @@ def stmt_aug(line, ap):
                 else:
                     e3(concat(ins, "q "), "%rax", concat(", ", r))
                 if str_eq(ins, "add") or str_eq(ins, "sub"):
-                    ovf_check(line)
+                    ovf_check_r(line, r)
                 end_stmt()
                 return 0
             nout = mark
@@ -7537,6 +7548,52 @@ def tc_params(p, cls, static):
             q += 1
     return q + 1
 
+def blk_ret(c):
+    # c at the ':' ending a header: does every path through the block return or raise?
+    if not (tk[c + 1] == K_NL and tk[c + 2] == K_IND):
+        return tok_is_id(c + 1, "return") or tok_is_id(c + 1, "raise")
+    e = block_end(c) - 1
+    q = c + 3
+    while q < e and tk[q] != K_EOF:
+        if tk[q] == K_NL or tk[q] == K_IND or tk[q] == K_DED:
+            q += 1
+        else:
+            if stmt_ret(q):
+                return 1
+            q = skip_stmt(tc_colon(q))
+    return 0
+
+def stmt_ret(s):
+    if tok_is_id(s, "return") or tok_is_id(s, "raise"):
+        return 1
+    if tok_is_id(s, "if") or tok_is_id(s, "try"):
+        cc = tc_colon(s)
+        ok = blk_ret(cc)
+        p = block_end(cc)
+        fin = tok_is_id(s, "try")
+        while tok_is_id(p, "elif") or tok_is_id(p, "else") or tok_is_id(p, "except") or tok_is_id(p, "finally"):
+            cc = tc_colon(p)
+            if tok_is_id(p, "else"):
+                fin = 1
+            if tok_is_id(p, "finally"):
+                if blk_ret(cc):
+                    return 1
+            else:
+                ok = ok and blk_ret(cc)
+            p = block_end(cc)
+        return ok and fin
+    if tok_is_id(s, "with"):
+        return blk_ret(tc_colon(s))
+    if tok_is_id(s, "while") and tok_is_id(s + 1, "True") and tok_is_op(s + 2, ":"):
+        e = block_end(s + 2)
+        q = s + 3
+        while q < e:
+            if tok_is_id(q, "break"):
+                return 0
+            q += 1
+        return 1
+    return 0
+
 def tc_def(p, cls):
     global tc_mode, n_ret, tc_static, tc_curdef
     static = tc_static
@@ -7556,6 +7613,8 @@ def tc_def(p, cls):
     tc_curdef = p
     if tc_has_yield(c, e):
         rt = "?"
+    if tc_mode == 1 and p >= PRETOK and not str_eq(rt, "?") and not str_eq(rt, "None") and not str_eq(ty_head(rt), "Optional") and not str_eq(rt, "Any") and not blk_ret(c):
+        tc_err(p + 1, concat(concat("missing return statement (function '", tv[p + 1]), "' can fall off the end without returning a value)"))
     ret_stack[n_ret] = rt
     n_ret += 1
     tc_push()
@@ -7741,6 +7800,8 @@ def tc_simple(p, e):
             vt = tcx(q + 1)
             if not assignable(t, vt):
                 tc_err(q + 1, concat(concat(concat(concat(concat(concat("incompatible types in assignment (expression has type ", vt), ", variable '"), tv[p]), "' has type "), t), ")"))
+            elif str_eq(t, "int") and tok_is_id(q + 1, "__bigparse") and tk[q + 3] == K_STR and tok_is_op(q + 4, ")"):
+                tc_err(q + 1, concat(concat("integer literal does not fit a typed 64-bit int (2**62..2**62+3 and values beyond 64 bits need an untyped variable): variable '", tv[p]), "'"))
         return 0
     if tk[p] == K_ID and tok_is_op(p + 1, ".") and tk[p + 2] == K_ID and tok_is_op(p + 3, ":"):
         t = tc_ann(p + 4)
@@ -11862,6 +11923,9 @@ def mv_to(o, D, dmem):
         e2(concat(concat("mov ", S), ", "), D)
 
 def o_ovf(k):
+    o_ovf_r(k, "%rax")
+
+def o_ovf_r(k, R):
     global no_ov
     if not iovf[k]:
         return 0
@@ -11881,6 +11945,7 @@ def o_ovf(k):
         o_ovn[no_ov] = line
         no_ov += 1
     e2("jo ", lab(l))
+    band_chk(R, l)
 
 def add_cold(s):
     global ncold
@@ -11921,7 +11986,7 @@ def em_bin(k):
         else:
             A = vl(a)
         e2(concat(concat(concat(concat("imul $", str(cval(b))), ", "), A), ", "), R)
-        o_ovf(k)
+        o_ovf_r(k, R)
         if not dreg:
             e2("mov %rax, ", D)
         return 0
@@ -11929,10 +11994,10 @@ def em_bin(k):
     if dreg and not (b >= 0 and str_eq(vl(b), D)):
         mv_to(a, D, 0)
         e2(concat(concat(nm, src_of(b, "%rcx")), ", "), D)
-        o_ovf(k)
+        o_ovf_r(k, D)
     elif dreg and is_comm(op):
         e2(concat(concat(nm, src_of(a, "%rcx")), ", "), D)
-        o_ovf(k)
+        o_ovf_r(k, D)
     else:
         mv_to(a, "%rax", 0)
         e2(concat(nm, src_of(b, "%rcx")), ", %rax")
@@ -11951,7 +12016,7 @@ def em_un(k):
         e2(concat(concat("sar $", str(cval(ib[k]))), ", "), R)
     elif op == O_NEG:
         e2("neg ", R)
-        o_ovf(k)
+        o_ovf_r(k, R)
     else:
         e2("not ", R)
     if not in_reg(d):
@@ -12756,6 +12821,9 @@ def hyb_reset(fi, p, endp):
 def hyb_compile(fi, p, endp):
     global tx_id, hyb_fe, hy_its, hyb, nH, hgrow, ip, pos, nout, nlabel, curf, ir_cslo, ir_sb, nslots, hyb_pro, hyb_epi, hyb_noreg, ncs, ncold, no_ov, nspill, irfail
     if not hyb_on or not hyb_ok(fi):
+        return 0
+    if tco_scan(fi, p, endp) > 0:
+        # hybrid frames have no self-tail-call loop; the token compiler keeps TCO
         return 0
     hs_out = nout
     hs_lab = nlabel

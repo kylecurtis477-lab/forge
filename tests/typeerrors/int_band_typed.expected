@@ -1,0 +1,3 @@
+error: line 2 col 14: integer literal does not fit a typed 64-bit int (2**62..2**62+3 and values beyond 64 bits need an untyped variable): variable 'a'
+    a: int = 4611686018427387904
+             ^

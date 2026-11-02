@@ -1802,6 +1802,7 @@ rt_exc_val: .quad 0
 rt_exc_line: .quad 0
 rt_sigact: .quad 0, 0, 0, 0
 rt_hp: .quad 0
+rt_band: .quad 0x1000000000000000
 rt_hlo: .quad 0
 rt_inuse: .quad 0
 rt_gcnext: .quad 0x4000000

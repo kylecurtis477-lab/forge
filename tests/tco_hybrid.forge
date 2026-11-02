@@ -1,0 +1,10 @@
+def cnt(n, acc):
+    if n == 0:
+        return acc
+    return cnt(n - 1, acc + [n][0])
+print(cnt(500000, 0))
+def walk(n: int, xs) -> int:
+    if n == 0:
+        return len(xs)
+    return walk(n - 1, xs)
+print(walk(300000, [1, 2, 3]))
