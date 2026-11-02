@@ -101,12 +101,14 @@ Best of 5 wall clock. Rust: rustc -C opt-level=3 (unstripped binaries). Phase 1 
 
 | bench | Forge run | Rust -O3 run | CPython run | Forge compile | Rust compile | Forge bin | Rust bin | output |
 |---|---|---|---|---|---|---|---|---|
-| fib | 0.008s | 0.006s | 0.19s | 194ms | 211ms | 137,184 B | 11,395,072 B | 2178309 |
-| loop | 0.095s | 0.073s | 5.55s | 203ms | 196ms | 137,184 B | 11,395,024 B | 199999997 |
-| strbuild | 0.067s | 0.061s | 0.09s | 236ms | 308ms | 137,232 B | 11,399,736 B | 6888890 |
-| lists | 0.064s | 0.056s | 3.07s | 204ms | 236ms | 137,272 B | 11,399,120 B | 49950000000 |
+| fib | 0.010s | 0.006s | 0.18s | 172ms | 233ms | 137,296 B | 11,395,072 B | 2178309 |
+| loop | 0.094s | 0.073s | 5.50s | 203ms | 184ms | 137,264 B | 11,395,024 B | 199999997 |
+| strbuild | 0.027s | 0.053s | 0.08s | 275ms | 328ms | 137,344 B | 11,399,736 B | 6888890 |
+| lists | 0.042s | 0.045s | 2.96s | 190ms | 223ms | 137,384 B | 11,399,120 B | 49950000000 |
+| floats | 0.031s | 0.015s | 0.18s | 237ms | 174ms | 137,776 B | 11,390,192 B | 1500122368 |
+| strops | 0.018s | 0.017s | 0.04s | 165ms | 324ms | 138,656 B | 11,516,016 B | 38408 977889 22311 |
 
-(Phase 5 run with the default -O. The -O0 fallback gives fib 0.009s, loop 0.097s, strbuild 0.069s, lists 0.119s; see bench/results.md.)
+(Run 2026-11-01 with the default -O, including the 2**62 band checks. Earlier Phase 5 -O0 numbers: The -O0 fallback gives fib 0.009s, loop 0.097s, strbuild 0.069s, lists 0.119s; see bench/results.md.)
 
 ### Optimizing backend (default; `-O0` turns it off)
 Eligible functions are plain int functions with int params. They are lowered to a three-address IR with virtual registers and basic blocks. The passes are const/copy propagation with folding, unreachable-block and jump cleanup, local CSE, liveness-based DCE, and elimination of tag and bounds checks for typed non-escaping `list[int]` locals. Registers are assigned by linear scan over rsi/rdi/r8-r10 and rbx/r12-r15, with spilling. Division by a constant uses magic numbers. Any function that is not eligible uses the direct code generator.
