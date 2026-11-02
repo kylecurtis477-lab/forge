@@ -96,6 +96,14 @@ def pmm_init(bi: ptr[BootInfo]):
     frame_limit = 0x40000000 / PAGE
 
 def frame_alloc() -> u64:
+    f = irq_save()
+    spin_lock(u64(addr(pmm_lock)))
+    pa = frame_alloc_nolock()
+    spin_unlock(u64(addr(pmm_lock)))
+    irq_restore(f)
+    return pa
+
+def frame_alloc_nolock() -> u64:
     w = frame_hint >> 6
     lim = frame_limit >> 6
     while w < lim:
@@ -113,11 +121,18 @@ def frame_alloc() -> u64:
         w += 1
     if frame_hint != 0:
         frame_hint = 0
-        return frame_alloc()
+        return frame_alloc_nolock()
     panic("out of physical memory")
     return 0
 
 def frame_free(pa: u64):
+    fl = irq_save()
+    spin_lock(u64(addr(pmm_lock)))
+    frame_free_nolock(pa)
+    spin_unlock(u64(addr(pmm_lock)))
+    irq_restore(fl)
+
+def frame_free_nolock(pa: u64):
     f = pa / PAGE
     if frame_used(f) == 0:
         panic("double free of frame")
@@ -264,6 +279,14 @@ def class_size(c: u64) -> u64:
     return u64(32) << c
 
 def kmalloc(n: u64) -> u64:
+    f = irq_save()
+    spin_lock(u64(addr(heap_lock)))
+    p = kmalloc_nolock(n)
+    spin_unlock(u64(addr(heap_lock)))
+    irq_restore(f)
+    return p
+
+def kmalloc_nolock(n: u64) -> u64:
     need = n + 16
     c = 0
     while c < NCLASS and class_size(c) < need:
@@ -298,6 +321,13 @@ def kmalloc(n: u64) -> u64:
     return base + 16
 
 def kfree(p: u64):
+    f = irq_save()
+    spin_lock(u64(addr(heap_lock)))
+    kfree_nolock(p)
+    spin_unlock(u64(addr(heap_lock)))
+    irq_restore(f)
+
+def kfree_nolock(p: u64):
     if p == 0:
         return
     if vload64(p - 8) != HEAP_MAGIC:

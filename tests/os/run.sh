@@ -9,13 +9,13 @@
 cd "$(dirname "$0")/../.."
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
-Q="-display none -no-reboot -net none -m 256 -serial stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04"
+Q="-display none -no-reboot -net none -m 256 -smp 4 -serial stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04"
 examples/kernel/build.sh >/dev/null || { echo "FAIL os/kernel-build"; exit 0; }
 examples/efi/build.sh >/dev/null || { echo "FAIL os/efi-build"; exit 0; }
 L=build/os; mkdir -p $L
 readelf -lW build/kernel/kernel.elf | grep -q "LOAD.* RWE " && echo "FAIL os/kernel-wx (RWX PT_LOAD)" || echo "PASS os/kernel-wx (no RWX PT_LOAD)"
 FB="Forge kernel: framebuffer console 1024x768"
-K="identity 0x0000000000100000 -> unmapped|stack guard 0xffffffffc002f000 -> unmapped|breakpoints handled: 2|live=0|demand paging: 3 faults|MADT: cpus=|memory reclaimed: |#DF on IST1|recovered from #DF|LAPIC timer ticks: 20|PIT IRQ0 via IOAPIC gsi 2: 1|KERNEL OK"
+K="identity 0x0000000000100000 -> unmapped|stack guard 0xffffffffc002f000 -> unmapped|breakpoints handled: 2|live=0|demand paging: 3 faults|MADT: cpus=|memory reclaimed: |#DF on IST1|recovered from #DF|LAPIC timer ticks: 20|PIT IRQ0 via IOAPIC gsi 2: 1|SMP: 4 cpus online|cpus used 4/4|preemptive SMP scheduler OK|KERNEL OK"
 B=tests/os/boot.py
 python3 $B kernel-bios $L/bios.log 60 "multiboot2 (BIOS)|$K" "$FB" -- $Q -cdrom build/kernel/forge.iso
 cp $OVMF_VARS $L/vars.fd

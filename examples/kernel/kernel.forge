@@ -5,10 +5,14 @@
 include "boot.fsi"
 include "bootinfo.fsi"
 include "console.fsi"
+include "sync.fsi"
 include "mm.fsi"
 include "cpu.fsi"
 include "acpi.fsi"
 include "apic.fsi"
+include "sched.fsi"
+include "smp.fsi"
+include "user.fsi"
 
 MB2_MAGIC = 0x36D76289
 
@@ -242,6 +246,74 @@ def kmain_high():
     recurse(0)
     panic("recursion returned")
 
+NWORKERS = 8
+shared_counter: u64
+counter_lock: u64
+done_count: u64
+work_until: u64
+
+def worker(arg: u64):
+    t = cur_thread()
+    while atomic_load64(u64(addr(lapic_ticks))) < work_until:
+        f = irq_save()
+        spin_lock(u64(addr(counter_lock)))
+        shared_counter += 1
+        spin_unlock(u64(addr(counter_lock)))
+        irq_restore(f)
+        t.iters += 1
+    atomic_add64(u64(addr(done_count)), 1)
+
+def popcount(v: u64) -> u64:
+    n: u64 = 0
+    while v != 0:
+        n += v & 1
+        v = v >> 1
+    return n
+
+def sched_test():
+    ths: u64[8]
+    work_until = lapic_ticks + 30
+    i = 0
+    while i < NWORKERS:
+        ths[i] = u64(thread_spawn(u64(worker), i))
+        i += 1
+    while atomic_load64(u64(addr(done_count))) < NWORKERS:
+        hlt()
+    total: u64 = 0
+    seen: u64 = 0
+    minsw: u64 = 0xFFFFFFFF
+    i = 0
+    while i < NWORKERS:
+        t = ptr[Thread](ths[i])
+        while atomic_load64(u64(addr(t.state))) != T_DEAD:
+            yield_cpu()
+        total += t.iters
+        seen = seen | t.cpus_seen
+        if t.switches < minsw:
+            minsw = t.switches
+        thread_free(t)
+        i += 1
+    puts("scheduler: ")
+    put_u64(NWORKERS)
+    puts(" threads, counter ")
+    put_u64(shared_counter)
+    puts(" = sum ")
+    put_u64(total)
+    puts(", min switches/thread ")
+    put_u64(minsw)
+    puts(", cpus used ")
+    put_u64(popcount(seen))
+    puts("/")
+    put_u64(ncpu_online)
+    puts(", heap live ")
+    put_u64(heap_live)
+    putc(10)
+    if shared_counter != total or minsw < 2:
+        panic("scheduler test failed")
+    if popcount(seen) != ncpu_online:
+        panic("not all CPUs ran threads")
+    puts("preemptive SMP scheduler OK\n")
+
 @export
 def after_overflow():
     puts("recovered from #DF on a fresh stack\n")
@@ -270,6 +342,15 @@ def after_overflow():
     puts(" irq(s)\n")
     if pit_irqs == 0:
         panic("no IOAPIC interrupt")
+    smp_init()
+    puts("SMP: ")
+    put_u64(ncpu_online)
+    puts(" cpus online\n")
+    sched_cpu_init(0, 0)
+    sched_on = 1
+    sti()
+    sched_test()
+    cli()
     puts("KERNEL OK\n")
     # test harness: wait up to 5 s (LAPIC ticks) for 'q' on COM1 so it can take a screenshot first
     t_end = lapic_ticks + 500

@@ -8,12 +8,26 @@ ioapic: u64
 lapic_ticks: u64
 pit_irqs: u64
 lapic_per_10ms: u64
+tsc_per_ms: u64
+sched_on: u64
 
 def lapic_rd(r: u64) -> u32:
     return vload32(lapic + r)
 
 def lapic_wr(r: u64, v: u32):
     vstore32(lapic + r, v)
+
+apic_to_cpu: u8[256]
+
+def lapic_cpu() -> u64:
+    if lapic == 0:
+        return 0
+    return u64(apic_to_cpu[lapic_rd(0x20) >> 24])
+
+def tsc_delay_us(us: u64):
+    t = rdtsc() + tsc_per_ms * us / 1000
+    while rdtsc() < t:
+        cpu_relax()
 
 def lapic_eoi():
     lapic_wr(0xB0, 0)
@@ -40,8 +54,11 @@ def pic_disable():
 
 @interrupt
 def on_lapic_timer(frame: ptr[u64]):
-    lapic_ticks += 1
+    if lapic_cpu() == 0:
+        atomic_add64(u64(addr(lapic_ticks)), 1)
     lapic_eoi()
+    if sched_on:
+        schedule(0)
 
 @interrupt
 def on_pit(frame: ptr[u64]):
@@ -84,6 +101,7 @@ def lapic_init():
         guard += 1
     lapic_per_10ms = u64(0xFFFFFFFF - lapic_rd(0x390))
     tsc_10ms = rdtsc() - t0
+    tsc_per_ms = tsc_10ms / 10
     lapic_wr(0x380, 0)
     if lapic_per_10ms == 0:
         lapic_per_10ms = 100000

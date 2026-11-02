@@ -30,14 +30,33 @@ SEL_KCODE = 0x08
 SEL_KDATA = 0x10
 SEL_TSS = 0x28
 
-gdt: u64[7]
+MAX_CPUS = 8
+# GDT: null, kcode 0x08, kdata 0x10, udata 0x18 (DPL3), ucode 0x20 (DPL3), then one 16-byte TSS descriptor per CPU
+gdt: u64[21]
 gdtr: GdtDesc
-tss: Tss
+tss: Tss[8]
 idt: IdtEntry[256]
 idtr: GdtDesc
 bp_count: u64
 df_rsp: u64
 df_recover: u64
+
+def tss_install(cpu: u64, kstack: u64, ist1: u64, ist2: u64):
+    t = addr(tss[cpu])
+    memset(u64(t), 0, sizeof(Tss))
+    t.ist[0] = ist1
+    t.ist[1] = ist2
+    t.rsp0 = kstack
+    t.iomap = u16(sizeof(Tss))
+    base = u64(t)
+    lim = sizeof(Tss) - 1
+    gdt[5 + 2 * cpu] = (lim & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (u64(0x89) << 40) | (((lim >> 16) & 0xF) << 48) | (((base >> 24) & 0xFF) << 56)
+    gdt[6 + 2 * cpu] = base >> 32
+
+def gdt_load(cpu: u64):
+    lgdt(addr(gdtr))
+    asm("push $8", "lea 1f(%rip),%rax", "push %rax", "lretq", "1:", "mov $16,%ax", "mov %ax,%ds", "mov %ax,%es", "mov %ax,%ss", "xor %eax,%eax", "mov %ax,%fs", "mov %ax,%gs")
+    ltr(u16(SEL_TSS + 16 * cpu))
 
 def gdt_init():
     gdt[0] = 0
@@ -45,20 +64,10 @@ def gdt_init():
     gdt[2] = 0x00CF92000000FFFF
     gdt[3] = 0x00CFF2000000FFFF
     gdt[4] = 0x00AFFA000000FFFF
-    memset(u64(addr(tss)), 0, sizeof(Tss))
-    tss.ist[0] = IST1_TOP
-    tss.ist[1] = IST2_TOP
-    tss.rsp0 = KSTACK_TOP
-    tss.iomap = u16(sizeof(Tss))
-    base = u64(addr(tss))
-    lim = sizeof(Tss) - 1
-    gdt[5] = (lim & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (u64(0x89) << 40) | (((lim >> 16) & 0xF) << 48) | (((base >> 24) & 0xFF) << 56)
-    gdt[6] = base >> 32
-    gdtr.limit = u16(sizeof(u64[7]) - 1)
+    tss_install(0, KSTACK_TOP, IST1_TOP, IST2_TOP)
+    gdtr.limit = u16(sizeof(u64[21]) - 1)
     gdtr.base = u64(addr(gdt))
-    lgdt(addr(gdtr))
-    asm("push $8", "lea 1f(%rip),%rax", "push %rax", "lretq", "1:", "mov $16,%ax", "mov %ax,%ds", "mov %ax,%es", "mov %ax,%ss", "xor %eax,%eax", "mov %ax,%fs", "mov %ax,%gs")
-    ltr(SEL_TSS)
+    gdt_load(0)
 
 def idt_set(n: u32, handler: u64, ist: u8):
     e = addr(idt[n])

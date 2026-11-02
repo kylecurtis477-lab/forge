@@ -5,6 +5,7 @@ lapic_phys: u64
 ioapic_phys: u64
 ioapic_gsi_base: u64
 ncpus: u64
+madt_apic: u64[8]
 irq_gsi: u32[16]
 irq_flags: u16[16]
 
@@ -35,6 +36,8 @@ def madt_parse(m: u64):
         if n == 0:
             break
         if t == 0 and (vload32(p + 4) & 3) != 0:
+            if ncpus < 8:
+                madt_apic[ncpus] = vload8(p + 3)
             ncpus += 1
         if t == 1 and ioapic_phys == 0:
             ioapic_phys = vload32(p + 4)
