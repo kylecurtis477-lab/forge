@@ -274,6 +274,113 @@ def popcount(v: u64) -> u64:
         v = v >> 1
     return n
 
+# ---- sleeping mutexes / condvars / sleep ----
+mx: Mutex
+mx_counter: u64
+mx_done: u64
+pc_m: Mutex
+pc_notempty: CondVar
+pc_notfull: CondVar
+pc_ring: u64[8]
+pc_head: u64
+pc_count: u64
+pc_sum: u64
+pc_got: u64
+PC_ITEMS = 3000
+
+def mx_worker(n: u64):
+    i: u64 = 0
+    while i < n:
+        mutex_lock(addr(mx))
+        v = mx_counter
+        if (i & 15) == 0:
+            yield_cpu()          # hold the mutex across a reschedule: others must sleep, not spin
+        mx_counter = v + 1
+        mutex_unlock(addr(mx))
+        i += 1
+    atomic_add64(u64(addr(mx_done)), 1)
+
+def pc_producer(base: u64):
+    i: u64 = 0
+    while i < PC_ITEMS:
+        mutex_lock(addr(pc_m))
+        while pc_count == 8:
+            cond_wait(addr(pc_notfull), addr(pc_m))
+        pc_ring[(pc_head + pc_count) & 7] = base + i
+        pc_count += 1
+        cond_signal(addr(pc_notempty))
+        mutex_unlock(addr(pc_m))
+        i += 1
+    atomic_add64(u64(addr(mx_done)), 1)
+
+def pc_consumer(n: u64):
+    i: u64 = 0
+    while i < n:
+        mutex_lock(addr(pc_m))
+        while pc_count == 0:
+            cond_wait(addr(pc_notempty), addr(pc_m))
+        v = pc_ring[pc_head]
+        pc_head = (pc_head + 1) & 7
+        pc_count -= 1
+        pc_sum += v
+        pc_got += 1
+        cond_signal(addr(pc_notfull))
+        mutex_unlock(addr(pc_m))
+        i += 1
+    atomic_add64(u64(addr(mx_done)), 1)
+
+def sync_test():
+    ths: u64[8]
+    b0 = wq_blocks
+    i: u64 = 0
+    while i < 6:
+        ths[i] = u64(thread_spawn(u64(mx_worker), 2000))
+        i += 1
+    while atomic_load64(u64(addr(mx_done))) < 6:
+        yield_cpu()
+    i = 0
+    while i < 6:
+        thread_reap(ptr[Thread](ths[i]))
+        i += 1
+    puts("sleeping mutex: 6 threads x 2000 increments = ")
+    put_u64(mx_counter)
+    puts(", ")
+    put_u64(mx.contended)
+    puts(" contended acquisitions, ")
+    put_u64(wq_blocks - b0)
+    puts(" blocks\n")
+    if mx_counter != 12000:
+        panic("mutex lost updates")
+    mx_done = 0
+    ths[0] = u64(thread_spawn(u64(pc_producer), 0))
+    ths[1] = u64(thread_spawn(u64(pc_producer), 1000000))
+    ths[2] = u64(thread_spawn(u64(pc_consumer), PC_ITEMS))
+    ths[3] = u64(thread_spawn(u64(pc_consumer), PC_ITEMS))
+    while atomic_load64(u64(addr(mx_done))) < 4:
+        yield_cpu()
+    i = 0
+    while i < 4:
+        thread_reap(ptr[Thread](ths[i]))
+        i += 1
+    want = PC_ITEMS * (PC_ITEMS - 1) + 1000000 * PC_ITEMS
+    puts("condvar producer/consumer: ")
+    put_u64(pc_got)
+    puts(" items through an 8-slot ring, checksum ")
+    if pc_sum == want:
+        puts("ok\n")
+    else:
+        puts("BAD\n")
+        panic("producer/consumer lost or duplicated items")
+    t0 = lapic_ticks
+    sleep_ticks(10)
+    dt = lapic_ticks - t0
+    puts("sleep_ticks(10) slept ")
+    put_u64(dt)
+    puts(" ticks\n")
+    if dt < 10 or dt > 30:
+        panic("sleep_ticks out of range")
+    puts("wait queues + sleeping mutexes + condvars OK\n")
+
 TLBT_VA = 0xFFFFFFFFC0800000
 tlbt_ready: u64
 tlbt_go: u64
@@ -529,6 +636,7 @@ def after_overflow():
     sti()
     sched_test()
     tlb_test()
+    sync_test()
     user_test()
     fs_test()
     cli()

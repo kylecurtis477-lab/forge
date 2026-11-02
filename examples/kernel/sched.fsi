@@ -5,6 +5,7 @@ T_READY = 0
 T_RUNNING = 1
 T_DEAD = 2
 T_IDLE = 3
+T_BLOCKED = 4
 KTHREAD_STACK = 16384
 
 struct Thread:
@@ -23,6 +24,7 @@ struct Thread:
     proc: u64
     fpu: u64
     pin: u64
+    wake_at: u64
 
 asm(
     ".text",
@@ -141,9 +143,14 @@ def sched_tail():
 
 def schedule(exiting: u64):
     # interrupts are off (timer handler, yield, exit)
+    spin_lock(u64(addr(rq_lock)))
+    schedule_l(exiting)
+
+def schedule_l(exiting: u64):
+    # rq_lock held, interrupts off; returns with rq_lock released. A T_BLOCKED caller is parked on a
+    # wait queue already and is not put back on the run queue.
     cpu = lapic_cpu()
     cur = ptr[Thread](current[cpu])
-    spin_lock(u64(addr(rq_lock)))
     if exiting:
         cur.state = T_DEAD
     nxt = ptr[Thread](rq_pop(cpu))
@@ -206,3 +213,161 @@ def sched_cpu_init(cpu: u64, boot_ctx_is_idle: u64):
         idle_thr[cpu] = u64(it)
     current[cpu] = u64(t)
     percpu_kstack[cpu * 4] = t.kstack_top
+
+# ---- wait queues, sleeping mutexes, condition variables, timed sleep ----
+# All wait-queue state is protected by rq_lock, so "check condition, enqueue, block" and "wake" can never
+# interleave: no lost wakeups. Blocked threads use Thread.next as their queue link.
+struct WaitQ:
+    head: u64
+    tail: u64
+
+struct Mutex:
+    locked: u64
+    owner: u64
+    q: WaitQ
+    contended: u64
+
+struct CondVar:
+    q: WaitQ
+
+sleepq: WaitQ
+wq_blocks: u64
+wq_wakes: u64
+
+def wq_push(q: ptr[WaitQ], t: ptr[Thread]):
+    t.next = 0
+    if q.tail == 0:
+        q.head = u64(t)
+    else:
+        ptr[Thread](q.tail).next = u64(t)
+    q.tail = u64(t)
+
+def wq_pop(q: ptr[WaitQ]) -> u64:
+    t = q.head
+    if t != 0:
+        q.head = ptr[Thread](t).next
+        if q.head == 0:
+            q.tail = 0
+    return t
+
+def wq_block_l(q: ptr[WaitQ]):
+    # rq_lock held, irqs off: park the current thread on q and run something else; returns with rq_lock re-held
+    cur = ptr[Thread](current[lapic_cpu()])
+    cur.state = T_BLOCKED
+    wq_push(q, cur)
+    wq_blocks += 1
+    schedule_l(0)
+    spin_lock(u64(addr(rq_lock)))
+
+def wake_l(t: ptr[Thread]):
+    t.state = T_READY
+    rq_push(t)
+    wq_wakes += 1
+
+def wq_wake_one_l(q: ptr[WaitQ]) -> u64:
+    t = wq_pop(q)
+    if t != 0:
+        wake_l(ptr[Thread](t))
+        return 1
+    return 0
+
+def wq_wake_all_l(q: ptr[WaitQ]) -> u64:
+    n: u64 = 0
+    while wq_wake_one_l(q):
+        n += 1
+    return n
+
+def wq_wait(q: ptr[WaitQ]):
+    f = irq_save()
+    spin_lock(u64(addr(rq_lock)))
+    wq_block_l(q)
+    spin_unlock(u64(addr(rq_lock)))
+    irq_restore(f)
+
+def wq_wake_all(q: ptr[WaitQ]) -> u64:
+    f = irq_save()
+    spin_lock(u64(addr(rq_lock)))
+    n = wq_wake_all_l(q)
+    spin_unlock(u64(addr(rq_lock)))
+    irq_restore(f)
+    return n
+
+def mutex_lock(m: ptr[Mutex]):
+    f = irq_save()
+    spin_lock(u64(addr(rq_lock)))
+    cur = current[lapic_cpu()]
+    if m.locked and m.owner == cur:
+        panic("mutex_lock: recursive lock")
+    while m.locked:
+        m.contended += 1
+        wq_block_l(addr(m.q))
+    m.locked = 1
+    m.owner = current[lapic_cpu()]
+    spin_unlock(u64(addr(rq_lock)))
+    irq_restore(f)
+
+def mutex_unlock_l(m: ptr[Mutex]):
+    if m.locked == 0 or m.owner != current[lapic_cpu()]:
+        panic("mutex_unlock: not owner")
+    m.locked = 0
+    m.owner = 0
+    wq_wake_one_l(addr(m.q))
+
+def mutex_unlock(m: ptr[Mutex]):
+    f = irq_save()
+    spin_lock(u64(addr(rq_lock)))
+    mutex_unlock_l(m)
+    spin_unlock(u64(addr(rq_lock)))
+    irq_restore(f)
+
+def cond_wait(c: ptr[CondVar], m: ptr[Mutex]):
+    # atomically release m and sleep on c, then re-acquire m
+    f = irq_save()
+    spin_lock(u64(addr(rq_lock)))
+    mutex_unlock_l(m)
+    wq_block_l(addr(c.q))
+    spin_unlock(u64(addr(rq_lock)))
+    irq_restore(f)
+    mutex_lock(m)
+
+def cond_signal(c: ptr[CondVar]):
+    f = irq_save()
+    spin_lock(u64(addr(rq_lock)))
+    wq_wake_one_l(addr(c.q))
+    spin_unlock(u64(addr(rq_lock)))
+    irq_restore(f)
+
+def cond_broadcast(c: ptr[CondVar]):
+    wq_wake_all(addr(c.q))
+
+def sleep_ticks(n: u64):
+    f = irq_save()
+    spin_lock(u64(addr(rq_lock)))
+    cur = ptr[Thread](current[lapic_cpu()])
+    cur.wake_at = lapic_ticks + n
+    wq_block_l(addr(sleepq))
+    spin_unlock(u64(addr(rq_lock)))
+    irq_restore(f)
+
+def sleep_tick_l():
+    # cpu 0 timer, rq_lock held: wake every sleeper whose deadline passed
+    prev: u64 = 0
+    t = sleepq.head
+    while t != 0:
+        nx = ptr[Thread](t).next
+        if ptr[Thread](t).wake_at <= lapic_ticks:
+            if prev == 0:
+                sleepq.head = nx
+            else:
+                ptr[Thread](prev).next = nx
+            if sleepq.tail == t:
+                sleepq.tail = prev
+            wake_l(ptr[Thread](t))
+        else:
+            prev = t
+        t = nx
+
+def thread_reap(t: ptr[Thread]):
+    while atomic_load64(u64(addr(t.state))) != T_DEAD:
+        yield_cpu()
+    thread_free(t)

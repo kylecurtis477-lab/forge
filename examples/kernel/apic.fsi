@@ -58,7 +58,10 @@ def on_lapic_timer(frame: ptr[u64]):
         atomic_add64(u64(addr(lapic_ticks)), 1)
     lapic_eoi()
     if sched_on:
-        schedule(0)
+        spin_lock(u64(addr(rq_lock)))
+        if lapic_cpu() == 0 and sleepq.head != 0:
+            sleep_tick_l()
+        schedule_l(0)
 
 @interrupt
 def on_pit(frame: ptr[u64]):
