@@ -34,3 +34,8 @@ Band checks (2**62..2**62+3 alias bool/None) are done where a value leaves int a
 Self-compile of the compiler (best of 5): 1.89s with -O, 1.96s with -O0.
 
 Note: the IR backend only takes plain int functions with int params, so 1 of 622 compiler functions uses it. fib does not improve because temporaries are not coalesced.
+
+## Self-compile re-time (2026-11-01 20:39 CST, after the freestanding backend)
+`build/forgec selfhost/forgec.forge out.s`, best of 5: 1.66s (1.42s at 9c270ca, 1.11s at 0bf3911).
+- Part of the increase is +1,450 source lines (+10%) for the fs backend.
+- About 0.2s comes from the hyb_wasted function recompile (still to be fixed).
