@@ -857,8 +857,30 @@ rt_itos:
     pop %rcx
     mov %rax, %rdi
     mov %r8, %rsi
-    rep movsb
+    call rt_mcpy_r
     ret
+rt_mcpy_r:
+    # copy rcx bytes rsi->rdi (advances both); fast path for short strings
+    cmp $32, %rcx
+    ja 3f
+1:  cmp $8, %rcx
+    jb 2f
+    mov (%rsi), %rdx
+    mov %rdx, (%rdi)
+    add $8, %rsi
+    add $8, %rdi
+    sub $8, %rcx
+    jmp 1b
+2:  test %rcx, %rcx
+    jz 4f
+    movzbl (%rsi), %edx
+    mov %dl, (%rdi)
+    inc %rsi
+    inc %rdi
+    dec %rcx
+    jmp 2b
+3:  rep movsb
+4:  ret
 rt_concat:
     mov 16(%rsp), %r10
     mov 8(%rsp), %r11
@@ -873,10 +895,10 @@ rt_concat:
     mov %rax, %rdi
     mov %r10, %rsi
     mov %r8, %rcx
-    rep movsb
+    call rt_mcpy_r
     mov %r11, %rsi
     mov %r9, %rcx
-    rep movsb
+    call rt_mcpy_r
     ret
 rt_substr:
     # (s, a, b) -> s[a:b] (caller guarantees 0 <= a, b <= len)
@@ -954,7 +976,7 @@ rt_join:
     mov (%r8,%r11,8), %rsi
     call rt_slen_r
     mov %rdx, %rcx
-    rep movsb
+    call rt_mcpy_r
     inc %r11
     jmp 3b
 5:  ret
