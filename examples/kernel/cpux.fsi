@@ -130,6 +130,43 @@ def fpu_area_free(a: u64):
     if a != 0:
         kfree(vload64(a - 8))
 
+# ---- PCID (Phase 8) ----
+# Each address space gets PCID 1..63 (from its PML4 frame) per CPU. A switch reuses the TLB entries (CR3 bit 63)
+# only if this CPU last loaded that PCID with the same PML4 and nobody invalidated it since: user shootdowns and
+# address-space teardown clear the PML4's slots on every CPU, so a later load flushes that PCID.
+pcid_on: u64
+pcid_owner: u64[512]
+pcid_hits: u64
+pcid_misses: u64
+
+def pcid_of(pml4: u64) -> u64:
+    return ((pml4 >> 12) % 63) + 1
+
+def switch_cr3(cpu: u64, pml4: u64):
+    if pcid_on == 0:
+        write_cr3(pml4)
+        return
+    write_cr3(pcid_cr3(cpu, pml4))
+
+def pcid_cr3(cpu: u64, pml4: u64) -> u64:
+# the CR3 value to load: keep the TLB (bit 63) only if this CPU's slot still belongs to pml4
+    pc = pcid_of(pml4)
+    i = cpu * 64 + pc
+    if pcid_owner[i] == pml4:
+        pcid_hits += 1
+        return pml4 | pc | 0x8000000000000000
+    pcid_owner[i] = pml4
+    pcid_misses += 1
+    return pml4 | pc
+
+def pcid_forget(pml4: u64):
+    pc = pcid_of(pml4)
+    c: u64 = 0
+    while c < MAX_CPUS:
+        if pcid_owner[c * 64 + pc] == pml4:
+            pcid_owner[c * 64 + pc] = 0
+        c += 1
+
 def cpu_features_cpu():
 # per CPU: x87/SSE on, the same XCR0 everywhere, SMEP/SMAP
     write_cr0((read_cr0() | 0x22) & ~u64(0xC))  # MP|NE on, EM|TS off
@@ -140,6 +177,8 @@ def cpu_features_cpu():
         c4 = c4 | 0x100000
     if smap_on:
         c4 = c4 | 0x200000
+    if pcid_on and (read_cr3() & 0xFFF) == 0:
+        c4 = c4 | 0x20000
     write_cr4(c4)
     if fpu_mode == 2:
         xsetbv0(fpu_xcr0)
@@ -156,6 +195,7 @@ def cpu_features_init():
         cpu_feat7b = u64(cpuid_out[1])
     smep_on = (cpu_feat7b >> 7) & 1
     smap_on = (cpu_feat7b >> 20) & 1
+    pcid_on = (ecx1 >> 17) & 1
     fpu_mode = 1
     fpu_size = 512
     if (ecx1 >> 26) & 1:
@@ -250,6 +290,7 @@ def stop_machine_end(f: u64):
 @unsafe
 def tlb_local(cr3: u64, va: u64, n: u64):
     if cr3 != 0 and (read_cr3() & ADDR_MASK) != cr3:
+        pcid_forget(cr3)
         return
     if n == 0 or n > 32:
         if cr3 == 0:
@@ -295,6 +336,8 @@ def on_tlb_ipi(frame: ptr[u64]):
 def tlb_shootdown(cr3: u64, va: u64, n: u64):
 # cr3 = 0: kernel (global) mapping, flush everywhere; otherwise only CPUs running that address space
     f = irq_save()
+    if cr3 != 0:
+        pcid_forget(cr3)
     tlb_local(cr3, va, n)
     if atomic_load(addr(ncpu_online), acquire) > 1:
         spin_lock(addr(tlb_lock))

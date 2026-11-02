@@ -185,7 +185,7 @@ def schedule_l(exiting: u64):
     tss[cpu].rsp0 = nxt.kstack_top
     percpu_kstack[cpu * 4] = nxt.kstack_top
     if nxt.cr3 != cur.cr3:
-        write_cr3(nxt.cr3)
+        switch_cr3(cpu, nxt.cr3)
     fpu_save(cur.fpu)
     fpu_restore(nxt.fpu)
     ctx_switch(u64(addr(cur.rsp)), nxt.rsp)

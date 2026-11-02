@@ -215,6 +215,7 @@ def as_free_level(t: u64, lvl: u64) -> u64:
 @unsafe
 def as_free(pml4: u64) -> u64:
 # frees every user page and table (lower half only), then the PML4 itself
+    pcid_forget(pml4)
     n: u64 = 0
     i = 0
     while i < 256:

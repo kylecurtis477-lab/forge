@@ -533,6 +533,7 @@ def user_unmap(pml4: u64, va: u64):
     v = vload64(e)
     vstore64(e, 0)
     invlpg(va)  # only this single-threaded process uses pml4, on this CPU
+    pcid_forget(pml4)  # CPUs it ran on before may still cache va under its PCID
     frame_free(v & ADDR_MASK)
 
 def page_up(v: u64) -> u64:

@@ -192,7 +192,7 @@ Generic defs/structs are recorded at prescan and skipped; an instance is created
 ## Roadmap
 The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel subset.
 
-1. ~~**Memory:** memory map, frame allocator, 4-level higher-half paging with guard pages and NX, kernel heap, ExitBootServices with the UEFI app as the loader, GOP framebuffer console.~~ **Done.** Reclaim done. Buddy allocator done (Phase 8). Virtual range allocator done (Phase 8). Still open: PCID.
+1. ~~**Memory:** memory map, frame allocator, 4-level higher-half paging with guard pages and NX, kernel heap, ExitBootServices with the UEFI app as the loader, GOP framebuffer console.~~ **Done.** Reclaim done. Buddy allocator done (Phase 8). Virtual range allocator and PCID done (Phase 8).
 2. ~~**Interrupts and time:** PIC off, LAPIC/IOAPIC via ACPI MADT, LAPIC timer, IST stacks for #DF/NMI.~~ **Done** (atomics landed in the language too). Still open: HPET/TSC-deadline, x2APIC, and MSI.
 3. ~~**Scheduler + SMP:** preemptive kernel threads, spinlocks, INIT-SIPI AP bring-up.~~ **Done.** Since done: xsave/fxsave FPU state per thread, TLB shootdown IPIs, pinned threads, wait queues, sleeping mutexes, condvars, sleep_ticks. Still open: per-CPU run queues + load balancing, priorities.
 4. ~~**User mode:** TSS, ring 3, `syscall`/`sysret`, ELF loader, per-process address spaces.~~ **Done.** Since done: SMEP/SMAP with copy-in/out #PF fixups; Proc objects with fork (eager copy), exec, wait4, exit, brk, anonymous mmap/munmap, getargs; an interactive `sh` from `\EFI\Forge\bin\`. Still open: copy-on-write fork, signals, env, file-backed mmap.
@@ -275,3 +275,6 @@ Per-order free bitmaps (4 KiB..4 MiB) on top of the authoritative `frame_bits` m
 
 ## vmalloc (Phase 8)
 Big-heap VA comes from a coalescing first-fit free list of ranges (each with a top guard page); freed ranges are reused. `vmalloc_test` runs 2000 alloc/free cycles with bounded VA growth and no frame leaks. The bounds-overhead benchmark in `tests/bounds/run.sh` now interleaves checked/unchecked runs (best of 7) so load drift cannot fail it.
+
+## PCID (Phase 8)
+Per-CPU PCID slots (1..63, from the PML4 frame) let a context switch keep TLB entries when the slot still belongs to the incoming address space; any user shootdown, `user_unmap` or address-space teardown forgets the slot on all CPUs. Enabled only when CPUID reports PCID; not exercised under QEMU TCG (no PCID), so only the bookkeeping is boot-tested.

@@ -436,11 +436,11 @@ def sys_kexec(frame: u64, which: u64) -> u64:
     vstore64(tv, (tb + PAGE) | 3)
     vstore64(tv + 511 * 8, (tb + 2 * PAGE) | 3)
     vstore64(tv + 2 * PAGE + 510 * 8, (tb + 3 * PAGE) | 3)
-    # jump stub (identity mapped in both page tables): clear CR4.PGE so no global entry of this kernel
+    # jump stub (identity mapped in both page tables): clear CR4.PGE and CR4.PCIDE so no global entry of this kernel
     # survives, load the boot tables, enter kentry64 with rdi = BootInfo
     sb = hb + 11 * PAGE
     s = h + 11 * PAGE
-    vstore64(s, 0xffff7f2548e0200f)
+    vstore64(s, 0xfdff7f2548e0200f)
     vstore64(s + 8, 0x48df220fe0220fff)
     vstore32(s + 16, u32(0xe6ffd789))
     puts("kexec: generation ")

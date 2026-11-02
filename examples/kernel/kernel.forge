@@ -243,6 +243,43 @@ def check_mapping(name: ptr[u8], va: u64, expect_mapped: u64):
             panic("expected no mapping")
     putc(10)
 
+def pcid_selftest():
+# slot bookkeeping, checked on spare (cpu 7) slots whether or not the CPU has PCID: a reload keeps the TLB,
+# a forget (shootdown/teardown) or a colliding address space forces a flush
+    h0 = pcid_hits
+    m0 = pcid_misses
+    a: u64 = 0x1234000
+    b = a + 63 * PAGE  # same PCID as a
+    ok: u64 = 1
+    pcid_forget(a)
+    pcid_forget(b)
+    if (pcid_cr3(7, a) >> 63) != 0 or (pcid_cr3(7, a) >> 63) != 1:
+        ok = 0
+    if (pcid_cr3(7, a) & 0xFFF) != pcid_of(a) or pcid_of(a) == 0:
+        ok = 0
+    pcid_forget(a)
+    if (pcid_cr3(7, a) >> 63) != 0:
+        ok = 0
+    if (pcid_cr3(7, b) >> 63) != 0 or (pcid_cr3(7, a) >> 63) != 0:
+        ok = 0
+    pcid_forget(a)
+    pcid_hits = h0
+    pcid_misses = m0
+    puts("PCID: ")
+    if pcid_on:
+        puts("on, address-space switches reusing the TLB ")
+        put_u64(pcid_hits)
+        puts(", flushing ")
+        put_u64(pcid_misses)
+    else:
+        puts("not offered by this CPU (QEMU TCG), CR3 loads flush as before")
+    puts("; slot bookkeeping ")
+    if ok == 0:
+        panic("PCID bookkeeping")
+    puts("OK\n")
+    if pcid_on and pcid_hits == 0:
+        panic("PCID never reused a TLB")
+
 def vmalloc_test():
 # Phase 8: 2000 big-heap alloc/free cycles of mixed sizes reuse VA; the high-water mark stays bounded
     h0 = va_hiwater
@@ -1416,6 +1453,7 @@ def shell_test():
     if code != 0 or kbd_irqs == 0 or com_irqs == 0:
         panic("interactive shell test failed")
     puts("processes + VFS + keyboard/serial input + sh OK\n")
+    pcid_selftest()
 
 def kexec_test():
 # a second shell session that replaces the kernel under itself (sh builtin `kexec`, syscall 409)
