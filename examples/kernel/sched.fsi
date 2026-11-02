@@ -7,6 +7,7 @@ T_DEAD = 2
 T_IDLE = 3
 T_BLOCKED = 4
 KTHREAD_STACK = 16384
+KTHREAD_PAGES = 4
 
 struct Thread:
     rsp: u64
@@ -102,8 +103,8 @@ def cur_thread() -> ptr[Thread]:
 def thread_new(fn: u64, arg: u64) -> ptr[Thread]:
     t = ptr[Thread](kmalloc(sizeof(Thread)))
     memset(u64(t), 0, sizeof(Thread))
-    t.stack = kmalloc(KTHREAD_STACK)
-    t.kstack_top = (t.stack + KTHREAD_STACK) & ~u64(15)
+    t.stack = kstack_alloc(KTHREAD_PAGES)
+    t.kstack_top = t.stack + KTHREAD_STACK
     t.id = atomic_fetch_add(addr(next_tid), 1, acq_rel) + 1
     t.cr3 = kernel_pml4
     t.fpu = fpu_area_new()
@@ -143,7 +144,7 @@ def thread_free(t: ptr[Thread]):
     irq_restore(f)
     if st != T_DEAD:
         panic("thread_free: thread still alive")
-    kfree(t.stack)
+    kstack_free(t.stack, KTHREAD_PAGES)
     fpu_area_free(t.fpu)
     kfree(u64(t))
 
@@ -201,6 +202,24 @@ def thread_exit():
     cli()
     schedule(1)
     panic("dead thread resumed")
+
+def thread_guard_hit(cr2: u64) -> u64:
+# called from #DF: if cr2 is in the current thread's guard page, return the rsp to restart it on
+    if u64(cur_thread()) == 0:
+        return 0
+    t = cur_thread()
+    if t.stack == 0 or cr2 < t.stack - PAGE or cr2 >= t.stack:
+        return 0
+    kstack_guard_faults += 1
+    return t.kstack_top - 8
+
+@export
+def thread_overflow_exit():
+# a kernel thread ran into its guard page: #DF moved it here, onto the top of its own stack
+    puts("kernel thread ")
+    put_u64(cur_thread().id)
+    puts(" overflowed its stack into the guard page: killed, kernel carries on\n")
+    thread_exit()
 
 @unsafe
 def idle_loop(arg: u64):

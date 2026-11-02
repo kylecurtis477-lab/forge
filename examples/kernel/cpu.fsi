@@ -142,16 +142,23 @@ def on_double_fault(frame: ptr[u64]):
 # runs on IST1 even though the faulting stack is gone; frame = [err, rip, cs, rflags, rsp, ss]
     df_rsp = u64(frame)
     if df_recover == 0:
-        fault("#DF", frame, 1)
-    puts("#DF on IST1: handler frame at ")
-    put_hex(df_rsp)
-    puts(", faulting rsp=")
-    put_hex(frame[4])
-    putc(10)
-    # resume at the recovery continuation on a fresh kernel stack (iretq to it)
-    frame[1] = df_recover
-    frame[4] = KSTACK_TOP - 8
-    df_recover = 0
+    # a kernel thread that ran into its stack guard page dies alone (CR2 is the faulting push)
+        sp = thread_guard_hit(read_cr2())
+        if sp == 0:
+            fault("#DF", frame, 1)
+        rip = u64(thread_overflow_exit)
+    else:
+        puts("#DF on IST1: handler frame at ")
+        put_hex(df_rsp)
+        puts(", faulting rsp=")
+        put_hex(frame[4])
+        putc(10)
+        # resume at the recovery continuation on a fresh kernel stack (iretq to it)
+        rip = df_recover
+        sp = KSTACK_TOP - 8
+        df_recover = 0
+    frame[1] = rip
+    frame[4] = sp
 
 @unsafe
 def idt_init():

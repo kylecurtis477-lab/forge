@@ -8,6 +8,7 @@ DEMAND_SIZE = 0x1000000
 HEAP_BIG_BASE = 0xFFFFC00000000000
 KSTACK_TOP = 0xFFFFFFFFC0040000
 KSTACK_PAGES = 16
+KSTACKS_BASE = 0xFFFFC04000000000  # kernel thread stacks: same PML4 slot as the big heap, bump VA, guard page below each
 IST1_TOP = 0xFFFFFFFFC0080000
 IST2_TOP = 0xFFFFFFFFC00C0000
 IST_PAGES = 4
@@ -415,6 +416,33 @@ def kfree_nolock(p: u64):
         return
     vstore64(p, slab_free[h])
     slab_free[h] = p
+
+kstack_next: u64
+kstack_guard_faults: u64
+
+def kstack_alloc(np: u64) -> u64:
+# np mapped pages above one never-mapped guard page; the VA range is never reused
+    f = irq_save()
+    spin_lock(addr(heap_lock))
+    if kstack_next == 0:
+        kstack_next = KSTACKS_BASE
+    base = kstack_next + PAGE
+    kstack_next += (np + 1) * PAGE
+    i = 0
+    while i < np:
+        map_page(kernel_pml4, base + i * PAGE, frame_alloc(), PTE_W | PTE_NX)
+        i += 1
+    spin_unlock(addr(heap_lock))
+    irq_restore(f)
+    return base
+
+def kstack_free(base: u64, np: u64):
+    i = 0
+    while i < np:
+        fr = unmap_page(kernel_pml4, base + i * PAGE)
+        tlb_shootdown(0, base + i * PAGE, 1)
+        frame_free(fr)
+        i += 1
 
 # ---- reclaim boot-time memory ----
 # Called once ACPI has been parsed and the kernel runs on its own page tables: the loader's image, its page

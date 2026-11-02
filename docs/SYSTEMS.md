@@ -210,3 +210,8 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
 - `elf_load` (user.fsi) rejects a PT_LOAD with PF_W|PF_X, and rejects a segment that lands on an already-mapped page whose W/NX bits differ from its own, so no page is ever writable and executable or silently gets weaker permissions. Rejections bump `elf_wx_rejects`.
 - Text pages are mapped read-only + executable; everything else (data, bss, stack, brk, mmap) is NX. User programs are linked with `-z separate-code -z noexecstack`.
 - Tests: `user_wx_test` in kernel.forge (crafted images built in a static buffer, safe code) and `wxtest` from the boot shell (four forked children; each must exit 0x10e from #PF).
+
+## Kernel stack guard pages (Phase 5.4b)
+- `kstack_alloc(np)` / `kstack_free` (mm.fsi) map np pages at `KSTACKS_BASE` + bump offset with one never-mapped page below; VA is never reused, so a stale pointer into a freed stack faults too. The range shares the big heap's PML4 slot, so every user address space already sees it.
+- Overflow: push into the guard page -> #PF cannot deliver -> #DF on IST1. `thread_guard_hit(cr2)` (sched.fsi) matches the current thread's guard page; the handler iretqs to `thread_overflow_exit` with rsp = the thread's stack top, and the thread exits. Any other #DF without a recovery point still panics.
+- Test: `guard_test` (kernel.forge) after the scheduler test.

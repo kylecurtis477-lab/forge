@@ -562,6 +562,22 @@ def sched_test():
     if popcount(seen) != ncpu_online:
         panic("not all CPUs ran threads")
     puts("preemptive SMP scheduler OK\n")
+    guard_test()
+
+def deep(arg: u64):
+    recurse(0)
+
+def guard_test():
+# a kernel thread recursing without bound must hit its own guard page and die alone
+    f0 = frames_free
+    g0 = kstack_guard_faults
+    t = thread_spawn(u64(deep), 0)
+    while atomic_load(addr(t.state), acquire) != T_DEAD:
+        yield_cpu()
+    thread_free(t)
+    if kstack_guard_faults != g0 + 1 or frames_free != f0:
+        panic("kernel stack guard test failed")
+    puts("kernel stack guard pages: overflowing thread killed, stack frames returned\n")
 
 asm(".section .rodata",
     ".balign 16",
