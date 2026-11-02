@@ -28,6 +28,11 @@ if [ "$1" = "pkg" ]; then
     *) echo "usage: forge pkg [--registry DIR] lock | build [-o OUT] | sha256 FILE..." >&2; exit 2 ;;
   esac
 fi
+# forge lsp : Language Server Protocol server on stdio (tools/lsp.forge)
+if [ "$1" = "lsp" ]; then
+  [ "$D/build/lsp" -nt "$D/tools/lsp.forge" ] || "$0" "$D/tools/lsp.forge" -o "$D/build/lsp" >&2
+  exec "$D/build/lsp" "$D/build/forgec"
+fi
 # forge fmt [--check] [files...] : canonical formatter (tools/fmt.forge); no files = repo set
 if [ "$1" = "fmt" ]; then
   shift

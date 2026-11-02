@@ -254,6 +254,9 @@ A process holds exactly the capability bits its sealed manifest declares (fs=1, 
 ## Built-in assembler (Phase 7.1)
 `build/fas` (tools/fas.forge): `fas [-I dir] [-o out.o] in.s`. Byte-identical to GNU as on everything the toolchain emits (compiler output, kernel incl. asm blocks, krel stubs, EFI loader, modules, user programs); tested by tests/fas/run.sh. Layout rules it mirrors: file offsets aligned to min(sh_addralign, 8); NOBITS takes an aligned offset without advancing; no symtab/strtab when there are no symbols; locals relocated against section symbols; PLT32 for calls unless the target was a defined local when the call was assembled; GNU relax_segment jump relaxation with alignment regions. Unsupported directives/instructions fail with `fas: file:line: ...`.
 
+## Language server (Phase 7.5)
+`forge lsp` runs an LSP server on stdin/stdout (point the editor's client at the command `forge lsp`). It provides diagnostics from forgec (parse first, then the full compile), go-to-definition and hover. Both come from the `--emit=ast-json` tree and cover locals, parameters, module globals and sibling-module imports. Unsaved buffers are compiled from a hidden `.<name>.lsp<pid>.forge` file next to the original, which is deleted after each run. Positions are ASCII-only. See tests/lsp for a scripted session.
+
 ## Packages (Phase 7.4)
 `forge pkg lock` / `forge pkg build` in a directory with a forge.toml. Dependencies come from a local registry directory (`<name>/versions`, `<name>/<version>/forge.toml` and sources) and are pinned with SHA-256 content hashes in forge.lock; `build` verifies every hash before staging the sources into target/stage and compiling, so the same lock gives the same binary hash. See tests/pkg for a fixture registry and project.
 

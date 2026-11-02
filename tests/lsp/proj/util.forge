@@ -1,0 +1,7 @@
+def shout(s: str) -> str:
+    "Upper-case s and add a bang."
+    return s.upper() + "!"
+
+class Counter:
+    def __init__(self):
+        self.n = 0

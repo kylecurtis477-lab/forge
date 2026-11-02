@@ -1742,6 +1742,10 @@ rt_syscall:
     mov 24(%rsp), %rdi
     mov 16(%rsp), %rsi
     mov 8(%rsp), %rdx
+    # 4th..6th arguments are always 0: wait4's rusage pointer (r10) must not be stale garbage
+    xor %r10d, %r10d
+    xor %r8d, %r8d
+    xor %r9d, %r9d
     syscall
     ret
 rt_clock:

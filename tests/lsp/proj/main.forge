@@ -1,0 +1,12 @@
+import util
+from util import shout
+
+def add(a: int, b: int) -> int:
+    "Add two ints."
+    total = a + b
+    return total
+
+for i in range(3):
+    print(add(i, 1))
+print(shout("hi"), util.shout("x"))
+c = util.Counter()

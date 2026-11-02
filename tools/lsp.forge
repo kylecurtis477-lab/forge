@@ -1,0 +1,615 @@
+# forge lsp: Language Server Protocol server over stdio (JSON-RPC with Content-Length framing).
+# Built on the compiler's JSON outputs: `forgec --emit=ast-json` for the syntax tree and
+# `--diagnostics=json` for errors. Supports initialize/shutdown/exit, full-text
+# didOpen/didChange/didSave/didClose, publishDiagnostics, textDocument/definition (functions,
+# classes, parameters, loop variables and assignments in scope, including `from m import f`,
+# `import m` + `m.f` in sibling modules) and textDocument/hover (the definition's header line and
+# docstring, or a parameter's annotation).
+# usage: lsp FORGEC     (FORGEC = absolute path of the compiler; `forge lsp` passes build/forgec)
+# An unsaved buffer is compiled from a hidden sibling file (.<name>.lsp<pid>.forge, deleted right
+# after) so its imports resolve the same way as on disk. Positions assume ASCII (UTF-16 = bytes).
+
+import sys
+
+FORGEC = [""]
+DOCS = {}
+PID = [0]
+
+# ---------------- JSON ----------------
+def jskip(s, i):
+    while i < len(s) and (s[i] == " " or s[i] == "\n" or s[i] == "\r" or s[i] == "\t"):
+        i += 1
+    return i
+
+def hexv(c):
+    o = ord(c)
+    if o >= 48 and o <= 57:
+        return o - 48
+    if o >= 97 and o <= 102:
+        return o - 87
+    return o - 55
+
+def utf8(cp):
+    if cp < 128:
+        return chr(cp)
+    if cp < 2048:
+        return chr(192 | (cp >> 6)) + chr(128 | (cp & 63))
+    if cp < 65536:
+        return chr(224 | (cp >> 12)) + chr(128 | ((cp >> 6) & 63)) + chr(128 | (cp & 63))
+    return chr(240 | (cp >> 18)) + chr(128 | ((cp >> 12) & 63)) + chr(128 | ((cp >> 6) & 63)) + chr(128 | (cp & 63))
+
+def jparse(s, i):
+# -> [value, next index]
+    i = jskip(s, i)
+    c = s[i]
+    if c == "{":
+        d = {}
+        i = jskip(s, i + 1)
+        if s[i] == "}":
+            return [d, i + 1]
+        while True:
+            k = jparse(s, i)
+            i = jskip(s, k[1])
+            v = jparse(s, i + 1)
+            d[k[0]] = v[0]
+            i = jskip(s, v[1])
+            if s[i] == ",":
+                i += 1
+            else:
+                return [d, i + 1]
+    if c == "[":
+        a = []
+        i = jskip(s, i + 1)
+        if s[i] == "]":
+            return [a, i + 1]
+        while True:
+            v = jparse(s, i)
+            a.append(v[0])
+            i = jskip(s, v[1])
+            if s[i] == ",":
+                i += 1
+            else:
+                return [a, i + 1]
+    if c == "\"":
+        parts = []
+        i += 1
+        st = i
+        while s[i] != "\"":
+            if s[i] == "\\":
+                parts.append(s[st:i])
+                e = s[i + 1]
+                if e == "n":
+                    parts.append("\n")
+                elif e == "t":
+                    parts.append("\t")
+                elif e == "r":
+                    parts.append("\r")
+                elif e == "b":
+                    parts.append(chr(8))
+                elif e == "f":
+                    parts.append(chr(12))
+                elif e == "u":
+                    cp = 0
+                    for k in range(4):
+                        cp = cp * 16 + hexv(s[i + 2 + k])
+                    i += 4
+                    if cp >= 0xD800 and cp < 0xDC00 and s[i + 2] == "\\" and s[i + 3] == "u":
+                        lo = 0
+                        for k in range(4):
+                            lo = lo * 16 + hexv(s[i + 4 + k])
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+                        i += 6
+                    parts.append(utf8(cp))
+                else:
+                    parts.append(e)
+                i += 2
+                st = i
+            else:
+                i += 1
+        parts.append(s[st:i])
+        return ["".join(parts), i + 1]
+    if s[i:i + 4] == "true":
+        return [True, i + 4]
+    if s[i:i + 5] == "false":
+        return [False, i + 5]
+    if s[i:i + 4] == "null":
+        return [None, i + 4]
+    j = i
+    while j < len(s) and (s[j] == "-" or s[j] == "+" or s[j] == "." or s[j] == "e" or s[j] == "E" or s[j].isdigit()):
+        j += 1
+    t = s[i:j]
+    if "." in t or "e" in t or "E" in t:
+        return [float(t), j]
+    return [int(t), j]
+
+def jstr(s):
+    parts = ["\""]
+    st = 0
+    i = 0
+    while i < len(s):
+        c = s[i]
+        o = ord(c)
+        if c == "\"" or c == "\\" or o < 32:
+            parts.append(s[st:i])
+            if c == "\"":
+                parts.append("\\\"")
+            elif c == "\\":
+                parts.append("\\\\")
+            elif c == "\n":
+                parts.append("\\n")
+            elif c == "\t":
+                parts.append("\\t")
+            elif c == "\r":
+                parts.append("\\r")
+            else:
+                parts.append("\\u00" + "0123456789abcdef"[o >> 4] + "0123456789abcdef"[o & 15])
+            st = i + 1
+        i += 1
+    parts.append(s[st:])
+    parts.append("\"")
+    return "".join(parts)
+
+def jdump(v):
+    if v == None:
+        return "null"
+    if v is True:
+        return "true"
+    if v is False:
+        return "false"
+    if isinstance(v, str):
+        return jstr(v)
+    if isinstance(v, int) or isinstance(v, float):
+        return str(v)
+    if isinstance(v, list):
+        r = []
+        for x in v:
+            r.append(jdump(x))
+        return "[" + ",".join(r) + "]"
+    r = []
+    for k in v:
+        r.append(jstr(k) + ":" + jdump(v[k]))
+    return "{" + ",".join(r) + "}"
+
+# ---------------- transport ----------------
+def read_n(n):
+    parts = []
+    buf = alloc(65536)
+    while n > 0:
+        m = n
+        if m > 65536:
+            m = 65536
+        k: int = __syscall(0, 0, buf, m)
+        if k <= 0:
+            return None
+        parts.append(substr(buf, 0, k))
+        n -= k
+    return "".join(parts)
+
+def read_msg():
+    clen = -1
+    while True:
+        l = sys.stdin.readline()
+        if len(l) == 0:
+            return None
+        l = l.strip()
+        if len(l) == 0:
+            break
+        if l.lower().startswith("content-length:"):
+            clen = int(l[15:].strip())
+    if clen < 0:
+        return None
+    body = read_n(clen)
+    if body == None:
+        return None
+    return jparse(body, 0)[0]
+
+def send(obj):
+    obj["jsonrpc"] = "2.0"
+    b = jdump(obj)
+    m = "Content-Length: " + str(len(b)) + "\r\n\r\n" + b
+    off = 0
+    while off < len(m):
+        k: int = __syscall(1, 1, substr(m, off, len(m)), len(m) - off)
+        if k <= 0:
+            return
+        off += k
+
+# ---------------- running the compiler ----------------
+def run_sh(cmd):
+    argv = __new(64, 4, 64)
+    __st(argv, 0, "/bin/sh")
+    __st(argv, 1, "-c")
+    __st(argv, 2, cmd)
+    __st(argv, 3, 0)
+    envp = __new(16, 4, 16)
+    __st(envp, 0, 0)
+    pid: int = __syscall(57, 0, 0, 0)
+    if pid == 0:
+        __syscall(59, "/bin/sh", argv, envp)
+        __syscall(60, 127, 0, 0)
+    st = alloc(64)
+    __syscall(61, pid, st, 0)
+    return 0
+
+def shq(s):
+    return "'" + s.replace("'", "'\\''") + "'"
+
+def uri_path(u):
+    if u.startswith("file://"):
+        u = u[7:]
+    r = []
+    i = 0
+    while i < len(u):
+        if u[i] == "%" and i + 2 < len(u):
+            r.append(chr(hexv(u[i + 1].upper()) * 16 + hexv(u[i + 2].upper())))
+            i += 3
+        else:
+            r.append(u[i])
+            i += 1
+    return "".join(r)
+
+def dirname(p):
+    i = p.rfind("/")
+    if i < 0:
+        return "."
+    if i == 0:
+        return "/"
+    return p[:i]
+
+def basename(p):
+    return p[p.rfind("/") + 1:]
+
+def file_text(path):
+    try:
+        f = open(path)
+        t = f.read()
+        f.close()
+        return t
+    except FileNotFoundError:
+        return None
+
+def write_text(path, text):
+    f = open(path, "w")
+    f.write(text)
+    f.close()
+
+def compile_doc(path, text):
+# -> [ast or None, list of diagnostic dicts]
+    src = path
+    tmp = ""
+    if file_text(path) != text:
+        tmp = dirname(path) + "/." + basename(path) + ".lsp" + str(PID[0]) + ".forge"
+        write_text(tmp, text)
+        src = tmp
+    T = "/tmp/forge-lsp-" + str(PID[0])
+    run_sh(shq(FORGEC[0]) + " " + shq(src) + " " + T + ".ast --emit=ast-json --diagnostics=json > " + T + ".d1 2>&1")
+    d = file_text(T + ".d1")
+    ast = None
+    if d != None and len(d.strip()) == 0:
+        a = file_text(T + ".ast")
+        if a != None and a.startswith("{"):
+            ast = jparse(a, 0)[0]["root"]
+        # syntax is fine: a full compile reports name and type errors
+        run_sh("cd " + shq(dirname(src)) + " && " + shq(FORGEC[0]) + " " + shq(src) + " " + T + ".s --diagnostics=json > " + T + ".d1 2>&1")
+        d = file_text(T + ".d1")
+    run_sh("rm -f " + T + ".ast " + T + ".s " + T + ".d1")
+    if tmp != "":
+        run_sh("rm -f " + shq(tmp))
+    diags = []
+    if d == None:
+        return [ast, diags]
+    for l in d.split("\n"):
+        l = l.strip()
+        if l.startswith("{\"version\""):
+            j = jparse(l, 0)[0]
+            if j["file"] == src or basename(j["file"]) == basename(src):
+                diags.append(j)
+        elif l.startswith("error:"):
+            diags.append({"line": 1, "col": 1, "end_line": 1, "end_col": 1, "code": "E0000", "message": "compiler failed: " + l, "severity": "error"})
+    return [ast, diags]
+
+def publish(uri):
+    doc = DOCS[uri]
+    r = compile_doc(uri_path(uri), doc["text"])
+    if r[0] != None:
+        doc["ast"] = r[0]
+    out = []
+    for j in r[1]:
+        el = j["end_line"]
+        ec = j["end_col"]
+        if el < j["line"] or (el == j["line"] and ec <= j["col"]):
+            el = j["line"]
+            ec = j["col"] + 1
+        sev = 1
+        if j["severity"] == "warning":
+            sev = 2
+        out.append({"range": {"start": {"line": j["line"] - 1, "character": j["col"] - 1}, "end": {"line": el - 1, "character": ec - 1}}, "severity": sev, "code": j["code"], "source": "forgec", "message": j["message"]})
+    send({"method": "textDocument/publishDiagnostics", "params": {"uri": uri, "diagnostics": out}})
+
+# ---------------- AST queries ----------------
+def kids(n):
+    if "c" in n:
+        return n["c"]
+    return []
+
+def last_line(n):
+    m = n["l"]
+    for c in kids(n):
+        x = last_line(c)
+        if x > m:
+            m = x
+    return m
+
+def word_at(text, line, ch):
+# -> [word, qualifier before a '.', or ""]
+    ls = text.split("\n")
+    if line >= len(ls):
+        return ["", ""]
+    s = ls[line]
+    if ch > len(s):
+        ch = len(s)
+    a = ch
+    while a > 0 and (s[a - 1].isalnum() or s[a - 1] == "_"):
+        a -= 1
+    b = ch
+    while b < len(s) and (s[b].isalnum() or s[b] == "_"):
+        b += 1
+    q = ""
+    if a > 0 and s[a - 1] == ".":
+        e = a - 1
+        k = e
+        while k > 0 and (s[k - 1].isalnum() or s[k - 1] == "_"):
+            k -= 1
+        q = s[k:e]
+    return [s[a:b], q]
+
+def name_col(text, line, name, after):
+# column of `name` as a whole word on 1-based `line`, searching from `after`
+    ls = text.split("\n")
+    if line - 1 >= len(ls):
+        return 0
+    s = ls[line - 1]
+    i = s.find(name, after)
+    while i >= 0:
+        ok = (i == 0 or not (s[i - 1].isalnum() or s[i - 1] == "_")) and (i + len(name) >= len(s) or not (s[i + len(name)].isalnum() or s[i + len(name)] == "_"))
+        if ok:
+            return i
+        i = s.find(name, i + 1)
+    return 0
+
+def bind_targets(n, out):
+    if n["k"] == "Name":
+        out.append(n)
+    elif n["k"] == "Tuple" or n["k"] == "List":
+        for c in kids(n):
+            bind_targets(c, out)
+
+def scope_defs(stmts, name, out, deep):
+# definitions of `name` among statements (descending into if/while/for/with/try blocks but not
+# into nested functions or classes). out gets [kind, node, line]
+    for s in stmts:
+        k = s["k"]
+        if (k == "Def" or k == "Class") and s["v"] == name:
+            out.append([k, s, s["l"]])
+        elif k == "Assign" or k == "AnnAssign" or k == "AugAssign":
+            ts = []
+            bind_targets(kids(s)[0], ts)
+            for t in ts:
+                if t["v"] == name:
+                    out.append(["Var", s, s["l"]])
+        elif k == "For":
+            ts = []
+            bind_targets(kids(s)[0], ts)
+            for t in ts:
+                if t["v"] == name:
+                    out.append(["Var", s, s["l"]])
+        elif (k == "Import" or k == "ImportFrom"):
+            for a in kids(s):
+                if a["k"] == "Alias" and a["v"] == name:
+                    out.append([k, s, s["l"]])
+        if k != "Def" and k != "Class" and deep:
+            for c in kids(s):
+                if c["k"] == "Block":
+                    scope_defs(kids(c), name, out, deep)
+                elif c["k"] in ["If", "Elif", "Else", "Except", "Finally", "Try"]:
+                    scope_defs([c], name, out, deep)
+
+def enclosing(stmts, line, chain):
+# chain of Def/Class nodes containing the 1-based line
+    for s in stmts:
+        if s["l"] <= line and line <= last_line(s):
+            if s["k"] == "Def" or s["k"] == "Class":
+                chain.append(s)
+            for c in kids(s):
+                if c["k"] == "Block":
+                    enclosing(kids(c), line, chain)
+                elif c["k"] in ["If", "Elif", "Else", "Except", "Finally", "Try", "For", "While", "With"]:
+                    enclosing([c], line, chain)
+
+def def_block(d):
+    for c in kids(d):
+        if c["k"] == "Block":
+            return kids(c)
+    return []
+
+def params(d):
+    for c in kids(d):
+        if c["k"] == "Params":
+            return kids(c)
+    return []
+
+def module_ast(dir, mod):
+    p = dir + "/" + mod + ".forge"
+    for u in DOCS:
+        if uri_path(u) == p and "ast" in DOCS[u]:
+            return [p, DOCS[u]["ast"], DOCS[u]["text"]]
+    t = file_text(p)
+    if t == None:
+        return None
+    r = compile_doc(p, t)
+    if r[0] == None:
+        return None
+    return [p, r[0], t]
+
+def find_def(path, ast, text, line, word, qual, depth):
+# -> [path, text, kind, node, line, col] or None
+    if ast == None or word == "" or depth > 4:
+        return None
+    if qual != "":
+        top = []
+        scope_defs(kids(ast), qual, top, True)
+        for t in top:
+            if t[0] == "Import":
+                m = module_ast(dirname(path), qual)
+                if m != None:
+                    return find_def(m[0], m[1], m[2], 0, word, "", depth + 1)
+        return None
+    chain = []
+    enclosing(kids(ast), line, chain)
+    i = len(chain) - 1
+    while i >= 0:
+        d = chain[i]
+        if d["k"] == "Def":
+            for p in params(d):
+                if p["v"] == word:
+                    return [path, text, "Param", p, p["l"], name_col(text, p["l"], word, text.split("\n")[p["l"] - 1].find("("))]
+            out = []
+            scope_defs(def_block(d), word, out, True)
+            if len(out) > 0:
+                return finish(path, text, out[0], word, depth)
+        i -= 1
+    out = []
+    scope_defs(kids(ast), word, out, True)
+    best = None
+    for o in out:
+        if best == None or (best[0] == "Var" and o[0] != "Var"):
+            best = o
+    if best == None:
+        return None
+    return finish(path, text, best, word, depth)
+
+def finish(path, text, o, word, depth):
+    k = o[0]
+    n = o[1]
+    if k == "ImportFrom":
+        m = module_ast(dirname(path), n["v"])
+        if m != None:
+            r = find_def(m[0], m[1], m[2], 0, word, "", depth + 1)
+            if r != None:
+                return r
+    after = 0
+    if k == "Def":
+        after = text.split("\n")[o[2] - 1].find("def ")
+    return [path, text, k, n, o[2], name_col(text, o[2], word, after)]
+
+def path_uri(p):
+    return "file://" + p
+
+def header(text, line):
+# the source lines of a def/class header, up to the line ending in ':'
+    ls = text.split("\n")
+    r = []
+    i = line - 1
+    while i < len(ls) and len(r) < 8:
+        r.append(ls[i].strip())
+        if ls[i].rstrip().endswith(":"):
+            break
+        i += 1
+    h = " ".join(r)
+    if h.endswith(":"):
+        h = h[:len(h) - 1]
+    return h
+
+def hover_text(r, word):
+    text = r[1]
+    k = r[2]
+    n = r[3]
+    if k == "Def" or k == "Class":
+        s = "```forge\n" + header(text, r[4]) + "\n```"
+        b = def_block(n)
+        if len(b) > 0 and b[0]["k"] == "Expr" and kids(b[0])[0]["k"] == "Str":
+            s += "\n\n" + kids(b[0])[0]["v"]
+        if r[0] != "":
+            s += "\n\n*" + basename(r[0]) + ":" + str(r[4]) + "*"
+        return s
+    if k == "Param":
+        ann = kids(n)[0]
+        t = ""
+        if ann["k"] == "Name":
+            t = ": " + ann["v"]
+        return "```forge\n(parameter) " + word + t + "\n```"
+    return "```forge\n(variable) " + text.split("\n")[r[4] - 1].strip() + "\n```"
+
+# ---------------- dispatch ----------------
+def handle(m):
+    meth = m.get("method", "")
+    mid = m.get("id", None)
+    p = m.get("params", {})
+    if meth == "initialize":
+        send({"id": mid, "result": {"capabilities": {"textDocumentSync": {"openClose": True, "change": 1, "save": {"includeText": True}}, "definitionProvider": True, "hoverProvider": True}, "serverInfo": {"name": "forge-lsp", "version": "0.1"}}})
+    elif meth == "shutdown":
+        send({"id": mid, "result": None})
+    elif meth == "exit":
+        return False
+    elif meth == "textDocument/didOpen":
+        td = p["textDocument"]
+        DOCS[td["uri"]] = {"text": td["text"]}
+        publish(td["uri"])
+    elif meth == "textDocument/didChange":
+        u = p["textDocument"]["uri"]
+        ch = p["contentChanges"]
+        if u in DOCS and len(ch) > 0:
+            DOCS[u]["text"] = ch[len(ch) - 1]["text"]
+            publish(u)
+    elif meth == "textDocument/didSave":
+        u = p["textDocument"]["uri"]
+        if u in DOCS:
+            if "text" in p:
+                DOCS[u]["text"] = p["text"]
+            publish(u)
+    elif meth == "textDocument/didClose":
+        u = p["textDocument"]["uri"]
+        if u in DOCS:
+            DOCS.pop(u)
+        send({"method": "textDocument/publishDiagnostics", "params": {"uri": u, "diagnostics": []}})
+    elif meth == "textDocument/definition" or meth == "textDocument/hover":
+        u = p["textDocument"]["uri"]
+        pos = p["position"]
+        res = None
+        if u in DOCS and "ast" in DOCS[u]:
+            doc = DOCS[u]
+            w = word_at(doc["text"], pos["line"], pos["character"])
+            r = find_def(uri_path(u), doc["ast"], doc["text"], pos["line"] + 1, w[0], w[1], 0)
+            if r != None:
+                if meth == "textDocument/definition":
+                    st = {"line": r[4] - 1, "character": r[5]}
+                    en = {"line": r[4] - 1, "character": r[5] + len(w[0])}
+                    res = {"uri": path_uri(r[0]), "range": {"start": st, "end": en}}
+                else:
+                    if r[0] == uri_path(u):
+                        r[0] = ""
+                    res = {"contents": {"kind": "markdown", "value": hover_text(r, w[0])}}
+        send({"id": mid, "result": res})
+    elif mid != None:
+        send({"id": mid, "error": {"code": -32601, "message": "method not found: " + meth}})
+    return True
+
+def main():
+    if len(sys.argv) < 2:
+        sys.stderr.write("usage: lsp FORGEC\n")
+        sys.exit(2)
+    FORGEC[0] = sys.argv[1]
+    PID[0] = __syscall(39, 0, 0, 0)
+    down = False
+    while True:
+        m = read_msg()
+        if m == None:
+            sys.exit(1)
+        if m.get("method", "") == "shutdown":
+            down = True
+        if not handle(m):
+            if down:
+                sys.exit(0)
+            sys.exit(1)
+
+main()
