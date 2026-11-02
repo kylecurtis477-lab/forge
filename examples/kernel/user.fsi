@@ -75,6 +75,21 @@ asm(".text",
     "  mov %rdi, %rsp",
     "  mov $1, %eax",
     "  jmp syscall_ret",
+    # a process parked at a syscall boundary by kexec re-issues that syscall in the new kernel:
+    # rdi = its syscall frame, with (nr, a, b, c, d) stored in the 40 bytes just below it
+    "kx_restart_entry:",
+    "  mov %rdi, %rsp",
+    "  mov -40(%rsp), %rdi",
+    "  mov -32(%rsp), %rsi",
+    "  mov -24(%rsp), %rdx",
+    "  mov -16(%rsp), %rcx",
+    "  mov -8(%rsp), %r8",
+    "  mov %rsp, %r9",
+    "  call syscall_dispatch",
+    "  jmp syscall_ret",
+    ".globl kx_restart_entry_addr",
+    "kx_restart_entry_addr: lea kx_restart_entry(%rip), %rax",
+    "  ret",
     ".globl kx_resume_entry_addr",
     "kx_resume_entry_addr: lea kx_resume_entry(%rip), %rax",
     "  ret",
@@ -109,6 +124,7 @@ asm(".text",
 extern def enter_ring3(rip: u64, rsp: u64)
 extern def fork_child_entry_addr() -> u64
 extern def kx_resume_entry_addr() -> u64
+extern def kx_restart_entry_addr() -> u64
 SF_SIZE = 80
 SF_RFLAGS = 7
 SF_RIP = 8

@@ -54,13 +54,17 @@ def do_ls(dir: ptr[u8]):
 
 @export
 def _start():
-    out("Forge sh: builtins ls, exit; programs from /efi/forge/bin\n")
+    out("Forge sh: builtins ls, wait, kexec [next], exit, cmd &; programs from /efi/forge/bin\n")
     flush()
     ncmd: u64 = 0
     while 1:
         out("sh$ ")
         flush()
         n = read_line()
+        bgr: u64 = 0
+        if n >= 2 and line[n - 1] == 38 and line[n - 2] == 32:
+            bgr = 1
+            line[n - 2] = 0
         s: u64 = 0
         while line[s] == 32:
             s += 1
@@ -85,7 +89,10 @@ def _start():
             out_u64(sys_getpid())
             out("\n")
             flush()
-            r = syscall3(409, 0, 0, 0)
+            nx: u64 = 0
+            if streq(addr(line[a]), "next"):
+                nx = 1
+            r = syscall3(409, nx, 0, 0)
             if r == 1:
                 out("sh: survived kexec: ")
                 out_u64(ncmd)
@@ -97,6 +104,19 @@ def _start():
             flush()
             continue
         ncmd += 1
+        if streq(cmd, "wait"):
+            while 1:
+                ws: u64 = 0
+                w = sys_wait(0xFFFFFFFFFFFFFFFF, addr(ws))
+                if is_err(w):
+                    break
+                out("[pid ")
+                out_u64(w)
+                out(" exited ")
+                out_u64(ws)
+                out("]\n")
+                flush()
+            continue
         if streq(cmd, "ls"):
             if line[a] == 0:
                 do_ls("/efi/forge/bin")
@@ -122,6 +142,14 @@ def _start():
             out(": command not found\n")
             flush()
             sys_exit(127)
+        if bgr:
+            out("[")
+            out(cmd)
+            out(" started in the background, pid ")
+            out_u64(pid)
+            out("]\n")
+            flush()
+            continue
         st: u64 = 0
         sys_wait(pid, addr(st))
         out("[")

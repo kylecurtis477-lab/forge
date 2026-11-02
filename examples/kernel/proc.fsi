@@ -40,6 +40,22 @@ struct Proc:
     dma_n: u64
 
 procs: u64[64]
+kx_freeze: u64      # a kexec handoff is collecting every user process at a syscall boundary
+kx_caller: u64      # the Proc doing the handoff (it is not parked)
+
+def kx_should_park() -> u64:
+    if kx_freeze == 0:
+        return 0
+    p = cur_proc()
+    return u64(p) != 0 and p.drv == 0 and u64(p) != kx_caller
+
+def kx_park():
+    # park at a syscall boundary until the handoff happens (never returns then) or is abandoned
+    t = cur_thread()
+    t.kx_parked = 1
+    while kx_freeze != 0:
+        sleep_ticks(1)
+    t.kx_parked = 0
 nforks: u64
 nexecs: u64
 
@@ -326,6 +342,13 @@ def tty_read(ubuf: u64, n: u64) -> u64:
         tty_fp_lines = u64(tty0_lines)
         tty_fp_pop = u64(tty0_pop)
     while call_ptr(tty_fp_lines) == 0:
+        if kx_should_park():
+            spin_unlock(u64(addr(rq_lock)))
+            irq_restore(f)
+            kx_park()
+            f = irq_save()
+            spin_lock(u64(addr(rq_lock)))
+            continue
         wq_block_l(addr(tty_q))
     got: u64 = 0
     while got < n:
@@ -709,6 +732,13 @@ def sys_wait(pid: u64, ustatus: u64) -> u64:
             spin_unlock(u64(addr(rq_lock)))
             irq_restore(f)
             return ECHILD
+        if kx_should_park():
+            spin_unlock(u64(addr(rq_lock)))
+            irq_restore(f)
+            kx_park()
+            f = irq_save()
+            spin_lock(u64(addr(rq_lock)))
+            continue
         wq_block_l(addr(me.childq))
     return 0
 
@@ -852,6 +882,14 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
     # entered with interrupts off (FMASK); the asm exit path disables them again before sysret
     atomic_add64(u64(addr(syscalls)), 1)
     sti()
+    st = cur_thread()
+    st.sc[0] = nr
+    st.sc[1] = a
+    st.sc[2] = b
+    st.sc[3] = c
+    st.sc[4] = d
+    if kx_should_park():
+        kx_park()
     if nr == 0:
         return sys_read(a, b, c)
     if nr == 1:
@@ -904,7 +942,9 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
             return u64(smep_on) | (u64(smap_on) << 1)
         return EINVAL
     if nr == 409:
-        return sys_kexec(frame)
+        return sys_kexec(frame, a)
+    if nr == 410:
+        return kx_gen
     if nr >= 400 and nr <= 408:
         return sys_drv(nr, a, b, c)
     if nr == 300:

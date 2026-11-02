@@ -90,7 +90,14 @@ def mb2_parse(info: u64):
             bi.rsdp = p + 8
         p = (p + size + 7) & ~u64(7)
 
+def kernel_version() -> ptr[u8]:
+    # build identity; examples/kernel/build.sh makes kernel-next.elf with a different string
+    return "forge-kernel 0.2.6"
+
 def kernel_start():
+    puts("kernel version: ")
+    puts(kernel_version())
+    putc(10)
     puts("boot method: ")
     if bi.method == BOOT_MB2_BIOS:
         puts("multiboot2 (BIOS)\n")
@@ -1084,6 +1091,8 @@ def kexec_test():
 def kexec_resume():
     input_init()
     t = kx_restore()
+    if u64(t) == 0:
+        panic("kexec: the handoff was not adopted")
     code = proc_reap(t)
     orph = proc_reap_orphans()
     input_off()
@@ -1091,8 +1100,10 @@ def kexec_resume():
     put_u64(code)
     puts(" after the handoff, orphans reaped ")
     put_u64(orph)
+    puts(", running ")
+    puts(kernel_version())
     putc(10)
-    if code != 0 or kx_restored == 0:
+    if code != 0 or kx_restored == 0 or kx_nproc < 3:
         panic("kexec handoff test failed")
     puts("kexec handoff OK\n")
 

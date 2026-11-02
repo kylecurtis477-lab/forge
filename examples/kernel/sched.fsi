@@ -25,6 +25,8 @@ struct Thread:
     fpu: u64
     pin: u64
     wake_at: u64
+    sc: u64[5]      # the syscall in progress (nr, a, b, c, d): a kexec handoff re-issues it
+    kx_parked: u64
 
 asm(
     ".text",

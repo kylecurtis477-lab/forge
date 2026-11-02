@@ -1,0 +1,95 @@
+# forge: no-runtime
+# bg GEN: a background process for the kexec test. Reads the first half of a file, then keeps yielding
+# until the kernel generation (syscall 410) reaches GEN, then reads the rest through the same fd (its
+# position must survive the handoff), re-reads the whole file through a fresh fd and checks both hashes,
+# and checks a heap pattern it wrote before. Exit 0 if everything survived.
+include "ulib.fsi"
+
+buf: u8[512]
+
+def fnv(h: u64, n: u64) -> u64:
+    i: u64 = 0
+    while i < n:
+        h = (h ^ u64(buf[i])) * 0x100000001b3
+        i += 1
+    return h
+
+@export
+def _start():
+    av: u8[128]
+    sys_getargs(u64(addr(av[0])), 128)
+    want: u64 = 0
+    i: u64 = 0
+    while av[i] >= 48 and av[i] <= 57:
+        want = want * 10 + u64(av[i]) - 48
+        i += 1
+    pid = sys_getpid()
+    m = sys_mmap(16384)
+    if is_err(m):
+        sys_exit(2)
+    i = 0
+    while i < 2048:
+        ptr[u64](m)[i] = pid * 0x9E3779B97F4A7C15 + i
+        i += 1
+    fd = sys_open("/efi/forge/docs/big.bin")
+    if is_err(fd):
+        sys_exit(3)
+    h: u64 = 0xcbf29ce484222325
+    tot: u64 = 0
+    while tot < 49152:
+        n = sys_read(fd, u64(addr(buf[0])), 512)
+        if n == 0 or is_err(n):
+            break
+        h = fnv(h, n)
+        tot += n
+    out("bg: pid ")
+    out_u64(pid)
+    out(" read ")
+    out_u64(tot)
+    out(" bytes, waiting for kernel generation ")
+    out_u64(want)
+    out("\n")
+    flush()
+    while syscall3(410, 0, 0, 0) < want:
+        sys_yield()
+    while 1:
+        n = sys_read(fd, u64(addr(buf[0])), 512)
+        if n == 0 or is_err(n):
+            break
+        h = fnv(h, n)
+        tot += n
+    sys_close(fd)
+    fd2 = sys_open("/efi/forge/docs/big.bin")
+    h2: u64 = 0xcbf29ce484222325
+    t2: u64 = 0
+    while 1:
+        n = sys_read(fd2, u64(addr(buf[0])), 512)
+        if n == 0 or is_err(n):
+            break
+        h2 = fnv(h2, n)
+        t2 += n
+    sys_close(fd2)
+    bad: u64 = 0
+    i = 0
+    while i < 2048:
+        if ptr[u64](m)[i] != pid * 0x9E3779B97F4A7C15 + i:
+            bad += 1
+        i += 1
+    out("bg: pid ")
+    out_u64(sys_getpid())
+    out(" in generation ")
+    out_u64(syscall3(410, 0, 0, 0))
+    out(": ")
+    out_u64(tot)
+    out(" bytes through the carried fd, ")
+    if h == h2 and tot == t2:
+        out("hash matches a fresh read")
+    else:
+        out("HASH MISMATCH")
+    out(", heap words bad ")
+    out_u64(bad)
+    out("\n")
+    flush()
+    if h != h2 or tot != t2 or bad != 0 or sys_getpid() != pid:
+        sys_exit(1)
+    sys_exit(0)
