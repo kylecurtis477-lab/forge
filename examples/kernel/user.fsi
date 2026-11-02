@@ -29,15 +29,32 @@ asm(".text",
     "  mov %gs:0, %rsp",
     "  pushq %gs:8",
     "  swapgs",
+    # frame (80 bytes, see SF_* below): pad, r15, r14, r13, r12, rbp, rbx, r11 (rflags), rcx (rip), user rsp
     "  push %rcx",
     "  push %r11",
+    "  push %rbx",
+    "  push %rbp",
+    "  push %r12",
+    "  push %r13",
+    "  push %r14",
+    "  push %r15",
     "  sub $8, %rsp",
+    "  mov %rsp, %r9",
+    "  mov %r10, %r8",
     "  mov %rdx, %rcx",
     "  mov %rsi, %rdx",
     "  mov %rdi, %rsi",
     "  mov %rax, %rdi",
     "  call syscall_dispatch",
+    "syscall_ret:",
+    "  cli",
     "  add $8, %rsp",
+    "  pop %r15",
+    "  pop %r14",
+    "  pop %r13",
+    "  pop %r12",
+    "  pop %rbp",
+    "  pop %rbx",
     "  pop %r11",
     "  pop %rcx",
     "  pop %rsp",
@@ -48,6 +65,14 @@ asm(".text",
     "  xor %r9d, %r9d",
     "  xor %r10d, %r10d",
     "  sysretq",
+    # a forked child starts here (rdi = its copy of the parent's syscall frame) and returns 0 to user mode
+    "fork_child_entry:",
+    "  mov %rdi, %rsp",
+    "  xor %eax, %eax",
+    "  jmp syscall_ret",
+    ".globl fork_child_entry_addr",
+    "fork_child_entry_addr: lea fork_child_entry(%rip), %rax",
+    "  ret",
     ".globl enter_ring3",
     "enter_ring3:",
     "  cli",
@@ -74,6 +99,11 @@ asm(".text",
     "  iretq")
 
 extern def enter_ring3(rip: u64, rsp: u64)
+extern def fork_child_entry_addr() -> u64
+SF_SIZE = 80
+SF_RFLAGS = 7
+SF_RIP = 8
+SF_RSP = 9
 
 @naked
 def syscall_entry_addr() -> u64:
@@ -169,6 +199,8 @@ def ld16(p: u64) -> u64:
 def ld32(p: u64) -> u64:
     return vload64(p) & 0xFFFFFFFF
 
+elf_end: u64
+
 def elf_load(pml4: u64, img: u64, len: u64) -> u64:
     # returns the entry point, or 0 if the image is rejected
     if len < 64 or ld32(img) != 0x464C457F or (vload64(img + 4) & 0xFF) != 2 or ld16(img + 18) != 62:
@@ -183,6 +215,7 @@ def elf_load(pml4: u64, img: u64, len: u64) -> u64:
         return 0
     i = 0
     nload = 0
+    elf_end = 0
     while i < phnum:
         ph = img + phoff + i * 56
         if ld32(ph) == 1:
@@ -214,118 +247,11 @@ def elf_load(pml4: u64, img: u64, len: u64) -> u64:
                 if lo < hi:
                     memcpy(p2v(fr) + (lo - p), img + off + (lo - va), hi - lo)
                 p += PAGE
+            if va + msz > elf_end:
+                elf_end = va + msz
             nload += 1
         i += 1
     if nload == 0 or entry >= USER_TOP:
         return 0
     return entry
 
-def user_main(arg: u64):
-    t = cur_thread()
-    enter_ring3(t.proc, USTACK_TOP - 8)
-
-def proc_spawn(img: u64, len: u64) -> ptr[Thread]:
-    pml4 = as_new()
-    entry = elf_load(pml4, img, len)
-    if entry == 0:
-        as_free(pml4)
-        return ptr[Thread](0)
-    i = 0
-    while i < USTACK_PAGES:
-        vstore64(user_pte(pml4, USTACK_TOP - (i + 1) * PAGE), frame_alloc() | PTE_P | PTE_W | PTE_U | PTE_NX)
-        i += 1
-    t = thread_new(u64(user_main), 0)
-    t.cr3 = pml4
-    t.user = 1
-    t.proc = entry
-    thread_start_ready(t)
-    return t
-
-def proc_reap(t: ptr[Thread]) -> u64:
-    # waits for a user thread to die, frees it and its address space; returns the exit code
-    while atomic_load64(u64(addr(t.state))) != T_DEAD:
-        yield_cpu()
-    code = t.exit_code
-    pml4 = t.cr3
-    thread_free(t)
-    as_free(pml4)
-    return code
-
-# ---- syscalls ----
-def user_ptr_ok(va: u64, len: u64) -> u64:
-    # only the range check: the copy itself survives unmapped pages through the #PF fixup
-    return va < USER_TOP and va + len <= USER_TOP and va + len >= va
-
-def con_write_user(p: u64, n: u64) -> u64:
-    kb: u8[256]
-    done: u64 = 0
-    spin_lock(u64(addr(con_lock)))
-    while done < n:
-        k = n - done
-        if k > 256:
-            k = 256
-        if copy_user(u64(addr(kb[0])), p + done, k) != 0:
-            spin_unlock(u64(addr(con_lock)))
-            return 0xFFFFFFFFFFFFFFF2
-        i = 0
-        while i < k:
-            putc(kb[i])
-            i += 1
-        done += k
-    spin_unlock(u64(addr(con_lock)))
-    return n
-
-@export
-def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64) -> u64:
-    # interrupts are off (FMASK clears IF)
-    atomic_add64(u64(addr(syscalls)), 1)
-    t = cur_thread()
-    if nr == 1:
-        if user_ptr_ok(a, b) == 0:
-            return 0xFFFFFFFFFFFFFFF2
-        return con_write_user(a, b)
-    if nr == 24:
-        schedule(0)
-        return 0
-    if nr == 39:
-        return t.id
-    if nr == 60:
-        t.exit_code = a & 0xFF
-        thread_exit()
-    if nr == 96:
-        return lapic_ticks
-    if nr == 97:
-        return lapic_cpu()
-    if nr == 200:
-        # self-test probes: 1 = kernel read of user memory without stac, 2 = kernel call into user code
-        if user_ptr_ok(b, 8) == 0:
-            return 0xFFFFFFFFFFFFFFF2
-        if a == 1:
-            return smap_probe(b)
-        if a == 2:
-            smep_probing = 1
-            r = smep_probe(b)
-            smep_probing = 0
-            return r
-        if a == 3:
-            return u64(smep_on) | (u64(smap_on) << 1)
-        return 0xFFFFFFFFFFFFFFEA
-    return 0xFFFFFFFFFFFFFFDA
-
-def user_kill(name: ptr[u8], vec: u64, rip: u64, addr_: u64):
-    # called from an exception taken in ring 3: report, mark, and never return to that thread
-    t = cur_thread()
-    atomic_add64(u64(addr(user_kills)), 1)
-    spin_lock(u64(addr(con_lock)))
-    puts("user fault: pid ")
-    put_u64(t.id)
-    puts(" ")
-    puts(name)
-    puts(" at rip=")
-    put_hex(rip)
-    puts(" addr=")
-    put_hex(addr_)
-    puts(" -> killed\n")
-    spin_unlock(u64(addr(con_lock)))
-    t.exit_code = 0x100 + vec
-    thread_exit()

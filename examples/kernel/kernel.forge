@@ -17,6 +17,7 @@ include "user.fsi"
 include "pci.fsi"
 include "virtio.fsi"
 include "fat.fsi"
+include "proc.fsi"
 
 MB2_MAGIC = 0x36D76289
 
@@ -596,6 +597,37 @@ def fs_test():
         panic("init from disk failed")
     puts("PCI + virtio-blk + FAT32 (read-only) OK\n")
 
+def shell_test():
+    # the interactive shell from \EFI\Forge\bin\sh; the boot test types its commands
+    input_init()
+    sz: u64 = 0
+    img = fs_read_file("/EFI/Forge/bin/sh", addr(sz))
+    if img == 0:
+        panic("cannot read \\EFI\\Forge\\bin\\sh")
+    t = proc_spawn(img, sz)
+    kfree(img)
+    if u64(t) == 0:
+        panic("sh rejected by ELF loader")
+    code = proc_reap(t)
+    orph = proc_reap_orphans()
+    input_off()
+    puts("sh exited with ")
+    put_u64(code)
+    puts(": ")
+    put_u64(nforks)
+    puts(" forks, ")
+    put_u64(nexecs)
+    puts(" execs, keyboard irqs ")
+    put_u64(kbd_irqs)
+    puts(", serial irqs ")
+    put_u64(com_irqs)
+    puts(", orphans reaped ")
+    put_u64(orph)
+    putc(10)
+    if code != 0 or kbd_irqs == 0 or com_irqs == 0:
+        panic("interactive shell test failed")
+    puts("processes + VFS + keyboard/serial input + sh OK\n")
+
 @export
 def after_overflow():
     puts("recovered from #DF on a fresh stack\n")
@@ -639,6 +671,7 @@ def after_overflow():
     sync_test()
     user_test()
     fs_test()
+    shell_test()
     cli()
     puts("KERNEL OK\n")
     # test harness: wait up to 5 s (LAPIC ticks) for 'q' on COM1 so it can take a screenshot first

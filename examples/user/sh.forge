@@ -1,0 +1,112 @@
+# forge: no-runtime
+# sh: the first interactive program. Reads lines from the console (keyboard or serial),
+# runs builtins (ls, exit) or fork+exec /efi/forge/bin/<cmd> and waits for it.
+include "ulib.fsi"
+
+line: u8[256]
+path: u8[160]
+dents: u8[1024]
+
+def read_line() -> u64:
+    n: u64 = 0
+    while n < 255:
+        r = sys_read(0, u64(addr(line[n])), 255 - n)
+        if is_err(r) or r == 0:
+            break
+        n += r
+        if line[n - 1] == 10:
+            n -= 1
+            break
+    line[n] = 0
+    return n
+
+def do_ls(dir: ptr[u8]):
+    fd = sys_open(dir)
+    if is_err(fd):
+        out("ls: ")
+        out(dir)
+        out(": not found\n")
+        flush()
+        return
+    while 1:
+        n = sys_getdents(fd, u64(addr(dents[0])), 1024)
+        if n == 0 or is_err(n):
+            break
+        i: u64 = 0
+        while i < n:
+            sz = ptr[u64](u64(addr(dents[i])))[0]
+            isdir = dents[i + 8]
+            nm = addr(dents[i + 9])
+            out("  ")
+            out(nm)
+            if isdir:
+                out("/")
+            else:
+                out("  ")
+                out_u64(sz)
+            out("\n")
+            flush()
+            l: u64 = 0
+            while nm[l] != 0:
+                l += 1
+            i += 9 + l + 1
+    sys_close(fd)
+
+@export
+def _start():
+    out("Forge sh: builtins ls, exit; programs from /efi/forge/bin\n")
+    flush()
+    while 1:
+        out("sh$ ")
+        flush()
+        n = read_line()
+        s: u64 = 0
+        while line[s] == 32:
+            s += 1
+        if line[s] == 0:
+            continue
+        e = s
+        while line[e] != 0 and line[e] != 32:
+            e += 1
+        a = e
+        if line[a] == 32:
+            line[a] = 0
+            a += 1
+        cmd = addr(line[s])
+        if streq(cmd, "exit"):
+            out("sh: bye\n")
+            flush()
+            sys_exit(0)
+        if streq(cmd, "ls"):
+            if line[a] == 0:
+                do_ls("/efi/forge/bin")
+            else:
+                do_ls(addr(line[a]))
+            continue
+        pl: u64 = 0
+        pre = "/efi/forge/bin/"
+        while pre[pl] != 0:
+            path[pl] = pre[pl]
+            pl += 1
+        i: u64 = 0
+        while cmd[i] != 0 and pl < 159:
+            path[pl] = cmd[i]
+            pl += 1
+            i += 1
+        path[pl] = 0
+        pid = sys_fork()
+        if pid == 0:
+            r = sys_exec(addr(path[0]), addr(line[a]))
+            out("sh: ")
+            out(cmd)
+            out(": command not found\n")
+            flush()
+            sys_exit(127)
+        st: u64 = 0
+        sys_wait(pid, addr(st))
+        out("[")
+        out(cmd)
+        out(" exited ")
+        out_u64(st)
+        out("]\n")
+        flush()

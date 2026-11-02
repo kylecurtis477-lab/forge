@@ -49,4 +49,11 @@ def _start():
     out_u64(n)
     out(", private data and xmm0-15 intact after 20 yields\n")
     flush()
+    av: u8[128]
+    if sys_getargs(u64(addr(av[0])), 128) > 0:
+        out("hello: args = '")
+        out(addr(av[0]))
+        out("'\n")
+        flush()
+        sys_exit(0)
     sys_exit(pid)

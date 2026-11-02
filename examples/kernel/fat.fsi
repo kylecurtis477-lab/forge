@@ -1,4 +1,4 @@
-# Read-only filesystem: GPT -> EFI System Partition -> FAT32 (8.3 names; LFN entries skipped).
+# Read-only filesystem: GPT -> EFI System Partition -> FAT32 with VFAT long names (case-insensitive lookup).
 fs_part: u64          # partition start LBA
 fs_spc: u64
 fs_fat: u64           # FAT start LBA
@@ -87,107 +87,190 @@ def fat_next(c: u64) -> u64:
 def clu_lba(c: u64) -> u64:
     return fs_data + (c - 2) * fs_spc
 
-def name83(comp: ptr[u8], n: u64, out: ptr[u8]):
-    i = 0
-    while i < 11:
-        out[i] = 32
-        i += 1
-    j: u64 = 0
-    k: u64 = 0
-    while j < n:
-        ch = comp[j]
-        if ch == 46:
-            k = 8
-        elif k < 11:
-            if ch >= 97 and ch <= 122:
-                ch = ch - 32
-            out[k] = ch
-            k += 1
-        j += 1
+fs_m: Mutex              # serialises the FAT layer (shared sector buffers); holders may sleep on disk I/O
+fs_dsec_lba: u64
+fs_dsec: u64             # directory sector cache
 
-# finds name (11 bytes, 8.3) in the directory starting at cluster dc; returns the 32-byte entry copied
-# into ent, or 0. With list != 0, prints every entry instead.
-def dir_find(dc: u64, nm: ptr[u8], ent: u64, list: u64) -> u64:
+def fs_sector(lba: u64) -> u64:
+    if fs_dsec == 0:
+        fs_dsec = kmalloc(512)
+        fs_dsec_lba = 0xFFFFFFFFFFFFFFFF
+    if lba != fs_dsec_lba:
+        if vb_read(lba, 1, fs_dsec) == 0:
+            fs_dsec_lba = 0xFFFFFFFFFFFFFFFF
+            return 0
+        fs_dsec_lba = lba
+    return fs_dsec
+
+def lfn_put(name: ptr[u8], pos: u64, ch: u64):
+    if pos < 255:
+        if ch == 0 or ch == 0xFFFF:
+            name[pos] = 0
+        elif ch < 128:
+            name[pos] = u8(ch)
+        else:
+            name[pos] = 63
+
+# Directory iteration with VFAT long names. Returns the index just past entry #idx-or-later that is a
+# real file/dir (its 32-byte entry in ent, its name, NUL-terminated, in name), or 0 at the end.
+# 8.3-only entries honour the NT lower-case flags (byte 12: 0x08 base, 0x10 extension).
+LFN_OFFS: u8[13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
+
+def dir_next(dc: u64, idx: u64, name: ptr[u8], ent: u64) -> u64:
+    epc = fs_spc * 16
     c = dc
-    while c >= 2 and c < 0x0FFFFFF8:
-        s: u64 = 0
-        while s < fs_spc:
-            if vb_read(clu_lba(c) + s, 1, fs_sec) == 0:
-                return 0
-            e: u64 = 0
-            while e < 512:
-                d = fs_sec + e
-                first = vload64(d) & 0xFF
-                if first == 0:
-                    return 0
-                attr = vload64(d + 11) & 0xFF
-                if first != 0xE5 and attr != 0x0F and (attr & 8) == 0:
-                    if list:
-                        if first != 46:
-                            puts(" ")
-                            k = 0
-                            while k < 11:
-                                ch = vload64(d + k) & 0xFF
-                                if ch != 32:
-                                    if k == 8 and (attr & 0x10) == 0:
-                                        putc(46)
-                                    putc(ch)
-                                k += 1
-                            if attr & 0x10:
-                                puts("/")
-                            else:
-                                puts("(")
-                                put_u64(le32(d + 28))
-                                puts(")")
-                    else:
-                        k = 0
-                        same = 1
-                        while k < 11:
-                            if (vload64(d + k) & 0xFF) != u64(nm[k]):
-                                same = 0
-                            k += 1
-                        if same:
-                            memcpy(ent, d, 32)
-                            return 1
-                e += 32
-            s += 1
+    k = idx / epc
+    while k > 0:
         c = fat_next(c)
+        if c < 2 or c >= 0x0FFFFFF8:
+            return 0
+        k -= 1
+    i = idx
+    have_lfn = 0
+    while c >= 2 and c < 0x0FFFFFF8:
+        sec = fs_sector(clu_lba(c) + (i % epc) / 16)
+        if sec == 0:
+            return 0
+        d = sec + (i % 16) * 32
+        first = vload64(d) & 0xFF
+        if first == 0:
+            return 0
+        attr = vload64(d + 11) & 0xFF
+        i += 1
+        if first == 0xE5:
+            have_lfn = 0
+        elif attr == 0x0F:
+            seq = first & 0x3F
+            if first & 0x40:
+                have_lfn = 1
+                if seq * 13 < 255:
+                    name[seq * 13] = 0
+                else:
+                    name[255] = 0
+            if seq >= 1:
+                lq: u64 = 0
+                while lq < 13:
+                    lfn_put(name, (seq - 1) * 13 + lq, le16(d + u64(LFN_OFFS[lq])))
+                    lq += 1
+        elif (attr & 8) == 0:
+            memcpy(ent, d, 32)
+            if have_lfn == 0:
+                nt = vload64(d + 12) & 0xFF
+                n: u64 = 0
+                q: u64 = 0
+                while q < 11:
+                    ch = vload64(d + q) & 0xFF
+                    if q == 8 and ch != 32:
+                        name[n] = 46
+                        n += 1
+                    if ch != 32:
+                        if ch >= 65 and ch <= 90 and ((q < 8 and (nt & 8)) or (q >= 8 and (nt & 0x10))):
+                            ch += 32
+                        name[n] = u8(ch)
+                        n += 1
+                    q += 1
+                name[n] = 0
+            return i
+        else:
+            have_lfn = 0
+        if (i % epc) == 0:
+            c = fat_next(c)
     return 0
+
+def lower(c: u64) -> u64:
+    if c >= 65 and c <= 90:
+        return c + 32
+    return c
+
+def name_eq(a: ptr[u8], b: ptr[u8], blen: u64) -> u64:
+    # a: NUL-terminated directory name, b: path component (blen bytes); case-insensitive
+    i: u64 = 0
+    while i < blen:
+        if a[i] == 0 or lower(u64(a[i])) != lower(u64(b[i])):
+            return 0
+        i += 1
+    return a[i] == 0
 
 def ent_cluster(ent: u64) -> u64:
     return (le16(ent + 20) << 16) | le16(ent + 26)
 
-# walks a path like "EFI/Forge/init.elf"; returns 1 with the entry in ent
+# walks a path like "/EFI/Forge/bin/Read Me.txt" (case-insensitive, long names); returns 1 with the
+# entry in ent. The root itself ("" or "/") returns 2 (no entry).
 def fs_lookup(path: ptr[u8], ent: u64) -> u64:
-    nm: u8[11]
+    nm: u8[256]
     c = fs_root
     i: u64 = 0
+    while path[i] == 47:
+        i += 1
+    if path[i] == 0:
+        return 2
     while 1:
         j = i
         while path[j] != 0 and path[j] != 47:
             j += 1
-        name83(ptr[u8](u64(path) + i), j - i, addr(nm[0]))
-        if dir_find(c, addr(nm[0]), ent, 0) == 0:
+        found = 0
+        idx: u64 = 0
+        while 1:
+            idx = dir_next(c, idx, addr(nm[0]), ent)
+            if idx == 0:
+                break
+            if name_eq(addr(nm[0]), ptr[u8](u64(path) + i), j - i):
+                found = 1
+                break
+        if found == 0:
             return 0
+        while path[j] == 47:
+            j += 1
         if path[j] == 0:
             return 1
-        if ((vload64(ent + 11) & 0x10) == 0):
+        if (vload64(ent + 11) & 0x10) == 0:
             return 0
         c = ent_cluster(ent)
-        i = j + 1
+        if c == 0:
+            c = fs_root
+        i = j
     return 0
+
+def fs_dir_cluster(path: ptr[u8]) -> u64:
+    ent: u8[32]
+    r = fs_lookup(path, u64(addr(ent[0])))
+    if r == 2:
+        return fs_root
+    if r == 0 or (ent[11] & 0x10) == 0:
+        return 0
+    c = ent_cluster(u64(addr(ent[0])))
+    if c == 0:
+        return fs_root
+    return c
 
 def fs_list(path: ptr[u8]):
     ent: u8[32]
-    if fs_lookup(path, u64(addr(ent[0]))) == 0:
-        return
-    dir_find(ent_cluster(u64(addr(ent[0]))), ptr[u8](0), 0, 1)
+    nm: u8[256]
+    mutex_lock(addr(fs_m))
+    c = fs_dir_cluster(path)
+    idx: u64 = 0
+    while c != 0:
+        idx = dir_next(c, idx, addr(nm[0]), u64(addr(ent[0])))
+        if idx == 0:
+            break
+        if nm[0] != 46:
+            puts(" ")
+            puts(addr(nm[0]))
+            if ent[11] & 0x10:
+                puts("/")
+            else:
+                puts("(")
+                put_u64(le32(u64(addr(ent[28]))))
+                puts(")")
+    mutex_unlock(addr(fs_m))
 
 # reads a whole file into a new kmalloc buffer; returns it (size in *size) or 0
 def fs_read_file(path: ptr[u8], size: ptr[u64]) -> u64:
     ent: u8[32]
     e = u64(addr(ent[0]))
-    if fs_lookup(path, e) == 0 or (vload64(e + 11) & 0x10) != 0:
+    mutex_lock(addr(fs_m))
+    if fs_lookup(path, e) != 1 or (vload64(e + 11) & 0x10) != 0:
+        mutex_unlock(addr(fs_m))
         return 0
     sz = le32(e + 28)
     buf = kmalloc(sz + 512)
@@ -195,15 +278,18 @@ def fs_read_file(path: ptr[u8], size: ptr[u64]) -> u64:
     got: u64 = 0
     while got < sz:
         if c < 2 or c >= 0x0FFFFFF8:
+            mutex_unlock(addr(fs_m))
             kfree(buf)
             return 0
         s: u64 = 0
         while s < fs_spc and got < sz:
             if vb_read(clu_lba(c) + s, 1, buf + got) == 0:
+                mutex_unlock(addr(fs_m))
                 kfree(buf)
                 return 0
             got += 512
             s += 1
         c = fat_next(c)
+    mutex_unlock(addr(fs_m))
     size[0] = sz
     return buf

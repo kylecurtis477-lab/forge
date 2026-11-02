@@ -184,7 +184,7 @@ Each driver gets its own boot test, and none of them writes to disks it does not
 - The user sees and approves plans, and every action can be reversed through rewind.
 - Tests: an intent suite with expected plans, permission-denial cases, and an offline-only check (no network capability).
 
-## Phase 16 — New targets and the intent layer
+## Phase 16 — New targets (AArch64, GPU)
 *Pillars: B, C.*
 1. AArch64 backend plus UEFI on QEMU `virt` (PL011, GIC, generic timer), running the same boot-test suite (SYSTEMS.md item 8).
 2. GPU backend (SPIR-V compute from `parallel for` kernels). Test: a vector-add and a matmul match the CPU results.

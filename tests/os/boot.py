@@ -50,11 +50,24 @@ def decode_row(path, n, row=0):
         out += ch
     return w, h, out
 
+# Interactive shell script: after the n-th "sh$ " prompt, type line n. 'k' lines are typed on the
+# PS/2 keyboard through the QEMU monitor (sendkey), 's' lines arrive on COM1 (serial RX interrupt).
+SCRIPT = [('k', 'ls'), ('s', 'cat /efi/forge/docs/Long File Name Notes.txt'), ('k', 'forktest'),
+          ('s', 'hello a b'), ('k', 'nosuch'), ('k', 'ls /EFI/Forge'), ('s', 'exit')]
+KEYS = {' ': 'spc', '/': 'slash', '-': 'minus', '.': 'dot', '\n': 'ret'}
+
+def type_keys(line):
+    s = socket.socket(socket.AF_UNIX); s.connect(mon)
+    for ch in line + '\n':
+        k = KEYS.get(ch) or (('shift-' + ch.lower()) if ch.isupper() else ch)
+        s.sendall(f'sendkey {k}\n'.encode()); time.sleep(0.03)
+    time.sleep(0.2); s.close()
+
 def main():
     p = subprocess.Popen(['qemu-system-x86_64'] + qargs + ['-monitor', f'unix:{mon},server,nowait'],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     os.set_blocking(p.stdout.fileno(), False)
-    buf, t0, shot_ok, fbmsg = b'', time.time(), False, ''
+    buf, t0, shot_ok, fbmsg, sent = b'', time.time(), False, '', 0
     while p.poll() is None and time.time() - t0 < float(tmo):
         try:
             chunk = p.stdout.read()
@@ -62,6 +75,13 @@ def main():
             chunk = None
         if chunk:
             buf += chunk
+        if buf.count(b'sh$ ') > sent and sent < len(SCRIPT):
+            how, line = SCRIPT[sent]; sent += 1
+            try:
+                if how == 'k': type_keys(line)
+                else: p.stdin.write(line.encode() + b'\r'); p.stdin.flush()
+            except Exception as ex:
+                buf += f'[harness: send failed: {ex}]'.encode()
         if not shot_ok and b'KERNEL OK' in buf:
             shot_ok = True
             if fbtext:

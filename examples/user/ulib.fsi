@@ -56,7 +56,7 @@ def read_cs() -> u64:
     asm("mov %cs,%rax", "ret")
 
 def sys_write(p: u64, n: u64) -> u64:
-    return syscall3(SYS_WRITE, p, n, 0)
+    return syscall3(SYS_WRITE, 1, p, n)
 
 def sys_exit(code: u64):
     syscall3(SYS_EXIT, code, 0, 0)
@@ -98,3 +98,70 @@ def out_u64(v: u64):
 def flush():
     sys_write(u64(addr(lbuf[0])), llen)
     llen = 0
+
+# ---- processes, memory, files ----
+SYS_READ = 0
+SYS_OPEN = 2
+SYS_CLOSE = 3
+SYS_STAT = 4
+SYS_MMAP = 9
+SYS_MUNMAP = 11
+SYS_BRK = 12
+SYS_FORK = 57
+SYS_EXEC = 59
+SYS_WAIT = 61
+SYS_GETDENTS = 78
+SYS_GETPPID = 110
+SYS_GETARGS = 300
+
+def sys_fork() -> u64:
+    return syscall3(SYS_FORK, 0, 0, 0)
+
+def sys_exec(path: ptr[u8], args: ptr[u8]) -> u64:
+    return syscall3(SYS_EXEC, u64(path), u64(args), 0)
+
+def sys_wait(pid: u64, status: ptr[u64]) -> u64:
+    return syscall3(SYS_WAIT, pid, u64(status), 0)
+
+def sys_brk(p: u64) -> u64:
+    return syscall3(SYS_BRK, p, 0, 0)
+
+def sys_mmap(len: u64) -> u64:
+    return syscall3(SYS_MMAP, 0, len, 0)
+
+def sys_munmap(p: u64, len: u64) -> u64:
+    return syscall3(SYS_MUNMAP, p, len, 0)
+
+def sys_open(path: ptr[u8]) -> u64:
+    return syscall3(SYS_OPEN, u64(path), 0, 0)
+
+def sys_close(fd: u64) -> u64:
+    return syscall3(SYS_CLOSE, fd, 0, 0)
+
+def sys_read(fd: u64, p: u64, n: u64) -> u64:
+    return syscall3(SYS_READ, fd, p, n)
+
+def sys_stat(path: ptr[u8], st: ptr[u64]) -> u64:
+    return syscall3(SYS_STAT, u64(path), u64(st), 0)
+
+def sys_getdents(fd: u64, p: u64, n: u64) -> u64:
+    return syscall3(SYS_GETDENTS, fd, p, n)
+
+def sys_getargs(p: u64, n: u64) -> u64:
+    return syscall3(SYS_GETARGS, p, n, 0)
+
+def is_err(v: u64) -> u64:
+    return v > 0xFFFFFFFFFFFFF000
+
+def streq(a: ptr[u8], b: ptr[u8]) -> u64:
+    i = 0
+    while a[i] == b[i]:
+        if a[i] == 0:
+            return 1
+        i += 1
+    return 0
+
+def outc(c: u64):
+    if llen < 255:
+        lbuf[llen] = u8(c)
+        llen += 1

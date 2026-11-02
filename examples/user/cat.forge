@@ -1,0 +1,32 @@
+# forge: no-runtime
+# cat FILE (the whole argument is one path, spaces allowed): copy files to the console through open/read/close (and stat for the size check).
+include "ulib.fsi"
+
+buf: u8[700]
+
+@export
+def _start():
+    av: u8[128]
+    sys_getargs(u64(addr(av[0])), 128)
+    rc: u64 = 0
+    st: u64[2]
+    fd = sys_open(addr(av[0]))
+    if is_err(fd) or is_err(sys_stat(addr(av[0]), addr(st[0]))):
+        out("cat: ")
+        out(addr(av[0]))
+        out(": no such file\n")
+        flush()
+        sys_exit(1)
+    tot: u64 = 0
+    while 1:
+        n = sys_read(fd, u64(addr(buf[0])), 700)
+        if n == 0 or is_err(n):
+            break
+        sys_write(u64(addr(buf[0])), n)
+        tot += n
+    sys_close(fd)
+    if tot != st[0]:
+        out("cat: short read\n")
+        flush()
+        rc = 2
+    sys_exit(rc)
