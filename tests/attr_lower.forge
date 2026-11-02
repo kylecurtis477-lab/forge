@@ -1,0 +1,42 @@
+class P:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+    def norm(self):
+        return self.x * self.x + self.y * self.y
+    def tag(self):
+        return "P"
+
+class Q(P):
+    def tag(self):
+        return "Q"
+
+class R:
+    def __init__(self):
+        self.y = 9
+        self.x = 1
+    def tag(self):
+        return "R"
+
+def main():
+    ps = []
+    d = {}
+    i = 0
+    while i < 3000:
+        if i % 3 == 0:
+            p = Q(i, i + 1)
+        else:
+            p = P(i, 0.5)
+        ps.append(p)
+        d[i % 7] = p.norm()
+        i += 1
+    s = 0
+    for q in ps:
+        s += q.x - q.y
+    ps.append(R())
+    t = ""
+    for q in ps[-4:]:
+        t = t + q.tag() + str(q.x)
+    print(s, len(d), d[3], t, ps[0].norm(), " ab ".strip().upper())
+
+main()

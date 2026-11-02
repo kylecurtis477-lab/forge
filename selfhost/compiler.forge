@@ -8442,6 +8442,7 @@ O_GIDX = 38
 O_GCMP = 39
 O_GTRU = 40
 O_MKB = 42
+O_FLD = 43
 O_GBIN = 41
 EXT_RT = ["rt_char_at", "rt_itos", "rt_len"]
 GCMP_RT = [10, 11, 12, 14, 13, 15]
@@ -9446,7 +9447,7 @@ def tx_start(p):
     return not is_kw(w) or str_eq(w, "True") or str_eq(w, "False") or str_eq(w, "None")
 
 def x_texpr(p0, kind) -> int:
-    global ip, pos, ety, nout, ndat, nlabel, nstr, nflt, pstop, cur_tex
+    global ip, pos, ety, nout, ndat, nlabel, nstr, nflt, pstop, cur_tex, novf
     if not tx_start(p0) and not (kind and (tok_is_id(p0, "not") or tok_is_op(p0, "-") or tok_is_op(p0, "~") or tok_is_op(p0, "+"))):
         o_fail("texpr start")
         return cst(0)
@@ -9464,6 +9465,7 @@ def x_texpr(p0, kind) -> int:
     s_str = nstr
     s_flt = nflt
     s_ps = pstop
+    s_novf = novf
     pstop = -1
     pos = p0
     if kind:
@@ -9477,6 +9479,7 @@ def x_texpr(p0, kind) -> int:
     nout = s_out
     ndat = s_dat
     nlabel = s_lab
+    novf = s_novf
     nstr = s_str
     nflt = s_flt
     pstop = s_ps
@@ -9565,9 +9568,7 @@ def x_post0() -> int:
                     kk = iadd(O_GIDX, gd, v, idx)
                     iimm[kk] = gl
                     v = gd
-                if tok_is_op(ip, ".") or tok_is_op(ip, "("):
-                    o_fail("postfix")
-                return v
+                return x_sfx(v)
             if i < 0 or xk[i] != 2:
                 o_fail("index")
                 return v
@@ -9585,9 +9586,157 @@ def x_post0() -> int:
     else:
         o_fail("atom")
         return v
+    if hyb and not inl_on and not irfail:
+        v = x_sfx(v)
     if tok_is_op(ip, ".") or tok_is_op(ip, "(") or tok_is_op(ip, "["):
         o_fail("postfix")
     return v
+
+def any_field(nm):
+    c = 0
+    while c < nclass:
+        if find_field(c, nm) >= 0:
+            return 1
+        c += 1
+    return 0
+
+def x_sfx(v):
+    global ip
+    while not irfail:
+        if tok_is_op(ip, "["):
+            gl = tl[ip]
+            ip += 1
+            idx = xbox(x_expr())
+            if not tok_is_op(ip, "]"):
+                o_fail("slice")
+                return v
+            ip += 1
+            gd = new_vr(1)
+            vtt[gd] = 0
+            kk = iadd(O_GIDX, gd, xbox(v), idx)
+            iimm[kk] = gl
+            v = gd
+        elif tok_is_op(ip, ".") and tk[ip + 1] == K_ID:
+            nm = tv[ip + 1]
+            if tok_is_op(ip + 2, "("):
+                v = x_meth(xbox(v), nm, ip + 2)
+            else:
+                if not any_field(nm):
+                    o_fail("attr")
+                    return v
+                off = field_offset(nm, oty(v), tl[ip + 1])
+                if off < 0:
+                    o_fail("dyn attr")
+                    return v
+                gd = new_vr(1)
+                vtt[gd] = 0
+                kk = iadd(O_FLD, gd, v, -1)
+                iimm[kk] = off
+                v = gd
+                ip += 2
+        else:
+            return v
+    return v
+
+def x_meth(v, nm, lp):
+    global ip
+    rp = match_close(lp)
+    rt = oty(v)
+    if rp < 0 or rt == T_INT or rt == T_DBL or rt == T_FLOAT or rt == T_BOOL:
+        o_fail("meth recv")
+        return v
+    if str_eq(nm, "format"):
+        o_fail("format")
+        return v
+    n = 0
+    if rp > lp + 1:
+        n = 1
+    d = 0
+    p = lp + 1
+    while p < rp:
+        if is_open(p):
+            d += 1
+        elif is_close(p):
+            d -= 1
+        elif d == 0 and tok_is_op(p, ","):
+            n += 1
+        elif d == 0 and (tok_is_op(p, "=") or tok_is_op(p, "*") and (tok_is_op(p - 1, "(") or tok_is_op(p - 1, ",")) or tok_is_op(p, "**") or tok_is_id(p, "for")):
+            o_fail("meth args")
+            return v
+        p += 1
+    f = -1
+    cnt = 0
+    one = -1
+    same = 1
+    if rt > 10:
+        f = method_of(rt - 11, nm)
+        if f < 0 or overridden(rt - 11, nm, f):
+            o_fail("meth dyn")
+            return v
+    if f < 0 and rt != T_STR and rt != T_LIST and rt != T_DICT:
+        c = 0
+        while c < nclass:
+            g = method_of(c, nm)
+            if g >= 0:
+                if one >= 0 and g != one:
+                    same = 0
+                cnt += 1
+                one = g
+            c += 1
+    plain = resolve_fn(concat("__m_", nm), n + 1)
+    if plain < 0:
+        plain = resolve_fn(nm, n + 1)
+    if f < 0 and cnt > 0:
+        if same and plain < 0:
+            f = one
+        else:
+            o_fail("meth dyn")
+            return v
+    gen = 0
+    if f < 0:
+        f = plain
+        gen = 1
+    if f < 0 or fkind[f] != 0 or fpar[f] > 0 or ncap[f] > 0 or fargs[f] != n + 1 or fshadow[f] or fyields(f):
+        o_fail("meth callee")
+        return v
+    if fmeth[f] == 0:
+        gen = 1
+    ip = lp + 1
+    vals = list(n + 2)
+    vals[0] = v
+    i = 1
+    while i <= n:
+        vals[i] = xbox(x_expr())
+        if i < n:
+            if not tok_is_op(ip, ","):
+                o_fail("arg")
+                return v
+            ip += 1
+        i += 1
+    if ip != rp:
+        o_fail("meth call")
+        return v
+    ip = rp + 1
+    i = 0
+    while i <= n:
+        kp = fpb[f] + i
+        if oty(vals[i]) != T_INT and (ptypes[kp] == T_INT or pintf[kp]):
+            o_fail("arg type")
+            return v
+        i += 1
+    st = nargb
+    i = 0
+    while i <= n:
+        o_argpush(vals[i])
+        i += 1
+    dd = new_vr(1)
+    k = iadd(O_CALL, dd, st, n + 1)
+    iimm[k] = f
+    if fnone[f]:
+        vtt[dd] = 0
+    else:
+        vtt[dd] = ret_type(f)
+    return dd
 
 def range_ok(i, idx):
     # idx is a counted-loop variable running over [c>=0, len(list i))
@@ -10548,7 +10697,7 @@ def find_top_eq(p):
 # ---------------- IR utilities ----------------
 def u_n(k):
     op = iop[k]
-    if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET or op == O_VST or op == O_TSET or op == O_I2D or op == O_UNB or op == O_BOX or op == O_FNEG or op == O_GTRU or op == O_MKB:
+    if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET or op == O_VST or op == O_TSET or op == O_I2D or op == O_UNB or op == O_BOX or op == O_FNEG or op == O_GTRU or op == O_MKB or op == O_FLD:
         return 1
     if op == O_FOP or op == O_FCMP or op == O_GIDX or op == O_GCMP or op == O_GBIN:
         return 2
@@ -12154,6 +12303,11 @@ def o_ins(k, fi, x_epi):
         e("pop %rdi")
         e("pop %rsi")
         emit_raw("2:\n")
+        if idst[k] >= 0:
+            e2("mov %rax, ", vl(idst[k]))
+    elif op == O_FLD:
+        mv_to(ia[k], "%rax", 0)
+        e3("mov ", str(iimm[k]), "(%rax), %rax")
         if idst[k] >= 0:
             e2("mov %rax, ", vl(idst[k]))
     elif op == O_MKB:
