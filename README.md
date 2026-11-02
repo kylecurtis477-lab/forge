@@ -116,7 +116,7 @@ Eligible functions are plain int functions with int params. They are lowered to 
 ## Systems programming (freestanding mode)
 `# forge: no-runtime` or `--freestanding` selects a runtime-free backend. It has fixed-width ints, pointers, C-layout and `@packed` structs, inline asm, port I/O, CPU and atomic intrinsics, C and MS x64 ABI extern/export, and interrupt and UEFI entry attributes.
 It powers `examples/kernel` and `examples/efi`. The kernel is a higher-half x86-64 kernel with a frame allocator, its own 4-level paging, a heap, demand paging, a framebuffer console, ACPI/IOAPIC/LAPIC timer, IST stacks, SMP with a preemptive scheduler, ring-3 Forge user programs via syscall/sysret, and PCI + virtio-blk + read-only FAT32 (it loads `\EFI\Forge\init.elf` from the ESP). `examples/efi` is a native UEFI loader written in Forge (`\EFI\Forge\forgex64.efi`) that loads the kernel from a GPT ESP shared with Windows and Linux. The kernel boots through GRUB on BIOS and UEFI, or through the Forge loader (see docs/SYSTEMS.md).
-Both are boot-tested headless in QEMU/OVMF by `tests/os/run.sh`. See docs/SYSTEMS.md for the subset, dual-boot design, and roadmap.
+Both are boot-tested headless in QEMU/OVMF by `tests/os/run.sh`. See docs/SYSTEMS.md for the subset, dual-boot design, and roadmap, and docs/BUILD_PLAN.md for the phased build plan.
 
 ## Limitations
 - Int-typed or inferred-int code raises `OverflowError` rather than promoting to a bigint, e.g. `fact(40)` called with a literal. `int(big)` raises. There are no bitwise operators on bigints.
