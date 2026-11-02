@@ -107,6 +107,7 @@ def cur_proc() -> ptr[Proc]:
 F_CONSOLE = 1
 F_FILE = 2
 F_DIR = 3
+F_CHAN = 4
 
 struct File:
     type: u64
@@ -135,7 +136,12 @@ def file_get(fl: u64) -> u64:
 
 @unsafe
 def file_put(fl: u64):
-    if fl != 0 and (atomic_fetch_add(addr(ptr[File](fl).ref), 0xFFFFFFFFFFFFFFFF, acq_rel)) == 1:
+    if fl == 0:
+        return
+    f = ptr[File](fl)
+    if atomic_fetch_add(addr(f.ref), 0xFFFFFFFFFFFFFFFF, acq_rel) == 1:
+        if f.type == F_CHAN:
+            chan_end_close(f)
         kfree(fl)
 
 console_obj: File
@@ -1088,6 +1094,12 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         return sys_openat(a, b)
     if nr == 422:
         return sys_rights(a)
+    if nr == 423:
+        return sys_chan_create(a)
+    if nr == 424:
+        return sys_chan_send(a, b, c, d)
+    if nr == 425:
+        return sys_chan_recv(a, b, c, d)
     if nr == 78:
         return sys_getdents(a, b, c)
     if nr == 96:

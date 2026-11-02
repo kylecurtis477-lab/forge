@@ -47,9 +47,8 @@ def xmm_yield_check(v: u64, n: u64) -> u64:
 def user_nop():
     asm("ret")
 
-@naked
 def syscall3(n: u64, a: u64, b: u64, c: u64) -> u64:
-    asm("mov %rdi,%rax", "mov %rsi,%rdi", "mov %rdx,%rsi", "mov %rcx,%rdx", "syscall", "ret")
+    return syscall4(n, a, b, c, 0)
 
 @naked
 def read_cs() -> u64:
@@ -160,6 +159,27 @@ CAP_XFER = 16
 SYS_DUP = 420
 SYS_OPENAT = 421
 SYS_RIGHTS = 422
+
+SYS_CHAN = 423
+SYS_SEND = 424
+SYS_RECV = 425
+NO_HANDLE = 0xFFFFFFFFFFFFFFFF
+
+@naked
+def syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
+    asm("mov %rdi,%rax", "mov %rsi,%rdi", "mov %rdx,%rsi", "mov %rcx,%rdx", "mov %r8,%r10", "syscall", "ret")
+
+def sys_chan(fds: ptr[u64]) -> u64:
+    return syscall3(SYS_CHAN, u64(fds), 0, 0)
+
+def sys_send(fd: u64, p: u64, n: u64, h: u64) -> u64:
+    return syscall4(SYS_SEND, fd, p, n, h)
+
+def sys_recv(fd: u64, p: u64, n: u64, h: ptr[u64]) -> u64:
+    return syscall4(SYS_RECV, fd, p, n, u64(h))
+
+def sys_ticks() -> u64:
+    return syscall3(SYS_TICKS, 0, 0, 0)
 
 def sys_writefd(fd: u64, p: u64, n: u64) -> u64:
     return syscall3(SYS_WRITE, fd, p, n)

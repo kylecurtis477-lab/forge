@@ -166,6 +166,17 @@ Generic defs/structs are recorded at prescan and skipped; an instance is created
 - fork copies the rights, and close and exit clear them. kexec stores `(file index + 1) | rights << 32` in each fd slot of the v2 handoff record.
 - Test: `examples/user/captest.forge` (safe mode) checks a read-only dup, widening, DUP-less dup, relative and escaping openat, and a no-LOOKUP directory. It also forks a child that closes every handle except a read-only one; that child's write, open, openat(3) and exec are all denied.
 
+## IPC channels (Phase 5.2, `examples/kernel/chan.fsi`)
+- An endpoint is a `File` of type F_CHAN. `clu` is an index into the static `chans: Chan[16]` table and `pos` is the end (0 or 1). Each `Chan` has per-direction rings: `head`, `cnt`, `mlen`, `mh`/`mr` (moved File and its rights) and `mdata` (64 bytes per slot). It also has `open[2]` and the wait queues `rq0`/`rq1` (receivers) and `sq0`/`sq1` (senders blocked on a full ring). Everything is guarded by `rq_lock`, and blocking goes through `wq_block_l`.
+- Syscalls:
+  - 423 `chan(u64[2])` returns two fds, both with READ|WRITE|DUP|XFER.
+  - 424 `send(fd, buf, n, h)` takes n in 1..64. h is `NO_HANDLE` (~0) or an fd with XFER; it cannot be the endpoint itself. The handle is moved, not copied. Sending to a closed peer returns EPIPE.
+  - 425 `recv(fd, buf, n, &h)` blocks while the ring is empty. It returns 0 when the peer is closed and nothing is queued. A moved handle is installed in the lowest free fd; if there is none, the handle is dropped and EMFILE is returned.
+- The user-side 4th argument travels in r10 (`syscall4` in ulib; `syscall3` now wraps it, so ulib's unsafe count is unchanged).
+- Closing: when an endpoint File's last reference goes, `file_put` calls `chan_end_close`. That wakes the peer and, once both ends are closed, drops any queued handles and frees the table slot. `chan_live` counts open channels, and `sys_kexec` fails while it is nonzero.
+- Test: `examples/user/chantest.forge` (safe mode).
+- Fix found by chantest: `cur_thread()` now reads the CPU id and `current[]` with irqs off. Before, a preemption that migrated the thread between the two loads returned another CPU's (idle) thread, so `cur_proc()` was 0 and caused a #PF in `fd_get`.
+
 ## Dual boot
 - The loader and kernel install into their own vendor directory on an existing ESP: `\EFI\Forge\forgex64.efi` and `\EFI\Forge\kernel.elf`. Add a firmware boot entry, e.g. `efibootmgr -c -d /dev/sdX -p N -L Forge -l '\EFI\Forge\forgex64.efi'`, or `bcdedit /copy {bootmgr}` + `/set {id} path \EFI\Forge\forgex64.efi` on Windows.
 - Nothing else is touched: not `\EFI\Microsoft`, not `\EFI\<distro>`, not the MBR, and no repartitioning. The loader only reads its own kernel file. The kernel's disk access is read-only: it reads only GPT headers and files under `\\EFI\\Forge\\` on the ESP and never writes. `\EFI\BOOT\BOOTX64.EFI` is used only on the throwaway test disk.

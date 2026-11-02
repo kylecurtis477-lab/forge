@@ -1,0 +1,100 @@
+# forge: safe
+# forge: no-runtime
+# Phase 5.2: IPC channels with wait queues. Ping-pong latency between a parent and a forked child,
+# a file handle moved over the channel (gone from the sender, usable read-only by the receiver),
+# XFER enforcement, and EOF once the peer's end is closed.
+include "ulib.fsi"
+
+EPERM = 0xFFFFFFFFFFFFFFFF
+EBADF = 0xFFFFFFFFFFFFFFF7
+N = 2000
+
+buf: u8[64]
+refb: u8[64]
+
+def fail(s: ptr[u8]):
+    out("chantest FAIL: ")
+    out(s)
+    out("\n")
+    flush()
+    sys_exit(1)
+
+@export
+def _start():
+    ch: u64[2]
+    h: u64 = 0
+    if is_err(sys_chan(addr(ch[0]))):
+        fail("chan")
+    pid = sys_fork()
+    if pid == 0:
+        sys_close(ch[0])
+        e = ch[1]
+        j: u64 = 0
+        while j < N:
+            if sys_recv(e, u64(addr(buf[0])), 64, addr(h)) != 8 or h != NO_HANDLE:
+                sys_exit(2)
+            mem_set64(u64(addr(buf[0])), mem_get64(u64(addr(buf[0]))) + 1)
+            if sys_send(e, u64(addr(buf[0])), 8, NO_HANDLE) != 8:
+                sys_exit(3)
+            j += 1
+        # a moved handle: read it, prove it is read-only, echo its first bytes back
+        if sys_recv(e, u64(addr(buf[0])), 64, addr(h)) != 4 or h == NO_HANDLE:
+            sys_exit(4)
+        if (sys_rights(h) & CAP_WRITE) != 0 or (sys_rights(h) & CAP_READ) == 0:
+            sys_exit(5)
+        if sys_writefd(h, u64(addr(buf[0])), 1) != EPERM:
+            sys_exit(6)
+        if sys_read(h, u64(addr(buf[0])), 64) != 64:
+            sys_exit(7)
+        sys_send(e, u64(addr(buf[0])), 64, NO_HANDLE)
+        sys_exit(0)
+    sys_close(ch[1])
+    e = ch[0]
+    t0 = sys_ticks()
+    k: u64 = 0
+    v: u64 = 7
+    while k < N:
+        mem_set64(u64(addr(buf[0])), v)
+        if sys_send(e, u64(addr(buf[0])), 8, NO_HANDLE) != 8:
+            fail("send")
+        if sys_recv(e, u64(addr(buf[0])), 64, addr(h)) != 8 or mem_get64(u64(addr(buf[0]))) != v + 1:
+            fail("pong")
+        v += 2
+        k += 1
+    dt = sys_ticks() - t0
+    out("chantest: ping-pong ")
+    out_u64(N)
+    out(" round trips in ")
+    out_u64(dt)
+    out(" ticks\n")
+    flush()
+    # handle transfer
+    f = sys_openat(3, "efi/forge/docs/big.bin")
+    g = sys_openat(3, "efi/forge/docs/big.bin")
+    if is_err(f) or is_err(g) or sys_read(g, u64(addr(refb[0])), 64) != 64:
+        fail("open")
+    nx = sys_dup(f, CAP_READ)
+    if sys_send(e, u64(addr(buf[0])), 4, nx) != EPERM:
+        fail("send without XFER")
+    if sys_send(e, u64(addr(buf[0])), 4, f) != 4:
+        fail("send handle")
+    if sys_read(f, u64(addr(buf[0])), 1) != EBADF:
+        fail("handle still held by sender")
+    if sys_recv(e, u64(addr(buf[0])), 64, addr(h)) != 64:
+        fail("echo")
+    i: u64 = 0
+    while i < 64:
+        if buf[i] != refb[i]:
+            fail("echoed bytes")
+        i += 1
+    out("chantest: handle moved over the channel; receiver read it, write denied, XFER enforced\n")
+    flush()
+    st: u64 = 9
+    if sys_wait(pid, addr(st)) != pid or st != 0:
+        fail("child")
+    if sys_recv(e, u64(addr(buf[0])), 64, addr(h)) != 0:
+        fail("EOF")
+    out("chantest: peer close gives EOF\n")
+    out("chantest: PASS\n")
+    flush()
+    sys_exit(0)

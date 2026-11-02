@@ -91,7 +91,12 @@ def rq_pop(cpu: u64) -> u64:
 
 @unsafe
 def cur_thread() -> ptr[Thread]:
-    return ptr[Thread](current[lapic_cpu()])
+# irqs off across the CPU-id read and the current[] load: a preemption (and migration)
+# in between would return another CPU's thread (seen as cur_proc()==0 under chantest)
+    f = irq_save()
+    t = current[lapic_cpu()]
+    irq_restore(f)
+    return ptr[Thread](t)
 
 @unsafe
 def thread_new(fn: u64, arg: u64) -> ptr[Thread]:

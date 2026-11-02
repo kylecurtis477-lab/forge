@@ -222,6 +222,8 @@ def sys_kexec(frame: u64, which: u64) -> u64:
             if vload64(ph + 24) + vload64(ph + 40) > hi:
                 hi = vload64(ph + 24) + vload64(ph + 40)
         i += 1
+    if chan_live != 0:
+        return kx_fail("IPC channels are open (not handed over)", img)
     if lo != 0x100000:
         return kx_fail("unexpected kernel load address", img)
     entry: u64 = 0
