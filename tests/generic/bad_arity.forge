@@ -1,0 +1,8 @@
+# expect: takes 1 type argument
+# forge: no-runtime
+include "../fs/linux.fsi"
+@generic(T)
+def id(x: T) -> T:
+    return x
+def main() -> u64:
+    return id[u64, u8](1)

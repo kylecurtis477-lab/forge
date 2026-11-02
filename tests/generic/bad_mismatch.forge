@@ -1,0 +1,9 @@
+# expect: integer-to-pointer
+# forge: no-runtime
+include "../fs/linux.fsi"
+@generic(T)
+def id(x: T) -> T:
+    return x
+def main() -> u64:
+    p: ptr[u8] = id[u64](5)
+    return 0

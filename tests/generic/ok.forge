@@ -1,0 +1,75 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+
+@generic(T)
+def gmax(a: T, b: T) -> T:
+    if a > b:
+        return a
+    return b
+
+@generic(T)
+struct Pair:
+    a: T
+    b: T
+
+@generic(K, V)
+struct KV:
+    k: K
+    v: V
+
+@generic(T)
+def psum(p: ptr[Pair[T]]) -> T:
+    return p.a + p.b
+
+@generic(T)
+def deref(p: ptr[T]) -> T:
+    return p[0]
+
+@generic(T)
+def width() -> u64:
+    return sizeof(T)
+
+@generic(T)
+def wrap(x: u64) -> T:
+    return T(x)
+
+@generic(T)
+def fact(n: T) -> T:
+    if n <= 1:
+        return 1
+    return n * fact(n - 1)
+
+def main() -> u64:
+    put_u64(gmax(3, 9))
+    puts(" ")
+    x: u8 = 200
+    y: u8 = 100
+    put_u64(u64(gmax(x, y)))
+    puts(" ")
+    put_i64(gmax[i64](0 - 5, 0 - 2))
+    puts(" ")
+    p: Pair[u64]
+    p.a = 30
+    p.b = 12
+    put_u64(psum(addr(p)))
+    puts(" ")
+    q: Pair[u8]
+    q.a = 250
+    q.b = 10
+    put_u64(u64(psum(addr(q))))
+    puts(" ")
+    put_u64(sizeof(Pair[u8]))
+    puts(" ")
+    put_u64(sizeof(KV[u8, u64]))
+    puts(" ")
+    v: u32 = 77
+    put_u64(u64(deref(addr(v))))
+    puts(" ")
+    put_u64(width[u16]())
+    puts(" ")
+    put_u64(u64(wrap[u8](300)))
+    puts(" ")
+    f: u64 = 10
+    put_u64(fact(f))
+    nl()
+    return 0

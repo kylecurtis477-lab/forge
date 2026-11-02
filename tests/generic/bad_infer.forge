@@ -1,0 +1,8 @@
+# expect: cannot infer type parameter T
+# forge: no-runtime
+include "../fs/linux.fsi"
+@generic(T)
+def width() -> u64:
+    return sizeof(T)
+def main() -> u64:
+    return width()

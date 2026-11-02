@@ -15469,6 +15469,31 @@ fs_lbm = list(256)
 fs_lb0 = list(256)
 fs_safe = 0
 # Phase 4.5 defer: `with defer:` blocks at a function's top level run (LIFO) before every return
+# Phase 4.5 generics: @generic(T, ...) on a def or struct; instantiated (monomorphized) per type tuple
+fsgen_n = list(512)
+fsgen_k = list(512)
+fsgen_pos = list(512)
+fsgen_at = list(512)
+fsgen_tp0 = list(512)
+fsgen_ntp = list(512)
+nfsgen = 0
+fsgtp = list(2048)
+nfsgtp = 0
+fsi_g = list(4096)
+fsi_a0 = list(4096)
+fsi_r = list(4096)
+nfsi = 0
+fsia = list(16384)
+nfsia = 0
+fs_bnm = list(256)
+fs_bty = list(256)
+fs_bn = 0
+fs_bn0 = 0
+fs_dgen = list(16)
+fs_dgn = 0
+fs_signame = ""
+fsf_gi = list(8192)
+ftgi = list(8192)
 fs_dfp = list(64)
 fs_dfu = list(64)
 nfsdf = 0
@@ -15575,6 +15600,7 @@ def fs_pop(r):
 # ---- types ----
 def ft_add(k, el, sz, al, sg, n, nm):
     global nft
+    ftgi[nft] = -1
     fsk[nft] = k
     ftel[nft] = el
     ftsz[nft] = sz
@@ -15693,7 +15719,16 @@ def fs_type():
     global fp
     nm = fs_ident()
     t = ft_prim(nm)
-    if str_eq(nm, "ptr"):
+    b = fs_tbound(nm)
+    g = fs_gfind(nm, 1)
+    if b >= 0:
+        t = b
+    elif g >= 0:
+        if not fs_isop("["):
+            fs_die(c3("generic struct ", nm, " needs type arguments: write Name[T]"))
+        fp += 1
+        t = fs_ginst(g, fs_targs())
+    elif str_eq(nm, "ptr"):
         if fs_isop("["):
             fp += 1
             el = fs_type()
@@ -15735,6 +15770,8 @@ def fs_type():
 def fs_istype(p):
     if tk[p] != K_ID:
         return 0
+    if fs_tbound(tv[p]) >= 0 or fs_gfind(tv[p], 1) >= 0:
+        return 1
     if ft_prim(tv[p]) >= 0 or str_eq(tv[p], "ptr") or ((str_eq(tv[p], "slice") or str_eq(tv[p], "nptr") or fs_isbname(tv[p])) and tk[p + 1] == K_OP and str_eq(tv[p + 1], "[")):
         return 1
     return ft_struct(tv[p]) >= 0
@@ -16311,6 +16348,279 @@ def fs_args(maxn, ptys):
 FS_AREG = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]
 FS_WREG = ["%rcx", "%rdx", "%r8", "%r9"]
 
+def fs_callf(f):
+    global fs_ety, fs_mode
+    n = fs_args(6, f)
+    i = n - 1
+    while i >= 0:
+        fs_pop(FS_AREG[i])
+        i -= 1
+    fs_callsite(fsf_n[f])
+    fs_ety = fsf_ret[f]
+    fs_norm(fs_ety)
+    fs_mode = 0
+
+def fs_gfind(nm, k):
+    i = 0
+    while i < nfsgen:
+        if fsgen_k[i] == k and str_eq(fsgen_n[i], nm):
+            return i
+        i += 1
+    return -1
+
+def fs_tbound(nm):
+    i = fs_bn0
+    while i < fs_bn:
+        if str_eq(fs_bnm[i], nm):
+            return fs_bty[i]
+        i += 1
+    return -1
+
+def fs_gendef():
+# prescan: record a @generic def/struct and skip it
+    global fp, nfsgen, nfsgtp, fs_dgn
+    g = nfsgen
+    fsgen_n[g] = ""
+    fsgen_k[g] = -1
+    nfsgen += 1
+    fsgen_at[g] = fs_datt
+    fsgen_tp0[g] = nfsgtp
+    fsgen_ntp[g] = fs_dgn
+    i = 0
+    while i < fs_dgn:
+        fsgtp[nfsgtp] = fs_dgen[i]
+        nfsgtp += 1
+        i += 1
+    fs_dgn = 0
+    if fs_isid("def"):
+        fsgen_k[g] = 0
+        fsgen_pos[g] = fp
+        if fs_func(tv[fp + 1]) >= 0 or fs_gfind(tv[fp + 1], 0) >= 0:
+            fs_die(concat("duplicate function ", tv[fp + 1]))
+        fsgen_n[g] = tv[fp + 1]
+        while not fs_isop(")"):
+            if tk[fp] == K_EOF:
+                fs_die("bad generic def")
+            fp += 1
+        while not fs_isop(":"):
+            if tk[fp] == K_EOF or tk[fp] == K_NL:
+                fs_die("bad generic def")
+            fp += 1
+        fs_skip_suite()
+        return 0
+    if fs_isid("struct") or fs_isid("class"):
+        fsgen_k[g] = 1
+        if ft_struct(tv[fp + 1]) >= 0 or fs_gfind(tv[fp + 1], 1) >= 0:
+            fs_die(concat("duplicate struct ", tv[fp + 1]))
+        fsgen_n[g] = tv[fp + 1]
+        fp += 2
+        fsgen_pos[g] = fp
+        fs_skip_suite()
+        return 0
+    fs_die("@generic(...) must decorate a def or a struct")
+
+def fs_targs():
+# type arguments after '[' up to ']' (consumed); returns them as a list with the count in the last slot
+    global fp
+    a = list(17)
+    n = 0
+    while not fs_isop("]"):
+        if n >= 16:
+            fs_die("too many type arguments")
+        a[n] = fs_type()
+        n += 1
+        if fs_isop(","):
+            fp += 1
+    fp += 1
+    a[16] = n
+    return a
+
+def fs_tname(t):
+    return ftname[t]
+
+def fs_genv(g, a):
+# push the binding frame of generic g with arguments a; returns the old frame base
+    global fs_bn, fs_bn0
+    old = fs_bn0
+    nb = fs_bn
+    i = 0
+    while i < fsgen_ntp[g]:
+        fs_bnm[nb + i] = fsgtp[fsgen_tp0[g] + i]
+        fs_bty[nb + i] = a[i]
+        i += 1
+    fs_bn0 = nb
+    fs_bn = nb + fsgen_ntp[g]
+    return old
+
+def fs_genv_pop(old):
+    global fs_bn, fs_bn0
+    fs_bn = fs_bn0
+    fs_bn0 = old
+
+def fs_ginst(g, a):
+# the instance of generic g for type arguments a: a function index (def) or a struct type
+    global fp, nfsi, nfsia, fs_signame, fs_datt, nft
+    if a[16] != fsgen_ntp[g]:
+        fs_die(c4(fsgen_n[g], " takes ", str(fsgen_ntp[g]), " type argument(s)"))
+    n = fsgen_ntp[g]
+    i = 0
+    while i < nfsi:
+        if fsi_g[i] == g:
+            j = 0
+            while j < n and fsia[fsi_a0[i] + j] == a[j]:
+                j += 1
+            if j == n:
+                return fsi_r[i]
+        i += 1
+    ii = nfsi
+    nfsi += 1
+    fsi_g[ii] = g
+    fsi_a0[ii] = nfsia
+    nm = concat(fsgen_n[g], "[")
+    j = 0
+    while j < n:
+        fsia[nfsia] = a[j]
+        nfsia += 1
+        if j > 0:
+            nm = concat(nm, ", ")
+        nm = concat(nm, ftname[a[j]])
+        j += 1
+    nm = concat(nm, "]")
+    fp0 = fp
+    old = fs_genv(g, a)
+    if fsgen_k[g] == 1:
+        t = ft_add(2, 0, 0, 1, 0, 0, nm)
+        fsi_r[ii] = t
+        ftgi[t] = ii
+        fp = fsgen_pos[g]
+        fs_struct_body(t, fs_bop(fsgen_at[g], 32, 0))
+    else:
+        fs_signame = c3(fsgen_n[g], "__g", str(ii))
+        fs_datt = fsgen_at[g]
+        fp = fsgen_pos[g]
+        f = fs_sig(0)
+        fs_signame = ""
+        fsf_gi[f] = ii
+        fsi_r[ii] = f
+    fs_genv_pop(old)
+    fp = fp0
+    return fsi_r[ii]
+
+def fs_tskip(p):
+# end of the type expression at p
+    p += 1
+    while fs_isop2(p, "["):
+        d = 0
+        while 1:
+            if fs_isop2(p, "["):
+                d += 1
+            elif fs_isop2(p, "]"):
+                d -= 1
+                if d == 0:
+                    break
+            elif tk[p] == K_EOF:
+                return p
+            p += 1
+        p += 1
+    return p
+
+def fs_unify(g, b, p, t):
+# match the type written at p (in generic g's source) against concrete type t, filling bindings b
+    nm = tv[p]
+    j = 0
+    while j < fsgen_ntp[g]:
+        if str_eq(fsgtp[fsgen_tp0[g] + j], nm) and not fs_isop2(p + 1, "["):
+            if b[j] < 0 and t != FT_LIT:
+                b[j] = t
+            return p + 1
+        j += 1
+    if fs_isop2(p + 1, "[") and (str_eq(nm, "ptr") or str_eq(nm, "nptr") or str_eq(nm, "slice") or fs_isbname(nm)):
+        if (fsk[t] == 1 or fsk[t] == 5) and t != FT_LIT:
+            q = fs_unify(g, b, p + 2, ftel[t])
+            if fs_isop2(q, "]"):
+                return fs_tskip(p)
+        return fs_tskip(p)
+    sg = fs_gfind(nm, 1)
+    if sg >= 0 and fs_isop2(p + 1, "[") and fsk[t] == 2 and t >= 0 and ftgi[t] >= 0 and fsi_g[ftgi[t]] == sg:
+        q = p + 2
+        k = 0
+        while k < fsgen_ntp[sg] and not fs_isop2(q, "]"):
+            q = fs_unify(g, b, q, fsia[fsi_a0[ftgi[t]] + k])
+            k += 1
+            if fs_isop2(q, ","):
+                q += 1
+        return fs_tskip(p)
+    return fs_tskip(p)
+
+def fs_ginfer(g):
+# infer generic g's type arguments from the argument types at fp ('('), without emitting code
+    global fp, nout, fs_argd, nfstb, fs_bpend, fs_dep, fs_uops, fs_utot, fs_nbc, fs_nbe
+    fp0 = fp
+    nout0 = nout
+    sn = fs_mvsnap()
+    d0 = fs_dep
+    u0 = fs_uops
+    u1 = fs_utot
+    c0 = fs_nbc
+    c1 = fs_nbe
+    tb0 = nfstb
+    ats = list(16)
+    na = 0
+    fp += 1
+    fs_argd += 1
+    while not fs_isop(")"):
+        fs_rexpr()
+        if na < 16:
+            ats[na] = fs_ety
+        na += 1
+        if fs_isop(","):
+            fp += 1
+    fs_argd -= 1
+    while nfstb > tb0:
+        nfstb -= 1
+        fs_brel(fs_tb[nfstb], fs_tbk[nfstb])
+    nout = nout0
+    fp = fp0
+    fs_mvset(sn)
+    fs_dep = d0
+    fs_uops = u0
+    fs_utot = u1
+    fs_nbc = c0
+    fs_nbe = c1
+    fs_bpend = -1
+    b = list(17)
+    i = 0
+    while i < 16:
+        b[i] = -1
+        i += 1
+    # walk the parameter list: def NAME ( p: T, ... )
+    p = fsgen_pos[g] + 3
+    k = 0
+    while not fs_isop2(p, ")") and tk[p] != K_EOF:
+        p += 1
+        if fs_isop2(p, ":"):
+            p += 1
+            if k < na:
+                p = fs_unify(g, b, p, ats[k])
+            else:
+                p = fs_tskip(p)
+        k += 1
+        if fs_isop2(p, ","):
+            p += 1
+    i = 0
+    while i < fsgen_ntp[g]:
+        if b[i] < 0:
+            k = 0
+            while k < na:
+                if ats[k] == FT_LIT:
+                    b[i] = FT_I64
+                k += 1
+            if b[i] < 0:
+                fs_die(c4("cannot infer type parameter ", fsgtp[fsgen_tp0[g] + i], " of ", concat(fsgen_n[g], ": write f[T](...)")))
+        i += 1
+    b[16] = fsgen_ntp[g]
+    return b
+
 def fs_callsite(target):
     global fs_dep
     odd = fs_dep % 2
@@ -16649,6 +16959,28 @@ def fs_primary():
             fs_ety = FT_BOOL
         return 0
     fp += 1
+    gf = fs_gfind(nm, 0)
+    if gf >= 0 and fs_local(nm) < 0:
+        if fs_isop("["):
+            fp += 1
+            f = fs_ginst(gf, fs_targs())
+        elif fs_isop("("):
+            f = fs_ginst(gf, fs_ginfer(gf))
+        else:
+            fs_die(c3("generic function ", nm, " must be called (its address needs explicit type arguments and a call)"))
+        if not fs_isop("("):
+            fs_die("expected ( after generic type arguments")
+        fs_callf(f)
+        return 0
+    if fs_isop("(") and fs_tbound(nm) >= 0 and fsk[fs_tbound(nm)] == 0:
+        t = fs_tbound(nm)
+        fp += 1
+        fs_expr()
+        fs_rv()
+        fs_expect(")")
+        fs_norm(t)
+        fs_ety = t
+        return 0
     if fs_isop("("):
         if fs_intrin(nm):
             return 0
@@ -17867,14 +18199,25 @@ def fs_rsrcat(p):
 # ---- program ----
 def fs_decos():
 # parse @name / @name(args) lines; sets fs_datt bits, fs_dal, fs_dsec
-    global fp, fs_datt, fs_dal, fs_dsec
+    global fp, fs_datt, fs_dal, fs_dsec, fs_dgn
     fs_datt = 0
     fs_dal = 0
     fs_dsec = ""
+    fs_dgn = 0
     while fs_isop("@"):
         fp += 1
         nm = fs_ident()
-        if str_eq(nm, "export"):
+        if str_eq(nm, "generic"):
+            fs_expect("(")
+            while not fs_isop(")"):
+                if fs_dgn >= 16:
+                    fs_die("too many type parameters")
+                fs_dgen[fs_dgn] = fs_ident()
+                fs_dgn += 1
+                if fs_isop(","):
+                    fp += 1
+            fp += 1
+        elif str_eq(nm, "export"):
             fs_datt = fs_bop(fs_datt, 1, 1)
         elif str_eq(nm, "interrupt"):
             fs_datt = fs_bop(fs_datt, 2, 1)
@@ -17905,9 +18248,11 @@ def fs_decos():
             fp += 1
 
 def fs_struct_def(packed):
-    global fp, nff
     nm = fs_ident()
-    t = ft_struct(nm)
+    fs_struct_body(ft_struct(nm), packed)
+
+def fs_struct_body(t, packed):
+    global fp, nff
     fs_expect(":")
     if tk[fp] != K_NL:
         fs_die("struct body must be an indented block")
@@ -17949,9 +18294,12 @@ def fs_sig(ext):
     global fp, nfsf, nfsp
     fp += 1
     nm = fs_ident()
-    if fs_func(nm) >= 0:
+    if len(fs_signame) > 0:
+        nm = fs_signame
+    if fs_func(nm) >= 0 or fs_gfind(nm, 0) >= 0:
         fs_die(concat("duplicate function ", nm))
     f = nfsf
+    fsf_gi[f] = -1
     nfsf += 1
     fsf_n[f] = nm
     fsf_ln[f] = tl[fp - 1]
@@ -18002,8 +18350,15 @@ def fs_prescan():
     global fp, nfsc, nfsg, nft
     # pass A: struct names
     fp = 0
+    gn = 0
     while tk[fp] != K_EOF:
-        if (fs_isid("struct") or fs_isid("class")) and tk[fp + 1] == K_ID:
+        if fs_isop("@") and tk[fp + 1] == K_ID and str_eq(tv[fp + 1], "generic"):
+            gn = 1
+        elif fs_isid("def"):
+            gn = 0
+        if (fs_isid("struct") or fs_isid("class")) and tk[fp + 1] == K_ID and gn:
+            gn = 0
+        elif (fs_isid("struct") or fs_isid("class")) and tk[fp + 1] == K_ID:
             nm = tv[fp + 1]
             if ft_struct(nm) >= 0:
                 fs_die(concat("duplicate struct ", nm))
@@ -18016,7 +18371,9 @@ def fs_prescan():
             fp += 1
             continue
         fs_decos()
-        if fs_isid("struct") or fs_isid("class"):
+        if fs_dgn > 0:
+            fs_gendef()
+        elif fs_isid("struct") or fs_isid("class"):
             fp += 1
             fs_struct_def(fs_bop(fs_datt, 32, 0))
         elif fs_isid("extern"):
@@ -18156,6 +18513,22 @@ def fs_function(f):
     fs_unsafe = 0
 
 def fs_function1(f):
+    global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop, nfsdf, fs_sdep, fs_term
+    gi = fsf_gi[f]
+    if gi < 0:
+        fs_function2(f)
+        return 0
+    a = list(17)
+    j = 0
+    while j < fsgen_ntp[fsi_g[gi]]:
+        a[j] = fsia[fsi_a0[gi] + j]
+        j += 1
+    a[16] = j
+    old = fs_genv(fsi_g[gi], a)
+    fs_function2(f)
+    fs_genv_pop(old)
+
+def fs_function2(f):
     global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop, nfsdf, fs_sdep, fs_term
     at = fsf_at[f]
     nm = fsf_n[f]

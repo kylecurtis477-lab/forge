@@ -1,0 +1,9 @@
+# expect: needs type arguments
+# forge: no-runtime
+include "../fs/linux.fsi"
+@generic(T)
+struct Box:
+    v: T
+def main() -> u64:
+    b: Box
+    return 0

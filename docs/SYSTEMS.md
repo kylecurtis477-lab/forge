@@ -81,6 +81,25 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 - Gate points: start of `fs_intrin` (list `FS_UNSAFE_FNS`), int→ptr in `fs_conv`, explicit pointer casts, non-`[0]` ptr indexing. `ptr[T](0)` is rejected before the unsafe check.
 - Report: `--unsafe-report` per region + summary (`fs_ufn`, `fs_ublk`, `fs_utot`, `fs_ubare`); baseline in tests/unsafe/baseline.txt.
 
+### Generics (Phase 4.5b)
+
+```
+@generic(T)
+struct Pair:
+    a: T
+    b: T
+
+@generic(T)
+def psum(p: ptr[Pair[T]]) -> T:
+    return p.a + p.b
+
+p: Pair[u64]
+psum(addr(p))        # inferred: psum__g<N> with T = u64
+width[u16]()         # explicit type arguments
+```
+
+Generic defs/structs are recorded at prescan and skipped; an instance is created the first time a type tuple is used (struct layout computed then; function signature registered and the body emitted by the normal function loop with a binding frame T -> concrete type). Inference dry-runs the argument expressions (no code kept, move/borrow/unsafe state rolled back) and unifies them with the declared parameter types. There are no trait bounds; errors in a body are reported per instance.
+
 ### defer (Phase 4.5a)
 
 - `with defer:` in `fs_stmt1` records the suite position in `fs_dfp` (and the unsafe depth in `fs_dfu`) and skips it; only allowed when `fs_sdep` (suite depth, maintained by the `fs_suite` wrapper around `fs_suite1`) is 1. `fs_rundefers` (called by `return` and by `fs_function1` when the body falls through) pushes %rax, ends block borrows (`fs_bkill(0)`, state restored afterwards), re-parses each block newest first with the move state snapshotted around it, then pops %rax.
