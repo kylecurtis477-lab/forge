@@ -1,0 +1,60 @@
+# Regression sweep: untyped binary ops / compares / truthiness over
+# static literals (floats, strings) mixed with ints, bools and heap values.
+def add(a, b):
+    return a + b
+def sub(a, b):
+    return a - b
+def mul(a, b):
+    return a * b
+def fdiv(a, b):
+    return a // b
+def mod(a, b):
+    return a % b
+def lt(a, b):
+    return a < b
+def eq(a, b):
+    return a == b
+def ge(a, b):
+    return a >= b
+def band(a, b):
+    return a & b
+def bor(a, b):
+    return a | b
+def bxor(a, b):
+    return a ^ b
+def truth(x):
+    if x:
+        return 1
+    return 0
+def ntruth(x):
+    if not x:
+        return 1
+    return 0
+
+nums = [0, 1, -1, 7, 4096, 5000000, 9000000000000, -9000000000000, 0.0, 2.5, -1.5, 1e300, True, False]
+for a in nums:
+    row = []
+    for b in nums:
+        row.append(add(a, b))
+        row.append(sub(a, b))
+        row.append(mul(a, b))
+        row.append(lt(a, b))
+        row.append(eq(a, b))
+        row.append(ge(a, b))
+        if b != 0:
+            row.append(fdiv(a, b))
+            row.append(mod(a, b))
+    print(row)
+ints = [0, 1, -1, 6, 4096, 5000000, 9000000000000, True, False]
+for a in ints:
+    print([band(a, b) for b in ints], [bor(a, b) for b in ints], [bxor(a, b) for b in ints])
+strs = ["", "a", "ab", "xyz"]
+for s in strs:
+    print(add(s, "!"), mul(s, 3), mul(2, s), lt(s, "b"), eq(s, "a"), truth(s), ntruth(s))
+lits = [0, 0.0, "", 1, 0.5, "x", -0.0, None, [], [0], 5000000, 9000000000000]
+print([truth(x) for x in lits], [ntruth(x) for x in lits])
+print(eq(2.0, 2), eq("2", 2), add(1.5, True), mul(0.5, 4), add([1], [2.5]), mul([0.0], 2))
+x = 2.5
+y = "s"
+z = 7
+print(x * z, z * x, x + z, z - x, x < z, y * z, z * y, x == 2.5, y == "s")

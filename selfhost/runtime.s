@@ -1203,6 +1203,8 @@ rt_floor_r:
     # xmm0 -> xmm0 = floor(xmm0); clobbers rax, rdx, xmm1, xmm2
     movq %xmm0, %rax
     btr $63, %rax
+    test %rax, %rax
+    jz 1f
     mov $0x4330000000000000, %rdx
     cmp %rdx, %rax
     jae 1f

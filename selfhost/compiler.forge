@@ -9499,6 +9499,14 @@ def x_call() -> int:
         iadd(O_MOV, dd, b, -1)
         ilabel(sk)
         return dd
+    if (f < 0 or fpre[f]) and str_eq(name, "float") and n == 1 and hyb and not inl_on:
+        ip = lp + 1
+        a = x_expr()
+        if ip != rp or not (oty(a) == T_INT or fl(a)):
+            o_fail("float()")
+            return cst(0)
+        ip = rp + 1
+        return to_d(a)
     if (f < 0 or fpre[f]) and str_eq(name, "abs") and n == 1:
         ip = lp + 1
         a = x_expr()
