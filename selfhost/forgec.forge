@@ -8443,8 +8443,9 @@ O_GCMP = 39
 O_GTRU = 40
 O_MKB = 42
 O_FLD = 43
+O_FST = 44
 O_GBIN = 41
-EXT_RT = ["rt_char_at", "rt_itos", "rt_len"]
+EXT_RT = ["rt_char_at", "rt_itos", "rt_len", "rt_list"]
 GCMP_RT = [10, 11, 12, 14, 13, 15]
 GCMP_CC = ["e", "ne", "l", "le", "g", "ge"]
 NRT_OK = ["concat", "substr", "str_eq", "chr", "join", "char_at", "eputs", "puts", "argv", "set_byte", "exit", "argc"]
@@ -9535,6 +9536,42 @@ def x_post0() -> int:
         kk = iadd(O_SCST, v, -1, -1)
         iimm[kk] = ip
         ip += 1
+    elif tok_is_op(ip, "[") and hyb and not inl_on and comp_for(ip + 1) < 0:
+        ip += 1
+        lv = list(17)
+        ln = 0
+        while not tok_is_op(ip, "]") and not irfail:
+            if ln >= 16:
+                o_fail("list lit")
+                return v
+            lv[ln] = xbox(x_expr())
+            ln += 1
+            if tok_is_op(ip, ","):
+                ip += 1
+            elif not tok_is_op(ip, "]"):
+                o_fail("list lit")
+                return v
+        if irfail:
+            return v
+        ip += 1
+        v = rt_call1(NBI + 3, cst(ln), T_LIST)
+        if ln > 0:
+            dp = new_vr(1)
+            vtt[dp] = T_INT
+            kk = iadd(O_FLD, dp, v, -1)
+            iimm[kk] = 16
+            i = 0
+            while i < ln:
+                kk = iadd(O_FST, -1, dp, lv[i])
+                iimm[kk] = 8 * i
+                i += 1
+    elif tok_is_op(ip, "{") and tok_is_op(ip + 1, "}") and hyb and not inl_on:
+        ip += 2
+        st = nargb
+        v = new_vr(1)
+        kk = iadd(O_CALL, v, st, 0)
+        iimm[kk] = internal("__dict", 0)
+        vtt[v] = T_DICT
     elif tok_is_op(ip, "("):
         ip += 1
         raw_at = ip
@@ -10699,7 +10736,7 @@ def u_n(k):
     op = iop[k]
     if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET or op == O_VST or op == O_TSET or op == O_I2D or op == O_UNB or op == O_BOX or op == O_FNEG or op == O_GTRU or op == O_MKB or op == O_FLD:
         return 1
-    if op == O_FOP or op == O_FCMP or op == O_GIDX or op == O_GCMP or op == O_GBIN:
+    if op == O_FOP or op == O_FCMP or op == O_GIDX or op == O_GCMP or op == O_GBIN or op == O_FST:
         return 2
     if op >= O_ADD and op <= O_MOD or op == O_CBR:
         return 2
@@ -12305,6 +12342,10 @@ def o_ins(k, fi, x_epi):
         emit_raw("2:\n")
         if idst[k] >= 0:
             e2("mov %rax, ", vl(idst[k]))
+    elif op == O_FST:
+        mv_to(ia[k], "%rax", 0)
+        mv_to(ib[k], "%rcx", 0)
+        e3("mov %rcx, ", str(iimm[k]), "(%rax)")
     elif op == O_FLD:
         mv_to(ia[k], "%rax", 0)
         e3("mov ", str(iimm[k]), "(%rax), %rax")
