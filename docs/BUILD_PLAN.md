@@ -155,7 +155,7 @@ A phase is done when every listed test passes in CI (`run_tests.sh`) on both -O2
 *Pillar: F. Closes SYSTEMS.md items 1, 2, and 5.*
 
 **Kernel infrastructure:**
-- buddy allocator
+- buddy allocator **(done)**: `mm.fsi` keeps the `frame_bits` used-map authoritative and adds per-order free-block bitmaps (orders 0..10, 4 KiB..4 MiB); blocks are re-validated against `frame_bits` on every take, so direct `frame_bits` edits (kexec grab, boot reserves) leave only stale entries that are dropped; the maps are rebuilt from `frame_bits` once if they run dry. `frame_alloc_contig(n)` takes an order-ceil(log2 n) block below 4 GiB (aligned) and returns its tail; `frame_free` coalesces. Boot test (`buddy_test`, all 3 boot paths and the kexec'd kernels): orders 0..10 come back aligned, 1000- and 3-frame runs work, 3050 frames held, everything coalesces back to the same number of 4 MiB blocks, 0 frames leaked. Gaps: contiguous requests are capped at 4 MiB (1024 frames); no per-CPU page caches; the kexec grab still scans `frame_bits` linearly.
 - vmalloc
 - PCID
 - x2APIC

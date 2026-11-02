@@ -1,4 +1,4 @@
-# Physical frame allocator (bitmap), 4-level paging (HHDM + per-section kernel mappings + guarded stacks),
+# Physical frame allocator (bitmap + buddy free maps), 4-level paging (HHDM + per-section kernel mappings + guarded stacks),
 # demand paging region, and the kernel heap (slab size classes + page-backed large blocks).
 PAGE = 4096
 KBASE = 0xFFFFFFFF80000000
@@ -102,6 +102,146 @@ def pmm_init(bi: ptr[BootInfo]):
         reserve_range(bi.info_base, bi.info_len)
     frame_hint = 256
     frame_limit = 0x40000000 / PAGE
+    buddy_build()
+
+# ---- buddy allocator (Phase 8) ----
+# frame_bits stays the authoritative used/free map; on top of it, per-order free-block bitmaps (orders 0..10,
+# 4 KiB .. 4 MiB) give O(order) splitting/coalescing. Every block taken from a free map is re-validated against
+# frame_bits, so code that edits frame_bits directly (kexec grab, boot reserves) can only leave stale entries
+# that get dropped, never a double allocation. If the maps run dry they are rebuilt from frame_bits once.
+BUDDY_MAX = 10
+BNONE = 0xFFFFFFFFFFFFFFFF
+bfree: u64[131072]
+bcount: u64[11]
+bhint: u64[11]
+buddy_splits: u64
+buddy_merges: u64
+buddy_rebuilds: u64
+
+def boff(k: u64) -> u64:
+    return 131072 - (131072 >> k)
+
+def bbit_get(k: u64, b: u64) -> u64:
+    return (bfree[boff(k) + (b >> 6)] >> (b & 63)) & 1
+
+def bbit_set(k: u64, b: u64):
+    if bbit_get(k, b) == 0:
+        w = boff(k) + (b >> 6)
+        bfree[w] = bfree[w] | (u64(1) << (b & 63))
+        bcount[k] += 1
+        if (b >> 6) < bhint[k]:
+            bhint[k] = b >> 6
+
+def bbit_clr(k: u64, b: u64):
+    if bbit_get(k, b) != 0:
+        w = boff(k) + (b >> 6)
+        bfree[w] = bfree[w] & ~(u64(1) << (b & 63))
+        bcount[k] -= 1
+
+def run_free(f: u64, n: u64) -> u64:
+    j: u64 = 0
+    while j < n:
+        if ((f + j) & 63) == 0 and n - j >= 64:
+            if frame_bits[(f + j) >> 6] != 0:
+                return 0
+            j += 64
+        else:
+            if frame_used(f + j):
+                return 0
+            j += 1
+    return 1
+
+def buddy_insert(f: u64, k: u64):
+# frames f .. f+2^k-1 are already free in frame_bits: coalesce with free buddies, then publish
+    while k < BUDDY_MAX:
+        b = (f >> k) ^ 1
+        if bbit_get(k, b) == 0:
+            break
+        bbit_clr(k, b)
+        if run_free(b << k, u64(1) << k) == 0:
+            break
+        buddy_merges += 1
+        f = f & ~((u64(1) << (k + 1)) - 1)
+        k += 1
+    bbit_set(k, f >> k)
+
+def bfind(k: u64) -> u64:
+    words = 65536 >> k
+    w = bhint[k]
+    o = boff(k)
+    while w < words:
+        x = bfree[o + w]
+        if x != 0:
+            bhint[k] = w
+            i: u64 = 0
+            while ((x >> i) & 1) == 0:
+                i += 1
+            return w * 64 + i
+        w += 1
+    bhint[k] = words
+    return BNONE
+
+def buddy_build():
+    i: u64 = 0
+    while i < 131072:
+        bfree[i] = 0
+        i += 1
+    k: u64 = 0
+    while k <= BUDDY_MAX:
+        bcount[k] = 0
+        bhint[k] = 0
+        k += 1
+    f: u64 = 0
+    while f < MAX_FRAMES:
+        if frame_bits[f >> 6] == 0xFFFFFFFFFFFFFFFF and (f & 63) == 0:
+            f += 64
+        elif frame_used(f):
+            f += 1
+        else:
+            k = BUDDY_MAX
+            while k > 0 and ((f & ((u64(1) << k) - 1)) != 0 or run_free(f, u64(1) << k) == 0):
+                k -= 1
+            bbit_set(k, f >> k)
+            f += u64(1) << k
+
+def buddy_take(k: u64, lim: u64) -> u64:
+# lowest free block of order k whose frames all lie below frame `lim`; marks them used. BNONE if none.
+    j = k
+    while j <= BUDDY_MAX:
+        b = BNONE
+        if bcount[j] != 0:
+            b = bfind(j)
+        while b != BNONE:
+            f = b << j
+            if f + (u64(1) << j) > lim:
+                b = BNONE
+                break
+            bbit_clr(j, b)
+            if run_free(f, u64(1) << j):
+                while j > k:
+                    j -= 1
+                    bbit_set(j, (f >> j) + 1)
+                    buddy_splits += 1
+                n = u64(1) << k
+                i: u64 = 0
+                while i < n:
+                    frame_set(f + i)
+                    i += 1
+                frames_free -= n
+                return f
+            b = BNONE
+            if bcount[j] != 0:
+                b = bfind(j)
+        j += 1
+    return BNONE
+
+def buddy_take_retry(k: u64, lim: u64) -> u64:
+    f = buddy_take(k, lim)
+    if f == BNONE:
+        buddy_rebuilds += 1
+        buddy_build()
+        f = buddy_take(k, lim)
+    return f
 
 def frame_alloc() -> u64:
     f = irq_save()
@@ -113,55 +253,39 @@ def frame_alloc() -> u64:
 
 @unsafe
 def frame_alloc_nolock() -> u64:
-    w = frame_hint >> 6
-    lim = frame_limit >> 6
-    while w < lim:
-        if frame_bits[w] != 0xFFFFFFFFFFFFFFFF:
-            b = 0
-            while (frame_bits[w] >> b) & 1:
-                b += 1
-            f = w * 64 + b
-            frame_set(f)
-            frames_free -= 1
-            frame_hint = f
-            pa = f * PAGE
-            memset(p2v(pa), 0, PAGE)
-            return pa
-        w += 1
-    if frame_hint != 0:
-        frame_hint = 0
-        return frame_alloc_nolock()
-    panic("out of physical memory")
-    return 0
+    f = buddy_take_retry(0, frame_limit)
+    if f == BNONE:
+        panic("out of physical memory")
+        return 0
+    pa = f * PAGE
+    memset(p2v(pa), 0, PAGE)
+    return pa
 
 @unsafe
 def frame_alloc_contig(n: u64) -> u64:
-# n physically contiguous zeroed frames below 4 GiB (DMA rings); 0 if none
+# n physically contiguous zeroed frames below 4 GiB (DMA rings), aligned to the next power of two; 0 if none
+    if n == 0 or n > (u64(1) << BUDDY_MAX):
+        return 0
+    k: u64 = 0
+    while (u64(1) << k) < n:
+        k += 1
     f = irq_save()
     spin_lock(addr(pmm_lock))
     lim = frame_limit
     if lim > 0x100000000 / PAGE:
         lim = 0x100000000 / PAGE
-    s: u64 = 256
-    run: u64 = 0
-    res: u64 = 0
-    while s + run < lim and res == 0:
-        if frame_used(s + run):
-            s = s + run + 1
-            run = 0
-        else:
-            run += 1
-            if run == n:
-                res = s
-    if res != 0:
-        i: u64 = 0
-        while i < n:
-            frame_set(res + i)
-            frames_free -= 1
+    res = buddy_take_retry(k, lim)
+    if res != BNONE:
+    # hand the unused tail of the power-of-two block straight back
+        i = n
+        while i < (u64(1) << k):
+            frame_clr(res + i)
+            frames_free += 1
+            buddy_insert(res + i, 0)
             i += 1
     spin_unlock(addr(pmm_lock))
     irq_restore(f)
-    if res == 0:
+    if res == BNONE:
         return 0
     memset(p2v(res * PAGE), 0, n * PAGE)
     return res * PAGE
@@ -179,8 +303,7 @@ def frame_free_nolock(pa: u64):
         panic("double free of frame")
     frame_clr(f)
     frames_free += 1
-    if f < frame_hint:
-        frame_hint = f
+    buddy_insert(f, 0)
 
 # ---- paging ----
 
@@ -473,6 +596,7 @@ def reclaim_range(base: u64, len: u64) -> u64:
             frame_clr(f)
             frames_free += 1
             frames_total += 1
+            buddy_insert(f, 0)
             n += 1
         f += 1
     return n

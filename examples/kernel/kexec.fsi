@@ -71,6 +71,7 @@ def kx_release(pa: u64, n: u64, total: u64):
     j: u64 = 0
     while j < n:
         frame_clr(pa / PAGE + j)
+        buddy_insert(pa / PAGE + j, 0)
         j += 1
     frames_free += n
     frames_total += total

@@ -243,6 +243,58 @@ def check_mapping(name: ptr[u8], va: u64, expect_mapped: u64):
             panic("expected no mapping")
     putc(10)
 
+def buddy_test():
+# Phase 8: power-of-two blocks come back aligned, odd sizes return their tail, frees coalesce to the start state
+    pas: u64[11]
+    f0 = frames_free
+    top0 = bcount[BUDDY_MAX]
+    s0 = buddy_splits
+    m0 = buddy_merges
+    k: u64 = 0
+    bad: u64 = 0
+    while k <= BUDDY_MAX:
+        pas[k] = frame_alloc_contig(u64(1) << k)
+        if pas[k] == 0 or (pas[k] & ((PAGE << k) - 1)) != 0:
+            bad += 1
+        k += 1
+    odd = frame_alloc_contig(1000)
+    odd3 = frame_alloc_contig(3)
+    used = f0 - frames_free
+    k = 0
+    i: u64 = 0
+    while k <= BUDDY_MAX:
+        i = 0
+        while i < (u64(1) << k):
+            frame_free(pas[k] + i * PAGE)
+            i += 1
+        k += 1
+    i = 0
+    while i < 1000:
+        frame_free(odd + i * PAGE)
+        i += 1
+    i = 0
+    while i < 3:
+        frame_free(odd3 + i * PAGE)
+        i += 1
+    puts("buddy: orders 0..10 aligned (bad ")
+    put_u64(bad)
+    puts("), held ")
+    put_u64(used)
+    puts(" frames, splits ")
+    put_u64(buddy_splits - s0)
+    puts(", merges ")
+    put_u64(buddy_merges - m0)
+    puts(", 4MiB blocks before/after ")
+    put_u64(top0)
+    puts("/")
+    put_u64(bcount[BUDDY_MAX])
+    puts(", frames leaked ")
+    put_u64(f0 - frames_free)
+    putc(10)
+    if bad != 0 or used != 2047 + 1000 + 3 or frames_free != f0 or bcount[BUDDY_MAX] != top0:
+        panic("buddy allocator")
+    puts("buddy allocator OK\n")
+
 @unsafe
 def heap_test():
     ptrs: u64[64]
@@ -335,6 +387,7 @@ def kmain_high():
     put_u64(bp_count)
     putc(10)
     heap_test()
+    buddy_test()
     demand_test()
     if acpi_init(bi.rsdp) == 0:
         panic("ACPI/MADT not found")
