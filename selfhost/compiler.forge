@@ -8441,6 +8441,7 @@ O_SCST = 37
 O_GIDX = 38
 O_GCMP = 39
 O_GTRU = 40
+O_GBIN = 41
 EXT_RT = ["rt_char_at", "rt_itos", "rt_len"]
 GCMP_RT = [10, 11, 12, 14, 13, 15]
 GCMP_CC = ["e", "ne", "l", "le", "g", "ge"]
@@ -8740,6 +8741,17 @@ def fc_reload(a, b):
         j += 1
 
 def ibin(op, a, b, ovf):
+    if (op == O_ADD or op == O_SUB) and (oty(a) != T_INT or oty(b) != T_INT) and hyb and not inl_on and not fl(a) and not fl(b):
+        if op == O_ADD and oty(a) == T_STR and oty(b) == T_STR:
+            return rt_call2(2, a, b, T_STR)
+        if oty(a) == 0 or oty(a) == T_INT:
+            if oty(b) == 0 or oty(b) == T_INT:
+                d = new_vr(1)
+                vtt[d] = 0
+                k = iadd(O_GBIN, d, a, b)
+                iimm[k] = op - O_ADD
+                ix[k] = uline(tl[ip])
+                return d
     need_int(a)
     need_int(b)
     d = new_vr(1)
@@ -10452,7 +10464,7 @@ def u_n(k):
     op = iop[k]
     if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET or op == O_VST or op == O_TSET or op == O_I2D or op == O_UNB or op == O_BOX or op == O_FNEG or op == O_GTRU:
         return 1
-    if op == O_FOP or op == O_FCMP or op == O_GIDX or op == O_GCMP:
+    if op == O_FOP or op == O_FCMP or op == O_GIDX or op == O_GCMP or op == O_GBIN:
         return 2
     if op >= O_ADD and op <= O_MOD or op == O_CBR:
         return 2
@@ -12016,6 +12028,29 @@ def o_ins(k, fi, x_epi):
         e("push %rsi")
         e("push %rdi")
         e("call rtp_getidx")
+        e("pop %rdi")
+        e("pop %rsi")
+        emit_raw("2:\n")
+        if idst[k] >= 0:
+            e2("mov %rax, ", vl(idst[k]))
+    elif op == O_GBIN:
+        mv_to(ia[k], "%rax", 0)
+        mv_to(ib[k], "%rcx", 0)
+        e("mov %rax, %rdx")
+        e("or %rcx, %rdx")
+        e("cmp rt_dlov(%rip), %rdx")
+        e("jae 1f")
+        if iimm[k] == 0:
+            e("add %rcx, %rax")
+        else:
+            e("sub %rcx, %rax")
+        e("jmp 2f")
+        emit_raw("1:\n")
+        e("push %rsi")
+        e("push %rdi")
+        e3("mov $", str(iimm[k]), ", %esi")
+        e3("mov $", str(ix[k]), ", %edx")
+        e("call rtp_binop")
         e("pop %rdi")
         e("pop %rsi")
         emit_raw("2:\n")
