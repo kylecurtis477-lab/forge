@@ -10255,6 +10255,15 @@ def is_lp(name):
 def h_home(name):
     return find(hH, nH, name) >= 0 or not is_lp(name)
 
+def h_demote(name):
+    global nH, hgrow
+    if not is_lp(name) or find(hH, nH, name) >= 0 or nH >= 1000:
+        return 0
+    hH[nH] = name
+    nH += 1
+    hgrow = 1
+    return 1
+
 def hyb_names(a, b):
     global nH, hgrow
     q = a
@@ -10664,6 +10673,9 @@ def assign_var(name, x):
         return 0
     v = xv[i]
     if vtt[v] != oty(x):
+        if hyb and not inl_on and h_demote(name):
+            hyb_write(name, x)
+            return 0
         o_fail("var type")
         return 0
     k = nir - 1
@@ -10815,8 +10827,15 @@ def s_simple():
                 y = fbin(fcode(op), v, x, q)
                 iadd(O_MOV, v, y, -1)
                 return 0
-            need_int(v)
-            need_int(x)
+            if oty(v) != T_INT or oty(x) != T_INT:
+                y = ibin(op, v, x, aug_ovf(op))
+                if irfail:
+                    return 0
+                if oty(y) != oty(v):
+                    o_fail("aug type")
+                    return 0
+                iadd(O_MOV, v, y, -1)
+                return 0
             kk = iadd(op, v, v, x)
             iovf[kk] = aug_ovf(op) and ovf_on
             return 0
