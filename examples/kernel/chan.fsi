@@ -88,6 +88,13 @@ def sys_chan_create(ufds: u64) -> u64:
     fds[0] = a
     fds[1] = b
     if copy_user(ufds, u64(addr(fds[0])), 16) != 0:
+    # undo: drop both fds; the last file_put closes each end and frees the channel
+        p.fds[a] = 0
+        p.fdr[a] = 0
+        p.fds[b] = 0
+        p.fdr[b] = 0
+        file_put(u64(e0))
+        file_put(u64(e1))
         return EFAULT
     return 0
 
@@ -180,6 +187,17 @@ def sys_chan_recv(fd: u64, ubuf: u64, n: u64, uh: u64) -> u64:
     if (p.fdr[fd] & CAP_READ) == 0:
         return EPERM
     if user_ptr_ok(ubuf, n) == 0 or user_ptr_ok(uh, 8) == 0:
+        return EFAULT
+    # touch the destinations before dequeuing, so a fault cannot lose the message
+    pre = n
+    if pre > 64:
+        pre = 64
+    z: u64 = NO_HANDLE
+    zi: u64 = 0
+    while zi < 64:
+        kb[zi] = 0
+        zi += 1
+    if copy_user(uh, u64(addr(z)), 8) != 0 or (pre > 0 and copy_user(ubuf, u64(addr(kb[0])), pre) != 0):
         return EFAULT
     c = chan_of(fl)
     e = fl.pos

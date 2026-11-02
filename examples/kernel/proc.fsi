@@ -814,7 +814,7 @@ def sys_wait(pid: u64, ustatus: u64) -> u64:
             cpid = c.pid
             code = c.exit_code
             proc_destroy(c)
-            if ustatus != 0 and copy_user(ustatus, u64(addr(code)), 8) != 0:
+            if ustatus != 0 and (user_ptr_ok(ustatus, 8) == 0 or copy_user(ustatus, u64(addr(code)), 8) != 0):
                 return EFAULT
             return cpid
         if any == 0:
@@ -855,12 +855,16 @@ def sys_mmap(len: u64) -> u64:
     if p.mmap_next + n > MMAP_TOP:
         return ENOMEM
     va = p.mmap_next
-    p.mmap_next += n + PAGE  # one unmapped guard page between mappings
     i: u64 = 0
     while i < n:
         if user_map_zero(p.pml4, va + i) == 0:
+        # roll back the pages mapped so far; the VA range is not consumed
+            while i > 0:
+                i -= PAGE
+                user_unmap(p.pml4, va + i)
             return ENOMEM
         i += PAGE
+    p.mmap_next += n + PAGE  # one unmapped guard page between mappings
     return va
 
 def sys_munmap(va: u64, len: u64) -> u64:
@@ -902,7 +906,7 @@ def sys_stat(upath: u64, ubuf: u64) -> u64:
     st[0] = ptr[File](fl).size
     st[1] = u64(ptr[File](fl).type == F_DIR)
     file_put(fl)
-    if copy_user(ubuf, u64(addr(st[0])), 16) != 0:
+    if user_ptr_ok(ubuf, 16) == 0 or copy_user(ubuf, u64(addr(st[0])), 16) != 0:
         return EFAULT
     return 0
 
@@ -1269,7 +1273,7 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
             l += 1
         if l + 1 > b:
             return EINVAL
-        if copy_user(a, u64(addr(p.args[0])), l + 1) != 0:
+        if user_ptr_ok(a, l + 1) == 0 or copy_user(a, u64(addr(p.args[0])), l + 1) != 0:
             return EFAULT
         return l
     return ENOSYS

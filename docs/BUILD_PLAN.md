@@ -243,3 +243,6 @@ Each driver gets its own boot test, and none of them writes to disks it does not
 **Execution order:** strictly one phase at a time: 1 → 2 (never reboot) → 3 → 4 → 5 → 6 (proven-safe programs) → 7 → 8 → 9 (object store) → 10 (private by design) → 11 → 12 → 13 → 14 (one computer) → 15 (intent + local AI) → 16.
 
 Each phase is finished, tested, and committed before the next one starts. The signature features (phases 2, 6, 9, 10, 14, 15) sit right after the phases they depend on. Never-reboot comes first because restart-free updates build directly on Phase 1's processes and services. Performance items from Phase 12 may be pulled forward when a phase leaves slack.
+
+- Security fix (between 8.8 and 8.9): user pointers validated inside copy_user/copy_str_user;
+  mmap/chan_create/chan_recv error paths fixed; uaccess boot self-test. Done.

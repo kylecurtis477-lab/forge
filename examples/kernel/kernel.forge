@@ -790,11 +790,41 @@ def stack_smashed():
         thread_exit()
     panic("stack canary: smashed stack frame")
 
+@unsafe
 def smasher(arg: u64):
     buf: u64[16]
     buf[0] = arg
     # a raw copy 32 bytes past the buffer: over the canary and saved rbp, toward the return address
-    copy_user(u64(addr(buf[0])), u64(addr(smash_pat[0])), 160)
+    memcpy(u64(addr(buf[0])), u64(addr(smash_pat[0])), 160)
+
+def uaccess_test():
+# boot self-test: user-supplied kernel/HHDM pointers must fault with EFAULT at the copy helpers
+    kb: u8[64]
+    kb[0] = 0
+    k = u64(addr(kb[0]))
+    top: u64 = 0x0000800000000000
+    bad: u64 = 0
+    if copy_user(k, k, 8) != EFAULT:
+        bad += 1
+    if copy_user(0xFFFF800000001000, k, 8) != EFAULT:
+        bad += 1
+    if copy_user(k, 0xFFFF800000001000, 8) != EFAULT:
+        bad += 1
+    if copy_user(top - 8, k, 16) != EFAULT:
+        bad += 1
+    if copy_user(k, 0x1000, 0xFFFFFFFFFFFFF000) != EFAULT:
+        bad += 1
+    if copy_str_user(k, k, 64) != EFAULT:
+        bad += 1
+    if copy_str_user(k, top + 0x1000, 64) != EFAULT:
+        bad += 1
+    if sys_open(k) != EFAULT or sys_open(0xFFFF800000001000) != EFAULT:
+        bad += 1
+    if sys_stat(k, 0x1000) != EFAULT:
+        bad += 1
+    if bad != 0:
+        panic("uaccess: kernel pointer accepted by a user copy")
+    puts("uaccess: 9 kernel-pointer probes -> EFAULT\n")
 
 def canary_test():
     i: u64 = 0
@@ -1577,6 +1607,7 @@ def after_overflow():
     user_test()
     fs_test()
     hw_test()
+    uaccess_test()
     module_test()
     drv_test()
     livepatch_test()

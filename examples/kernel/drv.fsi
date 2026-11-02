@@ -162,6 +162,8 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
     if nr == 405:
     # recv(msg[4]): block for a request -> seq, lba, count, flags
         m: u64[4]
+        if user_ptr_ok(a, 32) == 0:
+            return EFAULT
         f = irq_save()
         spin_lock(addr(rq_lock))
         while rq_state != RQ_POSTED:
@@ -178,7 +180,7 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
         return 0
     if nr == 406:
     # reply(seq, status, data): data holds count*512 bytes when status == 0
-        if b == 0 and copy_user(rq_buf, c, rq_n * 512) != 0:
+        if b == 0 and (rq_n > 8 or user_ptr_ok(c, rq_n * 512) == 0 or copy_user(rq_buf, c, rq_n * 512) != 0):
             return EFAULT
         f = irq_save()
         spin_lock(addr(rq_lock))

@@ -287,3 +287,15 @@ All device register access goes through checked accessors in `mmio.fsi` that onl
 
 ## Framebuffer console (Phase 8)
 The loader sets a 1024x768 GOP mode when offered. The kernel keeps two cell grids (wanted and drawn) and draws only changed cells; scrolling never reads the framebuffer. The boot tests decode the screen and check the console's consistency line above KERNEL OK.
+
+## Security fix: user-copy validation (after 8.8)
+
+`copy_user` / `copy_str_user` (cpux.fsi) now enforce the user range themselves: every operand below
+USER_TOP must lie wholly below it (overflow-safe `va + n`), at least one operand must be a user
+address (a kernel/HHDM pointer passed as the user side returns -14), and `copy_str_user` re-checks
+each byte address so a string cannot run past USER_TOP. Call sites in sys_wait, sys_getargs,
+sys_stat and drv recv/reply also check `user_ptr_ok` explicitly. sys_mmap maps before consuming VA
+and rolls back partial maps on ENOMEM; sys_chan_create drops both fds and the channel when the fd
+copy faults; sys_chan_recv touches the user buffer and handle slot (with zeros) before dequeuing.
+Boot self-test `uaccess_test` probes the helpers, sys_open and sys_stat with kernel pointers and
+expects EFAULT ("uaccess: 9 kernel-pointer probes -> EFAULT").
