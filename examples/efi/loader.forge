@@ -1,0 +1,387 @@
+# forge: no-runtime
+# forgex64.efi: native UEFI boot loader for the Forge kernel, written in Forge (PE32+, EFI subsystem 10).
+# Lives in \EFI\Forge\ on an existing ESP next to Windows Boot Manager / shim / GRUB / systemd-boot and
+# only reads \EFI\Forge\kernel.elf from the same volume: nothing else on the disk is touched.
+#   1. read kernel.elf via LoadedImage -> SimpleFileSystem
+#   2. load PT_LOAD segments at a 2 MiB-congruent physical base (LoaderData pages below 1 GiB)
+#   3. GOP mode (1024x768 if offered) + framebuffer, ACPI RSDP from the configuration table
+#   4. page tables: identity 0..4 GiB + -2 GiB -> kernel, 2 MiB pages
+#   5. GetMemoryMap -> ExitBootServices (retried if the map key went stale) -> BootInfo memory map
+#   6. CR3 switch and jump to kentry64 (found via the FORGEKRN header) with rdi = &BootInfo
+include "../kernel/bootinfo.fsi"
+
+EFI_SUCCESS = 0
+EFI_BUFFER_TOO_SMALL = 0x8000000000000005
+KERNEL_LINK_PHYS = 0x100000
+
+@packed
+struct TableHeader:
+    signature: u64
+    revision: u32
+    header_size: u32
+    crc32: u32
+    reserved: u32
+
+struct SystemTable:
+    hdr: TableHeader
+    firmware_vendor: ptr[u16]
+    firmware_revision: u32
+    console_in_handle: u64
+    con_in: u64
+    console_out_handle: u64
+    con_out: ptr[u64]
+    stderr_handle: u64
+    std_err: u64
+    runtime_services: u64
+    boot_services: ptr[u64]
+    num_table_entries: u64
+    config_table: u64
+
+# boot services slots (8-byte function pointers after the 24-byte table header)
+BS_ALLOCATE_PAGES = 5
+BS_GET_MEMORY_MAP = 7
+BS_HANDLE_PROTOCOL = 19
+BS_EXIT_BOOT_SERVICES = 29
+BS_LOCATE_PROTOCOL = 40
+
+GUID_LOADED_IMAGE: u8[16] = [0xa1, 0x31, 0x1b, 0x5b, 0x62, 0x95, 0xd2, 0x11, 0x8e, 0x3f, 0x0, 0xa0, 0xc9, 0x69, 0x72, 0x3b]
+GUID_SFS: u8[16] = [0x22, 0x5b, 0x4e, 0x96, 0x59, 0x64, 0xd2, 0x11, 0x8e, 0x39, 0x0, 0xa0, 0xc9, 0x69, 0x72, 0x3b]
+GUID_GOP: u8[16] = [0xde, 0xa9, 0x42, 0x90, 0xdc, 0x23, 0x38, 0x4a, 0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a]
+GUID_ACPI20: u8[16] = [0x71, 0xe8, 0x68, 0x88, 0xf1, 0xe4, 0xd3, 0x11, 0xbc, 0x22, 0x0, 0x80, 0xc7, 0x3c, 0x88, 0x81]
+GUID_ACPI10: u8[16] = [0x30, 0x2d, 0x9d, 0xeb, 0x88, 0x2d, 0xd3, 0x11, 0x9a, 0x16, 0x0, 0x90, 0x27, 0x3f, 0xc1, 0x4d]
+
+wbuf: u16[256]
+con: ptr[u64]
+bs: ptr[u64]
+
+def print(s: ptr[u8]):
+    i = 0
+    while s[i] != 0 and i < 254:
+        wbuf[i] = u16(s[i])
+        i += 1
+    wbuf[i] = 0
+    call_efi(con[1], u64(con), u64(addr(wbuf[0])))
+
+def print_w(s: ptr[u16]):
+    call_efi(con[1], u64(con), u64(s))
+
+def print_u64(v: u64):
+    buf: u8[24]
+    i = 23
+    buf[23] = 0
+    while 1:
+        i -= 1
+        buf[i] = u8(48 + v % 10)
+        v = v / 10
+        if v == 0:
+            break
+    print(addr(buf[i]))
+
+def print_hex(v: u64):
+    buf: u8[20]
+    buf[0] = 48
+    buf[1] = 120
+    i = 0
+    while i < 16:
+        d = u8((v >> (60 - i * 4)) & 15)
+        if d < 10:
+            buf[2 + i] = 48 + d
+        else:
+            buf[2 + i] = 87 + d
+        i += 1
+    buf[18] = 0
+    print(addr(buf[0]))
+
+def fail(msg: ptr[u8], status: u64) -> u64:
+    print("forgex64: ")
+    print(msg)
+    print(" status=")
+    print_hex(status)
+    print("\r\n")
+    if inl(0xF4) != 0xFFFFFFFF:
+        outl(0xF4, 0x12)
+    return status
+
+def guid_eq(a: u64, b: ptr[u8]) -> u64:
+    return load64(a) == load64(u64(b)) and load64(a + 8) == load64(u64(b) + 8)
+
+def alloc_pages(n: u64, max_addr: u64) -> u64:
+    # AllocatePages(AllocateMaxAddress, EfiLoaderData, n, &addr)
+    a: u64 = max_addr
+    st = call_efi(bs[BS_ALLOCATE_PAGES], 1, 2, n, u64(addr(a)))
+    if st != EFI_SUCCESS:
+        return 0
+    memset(a, 0, n * 4096)
+    return a
+
+def read_kernel(image: u64, size_out: ptr[u64]) -> u64:
+    li: u64 = 0
+    st = call_efi(bs[BS_HANDLE_PROTOCOL], image, u64(addr(GUID_LOADED_IMAGE[0])), u64(addr(li)))
+    if st != EFI_SUCCESS:
+        return fail("LoadedImage protocol missing", st) & 0
+    dev = load64(li + 24)
+    sfs: u64 = 0
+    st = call_efi(bs[BS_HANDLE_PROTOCOL], dev, u64(addr(GUID_SFS[0])), u64(addr(sfs)))
+    if st != EFI_SUCCESS:
+        return fail("SimpleFileSystem missing on boot volume", st) & 0
+    root: u64 = 0
+    st = call_efi(load64(sfs + 8), sfs, u64(addr(root)))
+    if st != EFI_SUCCESS:
+        return fail("OpenVolume failed", st) & 0
+    name = "/EFI/Forge/kernel.elf"
+    path: u16[64]
+    i = 0
+    while name[i] != 0:
+        c = u16(name[i])
+        if c == 47:
+            c = 92
+        path[i] = c
+        i += 1
+    path[i] = 0
+    fh: u64 = 0
+    st = call_efi(load64(root + 8), root, u64(addr(fh)), u64(addr(path[0])), 1, 0)
+    if st != EFI_SUCCESS:
+        return fail("cannot open \\EFI\\Forge\\kernel.elf", st) & 0
+    cap: u64 = 4 * 1024 * 1024
+    buf = alloc_pages(cap / 4096, 0xFFFFFFFF)
+    if buf == 0:
+        return fail("no memory for kernel file", 0) & 0
+    total: u64 = 0
+    while 1:
+        n: u64 = 65536
+        if total + n > cap:
+            return fail("kernel.elf larger than 4 MiB", 0) & 0
+        st = call_efi(load64(fh + 32), fh, u64(addr(n)), buf + total)
+        if st != EFI_SUCCESS:
+            return fail("file read failed", st) & 0
+        if n == 0:
+            break
+        total += n
+    call_efi(load64(fh + 16), fh)
+    size_out[0] = total
+    return buf
+
+def setup_gop(bi: ptr[BootInfo]):
+    gop: u64 = 0
+    st = call_efi(bs[BS_LOCATE_PROTOCOL], u64(addr(GUID_GOP[0])), 0, u64(addr(gop)))
+    if st != EFI_SUCCESS or gop == 0:
+        print("no GOP; kernel will use serial only\r\n")
+        return
+    mode = load64(gop + 24)
+    maxm = u64(load32(mode))
+    m: u64 = 0
+    while m < maxm:
+        isz: u64 = 0
+        info: u64 = 0
+        if call_efi(load64(gop), gop, m, u64(addr(isz)), u64(addr(info))) == EFI_SUCCESS:
+            if load32(info + 4) == 1024 and load32(info + 8) == 768 and load32(info + 12) < 2:
+                call_efi(load64(gop + 8), gop, m)
+                break
+        m += 1
+    mode = load64(gop + 24)
+    info = load64(mode + 8)
+    fmt = load32(info + 12)
+    if fmt > 1:
+        print("GOP pixel format not RGBX/BGRX; serial only\r\n")
+        return
+    bi.fb_addr = load64(mode + 24)
+    bi.fb_width = u64(load32(info + 4))
+    bi.fb_height = u64(load32(info + 8))
+    bi.fb_pitch = u64(load32(info + 32)) * 4
+    bi.fb_bpp = 32
+    bi.fb_format = u64(fmt)
+    print("GOP ")
+    print_u64(bi.fb_width)
+    print("x")
+    print_u64(bi.fb_height)
+    print(" fb ")
+    print_hex(bi.fb_addr)
+    print("\r\n")
+
+def find_rsdp(st: ptr[SystemTable]) -> u64:
+    found: u64 = 0
+    i: u64 = 0
+    while i < st.num_table_entries:
+        e = st.config_table + i * 24
+        if guid_eq(e, addr(GUID_ACPI20[0])):
+            return load64(e + 16)
+        if guid_eq(e, addr(GUID_ACPI10[0])):
+            found = load64(e + 16)
+        i += 1
+    return found
+
+def efi_mem_type(t: u32) -> u64:
+    if t == 3 or t == 4 or t == 7:
+        return MEM_USABLE
+    if t == 1 or t == 2:
+        return MEM_LOADER
+    if t == 9:
+        return MEM_ACPI_RECLAIM
+    if t == 10:
+        return MEM_ACPI_NVS
+    if t == 8:
+        return MEM_BAD
+    return MEM_RESERVED
+
+def convert_map(bi: ptr[BootInfo], map: u64, size: u64, dsz: u64):
+    # no allocations or firmware calls here: runs between GetMemoryMap and ExitBootServices
+    bi.nregions = 0
+    p = map
+    while p < map + size:
+        typ = efi_mem_type(load32(p))
+        base = load64(p + 8)
+        len = load64(p + 24) * 4096
+        n = bi.nregions
+        if n > 0:
+            last = addr(bi.regions[n - 1])
+            if last.typ == typ and last.base + last.len == base:
+                last.len += len
+                p += dsz
+                continue
+        if n < MAX_REGIONS:
+            r = addr(bi.regions[n])
+            r.base = base
+            r.len = len
+            r.typ = typ
+            bi.nregions = n + 1
+        p += dsz
+
+def build_tables(kdelta: u64) -> u64:
+    t = alloc_pages(8, 0xFFFFFFFF)
+    if t == 0:
+        return 0
+    pml4 = t
+    pdpt_lo = t + 4096
+    pdpt_hi = t + 2 * 4096
+    pd_hi = t + 3 * 4096
+    i: u64 = 0
+    while i < 4:
+        pd = t + (4 + i) * 4096
+        vstore64(pdpt_lo + i * 8, pd | 3)
+        j: u64 = 0
+        while j < 512:
+            vstore64(pd + j * 8, (i * 0x40000000 + j * 0x200000) | 0x83)
+            j += 1
+        i += 1
+    j = 0
+    while j < 512:
+        vstore64(pd_hi + j * 8, (kdelta + j * 0x200000) | 0x83)
+        j += 1
+    vstore64(pml4, pdpt_lo | 3)
+    vstore64(pml4 + 511 * 8, pdpt_hi | 3)
+    vstore64(pdpt_hi + 510 * 8, pd_hi | 3)
+    return pml4
+
+@efiapi
+@export
+def efi_main(image: u64, st: ptr[SystemTable]) -> u64:
+    con = st.con_out
+    bs = st.boot_services
+    print("Forge UEFI loader: hello from PE32+\r\n")
+    if st.hdr.signature != 0x5453595320494249:
+        return fail("bad system table signature", 0)
+    print("EFI system table signature OK, revision ")
+    print_u64(u64(st.hdr.revision >> 16))
+    print(".")
+    print_u64(u64(st.hdr.revision & 0xFFFF) / 10)
+    print(", firmware ")
+    print_w(st.firmware_vendor)
+    print("\r\n")
+    fsize: u64 = 0
+    file = read_kernel(image, addr(fsize))
+    if file == 0:
+        return 1
+    print("kernel.elf: ")
+    print_u64(fsize)
+    print(" bytes\r\n")
+    if load32(file) != 0x464C457F or load16(file + 18) != 62:
+        return fail("kernel.elf is not an x86-64 ELF", 0)
+    phoff = load64(file + 32)
+    phsz = u64(load16(file + 54))
+    phn = u64(load16(file + 56))
+    lo: u64 = 0xFFFFFFFFFFFFFFFF
+    hi: u64 = 0
+    i: u64 = 0
+    while i < phn:
+        ph = file + phoff + i * phsz
+        if load32(ph) == 1:
+            pa = load64(ph + 24)
+            if pa < lo:
+                lo = pa
+            if pa + load64(ph + 40) > hi:
+                hi = pa + load64(ph + 40)
+        i += 1
+    if lo != KERNEL_LINK_PHYS:
+        return fail("unexpected kernel load address", lo)
+    # place the image so that kdelta = P - 1 MiB is 2 MiB aligned (the -2 GiB window uses 2 MiB pages)
+    span = hi - lo
+    raw = alloc_pages((span + 0x200000) / 4096 + 1, 0x3FFFFFFF)
+    if raw == 0:
+        return fail("cannot allocate kernel memory", 0)
+    kdelta = (raw - KERNEL_LINK_PHYS + 0x1FFFFF) & ~u64(0x1FFFFF)
+    i = 0
+    while i < phn:
+        ph = file + phoff + i * phsz
+        if load32(ph) == 1:
+            dst = kdelta + load64(ph + 24)
+            memcpy(dst, file + load64(ph + 8), load64(ph + 32))
+            memset(dst + load64(ph + 32), 0, load64(ph + 40) - load64(ph + 32))
+        i += 1
+    entry: u64 = 0
+    off: u64 = 0
+    while off + 16 <= fsize:
+        if load64(file + off) == 0x4E524B4547524F46:
+            entry = load64(file + off + 8)
+            break
+        off += 8
+    if entry == 0:
+        return fail("FORGEKRN header not found", 0)
+    print("kernel loaded at ")
+    print_hex(kdelta + lo)
+    print(", entry ")
+    print_hex(entry)
+    print("\r\n")
+    bi = ptr[BootInfo](alloc_pages(sizeof(BootInfo) / 4096 + 1, 0xFFFFFFFF))
+    if u64(bi) == 0:
+        return fail("cannot allocate BootInfo", 0)
+    bi.magic = BI_MAGIC
+    bi.method = BOOT_FORGE_UEFI
+    bi.kdelta = kdelta
+    setup_gop(bi)
+    bi.rsdp = find_rsdp(st)
+    print("ACPI RSDP ")
+    print_hex(bi.rsdp)
+    print("\r\n")
+    pml4 = build_tables(kdelta)
+    if pml4 == 0:
+        return fail("cannot allocate page tables", 0)
+    # memory map buffer: ask for the size, then over-allocate (our own allocation adds descriptors)
+    msize: u64 = 0
+    key: u64 = 0
+    dsz: u64 = 0
+    dver: u64 = 0
+    call_efi(bs[BS_GET_MEMORY_MAP], u64(addr(msize)), 0, u64(addr(key)), u64(addr(dsz)), u64(addr(dver)))
+    cap = msize + 16 * 64
+    map = alloc_pages(cap / 4096 + 1, 0xFFFFFFFF)
+    if map == 0:
+        return fail("cannot allocate memory map", 0)
+    print("exiting boot services...\r\n")
+    tries = 0
+    while tries < 4:
+        msize = cap
+        stm = call_efi(bs[BS_GET_MEMORY_MAP], u64(addr(msize)), map, u64(addr(key)), u64(addr(dsz)), u64(addr(dver)))
+        if stm != EFI_SUCCESS:
+            return fail("GetMemoryMap failed", stm)
+        convert_map(bi, map, msize, dsz)
+        if call_efi(bs[BS_EXIT_BOOT_SERVICES], image, key) == EFI_SUCCESS:
+            break
+        tries += 1
+    if tries == 4:
+        return fail("ExitBootServices kept failing", 0)
+    # firmware is gone: no more boot services or console from here on
+    cli()
+    write_cr3(pml4)
+    call_ptr(entry, u64(bi))
+    while 1:
+        hlt()
+    return 0
