@@ -193,6 +193,15 @@ def sys_openat(dirfd: u64, path: ptr[u8]) -> u64:
 def sys_rights(fd: u64) -> u64:
     return syscall3(SYS_RIGHTS, fd, 0, 0)
 
+SYS_EXEC_SB = 426
+SYS_RESTRICT = 427
+
+def sys_exec_sandboxed(path: ptr[u8], args: ptr[u8]) -> u64:
+    return syscall3(SYS_EXEC_SB, u64(path), u64(args), 0)
+
+def sys_restrict(fd: u64, rights: u64) -> u64:
+    return syscall3(SYS_RESTRICT, fd, rights, 0)
+
 def is_err(v: u64) -> u64:
     return v > 0xFFFFFFFFFFFFF000
 

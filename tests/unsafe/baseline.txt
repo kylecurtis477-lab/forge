@@ -18,3 +18,4 @@ examples/modules tty1.forge 2 0 8 0
 examples/modules tty2.forge 2 0 8 0
 examples/modules unresolved.forge 0 0 0 0
 # 4.4: user counts include the 4 trusted ulib mem_* helpers; sh/bg/forktest/hello/cat/sum/crash main files are # forge: safe (0 unsafe)
+examples/user sbtest.forge 10 0 13 0

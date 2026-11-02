@@ -177,6 +177,12 @@ Generic defs/structs are recorded at prescan and skipped; an instance is created
 - Test: `examples/user/chantest.forge` (safe mode).
 - Fix found by chantest: `cur_thread()` now reads the CPU id and `current[]` with irqs off. Before, a preemption that migrated the thread between the two loads returned another CPU's (idle) thread, so `cur_proc()` was 0 and caused a #PF in `fd_get`.
 
+## App sandboxes (Phase 5.3)
+- Manifests live in `\EFI\Forge\apps\<app>.mf` (read-only ESP, inside the Forge directory). The format is one grant per line: `read PATH` or `dir PATH`. `#` lines and unknown lines are ignored.
+- Launch (`sh.forge` `run_app`): fork. The child opens each grant (fds 4.. in order), narrows each with `restrict(fd, rights)` (427; it can only drop rights) and calls `exec_sandboxed(path, args)` (426). If a grant fails to open, the child exits 126 before exec.
+- Kernel (`sandbox_enter` in proc.fsi): after a successful exec the root capability at fd 3 is closed, and the pid is recorded in `sb_pid[]`/`sb_name[]` beside the Proc table. That table is kept outside Proc so Proc stays in its 512-byte slab class. Fork inherits the record, `proc_destroy` clears it, and `sb_live` counts live records. `cap_deny` logs denials for sandboxed processes with the app name, operation and path. `sys_kexec` fails while `sb_live != 0`.
+- Leak check fix: the shell-session check now leaves out slab pages (`slab_pages`) and kernel page-table pages (`kpt_pages`, counted in `pt_next` for `kernel_pml4`). Both are kept by design. Adding the apps directory moved allocation peaks and showed them as 1–2 false 'leaked frames'. Objects are still checked exactly through `heap_live`.
+
 ## Dual boot
 - The loader and kernel install into their own vendor directory on an existing ESP: `\EFI\Forge\forgex64.efi` and `\EFI\Forge\kernel.elf`. Add a firmware boot entry, e.g. `efibootmgr -c -d /dev/sdX -p N -L Forge -l '\EFI\Forge\forgex64.efi'`, or `bcdedit /copy {bootmgr}` + `/set {id} path \EFI\Forge\forgex64.efi` on Windows.
 - Nothing else is touched: not `\EFI\Microsoft`, not `\EFI\<distro>`, not the MBR, and no repartitioning. The loader only reads its own kernel file. The kernel's disk access is read-only: it reads only GPT headers and files under `\\EFI\\Forge\\` on the ESP and never writes. `\EFI\BOOT\BOOTX64.EFI` is used only on the throwaway test disk.

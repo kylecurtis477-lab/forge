@@ -1054,6 +1054,7 @@ def shell_test():
     # the block driver runs as a supervised ring-3 service for the whole shell session
     f0 = frames_free
     h0 = heap_live
+    s0 = slab_pages + kpt_pages
     blkd_supervised_start(blkd_img, blkd_sz)
     tsw_img[1] = mod_read("EFI/Forge/mod/tty1.ko", addr(tsw_sz[1]))
     tsw_img[2] = mod_read("EFI/Forge/mod/tty2.ko", addr(tsw_sz[2]))
@@ -1117,6 +1118,9 @@ def shell_test():
         panic("tty hot swap lost input")
     puts("tty hot-swap OK\n")
     blkd_supervised_stop()
+    # slab pages grown at a new allocation peak, and kernel page tables, are kept by the
+    # allocator by design (objects are checked by heap_live)
+    f0 -= slab_pages + kpt_pages - s0
     puts("shell session: frames leaked ")
     put_u64(f0 - frames_free)
     puts(", heap leaked ")

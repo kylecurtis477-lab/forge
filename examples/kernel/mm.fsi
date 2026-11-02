@@ -185,6 +185,8 @@ def pt_next(table: u64, idx: u64, create: u64) -> u64:
         if create == 0:
             return 0
         nf = frame_alloc()
+        if create == 2:
+            atomic_fetch_add(addr(kpt_pages), 1, acq_rel)
         vstore64(e, nf | PTE_P | PTE_W)
         return nf
     if v & PTE_PS:
@@ -193,6 +195,8 @@ def pt_next(table: u64, idx: u64, create: u64) -> u64:
 
 def pte_addr(pml4: u64, va: u64, create: u64) -> u64:
 # virtual address of the level-1 entry for va (0 if missing and !create)
+    if create != 0 and pml4 == kernel_pml4:
+        create = 2
     t = pt_next(pml4, (va >> 39) & 511, create)
     if t == 0:
         return 0
@@ -319,6 +323,8 @@ HEAP_MAGIC = 0x4B4D414C4C4F4321
 slab_free: u64[8]
 heap_big_next: u64
 heap_live: u64
+kpt_pages: u64  # kernel page-table pages: created on demand, never freed (the kernel half is shared)
+slab_pages: u64  # slab pages are kept for reuse, never returned to the frame allocator
 
 def class_size(c: u64) -> u64:
     return u64(32) << c
@@ -340,6 +346,7 @@ def kmalloc_nolock(n: u64) -> u64:
     if c < NCLASS:
         if slab_free[c] == 0:
             pg = p2v(frame_alloc())
+            slab_pages += 1
             sz = class_size(c)
             off = 0
             while off + sz <= PAGE:

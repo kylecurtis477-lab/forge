@@ -1,0 +1,3 @@
+# sbtest: may read the hello binary and look up files inside /efi/forge/docs
+read /efi/forge/bin/hello
+dir /efi/forge/docs

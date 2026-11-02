@@ -1,0 +1,50 @@
+# forge: safe
+# forge: no-runtime
+# Phase 5.3: launched by `sh: run sbtest` through /efi/forge/apps/sbtest.mf. It holds exactly the
+# manifest's handles (fd 4 = /efi/forge/bin/hello read-only, fd 5 = /efi/forge/docs lookup) and
+# nothing else: no root capability, so any other path is denied (and the kernel logs it).
+include "ulib.fsi"
+
+EPERM = 0xFFFFFFFFFFFFFFFF
+EBADF = 0xFFFFFFFFFFFFFFF7
+EACCES = 0xFFFFFFFFFFFFFFF3
+
+buf: u8[64]
+
+def fail(s: ptr[u8]):
+    out("sbtest FAIL: ")
+    out(s)
+    out("\n")
+    flush()
+    sys_exit(1)
+
+@export
+def _start():
+    if sys_rights(3) != EBADF:
+        fail("root capability still held")
+    if sys_rights(4) != (CAP_READ | CAP_DUP) or sys_rights(5) != (CAP_READ | CAP_LOOKUP | CAP_DUP):
+        fail("manifest handle rights")
+    if sys_rights(6) != EBADF:
+        fail("extra handle")
+    if sys_read(4, u64(addr(buf[0])), 4) != 4 or buf[0] != 127 or buf[1] != 69 or buf[2] != 76 or buf[3] != 70:
+        fail("read granted file")
+    if sys_writefd(4, u64(addr(buf[0])), 1) != EPERM or sys_restrict(4, CAP_READ | CAP_WRITE) != EPERM:
+        fail("write/widen granted file")
+    f = sys_openat(5, "big.bin")
+    if is_err(f) or sys_read(f, u64(addr(buf[0])), 64) != 64:
+        fail("lookup in granted dir")
+    if sys_openat(5, "../bin/cat") != EACCES:
+        fail("escape from granted dir")
+    out("sbtest: manifest handles work: file read-only, dir lookup confined\n")
+    flush()
+    if sys_open("/efi/forge/bin/cat") != EACCES:
+        fail("open outside manifest")
+    st: u64[2]
+    if sys_stat("/efi/forge/kernel.elf", addr(st[0])) != EACCES:
+        fail("stat outside manifest")
+    if sys_exec("/efi/forge/bin/hello", "x") != EACCES:
+        fail("exec outside manifest")
+    out("sbtest: access outside the manifest denied (open, stat, exec)\n")
+    out("sbtest: PASS\n")
+    flush()
+    sys_exit(0)

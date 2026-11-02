@@ -66,6 +66,9 @@ def kx_park():
         sleep_ticks(1)
     t.kx_parked = 0
 nforks: u64
+sandboxes: u64
+sb_live: u64
+sb_denials: u64
 nexecs: u64
 
 @unsafe
@@ -607,6 +610,7 @@ def proc_destroy(p: ptr[Proc]):
     t = ptr[Thread](p.thread)
     thread_free(t)
     as_free(p.pml4)
+    sb_clear(p.pid)
     kfree(u64(p))
 
 @unsafe
@@ -714,6 +718,7 @@ def sys_fork(frame: u64) -> u64:
         kfree(u64(c))
         return ENOMEM
     nforks += 1
+    sb_inherit(p.pid, c.pid)
     thread_start_ready(ct)
     return c.pid
 
@@ -722,7 +727,7 @@ def thread_free_new(t: ptr[Thread]):
     thread_free(t)
 
 @unsafe
-def sys_exec(frame: u64, upath: u64, uargs: u64) -> u64:
+def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
     path: u8[128]
     args: u8[128]
     if copy_str_user(u64(addr(path[0])), upath, 128) > 127:
@@ -731,7 +736,7 @@ def sys_exec(frame: u64, upath: u64, uargs: u64) -> u64:
     if uargs != 0 and copy_str_user(u64(addr(args[0])), uargs, 128) > 127:
         return EFAULT
     if root_cap(cur_proc()) == 0:
-        cap_deny(cur_proc(), "exec")
+        cap_deny(cur_proc(), "exec", addr(path[0]))
         return EACCES
     if path_ok(path[:]) == 0:
         return EACCES
@@ -766,6 +771,8 @@ def sys_exec(frame: u64, upath: u64, uargs: u64) -> u64:
     vstore64(frame + SF_RFLAGS * 8, 0x202)
     fpu_restore(fpu_template)
     nexecs += 1
+    if sb:
+        sandbox_enter(p, path[:])
     return 0
 
 @unsafe
@@ -858,7 +865,7 @@ def sys_open(upath: u64) -> u64:
         return EFAULT
     p = cur_proc()
     if root_cap(p) == 0:
-        cap_deny(p, "open")
+        cap_deny(p, "open", addr(path[0]))
         return EACCES
     if path_ok(path[:]) == 0:
         return EACCES
@@ -871,7 +878,7 @@ def sys_stat(upath: u64, ubuf: u64) -> u64:
     if copy_str_user(u64(addr(path[0])), upath, 256) > 255:
         return EFAULT
     if root_cap(cur_proc()) == 0:
-        cap_deny(cur_proc(), "stat")
+        cap_deny(cur_proc(), "stat", addr(path[0]))
         return EACCES
     if path_ok(path[:]) == 0:
         return EACCES
@@ -967,8 +974,111 @@ def path_ok(s: slice[u8]) -> u64:
 
 cap_denials: u64
 
-def cap_deny(p: ptr[Proc], what: ptr[u8]):
+# sandbox state lives beside the Proc table (keyed by pid) so Proc stays in its 512-byte slab class
+sb_pid: u64[64]  # 0 = free slot
+sb_name: u8[1024]  # 16 bytes per slot: the app's name
+sb_lock: u64
+
+def sb_slot(pid: u64) -> u64:
+    i: u64 = 0
+    while i < MAX_PROCS:
+        if sb_pid[i] == pid:
+            return i
+        i += 1
+    return MAX_PROCS
+
+def sb_new(pid: u64) -> u64:
+# a free slot always exists: there are as many slots as processes
+    f = irq_save()
+    spin_lock(addr(sb_lock))
+    i: u64 = 0
+    while i < MAX_PROCS and sb_pid[i] != 0:
+        i += 1
+    sb_pid[i] = pid
+    spin_unlock(addr(sb_lock))
+    irq_restore(f)
+    atomic_fetch_add(addr(sb_live), 1, acq_rel)
+    return i
+
+def sb_inherit(ppid: u64, pid: u64):
+# a sandboxed process forks a sandboxed child with the same name
+    sp = sb_slot(ppid)
+    if sp == MAX_PROCS:
+        return
+    n = sb_new(pid)
+    k: u64 = 0
+    while k < 16:
+        sb_name[n * 16 + k] = sb_name[sp * 16 + k]
+        k += 1
+
+def sb_clear(pid: u64):
+    sp = sb_slot(pid)
+    if sp == MAX_PROCS:
+        return
+    sb_pid[sp] = 0
+    atomic_fetch_add(addr(sb_live), 0xFFFFFFFFFFFFFFFF, acq_rel)
+
+def sandbox_enter(p: ptr[Proc], path: slice[u8]):
+# exec through a manifest: the new image keeps only the handles the launcher installed; the
+# ambient root capability (fd 3) is dropped, so every other path is out of reach
+    if p.fds[CAP_ROOT_FD] != 0:
+        file_put(p.fds[CAP_ROOT_FD])
+        p.fds[CAP_ROOT_FD] = 0
+        p.fdr[CAP_ROOT_FD] = 0
+    sp = sb_slot(p.pid)
+    if sp == MAX_PROCS:
+        sp = sb_new(p.pid)
+    b: u64 = 0
+    i: u64 = 0
+    while i < len(path) and path[i] != 0:
+        if path[i] == 47:
+            b = i + 1
+        i += 1
+    k: u64 = 0
+    while k < 15 and b + k < len(path) and path[b + k] != 0:
+        sb_name[sp * 16 + k] = path[b + k]
+        k += 1
+    sb_name[sp * 16 + k] = 0
+    n: u64 = 0
+    i = 0
+    while i < NFD:
+        if i > 2 and p.fds[i] != 0:
+            n += 1
+        i += 1
+    sandboxes += 1
+    puts("sandbox: pid ")
+    put_u64(p.pid)
+    puts(" (")
+    puts(addr(sb_name[sp * 16]))
+    puts(") runs with ")
+    put_u64(n)
+    puts(" manifest handles, no root capability\n")
+
+def sys_restrict(fd: u64, rights: u64) -> u64:
+# narrow a handle's rights in place (never widen)
+    p = cur_proc()
+    if fd >= NFD or p.fds[fd] == 0:
+        return EBADF
+    if (rights & (~p.fdr[fd])) != 0:
+        return EPERM
+    p.fdr[fd] = rights
+    return 0
+
+def cap_deny(p: ptr[Proc], what: ptr[u8], path: ptr[u8]):
     cap_denials += 1
+    sp = sb_slot(p.pid)
+    if sp != MAX_PROCS:
+        sb_denials += 1
+        puts("sandbox: pid ")
+        put_u64(p.pid)
+        puts(" (")
+        puts(addr(sb_name[sp * 16]))
+        puts(") denied ")
+        puts(what)
+        puts(" ")
+        puts(path)
+        puts(": not in its manifest\n")
+        return
     puts("cap: pid ")
     put_u64(p.pid)
     puts(" denied ")
@@ -1083,7 +1193,7 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
     if nr == 57:
         return sys_fork(frame)
     if nr == 59:
-        return sys_exec(frame, a, b)
+        return sys_exec(frame, a, b, 0)
     if nr == 60:
         proc_exit(a & 0xFF)
     if nr == 61:
@@ -1094,6 +1204,10 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         return sys_openat(a, b)
     if nr == 422:
         return sys_rights(a)
+    if nr == 426:
+        return sys_exec(frame, a, b, 1)
+    if nr == 427:
+        return sys_restrict(a, b)
     if nr == 423:
         return sys_chan_create(a)
     if nr == 424:

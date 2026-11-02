@@ -7,6 +7,91 @@ include "ulib.fsi"
 line: u8[256]
 path: u8[160]
 dents: u8[1024]
+mf: u8[512]
+mpath: u8[160]
+
+def setpath(dst: ptr[u8], pre: ptr[u8], name: ptr[u8], suf: ptr[u8]):
+    pl: u64 = 0
+    i: u64 = 0
+    while mem_get8(u64(pre) + i) != 0 and pl < 150:
+        mem_set8(u64(dst) + pl, mem_get8(u64(pre) + i))
+        pl += 1
+        i += 1
+    i = 0
+    while mem_get8(u64(name) + i) != 0 and pl < 150:
+        mem_set8(u64(dst) + pl, mem_get8(u64(name) + i))
+        pl += 1
+        i += 1
+    i = 0
+    while mem_get8(u64(suf) + i) != 0 and pl < 159:
+        mem_set8(u64(dst) + pl, mem_get8(u64(suf) + i))
+        pl += 1
+        i += 1
+    mem_set8(u64(dst) + pl, 0)
+
+def run_app(name: ptr[u8], args: ptr[u8]) -> u64:
+# launch through /efi/forge/apps/<name>.mf: each "read PATH" / "dir PATH" line becomes a handle
+# (fds 4.. in manifest order) with only READ (+LOOKUP for dirs); the app gets nothing else
+    setpath(addr(mpath[0]), "/efi/forge/apps/", name, ".mf")
+    fd = sys_open(addr(mpath[0]))
+    if is_err(fd):
+        out("sh: run: no manifest ")
+        out(addr(mpath[0]))
+        out("\n")
+        flush()
+        return 1
+    n = sys_read(fd, u64(addr(mf[0])), 511)
+    sys_close(fd)
+    if is_err(n):
+        return 1
+    mf[n] = 0
+    pid = sys_fork()
+    if pid == 0:
+        ng: u64 = 0
+        i: u64 = 0
+        while i < n:
+            e = i
+            while e < n and mf[e] != 10:
+                e += 1
+            mf[e] = 0
+            r: u64 = 0
+            o: u64 = 0
+            if mf[i] == 114 and mf[i + 1] == 101 and mf[i + 2] == 97 and mf[i + 3] == 100 and mf[i + 4] == 32:
+                r = CAP_READ | CAP_DUP
+                o = 5
+            if mf[i] == 100 and mf[i + 1] == 105 and mf[i + 2] == 114 and mf[i + 3] == 32:
+                r = CAP_READ | CAP_LOOKUP | CAP_DUP
+                o = 4
+            if r != 0:
+                g = sys_open(addr(mf[i + o]))
+                if is_err(g) or is_err(sys_restrict(g, r)):
+                    out("sh: run: manifest grant failed: ")
+                    out(addr(mf[i + o]))
+                    out("\n")
+                    flush()
+                    sys_exit(126)
+                ng += 1
+            i = e + 1
+        out("sh: run ")
+        out(name)
+        out(": ")
+        out_u64(ng)
+        out(" grants from its manifest\n")
+        flush()
+        setpath(addr(mpath[0]), "/efi/forge/bin/", name, "")
+        sys_exec_sandboxed(addr(mpath[0]), args)
+        out("sh: run: exec failed\n")
+        flush()
+        sys_exit(127)
+    st: u64 = 0
+    sys_wait(pid, addr(st))
+    out("[")
+    out(name)
+    out(" exited ")
+    out_u64(st)
+    out(" (sandboxed)]\n")
+    flush()
+    return 0
 
 def read_line() -> u64:
     n: u64 = 0
@@ -55,7 +140,7 @@ def do_ls(dir: ptr[u8]):
 
 @export
 def _start():
-    out("Forge sh: builtins ls, wait, kexec [next], exit, cmd &; programs from /efi/forge/bin\n")
+    out("Forge sh: builtins ls, wait, run app (manifest sandbox), kexec [next], exit, cmd &; programs from /efi/forge/bin\n")
     flush()
     ncmd: u64 = 0
     while 1:
@@ -117,6 +202,15 @@ def _start():
                 out_u64(ws)
                 out("]\n")
                 flush()
+            continue
+        if streq(cmd, "run"):
+            b = a
+            while line[b] != 0 and line[b] != 32:
+                b += 1
+            if line[b] == 32:
+                line[b] = 0
+                b += 1
+            run_app(addr(line[a]), addr(line[b]))
             continue
         if streq(cmd, "ls"):
             if line[a] == 0:
