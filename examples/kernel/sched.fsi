@@ -1,4 +1,4 @@
-# Preemptive kernel threads: spinlocks (atomics), one global run queue shared by all CPUs, per-CPU current and
+# Preemptive kernel threads: spinlocks (atomics), per-CPU run queues with stealing (one rq_lock), per-CPU current and
 # idle threads, round-robin on the 100 Hz LAPIC timer. The run-queue lock is held across the stack switch and
 # released by whichever thread resumes, so a thread can never be picked up by another CPU half-saved.
 T_READY = 0
@@ -54,8 +54,11 @@ extern def ctx_switch(save: u64, rsp: u64)
 extern def thread_start_addr() -> u64
 
 rq_lock: u64
-rq_head: u64
-rq_tail: u64
+rq_head: u64[8]  # Phase 8: one run queue per CPU (still under the one rq_lock)
+rq_tail: u64[8]
+rq_len: u64[8]
+rq_enq: u64[8]
+rq_steals: u64
 current: u64[8]
 idle_thr: u64[8]
 next_tid: u64
@@ -63,31 +66,55 @@ ctx_switches: u64
 
 @unsafe
 def rq_push(t: ptr[Thread]):
+# pinned threads go to their CPU's queue; others to the shortest queue, preferring the pushing CPU on ties
     t.next = 0
-    if rq_tail == 0:
-        rq_head = u64(t)
+    n = ncpu_online
+    if n == 0 or n > 8:
+        n = 1
+    q = lapic_cpu()
+    if q >= n:
+        q = 0
+    if t.pin != 0:
+        q = t.pin - 1
     else:
-        ptr[Thread](rq_tail).next = u64(t)
-    rq_tail = u64(t)
+        i: u64 = 0
+        while i < n:
+            if rq_len[i] < rq_len[q]:
+                q = i
+            i += 1
+    if rq_tail[q] == 0:
+        rq_head[q] = u64(t)
+    else:
+        ptr[Thread](rq_tail[q]).next = u64(t)
+    rq_tail[q] = u64(t)
+    rq_len[q] += 1
+    rq_enq[q] += 1
 
 @unsafe
 def rq_pop(cpu: u64) -> u64:
-# first runnable thread allowed on this CPU (pin = 0: anywhere, else cpu + 1)
-    prev: u64 = 0
-    t = rq_head
-    while t != 0:
-        p = ptr[Thread](t).pin
-        if p == 0 or p == cpu + 1:
-            nx = ptr[Thread](t).next
-            if prev == 0:
-                rq_head = nx
-            else:
-                ptr[Thread](prev).next = nx
-            if rq_tail == t:
-                rq_tail = prev
-            return t
-        prev = t
-        t = ptr[Thread](t).next
+# own queue first; when empty, steal the first unpinned thread from the other queues (k = 1..7)
+    k: u64 = 0
+    while k < 8:
+        q = (cpu + k) % 8
+        prev: u64 = 0
+        t = rq_head[q]
+        while t != 0:
+            p = ptr[Thread](t).pin
+            if p == 0 or p == cpu + 1:
+                nx = ptr[Thread](t).next
+                if prev == 0:
+                    rq_head[q] = nx
+                else:
+                    ptr[Thread](prev).next = nx
+                if rq_tail[q] == t:
+                    rq_tail[q] = prev
+                rq_len[q] -= 1
+                if k != 0:
+                    rq_steals += 1
+                return t
+            prev = t
+            t = ptr[Thread](t).next
+        k += 1
     return 0
 
 @unsafe

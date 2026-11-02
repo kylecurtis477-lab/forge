@@ -724,6 +724,19 @@ def sched_test():
     if popcount(seen) != ncpu_online:
         panic("not all CPUs ran threads")
     puts("preemptive SMP scheduler OK\n")
+    used = 0
+    i = 0
+    while i < 8:
+        if rq_enq[i] != 0:
+            used += 1
+        i += 1
+    puts("per-CPU run queues: ")
+    put_u64(used)
+    puts(" queues used, ")
+    put_u64(rq_steals)
+    puts(" steals\n")
+    if ncpu_online > 1 and used < 2:
+        panic("run queues: everything landed on one CPU")
     if x2apic_on:
         puts("x2APIC: all cpus in x2APIC mode, IPIs sent via MSR 0x830: ")
         put_u64(x2apic_ipis)
