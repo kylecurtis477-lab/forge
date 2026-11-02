@@ -59,7 +59,7 @@ def kx_park():
 nforks: u64
 nexecs: u64
 
-def proc_find_l(pid: u64) -> ptr[Proc]:
+def proc_find_l(pid: u64) -> nptr[Proc]:
     i = 0
     while i < MAX_PROCS:
         if procs[i] != 0 and ptr[Proc](procs[i]).pid == pid:
@@ -134,7 +134,7 @@ def console() -> u64:
         console_file = u64(addr(console_obj))
     return file_get(console_file)
 
-def fd_get(p: ptr[Proc], fd: u64) -> ptr[File]:
+def fd_get(p: ptr[Proc], fd: u64) -> nptr[File]:
     if fd >= NFD:
         return ptr[File](0)
     return ptr[File](p.fds[fd])
@@ -515,7 +515,7 @@ def proc_new(ppid: u64) -> ptr[Proc]:
     p.mmap_next = MMAP_BASE
     return p
 
-def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> ptr[Thread]:
+def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> nptr[Thread]:
     pml4 = as_new()
     entry = elf_load(pml4, img, len)
     if entry == 0:
@@ -544,8 +544,15 @@ def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> ptr[Thread]:
     thread_start_ready(t)
     return t
 
-def proc_spawn(img: u64, len: u64) -> ptr[Thread]:
+def proc_spawn(img: u64, len: u64) -> nptr[Thread]:
     return proc_spawn_args(img, len, "")
+
+def proc_spawn_ok(img: u64, len: u64) -> ptr[Thread]:
+# kernel self-tests: spawn an image that must load
+    t = proc_spawn(img, len)
+    if t == 0:
+        panic("proc_spawn: image rejected by ELF loader")
+    return t
 
 def proc_destroy(p: ptr[Proc]):
 # p is a zombie whose thread is dead and which is no longer in the table

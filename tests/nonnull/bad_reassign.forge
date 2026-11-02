@@ -1,0 +1,10 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+# expect: before indexing
+g: nptr[u64]
+def main() -> u64:
+    p = g
+    if p != 0:
+        p = g
+        return p[0]
+    return 0

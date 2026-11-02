@@ -1,0 +1,57 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+# Phase 4.2: nptr[T] narrowing that must compile and run (exit 0, prints "nonnull ok")
+class Node:
+    val: u64
+    next: nptr[Node]
+
+pool: Node[4]
+head: nptr[Node]
+v: u64[4]
+
+def deref(p: ptr[u64]) -> u64:
+    return p[0]
+
+def first() -> ptr[Node]:
+    h = head
+    if h == 0:
+        return addr(pool[0])
+    return h
+
+def sum_list() -> u64:
+    s: u64 = 0
+    n = head
+    while n != 0:
+        s += n.val
+        n = n.next
+    return s
+
+def main() -> u64:
+    i: u64 = 0
+    while i < 4:
+        pool[i].val = i + 1
+        pool[i].next = 0
+        if i > 0:
+            pool[i - 1].next = addr(pool[i])
+        i += 1
+    head = addr(pool[0])
+    if sum_list() != 10:
+        return 1
+    p = head
+    if p != 0 and p.val == 1:
+        p.val = 5
+    q = head
+    if q == 0 or q.val != 5:
+        return 2
+    if not q:
+        return 3
+    r: nptr[u64] = addr(v[0])
+    if r != 0:
+        r[0] = 7
+    if u64(r) == 0:
+        return 4
+    if deref(r) != 7 or first().val != 5:
+        return 5
+    puts("nonnull ok")
+    nl()
+    return 0

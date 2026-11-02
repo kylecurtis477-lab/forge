@@ -221,7 +221,7 @@ def vb_reinit():
     blkd_mode = 0
     mutex_unlock(addr(vb_m))
 
-def blkd_start(img: u64, sz: u64) -> ptr[Thread]:
+def blkd_start(img: u64, sz: u64) -> nptr[Thread]:
 # hand the device over: no kernel-driver request is in flight while vb_m is held
     mutex_lock(addr(vb_m))
     spawn_drv = DRV_BLK
@@ -251,7 +251,7 @@ blkd_thread: u64
 ktest_hooks: u64  # set only by the in-kernel boot self-test (shell_test)
 blk_crash_after: u64  # fault injection: crash on the n-th next request (0 = off)
 
-def blkd_spawn(args: ptr[u8]) -> ptr[Thread]:
+def blkd_spawn(args: ptr[u8]) -> nptr[Thread]:
     spawn_drv = DRV_BLK
     t = proc_spawn_args(sup_img, sup_sz, args)
     spawn_drv = 0

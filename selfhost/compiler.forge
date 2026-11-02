@@ -15438,6 +15438,13 @@ fs_bstats = 0
 fs_nbc = 0
 fs_nbe = 0
 fs_lastnm = ""
+# Phase 4.2 non-null pointers: per-local "proven non-null" flag for nptr[T] locals
+fsl_nn = list(4096)
+fs_lhs = 0
+fs_lhsl = -1
+fs_lastimm = 1
+fs_nnl = list(64)
+fs_nnc = 0
 fsb_v = list(256)
 fsb_x = list(256)
 fsb_c = list(256)
@@ -15459,7 +15466,14 @@ def c4(a, b, c, d):
     return concat(concat(concat(a, b), c), d)
 
 def fs_die(msg):
-    die(tl[fp], msg)
+# report the original file/line (fs_include splices included files into one token stream)
+    ln = tl[fp]
+    if ln >= 1 and ln <= fsx_n:
+        fi = fsx_f[ln - 1]
+        ln = fsx_l[ln - 1]
+        if fi != 0:
+            msg = c3(fsx_fn[fi], ": ", msg)
+    die(ln, msg)
 
 def fs_isop(o):
     return tk[fp] == K_OP and str_eq(tv[fp], o)
@@ -15527,10 +15541,25 @@ def ft_init():
 def ft_ptr(t):
     i = 0
     while i < nft:
-        if fsk[i] == 1 and ftel[i] == t:
+        if fsk[i] == 1 and ftel[i] == t and ftsg[i] == 0:
             return i
         i += 1
     return ft_add(1, t, 8, 8, 0, 0, "ptr")
+
+def ft_nptr(t):
+# nptr[T] (= ?ptr[T]): may be null; must be checked before use
+    i = 0
+    while i < nft:
+        if fsk[i] == 1 and ftel[i] == t and ftsg[i] == 1:
+            return i
+        i += 1
+    return ft_add(1, t, 8, 8, 1, 0, "nptr")
+
+def ft_isnptr(t):
+    return fsk[t] == 1 and ftsg[t] == 1
+
+def ft_isnn(t):
+    return fsk[t] == 1 and ftsg[t] == 0
 
 def ft_arr(t, n):
     i = 0
@@ -15589,6 +15618,11 @@ def fs_type():
             t = ft_ptr(el)
         else:
             t = ft_ptr(FT_U8)
+    elif str_eq(nm, "nptr"):
+        fs_expect("[")
+        el = fs_type()
+        fs_expect("]")
+        t = ft_nptr(el)
     elif str_eq(nm, "slice"):
         fs_expect("[")
         el = fs_type()
@@ -15608,7 +15642,7 @@ def fs_type():
 def fs_istype(p):
     if tk[p] != K_ID:
         return 0
-    if ft_prim(tv[p]) >= 0 or str_eq(tv[p], "ptr") or (str_eq(tv[p], "slice") and tk[p + 1] == K_OP and str_eq(tv[p + 1], "[")):
+    if ft_prim(tv[p]) >= 0 or str_eq(tv[p], "ptr") or ((str_eq(tv[p], "slice") or str_eq(tv[p], "nptr")) and tk[p + 1] == K_OP and str_eq(tv[p + 1], "[")):
         return 1
     return ft_struct(tv[p]) >= 0
 
@@ -15789,6 +15823,7 @@ def fs_newlocal(nm, t):
     fsl_n[nfsl] = nm
     fsl_t[nfsl] = t
     fsl_o[nfsl] = 0 - fs_frame
+    fsl_nn[nfsl] = 0
     nfsl += 1
     return nfsl - 1
 
@@ -15919,6 +15954,11 @@ def fs_conv(to):
     global fs_ety
     if (fsk[to] == 5 or fsk[fs_ety] == 5) and fs_ety != to:
         fs_die("slice type mismatch (slices convert only to the same slice[T])")
+    if ft_isnn(to) and fs_ety != to:
+        if ft_isnptr(fs_ety):
+            fs_die("nptr[T] may be null: check it (if p != 0:) before using it as a ptr[T]")
+        if fs_ety == FT_LIT and fs_lastimm == 0:
+            fs_die("null (0) cannot be a ptr[T]; declare it nptr[T]")
     if fsk[to] == 0 and fs_ety != to:
         if not (fsk[fs_ety] == 0 and ftsz[fs_ety] <= ftsz[to] and ft_sg(fs_ety) == ftsg[to] and fs_ety != FT_LIT and to != FT_BOOL):
             fs_norm(to)
@@ -15926,7 +15966,7 @@ def fs_conv(to):
 
 # ---- expressions ----
 def fs_imm(v):
-    global fs_ety, fs_mode
+    global fs_ety, fs_mode, fs_lastimm
     if v >= -2147483648 and v <= 2147483647:
         if v == 0:
             e("xor %eax,%eax")
@@ -15934,6 +15974,7 @@ def fs_imm(v):
             e(c3("mov $", str(v), ",%rax"))
     else:
         e(c3("movabs $", str(v), ",%rax"))
+    fs_lastimm = v
     fs_ety = FT_LIT
     fs_mode = 0
 
@@ -16264,7 +16305,9 @@ def fs_efi_call():
     fs_dep -= n
 
 def fs_primary():
-    global fp, fs_ety, fs_mode, fs_moff, fs_mlab
+    global fp, fs_ety, fs_mode, fs_moff, fs_mlab, fs_lhs, fs_lhsl
+    lh = fs_lhs
+    fs_lhs = 0
     if tk[fp] == K_NUM:
         fs_imm(tv[fp])
         fp += 1
@@ -16342,6 +16385,10 @@ def fs_primary():
         fs_mode = 2
         fs_moff = fsl_o[l]
         fs_ety = fsl_t[l]
+        if lh:
+            fs_lhsl = l
+        elif ft_isnptr(fs_ety) and fsl_nn[l]:
+            fs_ety = ft_ptr(ftel[fs_ety])
         return 0
     g = fs_glob(nm)
     if g >= 0:
@@ -16493,6 +16540,8 @@ def fs_postfix():
             if (fsk[t] == 3 or fsk[t] == 5) and fs_mode != 0:
                 fs_mat()
             elif fsk[t] == 1:
+                if ftsg[t] == 1:
+                    fs_die("nptr[T] may be null: check it (if p != 0:) before indexing")
                 fs_rv()
             else:
                 fs_die("indexing needs a pointer, array or slice")
@@ -16536,6 +16585,8 @@ def fs_postfix():
             if fsk[t] == 2 and fs_mode != 0:
                 fs_mat()
             elif fsk[t] == 1 and fsk[ftel[t]] == 2:
+                if ftsg[t] == 1:
+                    fs_die("nptr[T] may be null: check it (if p != 0:) before a field access")
                 fs_rv()
                 t = ftel[t]
             else:
@@ -16798,8 +16849,130 @@ def fs_not():
         return 0
     fs_cmp()
 
+fs_nnend = 0
+
+def fs_nnname(q):
+# `x` or `u64(x)` at q with x an nptr local: x's index (fs_nnend = token after it), else -1
+    global fs_nnend
+    if tk[q] != K_ID:
+        return -1
+    n = q
+    fs_nnend = q + 1
+    if str_eq(tv[q], "u64") and fs_isop2(q + 1, "(") and tk[q + 2] == K_ID and fs_isop2(q + 3, ")"):
+        n = q + 2
+        fs_nnend = q + 4
+    l = fs_local(tv[n])
+    if l < 0 or not ft_isnptr(fsl_t[l]):
+        return -1
+    return l
+
+def fs_nnpat(q, e):
+# tokens [q, e) are `x` or `x != 0` (x may be written u64(x)) for an nptr local x: returns x's index, else -1
+    l = fs_nnname(q)
+    if l < 0:
+        return -1
+    n = fs_nnend
+    if e == n and n == q + 1:
+        return l
+    if e == n + 2 and fs_isop2(n, "!=") and tk[n + 1] == K_NUM and tv[n + 1] == 0:
+        return l
+    return -1
+
+def fs_nnzero(q, e):
+# tokens [q, e) are `x == 0` (or `u64(x) == 0`) for an nptr local x
+    l = fs_nnname(q)
+    if l < 0:
+        return -1
+    n = fs_nnend
+    if e == n + 2 and fs_isop2(n, "==") and tk[n + 1] == K_NUM and tv[n + 1] == 0:
+        return l
+    return -1
+
+def fs_nnscan(p):
+# conjuncts of the condition at p (up to the depth-0 ':') that prove an nptr local non-null -> fs_nnl[0..fs_nnc)
+    global fs_nnc
+    fs_nnc = 0
+    q = p
+    d = 0
+    while tk[p] != K_NL and tk[p] != K_EOF:
+        if tk[p] == K_OP and (str_eq(tv[p], "(") or str_eq(tv[p], "[")):
+            d += 1
+        elif tk[p] == K_OP and (str_eq(tv[p], ")") or str_eq(tv[p], "]")):
+            d -= 1
+        elif d == 0 and tk[p] == K_ID and str_eq(tv[p], "or"):
+            fs_nnc = 0
+            return 0
+        elif d == 0 and ((tk[p] == K_ID and str_eq(tv[p], "and")) or fs_isop2(p, ":")):
+            l = fs_nnpat(q, p)
+            if l >= 0 and fs_nnc < 64:
+                fs_nnl[fs_nnc] = l
+                fs_nnc += 1
+            if fs_isop2(p, ":"):
+                return 0
+            q = p + 1
+        p += 1
+    return 0
+
+def fs_nulltest(p):
+# condition at p starts with `x == 0` or is `not x` (x an nptr local) -> x's index, else -1
+    if tk[p] != K_ID:
+        return -1
+    if str_eq(tv[p], "not") and fs_isop2(p + 2, ":"):
+        return fs_nnpat(p + 1, p + 2)
+    l = fs_nnname(p)
+    if l < 0:
+        return -1
+    n = fs_nnend + 2
+    if fs_nnzero(p, n) >= 0 and (fs_isop2(n, ":") or (tk[n] == K_ID and str_eq(tv[n], "or"))):
+        return l
+    return -1
+
+def fs_exits(p):
+# the block whose ':' is at or after p ends in return/break/continue/panic at its own level
+    while tk[p] != K_EOF and not (fs_isop2(p, ":") and (tk[p + 1] == K_NL or tk[p + 1] == K_ID)):
+        p += 1
+    p += 1
+    if tk[p] == K_ID:
+        return fs_exitstmt(p)
+    p += 1
+    if tk[p] != K_IND:
+        return 0
+    p += 1
+    d = 1
+    st = 1
+    while tk[p] != K_EOF and d > 0:
+        if tk[p] == K_IND:
+            d += 1
+        elif tk[p] == K_DED:
+            d -= 1
+        elif tk[p] == K_NL:
+            st = 1
+            p += 1
+            continue
+        elif st and d == 1 and fs_exitstmt(p):
+            return 1
+        st = 0
+        p += 1
+    return 0
+
+def fs_exitstmt(p):
+    if tk[p] != K_ID:
+        return 0
+    if str_eq(tv[p], "return") or str_eq(tv[p], "break") or str_eq(tv[p], "continue"):
+        return 1
+    return (str_eq(tv[p], "panic") or str_eq(tv[p], "qemu_exit")) and fs_isop2(p + 1, "(")
+
+def fs_loopkill():
+# entering a loop: forget non-null facts for locals the loop assigns (the back edge may bring a null)
+    i = 0
+    while i < nfsl:
+        if fsl_nn[i] and not fs_bodyok(fsl_n[i], " "):
+            fsl_nn[i] = 0
+        i += 1
+
 def fs_andor(isand):
     global fp, fs_ety
+    q0 = fp
     if isand:
         fs_not()
     else:
@@ -16810,18 +16983,32 @@ def fs_andor(isand):
     if not fs_isid(kw):
         return 0
     l = fs_newlab()
+    sn = fs_nnsnap()
     while fs_isid(kw):
+        if isand:
+        # `x != 0 and <rhs>`: x is non-null while compiling rhs
+            x = fs_nnpat(q0, fp)
+            if x >= 0:
+                fsl_nn[x] = 1
+        else:
+        # `x == 0 or <rhs>`: x is non-null while compiling rhs
+            x = fs_nnzero(q0, fp)
+            if x >= 0:
+                fsl_nn[x] = 1
         fp += 1
         fs_rv()
         e("test %rax,%rax")
         if isand:
             e(concat("je ", l))
+            q0 = fp
             fs_not()
         else:
             e(concat("jne ", l))
+            q0 = fp
             fs_andor(1)
         fs_rv()
         e("test %rax,%rax")
+    fs_nnjoin(sn)
     emit_raw(concat(l, ":\n"))
     e("setne %al")
     e("movzbl %al,%eax")
@@ -16842,11 +17029,31 @@ def fs_eol():
     elif tk[fp] != K_DED and tk[fp] != K_EOF:
         fs_die("expected end of line")
 
+def fs_nnsnap():
+    sn = list(nfsl + 1)
+    i = 0
+    while i < nfsl:
+        sn[i] = fsl_nn[i]
+        i += 1
+    sn[nfsl] = nfsl
+    return sn
+
+def fs_nnjoin(sn):
+# leaving a block: a local stays proven non-null only if it was on entry and still is
+    n = sn[len(sn) - 1]
+    i = 0
+    while i < nfsl:
+        if i >= n or not sn[i]:
+            fsl_nn[i] = 0
+        i += 1
+
 def fs_suite():
     global fp
+    sn = fs_nnsnap()
     fs_expect(":")
     if tk[fp] != K_NL:
         fs_stmt()
+        fs_nnjoin(sn)
         return 0
     fp += 1
     if tk[fp] != K_IND:
@@ -16855,6 +17062,7 @@ def fs_suite():
     while tk[fp] != K_DED and tk[fp] != K_EOF:
         fs_stmt()
     fp += 1
+    fs_nnjoin(sn)
 
 def fs_skip_suite():
     global fp
@@ -16898,7 +17106,7 @@ def fs_assign_at():
 
 def fs_lhs_store(vt):
 # value in rax (type vt); compile target at fp (before '=') and store
-    global fp, fs_ety
+    global fp, fs_ety, fs_lhs, fs_lhsl
     if tk[fp] == K_ID and tk[fp + 1] == K_OP and str_eq(tv[fp + 1], "=") and fs_local(tv[fp]) < 0 and fs_glob(tv[fp]) < 0:
         if fs_const(tv[fp]) >= 0:
             fs_die("cannot assign to a constant")
@@ -16913,7 +17121,13 @@ def fs_lhs_store(vt):
         return 0
     fs_ety = vt
     fs_push()
+    fs_lhs = tk[fp] == K_ID and fs_isop2(fp + 1, "=")
+    fs_lhsl = -1
+    p0 = fp
     fs_postfix()
+    fs_lhs = 0
+    bare = fp == p0 + 1
+    tl0 = fs_lhsl
     t = fs_ety
     if fs_mode == 0:
         fs_die("cannot assign to this expression")
@@ -16926,6 +17140,9 @@ def fs_lhs_store(vt):
     fs_ety = vt
     fs_conv(t)
     fs_store(t, m)
+    if bare and tl0 >= 0:
+    # assigning a proven non-null value narrows an nptr local; anything else clears it
+        fsl_nn[tl0] = ft_isnn(vt)
 
 def fs_stmt():
     global fp, nfsloop, fs_ety, fs_mode, fs_dep, nfsb
@@ -16956,24 +17173,53 @@ def fs_stmt():
         return 0
     if fs_isid("if"):
         lend = fs_newlab()
+        nt = fs_nulltest(fp + 1)
+        if nt >= 0 and not fs_exits(fp + 1):
+            nt = -1
         while 1:
             fp += 1
             lnext = fs_newlab()
+            fs_nnscan(fp)
+            nc = fs_nnc
+            nl0 = list(nc + 1)
+            k = 0
+            while k < nc:
+                nl0[k] = fs_nnl[k]
+                k += 1
             fs_rexpr()
             e("test %rax,%rax")
             e(concat("je ", lnext))
+            sv = fs_nnsnap()
+            k = 0
+            while k < nc:
+                fsl_nn[nl0[k]] = 1
+                k += 1
             fs_suite()
+            fs_nnjoin(sv)
             e(concat("jmp ", lend))
             emit_raw(concat(lnext, ":\n"))
             if not fs_isid("elif"):
                 break
+            nt = -1
         if fs_isid("else"):
+            nt = -1
             fp += 1
             fs_suite()
         emit_raw(concat(lend, ":\n"))
+        if nt >= 0:
+        # `if x == 0: return` (or break/continue/panic): x is non-null after the if
+            fsl_nn[nt] = 1
         return 0
     if fs_isid("while"):
         fp += 1
+        fs_loopkill()
+        fs_nnscan(fp)
+        nc = fs_nnc
+        nl0 = list(nc + 1)
+        k = 0
+        while k < nc:
+            nl0[k] = fs_nnl[k]
+            k += 1
         lt = fs_newlab()
         lb = fs_newlab()
         emit_raw(concat(lt, ":\n"))
@@ -16983,7 +17229,13 @@ def fs_stmt():
         fs_brk[nfsloop] = lb
         fs_cnt[nfsloop] = lt
         nfsloop += 1
+        sv = fs_nnsnap()
+        k = 0
+        while k < nc:
+            fsl_nn[nl0[k]] = 1
+            k += 1
         fs_suite()
+        fs_nnjoin(sv)
         nfsloop -= 1
         e(concat("jmp ", lt))
         emit_raw(concat(lb, ":\n"))
@@ -16994,6 +17246,7 @@ def fs_stmt():
         if not fs_isid("in") or not str_eq(tv[fp + 1], "range"):
             fs_die("freestanding for supports only range()")
         fp += 2
+        fs_loopkill()
         fs_expect("(")
         fx = fs_rngfact()
         fs_rexpr()
@@ -17074,8 +17327,12 @@ def fs_stmt():
         if fs_isop("="):
             fp += 1
             fs_rexpr()
+            vt = fs_ety
             fs_conv(t)
             fs_store(t, concat(str(fsl_o[l]), "(%rbp)"))
+            fsl_nn[l] = ft_isnn(vt)
+        elif ft_isnn(t):
+            fs_die("a ptr[T] local needs an initializer (it cannot be null; use nptr[T])")
         elif ft_agg(t):
             e(c3("lea ", str(fsl_o[l]), "(%rbp),%rdi"))
             e("xor %eax,%eax")
@@ -17304,6 +17561,8 @@ def fs_prescan():
             nfsg += 1
             fsg_n[g] = nm
             fsg_t[g] = fs_type()
+            if ft_isnn(fsg_t[g]) and (not fs_isop("=") or (tk[fp + 1] == K_NUM and tv[fp + 1] == 0)):
+                fs_die("a ptr[T] global needs a non-null initializer (use nptr[T])")
             fsg_al[g] = fs_dal
             fsg_sec[g] = fs_dsec
             fsg_p[g] = -1

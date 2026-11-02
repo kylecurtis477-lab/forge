@@ -1,0 +1,8 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+# expect: before using it as a ptr[T]
+g: nptr[u64]
+def f() -> ptr[u64]:
+    return g
+def main() -> u64:
+    return 0

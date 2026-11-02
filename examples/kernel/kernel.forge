@@ -534,10 +534,10 @@ def user_test():
     bad = proc_spawn(hi + 1, hl - 1)
     if u64(bad) != 0:
         panic("ELF loader accepted a corrupt image")
-    a = proc_spawn(hi, hl)
-    b = proc_spawn(hi, hl)
-    c = proc_spawn(fi, fl)
-    d = proc_spawn(hi, hl)
+    a = proc_spawn_ok(hi, hl)
+    b = proc_spawn_ok(hi, hl)
+    c = proc_spawn_ok(fi, fl)
+    d = proc_spawn_ok(hi, hl)
     ida = a.id
     idb = b.id
     idd = d.id
@@ -645,12 +645,15 @@ def mod_expect_reject(img: u64, sz: u64, what: ptr[u8]):
     puts("  rejected ")
     puts(what)
     puts(": ")
-    puts(mod_err)
-    if u64(mod_err_sym) != 0:
+    er = mod_err
+    if er != 0:
+        puts(er)
+    es = mod_err_sym
+    if es != 0:
         puts(" (")
-        puts(mod_err_sym)
+        puts(es)
         putc(41)
-        mod_err_sym = ptr[u8](0)
+        mod_err_sym = 0
     putc(10)
 
 def module_test():
@@ -660,7 +663,7 @@ def module_test():
     img = mod_read("EFI/Forge/mod/hello.ko", addr(sz))
     m = mod_load(img, sz)
     if u64(m) == 0:
-        puts(mod_err)
+        puts(mod_err_str())
         panic(": hello.ko rejected")
     puts("module hello.ko: ")
     put_u64(m.npages)
@@ -688,7 +691,7 @@ def module_test():
     mod_unload(m)
     if virt_to_phys(kernel_pml4, base0) != 1:
         panic("module still mapped after unload")
-    m = mod_load(img, sz)
+    m = mod_load_ok(img, sz)
     if call_ptr(m.restore, st, n) != 1 or call_ptr(mod_sym(m, "mod_call"), 0) != 10 + 3:
         panic("module state not restored")
     kfree(st)
@@ -1081,7 +1084,7 @@ def kexec_test():
     ktest_hooks = 1
     sz: u64 = 0
     img = fs_read_file("/EFI/Forge/bin/sh", addr(sz))
-    t = proc_spawn(img, sz)
+    t = proc_spawn_ok(img, sz)
     kfree(img)
     code = proc_reap(t)
     ktest_hooks = 0

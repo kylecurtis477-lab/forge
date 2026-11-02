@@ -1,0 +1,6 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+# expect: needs an initializer
+def main() -> u64:
+    p: ptr[u64]
+    return 0

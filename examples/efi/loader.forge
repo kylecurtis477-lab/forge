@@ -51,8 +51,21 @@ GUID_ACPI20: u8[16] = [0x71, 0xe8, 0x68, 0x88, 0xf1, 0xe4, 0xd3, 0x11, 0xbc, 0x2
 GUID_ACPI10: u8[16] = [0x30, 0x2d, 0x9d, 0xeb, 0x88, 0x2d, 0xd3, 0x11, 0x9a, 0x16, 0x0, 0x90, 0x27, 0x3f, 0xc1, 0x4d]
 
 wbuf: u16[256]
-con: ptr[u64]
-bs: ptr[u64]
+# set from the system table first thing in efi_main; nullable until then (Phase 4.2: no implicit null)
+con: nptr[u64]
+bs: nptr[u64]
+
+def bsfn(i: u64) -> u64:
+# boot-services table entry i (0 before efi_main has stored the table)
+    b = bs
+    if b == 0:
+        return 0
+    return b[i]
+
+def con_out(s: u64):
+    c = con
+    if c != 0:
+        call_efi(c[1], u64(c), s)
 
 def print(s: ptr[u8]):
     i = 0
@@ -60,10 +73,10 @@ def print(s: ptr[u8]):
         wbuf[i] = u16(s[i])
         i += 1
     wbuf[i] = 0
-    call_efi(con[1], u64(con), u64(addr(wbuf[0])))
+    con_out(u64(addr(wbuf[0])))
 
 def print_w(s: ptr[u16]):
-    call_efi(con[1], u64(con), u64(s))
+    con_out(u64(s))
 
 def print_u64(v: u64):
     buf: u8[24]
@@ -108,7 +121,7 @@ def guid_eq(a: u64, b: ptr[u8]) -> u64:
 def alloc_pages(n: u64, max_addr: u64) -> u64:
 # AllocatePages(AllocateMaxAddress, EfiLoaderData, n, &addr)
     a: u64 = max_addr
-    st = call_efi(bs[BS_ALLOCATE_PAGES], 1, 2, n, u64(addr(a)))
+    st = call_efi(bsfn(BS_ALLOCATE_PAGES), 1, 2, n, u64(addr(a)))
     if st != EFI_SUCCESS:
         return 0
     memset(a, 0, n * 4096)
@@ -116,12 +129,12 @@ def alloc_pages(n: u64, max_addr: u64) -> u64:
 
 def read_kernel(image: u64, size_out: ptr[u64]) -> u64:
     li: u64 = 0
-    st = call_efi(bs[BS_HANDLE_PROTOCOL], image, u64(addr(GUID_LOADED_IMAGE[0])), u64(addr(li)))
+    st = call_efi(bsfn(BS_HANDLE_PROTOCOL), image, u64(addr(GUID_LOADED_IMAGE[0])), u64(addr(li)))
     if st != EFI_SUCCESS:
         return fail("LoadedImage protocol missing", st) & 0
     dev = load64(li + 24)
     sfs: u64 = 0
-    st = call_efi(bs[BS_HANDLE_PROTOCOL], dev, u64(addr(GUID_SFS[0])), u64(addr(sfs)))
+    st = call_efi(bsfn(BS_HANDLE_PROTOCOL), dev, u64(addr(GUID_SFS[0])), u64(addr(sfs)))
     if st != EFI_SUCCESS:
         return fail("SimpleFileSystem missing on boot volume", st) & 0
     root: u64 = 0
@@ -163,7 +176,7 @@ def read_kernel(image: u64, size_out: ptr[u64]) -> u64:
 
 def setup_gop(bi: ptr[BootInfo]):
     gop: u64 = 0
-    st = call_efi(bs[BS_LOCATE_PROTOCOL], u64(addr(GUID_GOP[0])), 0, u64(addr(gop)))
+    st = call_efi(bsfn(BS_LOCATE_PROTOCOL), u64(addr(GUID_GOP[0])), 0, u64(addr(gop)))
     if st != EFI_SUCCESS or gop == 0:
         print("no GOP; kernel will use serial only\r\n")
         return
@@ -362,7 +375,7 @@ def efi_main(image: u64, st: ptr[SystemTable]) -> u64:
     key: u64 = 0
     dsz: u64 = 0
     dver: u64 = 0
-    call_efi(bs[BS_GET_MEMORY_MAP], u64(addr(msize)), 0, u64(addr(key)), u64(addr(dsz)), u64(addr(dver)))
+    call_efi(bsfn(BS_GET_MEMORY_MAP), u64(addr(msize)), 0, u64(addr(key)), u64(addr(dsz)), u64(addr(dver)))
     cap = msize + 16 * 64
     map = alloc_pages(cap / 4096 + 1, 0xFFFFFFFF)
     if map == 0:
@@ -371,11 +384,11 @@ def efi_main(image: u64, st: ptr[SystemTable]) -> u64:
     tries = 0
     while tries < 4:
         msize = cap
-        stm = call_efi(bs[BS_GET_MEMORY_MAP], u64(addr(msize)), map, u64(addr(key)), u64(addr(dsz)), u64(addr(dver)))
+        stm = call_efi(bsfn(BS_GET_MEMORY_MAP), u64(addr(msize)), map, u64(addr(key)), u64(addr(dsz)), u64(addr(dver)))
         if stm != EFI_SUCCESS:
             return fail("GetMemoryMap failed", stm)
         convert_map(bi, map, msize, dsz)
-        if call_efi(bs[BS_EXIT_BOOT_SERVICES], image, key) == EFI_SUCCESS:
+        if call_efi(bsfn(BS_EXIT_BOOT_SERVICES), image, key) == EFI_SUCCESS:
             break
         tries += 1
     if tries == 4:

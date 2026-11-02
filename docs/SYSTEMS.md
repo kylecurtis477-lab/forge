@@ -69,6 +69,12 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 - Array and slice indexing is bounds-checked: `cmp len,%rcx; jb ok`, else `forge_bounds_fail(line, idx, len, file)` if the program defines it, then `ud2`. The line and file are the original source position, even through `include`. Constant out-of-range array indices are compile errors. `ptr[T]` indexing is unchecked.
 - Checks are elided for `x[v]` inside `for v in range(len(x))`, `range(C, len(x))` or `range(K)` with K ≤ the array length, when the body never assigns v or x or takes their `addr()`. `forgec … --bounds-stats` prints the counts on stderr; `--no-bounds` or `# forge: no-bounds-checks` disables checks.
 
+### No null (Phase 4.2)
+
+- `ptr[T]` is non-null; `nptr[T]` may be null (same 8-byte representation, ftsg=1 on the ptr type). `fs_conv` rejects literal 0 and unnarrowed nptr → ptr; deref of nptr is rejected in `fs_postfix`.
+- Narrowing is a per-local flag `fsl_nn` (set means "this nptr local is non-null here"). `fs_primary` gives a narrowed local the `ptr[T]` type. Sources: `fs_nnscan` (if/while conjuncts), `fs_andor` (rhs of `and` / `x == 0 or`), `fs_nulltest`+`fs_exits` (early-exit ifs), stores in `fs_lhs_store` / typed decls. `fs_suite` ANDs facts with the entry snapshot on exit; `fs_loopkill` clears facts for locals a loop assigns (reuses `fs_bodyok`).
+- `fs_die` maps include-expanded lines back to file:line.
+
 ### Test blocks, forge test, forge verify
 
 - `test "name":` + block at top level (column 0) is a unit test. forgec rewrites each header line to `def __forge_test_N():` before lexing (line count unchanged, so diagnostics keep their line numbers); without `--test` they are uncalled functions and the program is unchanged. Test blocks in imported modules are renamed the same way (global counter) and never run from the importer.

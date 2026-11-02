@@ -450,7 +450,7 @@ def sys_kexec(frame: u64, which: u64) -> u64:
     panic("kexec stub returned")
     return 0
 
-def kx_restore() -> ptr[Thread]:
+def kx_restore() -> nptr[Thread]:
 # in the new kernel: rebuild every handed-over process, then give the handoff region back.
 # Returns the caller's thread (0 if the handoff could not be adopted: the kernel boots fresh).
     hb = bi.handoff

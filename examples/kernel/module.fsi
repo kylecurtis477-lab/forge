@@ -49,8 +49,22 @@ mod_lock: u64
 mod_loads: u64
 mod_unloads: u64
 mod_rejects: u64
-mod_err: ptr[u8]
-mod_err_sym: ptr[u8]
+mod_err: nptr[u8]
+mod_err_sym: nptr[u8]
+
+def mod_load_ok(img: u64, sz: u64) -> ptr[Module]:
+# kernel self-tests: load a module that must be accepted
+    m = mod_load(img, sz)
+    if m == 0:
+        panic("mod_load: module rejected")
+    return m
+
+def mod_err_str() -> ptr[u8]:
+# last rejection reason, for messages
+    e = mod_err
+    if e != 0:
+        return e
+    return "(none)"
 
 def kstreq(a: u64, b: u64) -> u64:
     i: u64 = 0
@@ -87,7 +101,7 @@ def mod_area_init():
         pte_addr(kernel_pml4, va, 1)
         va += 0x200000
 
-def mod_fail(msg: ptr[u8]) -> ptr[Module]:
+def mod_fail(msg: ptr[u8]) -> nptr[Module]:
     mod_err = msg
     atomic_add64(u64(addr(mod_rejects)), 1)
     return ptr[Module](0)
@@ -131,7 +145,7 @@ def mod_sym(m: ptr[Module], name: ptr[u8]) -> u64:
         i += 1
     return 0
 
-def mod_load(img: u64, sz: u64) -> ptr[Module]:
+def mod_load(img: u64, sz: u64) -> nptr[Module]:
     secaddr: u64[64]
     # ---- ELF header ----
     if sz < 64 or vload32(img) != 0x464C457F or vload8(img + 4) != 2 or vload8(img + 5) != 1:

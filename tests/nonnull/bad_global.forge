@@ -1,0 +1,6 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+# expect: a ptr[T] global needs a non-null initializer
+g: ptr[u64]
+def main() -> u64:
+    return 0
