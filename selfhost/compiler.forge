@@ -8438,6 +8438,11 @@ O_FCMP = 34
 O_FNEG = 35
 O_FCST = 36
 O_SCST = 37
+O_GIDX = 38
+O_GCMP = 39
+O_GTRU = 40
+GCMP_RT = [10, 11, 12, 14, 13, 15]
+GCMP_CC = ["e", "ne", "l", "le", "g", "ge"]
 NRT_OK = ["concat", "substr", "str_eq", "chr", "join", "char_at"]
 T_DBL = 7
 raw_at = -1
@@ -9011,6 +9016,16 @@ def cond_leaf(a, b, l, sense):
             else:
                 icbr(r, cst(0), 0, l)
             return 0
+        if (oty(x) != T_INT or oty(y) != T_INT) and hyb and not inl_on:
+            r = new_vr(1)
+            vtt[r] = T_INT
+            kk = iadd(O_GCMP, r, xbox(x), xbox(y))
+            iimm[kk] = cc
+            if sense:
+                icbr(r, cst(0), 1, l)
+            else:
+                icbr(r, cst(0), 0, l)
+            return 0
         if not sense:
             cc = CC_NEG[cc]
         icbr(x, y, cc, l)
@@ -9023,6 +9038,11 @@ def cond_leaf(a, b, l, sense):
     if oty(x) == T_BOOL:
         r = new_vr(0)
         iadd(O_AND, r, x, cst(1))
+        x = r
+    elif oty(x) != T_INT and not fl(x) and hyb and not inl_on:
+        r = new_vr(1)
+        vtt[r] = T_INT
+        iadd(O_GTRU, r, x, -1)
         x = r
     if sense:
         icbr(x, cst(0), 1, l)
@@ -9426,6 +9446,25 @@ def x_post0() -> int:
             v = x_call()
         elif tok_is_op(ip + 1, "[") and not inl_on:
             i = xfind(name)
+            if i < 0 and hyb:
+                v = var_int(name)
+                ip += 1
+                while tok_is_op(ip, "[") and not irfail:
+                    gl = tl[ip]
+                    ip += 1
+                    idx = xbox(x_expr())
+                    if not tok_is_op(ip, "]"):
+                        o_fail("slice")
+                        return v
+                    ip += 1
+                    gd = new_vr(1)
+                    vtt[gd] = 0
+                    kk = iadd(O_GIDX, gd, v, idx)
+                    iimm[kk] = gl
+                    v = gd
+                if tok_is_op(ip, ".") or tok_is_op(ip, "("):
+                    o_fail("postfix")
+                return v
             if i < 0 or xk[i] != 2:
                 o_fail("index")
                 return v
@@ -10378,9 +10417,9 @@ def find_top_eq(p):
 # ---------------- IR utilities ----------------
 def u_n(k):
     op = iop[k]
-    if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET or op == O_VST or op == O_TSET or op == O_I2D or op == O_UNB or op == O_BOX or op == O_FNEG:
+    if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET or op == O_VST or op == O_TSET or op == O_I2D or op == O_UNB or op == O_BOX or op == O_FNEG or op == O_GTRU:
         return 1
-    if op == O_FOP or op == O_FCMP:
+    if op == O_FOP or op == O_FCMP or op == O_GIDX or op == O_GCMP:
         return 2
     if op >= O_ADD and op <= O_MOD or op == O_CBR:
         return 2
@@ -11292,7 +11331,7 @@ def o_intervals():
     k = 0
     while k < nir:
         cpre[k] = c
-        if iop[k] == O_CALL or iop[k] == O_LNEW or iop[k] == O_TSTMT or iop[k] == O_TCOND or iop[k] == O_TEXPR or iop[k] == O_TSET or iop[k] == O_BOX:
+        if iop[k] == O_CALL or  iop[k] == O_LNEW or iop[k] == O_TSTMT or iop[k] == O_TCOND or iop[k] == O_TEXPR or iop[k] == O_TSET or iop[k] == O_BOX:
             c += 1
         k += 1
     cpre[nir] = c
@@ -11929,6 +11968,64 @@ def o_ins(k, fi, x_epi):
     elif op == O_TSTMT:
         pos = iimm[k]
         stmt()
+    elif op == O_GIDX:
+        mv_to(ia[k], "%rax", 0)
+        mv_to(ib[k], "%rcx", 0)
+        e("cmpb $0, -1(%rax)")
+        e("jne 1f")
+        e("cmp (%rax), %rcx")
+        e("jae 1f")
+        e("mov 16(%rax), %rax")
+        e("mov (%rax,%rcx,8), %rax")
+        e("jmp 2f")
+        emit_raw("1:\n")
+        e3("mov $", str(iimm[k]), ", %rdx")
+        e("push %rsi")
+        e("push %rdi")
+        e("call rtp_getidx")
+        e("pop %rdi")
+        e("pop %rsi")
+        emit_raw("2:\n")
+        if idst[k] >= 0:
+            e2("mov %rax, ", vl(idst[k]))
+    elif op == O_GTRU:
+        mv_to(ia[k], "%rax", 0)
+        e("xor %edx, %edx")
+        e("test %rax, %rax")
+        e("jz 2f")
+        e("mov $1, %edx")
+        e("cmp rt_dlov(%rip), %rax")
+        e("jb 2f")
+        e("push %rsi")
+        e("push %rdi")
+        e("call rtp_truth")
+        e("pop %rdi")
+        e("pop %rsi")
+        emit_raw("2:\n")
+        if idst[k] >= 0:
+            e2("mov %rdx, ", vl(idst[k]))
+    elif op == O_GCMP:
+        mv_to(ia[k], "%rax", 0)
+        mv_to(ib[k], "%rcx", 0)
+        e("mov %rax, %rdx")
+        e("or %rcx, %rdx")
+        e("cmp rt_dlov(%rip), %rdx")
+        e("jae 1f")
+        e("cmp %rcx, %rax")
+        e2(concat("set", GCMP_CC[iimm[k]]), " %al")
+        e("movzbq %al, %rax")
+        e("jmp 2f")
+        emit_raw("1:\n")
+        e("push %rsi")
+        e("push %rdi")
+        e3("mov $", str(GCMP_RT[iimm[k]]), ", %esi")
+        e("call rtp_cmp")
+        e("pop %rdi")
+        e("pop %rsi")
+        e("and $1, %eax")
+        emit_raw("2:\n")
+        if idst[k] >= 0:
+            e2("mov %rax, ", vl(idst[k]))
     elif op == O_SCST:
         if idst[k] >= 0:
             if in_reg(idst[k]):
