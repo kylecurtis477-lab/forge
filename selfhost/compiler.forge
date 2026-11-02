@@ -13167,6 +13167,29 @@ def hyb_wasted():
         i += 1
     return 0
 
+def hyb_compact():
+    global nused
+    n = 0
+    i = 0
+    while i < nparams:
+        if preg[i]:
+            if find(hH, nH, params[i]) >= 0:
+                preg[i] = REGS[n]
+                n += 1
+            else:
+                preg[i] = 0
+        i += 1
+    i = 0
+    while i < nlocs:
+        if lreg[i]:
+            if find(hH, nH, locs[i]) >= 0:
+                lreg[i] = REGS[n]
+                n += 1
+            else:
+                lreg[i] = 0
+        i += 1
+    nused = n
+
 def hyb_selfc():
     # no instruction touches the token frame's register locals
     k = 0
@@ -13203,6 +13226,14 @@ def hyb_compile(fi, p, endp):
             hH[nH] = params[i]
             nH += 1
         i += 1
+    if hyb_rf:
+        # recompile: seed with the converged home set so the fixpoint loop finishes in one pass
+        i = 0
+        while i < nR:
+            if find(hH, nH, hR[i]) < 0:
+                hH[nH] = hR[i]
+                nH += 1
+            i += 1
     hyb = 1
     it = 0
     ok = 0
@@ -13228,20 +13259,10 @@ def hyb_compile(fi, p, endp):
         nlabel = hs_lab
         curf = -1
         return 0
-    if not hyb_rf and nused > 0 and hyb_wasted():
-        i = 0
-        while i < nH:
-            hR[i] = hH[i]
-            i += 1
-        nR = nH
-        hyb = 0
-        nout = hs_out
-        nlabel = hs_lab
-        curf = -1
-        hyb_rf = 1
-        r = hyb_compile(fi, p, endp)
-        hyb_rf = 0
-        return r
+    if nused > 0 and nused < NREGS and hyb_wasted():
+        # token-frame registers held by IR-only vars: hand them back without recompiling.
+        # Nothing register-dependent has been emitted yet (token stmts and the prologue are emitted later).
+        hyb_compact()
     o_intervals()
     ir_cslo = 5 + nused
     if hyb_selfc():

@@ -39,3 +39,8 @@ Note: the IR backend only takes plain int functions with int params, so 1 of 622
 `build/forgec selfhost/forgec.forge out.s`, best of 5: 1.66s (1.42s at 9c270ca, 1.11s at 0bf3911).
 - Part of the increase is +1,450 source lines (+10%) for the fs backend.
 - About 0.2s comes from the hyb_wasted function recompile (still to be fixed).
+
+## Recompile fix (2026-11-01 20:44 CST)
+The hybrid-function recompile is replaced by in-place register compaction (hyb_compact): registers held by IR-only vars are released without a second compile.
+- Self-compile best of 5: **1.21s** (was 1.66s).
+- Runtimes unchanged: fib 0.010, loop 0.093, strbuild 0.035, lists 0.042, floats 0.015, strops 0.019 (Rust 0.007/0.072/0.058/0.057/0.015/0.017).
