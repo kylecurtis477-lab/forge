@@ -8445,7 +8445,7 @@ O_GBIN = 41
 EXT_RT = ["rt_char_at", "rt_itos", "rt_len"]
 GCMP_RT = [10, 11, 12, 14, 13, 15]
 GCMP_CC = ["e", "ne", "l", "le", "g", "ge"]
-NRT_OK = ["concat", "substr", "str_eq", "chr", "join", "char_at"]
+NRT_OK = ["concat", "substr", "str_eq", "chr", "join", "char_at", "eputs", "puts"]
 T_DBL = 7
 raw_at = -1
 fcN = list(200)
@@ -9605,8 +9605,13 @@ def x_call() -> int:
             return a
         if oty(a) == T_INT:
             return rt_call1(NBI + 1, a, T_STR)
-        o_fail("str()")
-        return cst(0)
+        st = nargb
+        o_argpush(a)
+        dd = new_vr(1)
+        k = iadd(O_CALL, dd, st, 1)
+        iimm[k] = internal("__str", 1)
+        vtt[dd] = T_STR
+        return dd
     if (f < 0 or fpre[f]) and (str_eq(name, "min") or str_eq(name, "max")) and n == 2:
         ip = lp + 1
         a = x_expr()
@@ -9643,7 +9648,7 @@ def x_call() -> int:
         iovf[k] = ovf_on
         ilabel(sk)
         return dd
-    if f < 0 and hyb and not inl_on and find(NRT_OK, 6, name) >= 0:
+    if f < 0 and hyb and not inl_on and find(NRT_OK, 8, name) >= 0:
         rb = find(BI_NAMES, NBI, name)
         rty = T_INT
         if rb < 0:
