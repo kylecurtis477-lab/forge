@@ -1,0 +1,18 @@
+# forge: no-runtime
+# forge: checked-ints
+# checked-ints pragma: overflow traps (ud2 -> SIGILL) instead of wrapping
+include "linux.fsi"
+
+def main() -> i64:
+    a: u8 = 250
+    a += 5
+    put_u64(a)
+    nl()
+    x: i64 = 9223372036854775806
+    x += 1
+    put_i64(x)
+    nl()
+    puts("about to overflow\n")
+    a += 1
+    puts("not reached\n")
+    return 0

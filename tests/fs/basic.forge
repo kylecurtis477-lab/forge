@@ -1,0 +1,41 @@
+# forge: no-runtime
+# Freestanding smoke test: runs as a bare Linux process (no libc, no Forge runtime).
+include "linux.fsi"
+
+def fib(n: i64) -> i64:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+def main() -> i64:
+    puts("hello from freestanding forge\n")
+    put_i64(fib(20))
+    nl()
+    total: i64 = 0
+    for i in range(10):
+        total += i * i
+    put_i64(total)
+    nl()
+    put_i64(-12345)
+    nl()
+    x: u8 = 250
+    x += 10
+    put_u64(x)
+    nl()
+    y: i8 = 127
+    y += 1
+    put_i64(y)
+    nl()
+    big: u64 = 0xFFFFFFFFFFFFFFFF
+    put_u64(big)
+    nl()
+    put_u64(big >> 60)
+    nl()
+    s: i64 = -16
+    put_i64(s >> 2)
+    nl()
+    put_i64(-7 / 2)
+    nl()
+    put_u64(big / 3)
+    nl()
+    return 0

@@ -1,0 +1,44 @@
+# forge: no-runtime
+# raw memory: ptr[T], typed loads/stores, pointer arithmetic, addr(), sizeof, volatile, memset/memcpy
+include "linux.fsi"
+
+arena: u8[256]
+counter: u32 = 7
+
+def main() -> i64:
+    p: ptr[u8] = addr(arena[0])
+    memset(p, 0xAB, 16)
+    put_u64(p[3])
+    nl()
+    q: ptr[u32] = ptr[u32](p)
+    q[0] = 0x11223344
+    put_u64(p[0])
+    nl()
+    put_u64(p[3])
+    nl()
+    w = ptr[u64](p + 8)
+    w[0] = 0x0102030405060708
+    put_u64(load8(u64(p) + 8))
+    nl()
+    put_u64(load16(u64(p) + 8))
+    nl()
+    store32(u64(p) + 16, 0xDEADBEEF)
+    put_u64(vload32(u64(p) + 16))
+    nl()
+    vstore8(u64(p) + 16, 1)
+    put_u64(load32(u64(p) + 16))
+    nl()
+    a = q + 2
+    put_i64(i64(u64(a) - u64(q)))
+    nl()
+    put_i64(a - q)
+    nl()
+    pc = addr(counter)
+    pc[0] += 5
+    put_u64(counter)
+    nl()
+    put_u64(sizeof(u16) + sizeof(ptr[u8]) + sizeof(u8[10]))
+    nl()
+    memcpy(p + 100, "copy ok\n", 9)
+    puts(p + 100)
+    return 0

@@ -1,0 +1,45 @@
+# forge: no-runtime
+# fixed-width ints: wrapping, sign/zero extension, unsigned division/compare/shift
+include "linux.fsi"
+
+def main() -> i64:
+    a: u8 = 200
+    b: u8 = 100
+    c: u8 = a + b
+    put_u64(c)
+    nl()
+    d: i16 = 30000
+    d += 10000
+    put_i64(d)
+    nl()
+    e: u32 = 0
+    e -= 1
+    put_u64(e)
+    nl()
+    f: i32 = -1
+    put_u64(u32(f))
+    nl()
+    put_i64(i8(0x1FF))
+    nl()
+    m: u64 = 0x8000000000000000
+    if m > 1:
+        puts("unsigned compare ok\n")
+    n: i64 = i64(m)
+    if n < 1:
+        puts("signed compare ok\n")
+    put_u64(m >> 63)
+    puts(" ")
+    put_i64(n >> 63)
+    nl()
+    put_u64(m % 10)
+    puts(" ")
+    put_i64(-17 % 5)
+    nl()
+    put_u64((0xF0 | 0x0F) & 0x3C ^ 0x01)
+    nl()
+    put_u64(~u8(0))
+    nl()
+    ok = (1 < 2) and not (3 < 2) or False
+    put_u64(ok)
+    nl()
+    return 0

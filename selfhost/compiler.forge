@@ -485,7 +485,7 @@ def lex_fstring(src, i, q, line, buf):
 
 OPS3 = ["//=", "<<=", ">>=", "**="]
 OPS2 = ["==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "->", "//", "**", "<<", ">>"]
-OPS1 = "+-*/%()[]{}:,=<>.&|^~;"
+OPS1 = "+-*/%()[]{}:,=<>.&|^~;@"
 
 def flt_text(t):
     # literal text for the assembler's .double: drop '_' and make "1." / "1.e5" well-formed
@@ -13370,6 +13370,24 @@ def forge_main():
             ir_stats = 2
         ai += 1
     src = read_file(argv(1))
+    fsm = contains(src, concat("# forge: ", "no-runtime"))
+    ai = 3
+    while ai < argc():
+        if str_eq(argv(ai), "--freestanding"):
+            fsm = 1
+        ai += 1
+    if fsm:
+        set_lphase(1)
+        path = argv(1)
+        sl = len(path) - 1
+        while sl >= 0 and char_at(path, sl) != 47:
+            sl -= 1
+        src = fs_include(src, substr(path, 0, sl + 1), 0)
+        lex(src, 1, 0)
+        add_tok(K_EOF, 0, 0)
+        add_tok(K_EOF, 0, 0)
+        fs_main(src)
+        return 0
     pre = prelude_text()
     lex(pre, 1, 0)
     PRETOK = ntok
@@ -13471,3 +13489,1864 @@ def forge_main():
 def set_lphase(v):
     global lphase
     lphase = v
+
+# ======================================================================
+# Freestanding backend (--freestanding flag, or the no-runtime pragma).
+# Typed systems subset: no GC, no runtime, no bigint promotion.
+# Every value is a 64-bit register; narrow ints are kept normalized.
+# Plain SysV C ABI for every function; output is GNU as text that
+# assembles to a relocatable object for any linker script.
+# ======================================================================
+FT_VOID = 0
+FT_I64 = 4
+FT_U8 = 5
+FT_U16 = 6
+FT_U32 = 7
+FT_U64 = 8
+FT_BOOL = 9
+FT_LIT = 10
+FTMAX = 4096
+fsk = list(FTMAX)
+ftel = list(FTMAX)
+ftsz = list(FTMAX)
+ftal = list(FTMAX)
+ftsg = list(FTMAX)
+ftn = list(FTMAX)
+ftname = list(FTMAX)
+ftf0 = list(FTMAX)
+ftfn = list(FTMAX)
+ftdef = list(FTMAX)
+nft = 0
+ffn = list(16384)
+fft = list(16384)
+ffo = list(16384)
+nff = 0
+fsc_n = list(8192)
+fsc_v = list(8192)
+fsc_t = list(8192)
+nfsc = 0
+fsf_n = list(8192)
+fsf_ret = list(8192)
+fsf_np = list(8192)
+fsf_p0 = list(8192)
+fsf_pos = list(8192)
+fsf_at = list(8192)
+fsf_sec = list(8192)
+nfsf = 0
+fsp_n = list(65536)
+fsp_t = list(65536)
+nfsp = 0
+fsg_n = list(8192)
+fsg_t = list(8192)
+fsg_p = list(8192)
+fsg_al = list(8192)
+fsg_sec = list(8192)
+nfsg = 0
+fsl_n = list(4096)
+fsl_t = list(4096)
+fsl_o = list(4096)
+nfsl = 0
+fs_frame = 0
+fp = 0
+fs_ety = 0
+fs_mode = 0
+fs_moff = 0
+fs_mlab = ""
+fs_dep = 0
+fs_lab = 0
+fs_ret = ""
+fs_rty = 0
+fs_brk = list(256)
+fs_cnt = list(256)
+nfsloop = 0
+fs_chk = 0
+fs_rod = list(65536)
+nfsrod = 0
+fs_cok = 1
+fs_dal = 0
+fs_dsec = ""
+fs_dexp = 0
+fs_datt = 0
+
+def c3(a, b, c):
+    return concat(concat(a, b), c)
+
+def c4(a, b, c, d):
+    return concat(concat(concat(a, b), c), d)
+
+def fs_die(msg):
+    die(tl[fp], msg)
+
+def fs_isop(o):
+    return tk[fp] == K_OP and str_eq(tv[fp], o)
+
+def fs_isid(s):
+    return tk[fp] == K_ID and str_eq(tv[fp], s)
+
+def fs_expect(o):
+    global fp
+    if not fs_isop(o):
+        fs_die(c3("expected '", o, "'"))
+    fp += 1
+
+def fs_ident():
+    global fp
+    if tk[fp] != K_ID:
+        fs_die("expected identifier")
+    fp += 1
+    return tv[fp - 1]
+
+def fs_newlab():
+    global fs_lab
+    fs_lab += 1
+    return concat(".LF", str(fs_lab))
+
+def fs_push():
+    global fs_dep
+    e("push %rax")
+    fs_dep += 1
+
+def fs_pop(r):
+    global fs_dep
+    e(concat("pop ", r))
+    fs_dep -= 1
+
+# ---- types ----
+def ft_add(k, el, sz, al, sg, n, nm):
+    global nft
+    fsk[nft] = k
+    ftel[nft] = el
+    ftsz[nft] = sz
+    ftal[nft] = al
+    ftsg[nft] = sg
+    ftn[nft] = n
+    ftname[nft] = nm
+    ftf0[nft] = 0
+    ftfn[nft] = 0
+    ftdef[nft] = 1
+    nft += 1
+    return nft - 1
+
+def ft_init():
+    ft_add(4, 0, 0, 1, 0, 0, "void")
+    ft_add(0, 0, 1, 1, 1, 0, "i8")
+    ft_add(0, 0, 2, 2, 1, 0, "i16")
+    ft_add(0, 0, 4, 4, 1, 0, "i32")
+    ft_add(0, 0, 8, 8, 1, 0, "i64")
+    ft_add(0, 0, 1, 1, 0, 0, "u8")
+    ft_add(0, 0, 2, 2, 0, 0, "u16")
+    ft_add(0, 0, 4, 4, 0, 0, "u32")
+    ft_add(0, 0, 8, 8, 0, 0, "u64")
+    ft_add(0, 0, 1, 1, 0, 0, "bool")
+    ft_add(0, 0, 8, 8, 1, 0, "int")
+
+def ft_ptr(t):
+    i = 0
+    while i < nft:
+        if fsk[i] == 1 and ftel[i] == t:
+            return i
+        i += 1
+    return ft_add(1, t, 8, 8, 0, 0, "ptr")
+
+def ft_arr(t, n):
+    i = 0
+    while i < nft:
+        if fsk[i] == 3 and ftel[i] == t and ftn[i] == n:
+            return i
+        i += 1
+    return ft_add(3, t, ftsz[t] * n, ftal[t], 0, n, "array")
+
+def ft_isint(t):
+    return fsk[t] == 0
+
+def ft_agg(t):
+    return fsk[t] == 2 or fsk[t] == 3
+
+def ft_prim(nm):
+    if str_eq(nm, "int") or str_eq(nm, "isize"):
+        return FT_I64
+    if str_eq(nm, "uint") or str_eq(nm, "usize") or str_eq(nm, "addr"):
+        return FT_U64
+    if str_eq(nm, "byte") or str_eq(nm, "char"):
+        return FT_U8
+    i = 0
+    while i < 10:
+        if str_eq(ftname[i], nm):
+            return i
+        i += 1
+    return -1
+
+def ft_struct(nm):
+    i = 11
+    while i < nft:
+        if fsk[i] == 2 and str_eq(ftname[i], nm):
+            return i
+        i += 1
+    return -1
+
+def fs_type():
+    global fp
+    nm = fs_ident()
+    t = ft_prim(nm)
+    if str_eq(nm, "ptr"):
+        if fs_isop("["):
+            fp += 1
+            el = fs_type()
+            fs_expect("]")
+            t = ft_ptr(el)
+        else:
+            t = ft_ptr(FT_U8)
+    elif t < 0:
+        t = ft_struct(nm)
+        if t < 0:
+            fs_die(concat("unknown type ", nm))
+    while fs_isop("["):
+        fp += 1
+        n = fs_ceval()
+        fs_expect("]")
+        t = ft_arr(t, n)
+    return t
+
+def fs_istype(p):
+    if tk[p] != K_ID:
+        return 0
+    if ft_prim(tv[p]) >= 0 or str_eq(tv[p], "ptr"):
+        return 1
+    return ft_struct(tv[p]) >= 0
+
+def ft_join(a, b):
+    if a == FT_LIT:
+        return b
+    if b == FT_LIT:
+        return a
+    if fsk[a] != 0 or fsk[b] != 0:
+        return a
+    if ftsz[a] > ftsz[b]:
+        return a
+    if ftsz[b] > ftsz[a]:
+        return b
+    if not ftsg[a]:
+        return a
+    return b
+
+def ft_sg(t):
+    if fsk[t] != 0:
+        return 0
+    return ftsg[t]
+
+def fs_field(t, nm):
+    i = ftf0[t]
+    while i < ftf0[t] + ftfn[t]:
+        if str_eq(ffn[i], nm):
+            return i
+        i += 1
+    die(tl[fp], c4("no field ", nm, " in struct ", ftname[t]))
+    return -1
+
+# ---- compile-time constants ----
+def fs_const(nm):
+    i = 0
+    while i < nfsc:
+        if str_eq(fsc_n[i], nm):
+            return i
+        i += 1
+    return -1
+
+def fs_parse_dec(s):
+    v = 0
+    i = 0
+    while i < len(s):
+        v = v * 10 + char_at(s, i) - 48
+        i += 1
+    return v
+
+def fs_cprim():
+    global fp
+    if tk[fp] == K_NUM:
+        fp += 1
+        return tv[fp - 1]
+    if fs_isid("__bigparse"):
+        fp += 2
+        v = fs_parse_dec(tv[fp])
+        fp += 2
+        return v
+    if fs_isop("("):
+        fp += 1
+        v = fs_ceval()
+        fs_expect(")")
+        return v
+    if fs_isop("-"):
+        fp += 1
+        return 0 - fs_cprim()
+    if fs_isop("~"):
+        fp += 1
+        return -1 - fs_cprim()
+    if fs_isid("True"):
+        fp += 1
+        return 1
+    if fs_isid("False") or fs_isid("None"):
+        fp += 1
+        return 0
+    if fs_isid("ord"):
+        fp += 2
+        v = char_at(tv[fp], 0)
+        fp += 2
+        return v
+    if fs_isid("sizeof"):
+        fp += 2
+        t = fs_type()
+        fs_expect(")")
+        return ftsz[t]
+    if fs_isid("offsetof"):
+        fp += 2
+        t = fs_type()
+        fs_expect(",")
+        k = fs_field(t, fs_ident())
+        fs_expect(")")
+        return ffo[k]
+    if tk[fp] == K_ID:
+        c = fs_const(tv[fp])
+        if c >= 0:
+            fp += 1
+            return fsc_v[c]
+    fs_die("expected a compile-time constant")
+    return 0
+
+def fs_cmul():
+    global fp
+    v = fs_cprim()
+    while fs_isop("*") or fs_isop("//") or fs_isop("/") or fs_isop("%"):
+        o = tv[fp]
+        fp += 1
+        r = fs_cprim()
+        if str_eq(o, "*"):
+            v = v * r
+        elif str_eq(o, "%"):
+            v = v % r
+        else:
+            v = v // r
+    return v
+
+def fs_cadd():
+    global fp
+    v = fs_cmul()
+    while fs_isop("+") or fs_isop("-"):
+        o = tv[fp]
+        fp += 1
+        r = fs_cmul()
+        if str_eq(o, "+"):
+            v = v + r
+        else:
+            v = v - r
+    return v
+
+def fs_cshift():
+    global fp
+    v = fs_cadd()
+    while fs_isop("<<") or fs_isop(">>"):
+        o = tv[fp]
+        fp += 1
+        r = fs_cadd()
+        if str_eq(o, "<<"):
+            v = fs_shl(v, r)
+        else:
+            v = fs_shr(v, r)
+    return v
+
+def fs_ceval():
+    global fp
+    v = fs_cshift()
+    while fs_isop("&") or fs_isop("|") or fs_isop("^"):
+        o = tv[fp]
+        fp += 1
+        r = fs_cshift()
+        if str_eq(o, "&"):
+            v = fs_bop(v, r, 0)
+        elif str_eq(o, "|"):
+            v = fs_bop(v, r, 1)
+        else:
+            v = fs_bop(v, r, 2)
+    return v
+
+# ---- symbol lookup ----
+def fs_local(nm):
+    i = nfsl - 1
+    while i >= 0:
+        if str_eq(fsl_n[i], nm):
+            return i
+        i -= 1
+    return -1
+
+def fs_newlocal(nm, t):
+    global nfsl, fs_frame
+    a = ftal[t]
+    if a < 8:
+        a = 8
+    sz = ftsz[t]
+    if sz < 8:
+        sz = 8
+    fs_frame += sz
+    while fs_frame % a != 0:
+        fs_frame += 1
+    fsl_n[nfsl] = nm
+    fsl_t[nfsl] = t
+    fsl_o[nfsl] = 0 - fs_frame
+    nfsl += 1
+    return nfsl - 1
+
+def fs_func(nm):
+    i = 0
+    while i < nfsf:
+        if str_eq(fsf_n[i], nm):
+            return i
+        i += 1
+    return -1
+
+def fs_glob(nm):
+    i = 0
+    while i < nfsg:
+        if str_eq(fsg_n[i], nm):
+            return i
+        i += 1
+    return -1
+
+# ---- loads / stores / normalization ----
+def fs_norm(t):
+    if fsk[t] != 0:
+        return 0
+    sz = ftsz[t]
+    if t == FT_BOOL:
+        e("test %rax,%rax")
+        e("setne %al")
+        e("movzbl %al,%eax")
+    elif sz == 1 and ftsg[t]:
+        e("movsbq %al,%rax")
+    elif sz == 1:
+        e("movzbl %al,%eax")
+    elif sz == 2 and ftsg[t]:
+        e("movswq %ax,%rax")
+    elif sz == 2:
+        e("movzwl %ax,%eax")
+    elif sz == 4 and ftsg[t]:
+        e("movslq %eax,%rax")
+    elif sz == 4:
+        e("movl %eax,%eax")
+    return 0
+
+def fs_maddr():
+    # memory operand text for the current lvalue
+    if fs_mode == 2:
+        return concat(str(fs_moff), "(%rbp)")
+    if fs_mode == 3:
+        return concat(fs_mlab, "(%rip)")
+    return "(%rax)"
+
+def fs_mat():
+    global fs_mode
+    if fs_mode == 2 or fs_mode == 3:
+        e(c3("lea ", fs_maddr(), ",%rax"))
+    fs_mode = 1
+
+def fs_load(t):
+    # load the lvalue (fs_mode) of type t into rax
+    global fs_mode
+    if ft_agg(t):
+        fs_mat()
+        fs_mode = 0
+        return 0
+    m = fs_maddr()
+    sz = ftsz[t]
+    sg = ft_sg(t)
+    if fs_mode == 2:
+        e(c3("mov ", m, ",%rax"))
+    elif sz == 8:
+        e(c3("mov ", m, ",%rax"))
+    elif sz == 4 and sg:
+        e(c3("movslq ", m, ",%rax"))
+    elif sz == 4:
+        e(c3("movl ", m, ",%eax"))
+    elif sz == 2 and sg:
+        e(c3("movswq ", m, ",%rax"))
+    elif sz == 2:
+        e(c3("movzwl ", m, ",%eax"))
+    elif sg:
+        e(c3("movsbq ", m, ",%rax"))
+    else:
+        e(c3("movzbl ", m, ",%eax"))
+    fs_mode = 0
+    return 0
+
+def fs_store(t, m):
+    # value in rax -> memory operand m; m == "(%rcx)" or slot/label
+    if ft_agg(t):
+        fs_die("cannot assign a whole struct/array (use memcpy)")
+    sz = ftsz[t]
+    if contains(m, "(%rbp)"):
+        sz = 8
+    if sz == 8:
+        e(c3("mov %rax,", m, ""))
+    elif sz == 4:
+        e(concat("mov %eax,", m))
+    elif sz == 2:
+        e(concat("mov %ax,", m))
+    else:
+        e(concat("mov %al,", m))
+
+def fs_rv():
+    if fs_mode != 0:
+        fs_load(fs_ety)
+
+def fs_conv(to):
+    # convert rax (type fs_ety) for assignment/passing to type to
+    global fs_ety
+    if fsk[to] == 0 and fs_ety != to:
+        if not (fsk[fs_ety] == 0 and ftsz[fs_ety] <= ftsz[to] and ft_sg(fs_ety) == ftsg[to] and fs_ety != FT_LIT and to != FT_BOOL):
+            fs_norm(to)
+    fs_ety = to
+
+# ---- expressions ----
+def fs_imm(v):
+    global fs_ety, fs_mode
+    if v >= -2147483648 and v <= 2147483647:
+        if v == 0:
+            e("xor %eax,%eax")
+        else:
+            e(c3("mov $", str(v), ",%rax"))
+    else:
+        e(c3("movabs $", str(v), ",%rax"))
+    fs_ety = FT_LIT
+    fs_mode = 0
+
+def fs_strlit(s):
+    global nfsrod, fs_ety, fs_mode
+    lb = concat(".LFS", str(nfsrod))
+    b = ""
+    i = 0
+    while i < len(s):
+        b = c3(b, str(char_at(s, i)), ",")
+        i += 1
+    fs_rod[nfsrod] = c4(lb, ": .byte ", b, "0\n")
+    nfsrod += 1
+    e(c3("lea ", lb, "(%rip),%rax"))
+    fs_ety = ft_ptr(FT_U8)
+    fs_mode = 0
+
+def fs_args(maxn, ptys):
+    # evaluate comma-separated args to the stack; returns count
+    global fp
+    fs_expect("(")
+    n = 0
+    while not fs_isop(")"):
+        fs_rexpr()
+        if ptys >= 0 and n < fsf_np[ptys]:
+            fs_conv(fsp_t[fsf_p0[ptys] + n])
+        fs_push()
+        n += 1
+        if fs_isop(","):
+            fp += 1
+    fp += 1
+    if n > maxn:
+        fs_die("too many arguments (max 6 register args)")
+    return n
+
+FS_AREG = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]
+FS_WREG = ["%rcx", "%rdx", "%r8", "%r9"]
+
+def fs_callsite(target):
+    global fs_dep
+    odd = fs_dep % 2
+    if odd:
+        e("sub $8,%rsp")
+    e(concat("call ", target))
+    if odd:
+        e("add $8,%rsp")
+
+def fs_intrin(nm):
+    # returns 1 if nm( ... ) was compiled as an intrinsic
+    global fp, fs_ety, fs_mode
+    one = ["cli", "sti", "hlt", "pause", "int3", "mfence", "lfence", "sfence", "wbinvd", "ud2", "cpu_relax"]
+    k = find(one, 11, nm)
+    if k >= 0:
+        fs_args(0, -1)
+        if k == 10:
+            e("pause")
+        else:
+            e(nm)
+        e("xor %eax,%eax")
+        fs_ety = FT_VOID
+        fs_mode = 0
+        return 1
+    if str_eq(nm, "asm"):
+        fp += 1
+        while tk[fp] == K_STR:
+            e(tv[fp])
+            fp += 1
+            if fs_isop(","):
+                fp += 1
+        fs_expect(")")
+        fs_ety = FT_VOID
+        fs_mode = 0
+        return 1
+    ld = ["load8", "load16", "load32", "load64", "vload8", "vload16", "vload32", "vload64"]
+    k = find(ld, 8, nm)
+    if k >= 0:
+        fs_args(1, -1)
+        fs_pop("%rax")
+        fs_mode = 1
+        t = FT_U8 + k % 4
+        fs_load(t)
+        fs_ety = t
+        return 1
+    st = ["store8", "store16", "store32", "store64", "vstore8", "vstore16", "vstore32", "vstore64"]
+    k = find(st, 8, nm)
+    if k >= 0:
+        fs_args(2, -1)
+        fs_pop("%rax")
+        fs_pop("%rcx")
+        fs_store(FT_U8 + k % 4, "(%rcx)")
+        fs_ety = FT_VOID
+        return 1
+    if str_eq(nm, "outb") or str_eq(nm, "outw") or str_eq(nm, "outl"):
+        fs_args(2, -1)
+        fs_pop("%rax")
+        fs_pop("%rdx")
+        if str_eq(nm, "outb"):
+            e("out %al,%dx")
+        elif str_eq(nm, "outw"):
+            e("out %ax,%dx")
+        else:
+            e("out %eax,%dx")
+        fs_ety = FT_VOID
+        return 1
+    if str_eq(nm, "inb") or str_eq(nm, "inw") or str_eq(nm, "inl"):
+        fs_args(1, -1)
+        fs_pop("%rdx")
+        e("xor %eax,%eax")
+        if str_eq(nm, "inb"):
+            e("in %dx,%al")
+            fs_ety = FT_U8
+        elif str_eq(nm, "inw"):
+            e("in %dx,%ax")
+            fs_ety = FT_U16
+        else:
+            e("in %dx,%eax")
+            fs_ety = FT_U32
+        fs_mode = 0
+        return 1
+    if str_eq(nm, "lgdt") or str_eq(nm, "lidt") or str_eq(nm, "invlpg"):
+        fs_args(1, -1)
+        fs_pop("%rax")
+        e(concat(nm, " (%rax)"))
+        fs_ety = FT_VOID
+        return 1
+    if str_eq(nm, "ltr"):
+        fs_args(1, -1)
+        fs_pop("%rax")
+        e("ltr %ax")
+        fs_ety = FT_VOID
+        return 1
+    if len(nm) == 8 and str_eq(substr(nm, 0, 7), "read_cr"):
+        fs_args(0, -1)
+        e(c3("mov %cr", substr(nm, 7, 8), ",%rax"))
+        fs_ety = FT_U64
+        fs_mode = 0
+        return 1
+    if len(nm) == 9 and str_eq(substr(nm, 0, 8), "write_cr"):
+        fs_args(1, -1)
+        fs_pop("%rax")
+        e(c3("mov %rax,%cr", substr(nm, 8, 9), ""))
+        fs_ety = FT_VOID
+        return 1
+    if str_eq(nm, "rdtsc"):
+        fs_args(0, -1)
+        e("rdtsc")
+        e("shl $32,%rdx")
+        e("or %rdx,%rax")
+        fs_ety = FT_U64
+        fs_mode = 0
+        return 1
+    if str_eq(nm, "rdmsr"):
+        fs_args(1, -1)
+        fs_pop("%rcx")
+        e("rdmsr")
+        e("shl $32,%rdx")
+        e("or %rdx,%rax")
+        fs_ety = FT_U64
+        fs_mode = 0
+        return 1
+    if str_eq(nm, "wrmsr"):
+        fs_args(2, -1)
+        fs_pop("%rax")
+        fs_pop("%rcx")
+        e("mov %rax,%rdx")
+        e("shr $32,%rdx")
+        e("wrmsr")
+        fs_ety = FT_VOID
+        return 1
+    if str_eq(nm, "memset") or str_eq(nm, "memcpy"):
+        fs_args(3, -1)
+        fs_pop("%rcx")
+        if str_eq(nm, "memset"):
+            fs_pop("%rax")
+            fs_pop("%rdi")
+            e("mov %rdi,%rdx")
+            e("rep stosb")
+        else:
+            fs_pop("%rsi")
+            fs_pop("%rdi")
+            e("mov %rdi,%rdx")
+            e("rep movsb")
+        e("mov %rdx,%rax")
+        fs_ety = ft_ptr(FT_U8)
+        fs_mode = 0
+        return 1
+    if str_eq(nm, "call_ptr") or str_eq(nm, "call_efi"):
+        efi = str_eq(nm, "call_efi")
+        mx = 7
+        if efi:
+            mx = 5
+        n = fs_args(mx, -1)
+        regs = FS_AREG
+        if efi:
+            regs = FS_WREG
+        i = n - 1
+        while i >= 1:
+            fs_pop(regs[i - 1])
+            i -= 1
+        fs_pop("%r11")
+        if efi:
+            odd = fs_dep % 2
+            if odd:
+                e("sub $40,%rsp")
+            else:
+                e("sub $32,%rsp")
+            e("call *%r11")
+            if odd:
+                e("add $40,%rsp")
+            else:
+                e("add $32,%rsp")
+        else:
+            fs_callsite("*%r11")
+        fs_ety = FT_U64
+        fs_mode = 0
+        return 1
+    return 0
+
+def fs_primary():
+    global fp, fs_ety, fs_mode, fs_moff, fs_mlab
+    if tk[fp] == K_NUM:
+        fs_imm(tv[fp])
+        fp += 1
+        return 0
+    if tk[fp] == K_STR:
+        fs_strlit(tv[fp])
+        fp += 1
+        return 0
+    if fs_isop("("):
+        fp += 1
+        fs_expr()
+        fs_expect(")")
+        return 0
+    if tk[fp] != K_ID:
+        fs_die("unexpected token in expression")
+    nm = tv[fp]
+    if str_eq(nm, "__bigparse") or str_eq(nm, "True") or str_eq(nm, "False") or str_eq(nm, "None") or str_eq(nm, "ord") or str_eq(nm, "sizeof") or str_eq(nm, "offsetof"):
+        fs_imm(fs_cprim())
+        if str_eq(nm, "True") or str_eq(nm, "False"):
+            fs_ety = FT_BOOL
+        return 0
+    fp += 1
+    if fs_isop("("):
+        if fs_intrin(nm):
+            return 0
+        if str_eq(nm, "addr"):
+            fp += 1
+            fs_postfix()
+            if fs_mode == 0:
+                fs_die("addr() needs an lvalue")
+            fs_mat()
+            fs_ety = ft_ptr(fs_ety)
+            fs_mode = 0
+            fs_expect(")")
+            return 0
+        t = ft_prim(nm)
+        if t >= 0:
+            fp += 1
+            fs_expr()
+            fs_rv()
+            fs_expect(")")
+            fs_norm(t)
+            fs_ety = t
+            return 0
+        f = fs_func(nm)
+        if f < 0:
+            fs_die(concat("unknown function ", nm))
+        n = fs_args(6, f)
+        if n != fsf_np[f]:
+            fs_die(concat("wrong argument count for ", nm))
+        i = n - 1
+        while i >= 0:
+            fs_pop(FS_AREG[i])
+            i -= 1
+        fs_callsite(nm)
+        fs_ety = fsf_ret[f]
+        fs_mode = 0
+        return 0
+    if str_eq(nm, "ptr") and fs_isop("["):
+        fp -= 1
+        t = fs_type()
+        fs_expect("(")
+        fs_expr()
+        fs_rv()
+        fs_expect(")")
+        fs_ety = t
+        return 0
+    c = fs_const(nm)
+    if c >= 0:
+        fs_imm(fsc_v[c])
+        fs_ety = fsc_t[c]
+        return 0
+    l = fs_local(nm)
+    if l >= 0:
+        fs_mode = 2
+        fs_moff = fsl_o[l]
+        fs_ety = fsl_t[l]
+        return 0
+    g = fs_glob(nm)
+    if g >= 0:
+        fs_mode = 3
+        fs_mlab = nm
+        fs_ety = fsg_t[g]
+        return 0
+    if fs_func(nm) >= 0:
+        e(c3("lea ", nm, "(%rip),%rax"))
+        fs_ety = FT_U64
+        fs_mode = 0
+        return 0
+    fp -= 1
+    fs_die(concat("unknown name ", nm))
+
+def fs_postfix():
+    global fp, fs_ety, fs_mode
+    fs_primary()
+    while 1:
+        if fs_isop("["):
+            fp += 1
+            t = fs_ety
+            if fsk[t] == 3 and fs_mode != 0:
+                fs_mat()
+            elif fsk[t] == 1:
+                fs_rv()
+            else:
+                fs_die("indexing needs a pointer or array")
+            el = ftel[t]
+            fs_push()
+            fs_expr()
+            fs_rv()
+            if ftsz[el] != 1:
+                e(c3("imul $", str(ftsz[el]), ",%rax,%rax"))
+            e("mov %rax,%rcx")
+            fs_pop("%rax")
+            e("add %rcx,%rax")
+            fs_expect("]")
+            fs_mode = 1
+            fs_ety = el
+        elif fs_isop("."):
+            fp += 1
+            t = fs_ety
+            if fsk[t] == 2 and fs_mode != 0:
+                fs_mat()
+            elif fsk[t] == 1 and fsk[ftel[t]] == 2:
+                fs_rv()
+                t = ftel[t]
+            else:
+                fs_die("field access needs a struct or pointer to struct")
+            k = fs_field(t, fs_ident())
+            if ffo[k] != 0:
+                e(c3("add $", str(ffo[k]), ",%rax"))
+            fs_mode = 1
+            fs_ety = fft[k]
+        else:
+            return 0
+
+def fs_unary():
+    global fp, fs_ety
+    if fs_isop("-") or fs_isop("~") or fs_isop("+"):
+        o = tv[fp]
+        fp += 1
+        fs_unary()
+        fs_rv()
+        if str_eq(o, "-"):
+            e("neg %rax")
+            fs_norm(fs_ety)
+        elif str_eq(o, "~"):
+            e("not %rax")
+            fs_norm(fs_ety)
+        return 0
+    fs_postfix()
+
+def fs_ovf(t, op):
+    # checked-ints mode: trap (ud2) when the result does not fit t
+    if not fs_chk or fsk[t] != 0 or t == FT_BOOL:
+        return 0
+    l = fs_newlab()
+    if ftsz[t] == 8:
+        if ftsg[t] or t == FT_LIT:
+            e(concat("jno ", l))
+        elif str_eq(op, "*"):
+            e(concat("jno ", l))
+        else:
+            e(concat("jnc ", l))
+        e("ud2")
+        emit_raw(concat(l, ":\n"))
+        return 0
+    e("mov %rax,%rdx")
+    fs_norm(t)
+    e("cmp %rax,%rdx")
+    e(concat("je ", l))
+    e("ud2")
+    emit_raw(concat(l, ":\n"))
+
+def fs_binop(o, lt, rt):
+    # left in rax, right in rcx
+    global fs_ety
+    if fsk[lt] == 1 and (str_eq(o, "+") or str_eq(o, "-")):
+        sz = ftsz[ftel[lt]]
+        if fsk[rt] == 1:
+            e("sub %rcx,%rax")
+            if sz > 1:
+                e("cqo")
+                e(c3("mov $", str(sz), ",%rcx"))
+                e("idiv %rcx")
+            fs_ety = FT_I64
+            return 0
+        if sz > 1:
+            e(c3("imul $", str(sz), ",%rcx,%rcx"))
+        if str_eq(o, "+"):
+            e("add %rcx,%rax")
+        else:
+            e("sub %rcx,%rax")
+        fs_ety = lt
+        return 0
+    t = ft_join(lt, rt)
+    if fsk[t] != 0:
+        t = FT_U64
+    sg = ft_sg(t)
+    if str_eq(o, "+"):
+        e("add %rcx,%rax")
+        fs_ovf(t, o)
+    elif str_eq(o, "-"):
+        e("sub %rcx,%rax")
+        fs_ovf(t, o)
+    elif str_eq(o, "*"):
+        if sg or t == FT_LIT:
+            e("imul %rcx,%rax")
+        else:
+            e("mul %rcx")
+        fs_ovf(t, o)
+    elif str_eq(o, "/") or str_eq(o, "//") or str_eq(o, "%"):
+        if sg:
+            e("cqo")
+            e("idiv %rcx")
+        else:
+            e("xor %edx,%edx")
+            e("div %rcx")
+        if str_eq(o, "%"):
+            e("mov %rdx,%rax")
+    elif str_eq(o, "&"):
+        e("and %rcx,%rax")
+    elif str_eq(o, "|"):
+        e("or %rcx,%rax")
+    elif str_eq(o, "^"):
+        e("xor %rcx,%rax")
+    elif str_eq(o, "<<"):
+        e("shl %cl,%rax")
+    elif str_eq(o, ">>"):
+        if sg:
+            e("sar %cl,%rax")
+        else:
+            e("shr %cl,%rax")
+    fs_norm(t)
+    fs_ety = t
+
+FS_PREC = ["|", "^", "&", "<<>>", "+-", "*///%"]
+
+def fs_level_has(lv, o):
+    if lv == 0:
+        return str_eq(o, "|")
+    if lv == 1:
+        return str_eq(o, "^")
+    if lv == 2:
+        return str_eq(o, "&")
+    if lv == 3:
+        return str_eq(o, "<<") or str_eq(o, ">>")
+    if lv == 4:
+        return str_eq(o, "+") or str_eq(o, "-")
+    return str_eq(o, "*") or str_eq(o, "/") or str_eq(o, "//") or str_eq(o, "%")
+
+def fs_bin(lv):
+    global fp
+    if lv > 5:
+        fs_unary()
+        return 0
+    fs_bin(lv + 1)
+    while tk[fp] == K_OP and fs_level_has(lv, tv[fp]):
+        o = tv[fp]
+        fp += 1
+        fs_rv()
+        lt = fs_ety
+        fs_push()
+        fs_bin(lv + 1)
+        fs_rv()
+        rt = fs_ety
+        e("mov %rax,%rcx")
+        fs_pop("%rax")
+        fs_binop(o, lt, rt)
+
+FS_CMP = ["==", "!=", "<", "<=", ">", ">="]
+FS_SCC = ["e", "ne", "l", "le", "g", "ge"]
+FS_UCC = ["e", "ne", "b", "be", "a", "ae"]
+
+def fs_cmp():
+    global fp, fs_ety
+    fs_bin(0)
+    k = -1
+    if tk[fp] == K_OP:
+        k = find(FS_CMP, 6, tv[fp])
+    if k < 0:
+        return 0
+    fp += 1
+    fs_rv()
+    lt = fs_ety
+    fs_push()
+    fs_bin(0)
+    fs_rv()
+    rt = fs_ety
+    e("mov %rax,%rcx")
+    fs_pop("%rax")
+    e("cmp %rcx,%rax")
+    t = ft_join(lt, rt)
+    cc = FS_UCC[k]
+    if ft_sg(t) or t == FT_LIT:
+        cc = FS_SCC[k]
+    e(c3("set", cc, " %al"))
+    e("movzbl %al,%eax")
+    fs_ety = FT_BOOL
+
+def fs_not():
+    global fp, fs_ety
+    if fs_isid("not"):
+        fp += 1
+        fs_not()
+        fs_rv()
+        e("test %rax,%rax")
+        e("sete %al")
+        e("movzbl %al,%eax")
+        fs_ety = FT_BOOL
+        return 0
+    fs_cmp()
+
+def fs_andor(isand):
+    global fp, fs_ety
+    if isand:
+        fs_not()
+    else:
+        fs_andor(1)
+    kw = "or"
+    if isand:
+        kw = "and"
+    if not fs_isid(kw):
+        return 0
+    l = fs_newlab()
+    while fs_isid(kw):
+        fp += 1
+        fs_rv()
+        e("test %rax,%rax")
+        if isand:
+            e(concat("je ", l))
+            fs_not()
+        else:
+            e(concat("jne ", l))
+            fs_andor(1)
+        fs_rv()
+        e("test %rax,%rax")
+    emit_raw(concat(l, ":\n"))
+    e("setne %al")
+    e("movzbl %al,%eax")
+    fs_ety = FT_BOOL
+
+def fs_expr():
+    fs_andor(0)
+
+def fs_rexpr():
+    fs_expr()
+    fs_rv()
+
+# ---- statements ----
+def fs_eol():
+    global fp
+    if tk[fp] == K_NL:
+        fp += 1
+    elif tk[fp] != K_DED and tk[fp] != K_EOF:
+        fs_die("expected end of line")
+
+def fs_suite():
+    global fp
+    fs_expect(":")
+    if tk[fp] != K_NL:
+        fs_stmt()
+        return 0
+    fp += 1
+    if tk[fp] != K_IND:
+        fs_die("expected an indented block")
+    fp += 1
+    while tk[fp] != K_DED and tk[fp] != K_EOF:
+        fs_stmt()
+    fp += 1
+
+def fs_skip_suite():
+    global fp
+    fs_expect(":")
+    if tk[fp] != K_NL:
+        while tk[fp] != K_NL and tk[fp] != K_EOF:
+            fp += 1
+        fp += 1
+        return 0
+    fp += 1
+    if tk[fp] != K_IND:
+        fs_die("expected an indented block")
+    d = 0
+    while 1:
+        if tk[fp] == K_IND:
+            d += 1
+        elif tk[fp] == K_DED:
+            d -= 1
+            if d == 0:
+                fp += 1
+                return 0
+        elif tk[fp] == K_EOF:
+            return 0
+        fp += 1
+
+def fs_assign_at():
+    # index of a depth-0 assignment operator in this logical line, or -1
+    p = fp
+    d = 0
+    while tk[p] != K_NL and tk[p] != K_EOF and tk[p] != K_DED:
+        if tk[p] == K_OP:
+            s = tv[p]
+            if str_eq(s, "(") or str_eq(s, "["):
+                d += 1
+            elif str_eq(s, ")") or str_eq(s, "]"):
+                d -= 1
+            elif d == 0 and (str_eq(s, "=") or (len(s) >= 2 and char_at(s, len(s) - 1) == 61 and not str_eq(s, "==") and not str_eq(s, "!=") and not str_eq(s, "<=") and not str_eq(s, ">="))):
+                return p
+        p += 1
+    return -1
+
+def fs_lhs_store(vt):
+    # value in rax (type vt); compile target at fp (before '=') and store
+    global fp, fs_ety
+    if tk[fp] == K_ID and tk[fp + 1] == K_OP and str_eq(tv[fp + 1], "=") and fs_local(tv[fp]) < 0 and fs_glob(tv[fp]) < 0:
+        if fs_const(tv[fp]) >= 0:
+            fs_die("cannot assign to a constant")
+        t = vt
+        if t == FT_LIT:
+            t = FT_I64
+        if t == FT_VOID or ft_agg(t):
+            fs_die("cannot copy a void/struct/array value into a new local")
+        l = fs_newlocal(tv[fp], t)
+        e(c3("mov %rax,", str(fsl_o[l]), "(%rbp)"))
+        fp += 1
+        return 0
+    fs_ety = vt
+    fs_push()
+    fs_postfix()
+    t = fs_ety
+    if fs_mode == 0:
+        fs_die("cannot assign to this expression")
+    if fs_mode == 1:
+        e("mov %rax,%rcx")
+        m = "(%rcx)"
+    else:
+        m = fs_maddr()
+    fs_pop("%rax")
+    fs_ety = vt
+    fs_conv(t)
+    fs_store(t, m)
+
+def fs_stmt():
+    global fp, nfsloop, fs_ety, fs_mode, fs_dep
+    if tk[fp] == K_NL:
+        fp += 1
+        return 0
+    if fs_isid("pass"):
+        fp += 1
+        fs_eol()
+        return 0
+    if fs_isid("return"):
+        fp += 1
+        if tk[fp] != K_NL and tk[fp] != K_DED:
+            fs_rexpr()
+            fs_conv(fs_rty)
+        e(concat("jmp ", fs_ret))
+        fs_eol()
+        return 0
+    if fs_isid("break") or fs_isid("continue"):
+        if nfsloop == 0:
+            fs_die("break/continue outside a loop")
+        if fs_isid("break"):
+            e(concat("jmp ", fs_brk[nfsloop - 1]))
+        else:
+            e(concat("jmp ", fs_cnt[nfsloop - 1]))
+        fp += 1
+        fs_eol()
+        return 0
+    if fs_isid("if"):
+        lend = fs_newlab()
+        while 1:
+            fp += 1
+            lnext = fs_newlab()
+            fs_rexpr()
+            e("test %rax,%rax")
+            e(concat("je ", lnext))
+            fs_suite()
+            e(concat("jmp ", lend))
+            emit_raw(concat(lnext, ":\n"))
+            if not fs_isid("elif"):
+                break
+        if fs_isid("else"):
+            fp += 1
+            fs_suite()
+        emit_raw(concat(lend, ":\n"))
+        return 0
+    if fs_isid("while"):
+        fp += 1
+        lt = fs_newlab()
+        lb = fs_newlab()
+        emit_raw(concat(lt, ":\n"))
+        fs_rexpr()
+        e("test %rax,%rax")
+        e(concat("je ", lb))
+        fs_brk[nfsloop] = lb
+        fs_cnt[nfsloop] = lt
+        nfsloop += 1
+        fs_suite()
+        nfsloop -= 1
+        e(concat("jmp ", lt))
+        emit_raw(concat(lb, ":\n"))
+        return 0
+    if fs_isid("for"):
+        fp += 1
+        vn = fs_ident()
+        if not fs_isid("in") or not str_eq(tv[fp + 1], "range"):
+            fs_die("freestanding for supports only range()")
+        fp += 2
+        fs_expect("(")
+        fs_rexpr()
+        ty = fs_ety
+        st = 1
+        if fs_isop(","):
+            fp += 1
+            fs_push()
+            fs_rexpr()
+            ty = ft_join(ty, fs_ety)
+            if fs_isop(","):
+                fp += 1
+                st = fs_ceval()
+        else:
+            e("mov %rax,%rcx")
+            e("xor %eax,%eax")
+            fs_push()
+            e("mov %rcx,%rax")
+        if ty == FT_LIT:
+            ty = FT_I64
+        fs_expect(")")
+        l = fs_local(vn)
+        if l < 0:
+            l = fs_newlocal(vn, ty)
+        lim = fs_newlocal(concat(" lim", str(fs_lab)), ty)
+        e(c3("mov %rax,", str(fsl_o[lim]), "(%rbp)"))
+        fs_pop("%rax")
+        e(c3("mov %rax,", str(fsl_o[l]), "(%rbp)"))
+        lt = fs_newlab()
+        lc = fs_newlab()
+        lb = fs_newlab()
+        emit_raw(concat(lt, ":\n"))
+        e(c3("mov ", str(fsl_o[l]), "(%rbp),%rax"))
+        e(c3("cmp ", str(fsl_o[lim]), "(%rbp),%rax"))
+        cc = "ge"
+        if st < 0:
+            cc = "le"
+        if not ft_sg(ty):
+            cc = "ae"
+            if st < 0:
+                cc = "be"
+        e(c3("j", cc, concat(" ", lb)))
+        fs_brk[nfsloop] = lb
+        fs_cnt[nfsloop] = lc
+        nfsloop += 1
+        fs_suite()
+        nfsloop -= 1
+        emit_raw(concat(lc, ":\n"))
+        e(c4("addq $", str(st), ",", concat(str(fsl_o[l]), "(%rbp)")))
+        e(concat("jmp ", lt))
+        emit_raw(concat(lb, ":\n"))
+        return 0
+    if tk[fp] == K_ID and tk[fp + 1] == K_OP and str_eq(tv[fp + 1], ":") and fs_istype(fp + 2):
+        nm = tv[fp]
+        fp += 2
+        t = fs_type()
+        if fs_local(nm) >= 0:
+            fs_die(concat("redeclared local ", nm))
+        l = fs_newlocal(nm, t)
+        if fs_isop("="):
+            fp += 1
+            fs_rexpr()
+            fs_conv(t)
+            fs_store(t, concat(str(fsl_o[l]), "(%rbp)"))
+        elif ft_agg(t):
+            e(c3("lea ", str(fsl_o[l]), "(%rbp),%rdi"))
+            e("xor %eax,%eax")
+            e(c3("mov $", str(ftsz[t]), ",%rcx"))
+            e("rep stosb")
+        else:
+            e(c3("movq $0,", str(fsl_o[l]), "(%rbp)"))
+        fs_eol()
+        return 0
+    a = fs_assign_at()
+    if a >= 0:
+        st = fp
+        op = tv[a]
+        if str_eq(op, "="):
+            fp = a + 1
+            fs_rexpr()
+            vt = fs_ety
+            en = fp
+            fp = st
+            fs_lhs_store(vt)
+            if fp != a:
+                fs_die("bad assignment target")
+            fp = en
+            fs_eol()
+            return 0
+        # augmented assignment: target address, current value, rhs, op, store
+        fs_postfix()
+        t = fs_ety
+        if fs_mode == 0:
+            fs_die("cannot assign to this expression")
+        if fp != a:
+            fs_die("bad assignment target")
+        m = fs_maddr()
+        if fs_mode == 1:
+            fs_push()
+            m = "(%rcx)"
+        fs_load(t)
+        fs_push()
+        fp = a + 1
+        fs_rexpr()
+        rt = fs_ety
+        e("mov %rax,%rcx")
+        fs_pop("%rax")
+        fs_binop(substr(op, 0, len(op) - 1), t, rt)
+        fs_conv(t)
+        if str_eq(m, "(%rcx)"):
+            fs_pop("%rcx")
+        fs_store(t, m)
+        fs_eol()
+        return 0
+    fs_rexpr()
+    fs_eol()
+
+# ---- program ----
+def fs_decos():
+    # parse @name / @name(args) lines; sets fs_datt bits, fs_dal, fs_dsec
+    global fp, fs_datt, fs_dal, fs_dsec
+    fs_datt = 0
+    fs_dal = 0
+    fs_dsec = ""
+    while fs_isop("@"):
+        fp += 1
+        nm = fs_ident()
+        if str_eq(nm, "export"):
+            fs_datt = fs_bop(fs_datt, 1, 1)
+        elif str_eq(nm, "interrupt"):
+            fs_datt = fs_bop(fs_datt, 2, 1)
+        elif str_eq(nm, "interrupt_err"):
+            fs_datt = fs_bop(fs_datt, 4, 1)
+        elif str_eq(nm, "naked"):
+            fs_datt = fs_bop(fs_datt, 8, 1)
+        elif str_eq(nm, "efiapi"):
+            fs_datt = fs_bop(fs_datt, 16, 1)
+        elif str_eq(nm, "packed"):
+            fs_datt = fs_bop(fs_datt, 32, 1)
+        elif str_eq(nm, "align"):
+            fs_expect("(")
+            fs_dal = fs_ceval()
+            fs_expect(")")
+        elif str_eq(nm, "section"):
+            fs_expect("(")
+            fs_dsec = tv[fp]
+            fp += 1
+            fs_expect(")")
+        else:
+            fs_die(concat("unknown attribute @", nm))
+        if tk[fp] == K_NL:
+            fp += 1
+
+def fs_struct_def(packed):
+    global fp, nff
+    nm = fs_ident()
+    t = ft_struct(nm)
+    fs_expect(":")
+    if tk[fp] != K_NL:
+        fs_die("struct body must be an indented block")
+    fp += 2
+    ftf0[t] = nff
+    off = 0
+    al = 1
+    while tk[fp] != K_DED and tk[fp] != K_EOF:
+        if tk[fp] == K_NL or fs_isid("pass"):
+            fp += 1
+            continue
+        fnm = fs_ident()
+        fs_expect(":")
+        ft = fs_type()
+        fa = ftal[ft]
+        if packed:
+            fa = 1
+        while off % fa != 0:
+            off += 1
+        if fa > al:
+            al = fa
+        ffn[nff] = fnm
+        fft[nff] = ft
+        ffo[nff] = off
+        nff += 1
+        off += ftsz[ft]
+        fs_eol()
+    fp += 1
+    while off % al != 0:
+        off += 1
+    ftfn[t] = nff - ftf0[t]
+    ftsz[t] = off
+    ftal[t] = al
+
+def fs_sig(ext):
+    # def name(params) [-> T]; registers a function, leaves fp at ':' (or line end)
+    global fp, nfsf, nfsp
+    fp += 1
+    nm = fs_ident()
+    if fs_func(nm) >= 0:
+        fs_die(concat("duplicate function ", nm))
+    f = nfsf
+    nfsf += 1
+    fsf_n[f] = nm
+    fsf_p0[f] = nfsp
+    fsf_at[f] = fs_datt
+    fsf_sec[f] = fs_dsec
+    fs_expect("(")
+    n = 0
+    while not fs_isop(")"):
+        fsp_n[nfsp] = fs_ident()
+        t = FT_I64
+        if fs_isop(":"):
+            fp += 1
+            t = fs_type()
+        fsp_t[nfsp] = t
+        nfsp += 1
+        n += 1
+        if fs_isop(","):
+            fp += 1
+    fp += 1
+    fsf_np[f] = n
+    if n > 6:
+        fs_die("more than 6 parameters are not supported yet")
+    fsf_ret[f] = FT_VOID
+    if fs_isop("->"):
+        fp += 1
+        if fs_isid("None"):
+            fp += 1
+        else:
+            fsf_ret[f] = fs_type()
+    fsf_pos[f] = fp
+    if ext:
+        fsf_pos[f] = -1
+    return f
+
+def fs_prescan():
+    global fp, nfsc, nfsg, nft
+    # pass A: struct names
+    fp = 0
+    while tk[fp] != K_EOF:
+        if (fs_isid("struct") or fs_isid("class")) and tk[fp + 1] == K_ID:
+            nm = tv[fp + 1]
+            if ft_struct(nm) >= 0:
+                fs_die(concat("duplicate struct ", nm))
+            ft_add(2, 0, 0, 1, 0, 0, nm)
+        fp += 1
+    # pass B: everything else, in order
+    fp = 0
+    while tk[fp] != K_EOF:
+        if tk[fp] == K_NL:
+            fp += 1
+            continue
+        fs_decos()
+        if fs_isid("struct") or fs_isid("class"):
+            fp += 1
+            fs_struct_def(fs_bop(fs_datt, 32, 0))
+        elif fs_isid("extern"):
+            fp += 1
+            fs_sig(1)
+            fs_eol()
+        elif fs_isid("def"):
+            fs_sig(0)
+            fs_skip_suite()
+        elif fs_isid("asm"):
+            while tk[fp] != K_NL and tk[fp] != K_EOF:
+                fp += 1
+        elif fs_isid("import") or fs_isid("from"):
+            fs_die("imports are not available in freestanding mode")
+        elif tk[fp] == K_ID and fs_isop2(fp + 1, "="):
+            nm = tv[fp]
+            fp += 2
+            fsc_n[nfsc] = nm
+            fsc_v[nfsc] = fs_ceval()
+            fsc_t[nfsc] = FT_LIT
+            nfsc += 1
+            fs_eol()
+        elif tk[fp] == K_ID and fs_isop2(fp + 1, ":"):
+            nm = tv[fp]
+            fp += 2
+            g = nfsg
+            nfsg += 1
+            fsg_n[g] = nm
+            fsg_t[g] = fs_type()
+            fsg_al[g] = fs_dal
+            fsg_sec[g] = fs_dsec
+            fsg_p[g] = -1
+            if fs_isop("="):
+                fp += 1
+                fsg_p[g] = fp
+                while tk[fp] != K_NL and tk[fp] != K_EOF:
+                    fp += 1
+            fs_eol()
+        else:
+            fs_die("unsupported top-level statement in freestanding mode")
+
+def fs_isop2(p, o):
+    return tk[p] == K_OP and str_eq(tv[p], o)
+
+def fs_dirw(t):
+    sz = ftsz[t]
+    if sz == 1:
+        return ".byte"
+    if sz == 2:
+        return ".short"
+    if sz == 4:
+        return ".long"
+    return ".quad"
+
+def fs_gdata(g):
+    global fp, nfsrod
+    t = fsg_t[g]
+    al = ftal[t]
+    if fsg_al[g] > al:
+        al = fsg_al[g]
+    sec = fsg_sec[g]
+    if len(sec) == 0:
+        if fsg_p[g] < 0:
+            sec = ".bss"
+        else:
+            sec = ".data"
+    emit_raw(c3(".section ", sec, "\n"))
+    emit_raw(c3(".balign ", str(al), "\n"))
+    emit_raw(c3(".globl ", fsg_n[g], "\n"))
+    emit_raw(concat(fsg_n[g], ":\n"))
+    if fsg_p[g] < 0:
+        emit_raw(c3("    .zero ", str(ftsz[t]), "\n"))
+        return 0
+    fp = fsg_p[g]
+    if fs_isop("["):
+        if fsk[t] != 3:
+            fs_die("list initializer needs an array type")
+        fp += 1
+        n = 0
+        while not fs_isop("]"):
+            emit_raw(c4("    ", fs_dirw(ftel[t]), " ", concat(str(fs_ceval()), "\n")))
+            n += 1
+            if fs_isop(","):
+                fp += 1
+        if n < ftn[t]:
+            emit_raw(c3("    .zero ", str((ftn[t] - n) * ftsz[ftel[t]]), "\n"))
+        return 0
+    if tk[fp] == K_ID and (fs_func(tv[fp]) >= 0 or fs_glob(tv[fp]) >= 0):
+        emit_raw(c4("    ", fs_dirw(t), " ", concat(tv[fp], "\n")))
+        return 0
+    if tk[fp] == K_STR and fsk[t] == 1:
+        lb = concat(".LFS", str(nfsrod))
+        s = tv[fp]
+        b = ""
+        i = 0
+        while i < len(s):
+            b = c3(b, str(char_at(s, i)), ",")
+            i += 1
+        fs_rod[nfsrod] = c4(lb, ": .byte ", b, "0\n")
+        nfsrod += 1
+        emit_raw(c3("    .quad ", lb, "\n"))
+        return 0
+    if tk[fp] == K_STR:
+        s = tv[fp]
+        i = 0
+        while i < len(s):
+            emit_raw(c3("    .byte ", str(char_at(s, i)), "\n"))
+            i += 1
+        rest = ftsz[t] - len(s)
+        if rest > 0:
+            emit_raw(c3("    .zero ", str(rest), "\n"))
+        return 0
+    if ft_agg(t):
+        fs_die("aggregate globals take a [..] list or no initializer")
+    emit_raw(c4("    ", fs_dirw(t), " ", concat(str(fs_ceval()), "\n")))
+
+def fs_function(f):
+    global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop
+    at = fsf_at[f]
+    nm = fsf_n[f]
+    sec = fsf_sec[f]
+    if len(sec) == 0:
+        sec = ".text"
+    emit_raw(c3(".section ", sec, ",\"ax\",@progbits\n"))
+    if fs_bop(at, 1, 0):
+        emit_raw(c3(".globl ", nm, "\n"))
+    if fs_bop(at, 8, 0):
+        # naked: only asm() statements, no prologue/epilogue
+        emit_raw(concat(nm, ":\n"))
+        fp = fsf_pos[f]
+        fs_suite()
+        return 0
+    body = nm
+    if fs_bop(at, 22, 0):
+        body = concat(nm, "__body")
+        fs_wrapper(f, nm, body)
+    emit_raw(".p2align 4\n")
+    emit_raw(concat(body, ":\n"))
+    e("push %rbp")
+    e("mov %rsp,%rbp")
+    pidx = nout
+    e("sub $0,%rsp")
+    nfsl = 0
+    fs_frame = 0
+    fs_dep = 0
+    nfsloop = 0
+    fs_ret = fs_newlab()
+    fs_rty = fsf_ret[f]
+    i = 0
+    while i < fsf_np[f]:
+        l = fs_newlocal(fsp_n[fsf_p0[f] + i], fsp_t[fsf_p0[f] + i])
+        e(c4("mov ", FS_AREG[i], ",", concat(str(fsl_o[l]), "(%rbp)")))
+        i += 1
+    fp = fsf_pos[f]
+    fs_suite()
+    e("xor %eax,%eax")
+    emit_raw(concat(fs_ret, ":\n"))
+    e("leave")
+    e("ret")
+    while fs_frame % 16 != 0:
+        fs_frame += 1
+    if fs_frame == 0:
+        out[pidx] = ""
+    else:
+        out[pidx] = c3("    sub $", str(fs_frame), ",%rsp\n")
+
+FS_SAVE = ["%rax", "%rcx", "%rdx", "%rsi", "%rdi", "%r8", "%r9", "%r10", "%r11"]
+
+def fs_wrapper(f, nm, body):
+    at = fsf_at[f]
+    emit_raw(".p2align 4\n")
+    emit_raw(concat(nm, ":\n"))
+    if fs_bop(at, 16, 0):
+        # UEFI / Microsoft x64 entry: rcx, rdx, r8, r9 -> SysV; rdi/rsi are callee-saved there
+        e("push %rdi")
+        e("push %rsi")
+        e("sub $8,%rsp")
+        e("mov %rcx,%rdi")
+        e("mov %rdx,%rsi")
+        e("mov %r8,%rdx")
+        e("mov %r9,%rcx")
+        e(concat("call ", body))
+        e("add $8,%rsp")
+        e("pop %rsi")
+        e("pop %rdi")
+        e("ret")
+        return 0
+    i = 0
+    while i < 9:
+        e(concat("push ", FS_SAVE[i]))
+        i += 1
+    e("cld")
+    e("lea 72(%rsp),%rdi")
+    if fs_bop(at, 4, 0):
+        e("sub $8,%rsp")
+    e(concat("call ", body))
+    if fs_bop(at, 4, 0):
+        e("add $8,%rsp")
+    i = 8
+    while i >= 0:
+        e(concat("pop ", FS_SAVE[i]))
+        i -= 1
+    if fs_bop(at, 4, 0):
+        e("add $8,%rsp")
+    e("iretq")
+
+def fs_main(src):
+    global fp, fs_chk
+    if contains(src, concat("# forge: ", "checked-ints")):
+        fs_chk = 1
+    ft_init()
+    fs_prescan()
+    emit_raw("# generated by forgec --freestanding\n")
+    # top-level asm blocks, in source order
+    fp = 0
+    d = 0
+    while tk[fp] != K_EOF:
+        if tk[fp] == K_IND:
+            d += 1
+            fp += 1
+        elif tk[fp] == K_DED:
+            d -= 1
+            fp += 1
+        elif d == 0 and fs_isid("asm") and (fp == 0 or tk[fp - 1] == K_NL or tk[fp - 1] == K_DED):
+            fp += 2
+            while tk[fp] == K_STR:
+                emit_raw(concat(tv[fp], "\n"))
+                fp += 1
+                if fs_isop(","):
+                    fp += 1
+            fs_expect(")")
+        else:
+            fp += 1
+    f = 0
+    while f < nfsf:
+        if fsf_pos[f] >= 0:
+            fs_function(f)
+        f += 1
+    g = 0
+    while g < nfsg:
+        fs_gdata(g)
+        g += 1
+    emit_raw(".section .rodata\n")
+    i = 0
+    while i < nfsrod:
+        emit_raw(fs_rod[i])
+        i += 1
+    emit_raw(".section .note.GNU-stack,\"\",@progbits\n")
+    write_file(argv(2), join(out, nout))
+
+FS_MIN = -9223372036854775807 - 1
+
+def fs_bits(v, bits):
+    # 64 two's-complement bits of v, LSB first
+    top = 0
+    if v < 0:
+        top = 1
+        v = v - FS_MIN
+    i = 0
+    while i < 63:
+        bits[i] = v % 2
+        v = v // 2
+        i += 1
+    bits[63] = top
+
+def fs_unbits(bits):
+    v = 0
+    i = 62
+    while i >= 0:
+        v = v * 2 + bits[i]
+        i -= 1
+    if bits[63]:
+        v = v + FS_MIN
+    return v
+
+def fs_bop(x, y, k):
+    bx = list(64)
+    by = list(64)
+    fs_bits(x, bx)
+    fs_bits(y, by)
+    i = 0
+    while i < 64:
+        if k == 0:
+            bx[i] = bx[i] * by[i]
+        elif k == 1:
+            bx[i] = bx[i] + by[i] - bx[i] * by[i]
+        else:
+            bx[i] = (bx[i] + by[i]) % 2
+        i += 1
+    return fs_unbits(bx)
+
+def fs_shl(x, r):
+    if r >= 64 or r < 0:
+        return 0
+    bx = list(64)
+    fs_bits(x, bx)
+    by = list(64)
+    i = 0
+    while i < 64:
+        by[i] = 0
+        if i >= r:
+            by[i] = bx[i - r]
+        i += 1
+    return fs_unbits(by)
+
+def fs_shr(x, r):
+    # arithmetic shift (signed constants)
+    if r >= 63:
+        if x < 0:
+            return -1
+        return 0
+    bx = list(64)
+    fs_bits(x, bx)
+    by = list(64)
+    i = 0
+    while i < 64:
+        by[i] = bx[63]
+        if i + r < 64:
+            by[i] = bx[i + r]
+        i += 1
+    return fs_unbits(by)
+
+def fs_include(src, dir, depth):
+    # top-level lines `include "file.forge"` are replaced by that file (relative to the includer)
+    if depth > 16:
+        eputs("error: include nesting too deep")
+        exit(1)
+    parts = list(4096)
+    np = 0
+    n = len(src)
+    i = 0
+    st = 0
+    while i <= n:
+        if i == n or char_at(src, i) == 10:
+            ln = substr(src, st, i)
+            if len(ln) > 10 and str_eq(substr(ln, 0, 9), "include \""):
+                q = 9
+                while q < len(ln) and char_at(ln, q) != 34:
+                    q += 1
+                f = concat(dir, substr(ln, 9, q))
+                sub = read_file(f)
+                sl = len(f) - 1
+                while sl >= 0 and char_at(f, sl) != 47:
+                    sl -= 1
+                parts[np] = fs_include(sub, substr(f, 0, sl + 1), depth + 1)
+                np += 1
+                parts[np] = "\n"
+                np += 1
+            else:
+                parts[np] = concat(ln, "\n")
+                np += 1
+            if np > 4090:
+                parts[0] = join(parts, np)
+                np = 1
+            st = i + 1
+        i += 1
+    return join(parts, np)

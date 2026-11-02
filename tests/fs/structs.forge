@@ -1,0 +1,64 @@
+# forge: no-runtime
+# fixed-layout structs (C ABI alignment and @packed), field access through values and pointers
+include "linux.fsi"
+
+struct Pair:
+    a: u8
+    b: u32
+    c: u16
+
+@packed
+struct GdtPtr:
+    limit: u16
+    base: u64
+
+struct Node:
+    val: i64
+    next: ptr[Node]
+
+gp: GdtPtr
+nodes: Node[4]
+
+def sum(n: ptr[Node]) -> i64:
+    t: i64 = 0
+    while u64(n) != 0:
+        t += n.val
+        n = n.next
+    return t
+
+def main() -> i64:
+    put_u64(sizeof(Pair))
+    puts(" ")
+    put_u64(offsetof(Pair, b))
+    puts(" ")
+    put_u64(offsetof(Pair, c))
+    nl()
+    put_u64(sizeof(GdtPtr))
+    puts(" ")
+    put_u64(offsetof(GdtPtr, base))
+    nl()
+    gp.limit = 0xFFFF
+    gp.base = 0x123456789A
+    b: ptr[u8] = ptr[u8](addr(gp))
+    put_u64(b[2])
+    puts(" ")
+    put_u64(gp.limit)
+    nl()
+    i = 0
+    while i < 4:
+        nodes[i].val = (i + 1) * 10
+        if i < 3:
+            nodes[i].next = addr(nodes[i + 1])
+        i += 1
+    put_i64(sum(addr(nodes[0])))
+    nl()
+    loc: Pair
+    loc.a = 300
+    loc.b = 7
+    lp = addr(loc)
+    lp.b += 1
+    put_u64(loc.a)
+    puts(" ")
+    put_u64(loc.b)
+    nl()
+    return 0
