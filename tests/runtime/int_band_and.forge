@@ -1,0 +1,13 @@
+def f(a: int, b: int) -> int:
+    x = a & b
+    return x
+def g(a: int) -> int:
+    return a // 1
+def h(n: int) -> int:
+    i = 0
+    while i < n:
+        i += 1
+    return i
+print(h(1000))
+print(g(5))
+print(f(4611686018427387912, -9))

@@ -1,0 +1,27 @@
+def f(a: int, b: int) -> int:
+    x = a & b
+    return x
+def g(a: int) -> int:
+    y = a
+    y &= -9
+    return y
+def s(a: int) -> int:
+    return 1 << a
+def d(a: int, b: int) -> int:
+    return a // b
+def n(a: int) -> int:
+    return -a
+for t in range(5):
+    try:
+        if t == 0:
+            print(f(4611686018427387912, -9))
+        elif t == 1:
+            print(g(4611686018427387912))
+        elif t == 2:
+            print(s(62))
+        elif t == 3:
+            print(d(-4611686018427387902 - 2, -1))
+        else:
+            print(n(-4611686018427387902 - 2))
+    except OverflowError:
+        print("ovf", t)

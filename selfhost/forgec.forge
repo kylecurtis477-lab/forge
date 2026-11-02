@@ -2255,6 +2255,7 @@ def bitop(ins, code, start, mark, lt, rt):
     global ety
     if lt == T_INT and rt == T_INT:
         binop(ins, start, mark)
+        band_line(cur_line())
         ety = T_INT
         return 0
     lr(start, mark)
@@ -2329,6 +2330,8 @@ def shift_expr():
         else:
             lr(start, mark)
             e2(ins, " %cl, %rax")
+        if str_eq(ins, "shl"):
+            band_line(cur_line())
         ety = T_INT
 
 def add_expr():
@@ -2396,8 +2399,31 @@ def ovf_check(line):
 
 def ovf_check_r(line, R):
     # typed int add/sub/mul in user code: raise OverflowError instead of wrapping
-    global novf
     if pos >= PRETOK and ovf_on:
+        l = ovf_label(line)
+        if l < 0:
+            l = new_label()
+            e2("jno ", lab(l))
+            e3("push $", str(uline(line)), "")
+            call_internal("__iovf", 1)
+            put_label(l)
+            return 0
+        e2("jo ", lab(l))
+        band_chk(R, l)
+
+def band_line(line):
+    band_line_r(line, "%rax")
+
+def band_line_r(line, R):
+    # typed int ops that cannot overflow but may still land on the bool/None band
+    if pos >= PRETOK and ovf_on:
+        l = ovf_label(line)
+        if l >= 0:
+            band_chk(R, l)
+
+def ovf_label(line):
+    global novf
+    if 1:
         # cold stub at the end of the function keeps the hot path fall-through
         l = -1
         i = 0
@@ -2407,18 +2433,12 @@ def ovf_check_r(line, R):
             i += 1
         if l < 0:
             if novf >= 4096:
-                l = new_label()
-                e2("jno ", lab(l))
-                e3("push $", str(uline(line)), "")
-                call_internal("__iovf", 1)
-                put_label(l)
-                return 0
+                return -1
             l = new_label()
             ovf_lab[novf] = l
             ovf_ln[novf] = line
             novf += 1
-        e2("jo ", lab(l))
-        band_chk(R, l)
+        return l
 
 def flush_ovf():
     global novf
@@ -2570,6 +2590,7 @@ def divmod(start, mark, ismod, line):
     emit_raw("2:\n")
     if ismod:
         e("mov %rdx, %rax")
+    band_line(line)
 
 def const_div(d, ismod):
     # floor division / modulo by a positive constant (value in %rax)
@@ -2638,6 +2659,7 @@ def unary_expr():
                 return 0
         if ety == T_INT:
             e("neg %rax")
+            band_line(cur_line())
             return 0
         t = ety
         e("push %rax")
@@ -2658,6 +2680,7 @@ def unary_expr():
         if ety == T_BOOL:
             e("and $1, %eax")
         e("not %rax")
+        band_line(cur_line())
         ety = T_INT
         return 0
     power_expr()
@@ -4495,6 +4518,8 @@ def stmt_aug(line, ap):
                     e3(concat(ins, "q "), "%rax", concat(", ", r))
                 if str_eq(ins, "add") or str_eq(ins, "sub"):
                     ovf_check_r(line, r)
+                else:
+                    band_line_r(line, r)
                 end_stmt()
                 return 0
             nout = mark
@@ -4608,6 +4633,8 @@ def apply_binary(op, start, mark, lt, rt, line):
             ins = "shl"
         lr(start, mark)
         e2(ins, " %cl, %rax")
+        if str_eq(ins, "shl"):
+            band_line(line)
         ety = T_INT
 
 # ---------------- functions ----------------
@@ -11700,12 +11727,84 @@ nspill = 0
 
 vband = list(IVMAX)
 
+vchk = list(IVMAX)
+vcnt = list(IVMAX)
+
+def o_bandable(k):
+    # non-overflowing int ops whose result may still land in the 2**62..2**62+3 band
+    op = iop[k]
+    if op == O_AND or op == O_OR or op == O_XOR or op == O_NEG or op == O_NOT:
+        return 1
+    if op == O_DIV:
+        return not (is_c(ib[k]) and (cval(ib[k]) >= 2 or cval(ib[k]) <= -2))
+    if op == O_MOD:
+        return not (is_c(ib[k]) and cval(ib[k]) > -4611686018427387903 and cval(ib[k]) < 4611686018427387903)
+    if op == O_SAR:
+        return not (is_c(ib[k]) and cval(ib[k]) >= 1)
+    return 0
+
+def o_counters():
+    # counters: every def is a small non-negative constant or v = v + 1. Starting below 2**40,
+    # reaching 2**62 needs > 4e18 increments, so these adds need neither jo nor a band check.
+    v = 0
+    while v < nvr:
+        vcnt[v] = 1
+        v += 1
+    k = 0
+    while k < nir:
+        d = idst[k]
+        if d >= 0:
+            op = iop[k]
+            ok = 0
+            if op == O_MOV and is_c(ia[k]) and cval(ia[k]) >= 0 and cval(ia[k]) < 1099511627776:
+                ok = 1
+            elif op == O_ADD and (ia[k] == d and is_c(ib[k]) and cval(ib[k]) == 1 or ib[k] == d and is_c(ia[k]) and cval(ia[k]) == 1):
+                ok = 1
+            if not ok:
+                vcnt[d] = 0
+        k += 1
+    k = 0
+    while k < nir:
+        d = idst[k]
+        if d >= 0 and vcnt[d] and iop[k] == O_ADD:
+            iovf[k] = 0
+        k += 1
+vline = list(IVMAX)
+
 def o_band():
-    # vregs whose value can leave pure int arithmetic need the bool/None band check
+    # vchk: vregs that may hold an unchecked arithmetic result (checked where they escape)
     v = 0
     while v < nvr:
         vband[v] = hyb
+        vchk[v] = 0
+        vline[v] = -2
         v += 1
+    o_counters()
+    k = 0
+    while k < nir:
+        d = idst[k]
+        if d >= 0 and (iovf[k] or o_bandable(k)):
+            vchk[d] = 1
+            if vline[d] == -2:
+                vline[d] = iline[k]
+            elif vline[d] != iline[k]:
+                vline[d] = -1
+        k += 1
+    ch = 1
+    while ch:
+        ch = 0
+        k = 0
+        while k < nir:
+            d = idst[k]
+            if iop[k] == O_MOV and d >= 0 and ia[k] >= 0 and vchk[ia[k]]:
+                if not vchk[d] or vline[d] == -2:
+                    vchk[d] = 1
+                    vline[d] = vline[ia[k]]
+                    ch = 1
+                elif vline[d] != vline[ia[k]] and vline[d] != -1:
+                    vline[d] = -1
+                    ch = 1
+            k += 1
     if hyb:
         return 0
     k = 0
@@ -11963,24 +12062,44 @@ def o_ovf_r(k, R):
     global no_ov
     if not iovf[k]:
         return 0
-    line = iline[k]
-    l = -1
+    l = o_ovlab(iline[k])
+    e2("jo ", lab(l))
+    if hyb:
+        band_chk(R, l)
+
+def o_ovlab(line):
+    global no_ov
     i = 0
     while i < no_ov:
         if o_ovn[i] == line:
-            l = o_ovl[i]
+            return o_ovl[i]
         i += 1
-    if l < 0:
-        if no_ov >= 4096:
-            o_fail("ovf")
-            return 0
-        l = new_label()
-        o_ovl[no_ov] = l
-        o_ovn[no_ov] = line
-        no_ov += 1
-    e2("jo ", lab(l))
-    if vband[idst[k]]:
-        band_chk(R, l)
+    if no_ov >= 4096:
+        o_fail("ovf")
+        return 0
+    l = new_label()
+    o_ovl[no_ov] = l
+    o_ovn[no_ov] = line
+    no_ov += 1
+    return l
+
+def o_safe(op):
+    return op == O_ADD or op == O_SUB or op == O_MUL or op == O_AND or op == O_OR or op == O_XOR or op == O_SAR or op == O_DIV or op == O_MOD or op == O_NEG or op == O_NOT or op == O_CBR or op == O_MOV
+
+def o_escchk(k):
+    # band check deferred from arithmetic defs to the point a value escapes pure int code
+    if hyb or o_safe(iop[k]):
+        return 0
+    n = u_n(k)
+    j = 0
+    while j < n:
+        o = u_get(k, j)
+        if o >= 0 and vchk[o]:
+            ln = vline[o]
+            if ln < 0:
+                ln = iline[k]
+            band_chk(vl(o), o_ovlab(ln))
+        j += 1
 
 def add_cold(s):
     global ncold
@@ -12361,6 +12480,7 @@ def o_ins(k, fi, x_epi):
     op = iop[k]
     if k == 0:
         mark_loops()
+    o_escchk(k)
     if op == O_LABEL:
         if lbk[ic[k]]:
             e(".p2align 5")
