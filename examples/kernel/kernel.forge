@@ -243,6 +243,39 @@ def check_mapping(name: ptr[u8], va: u64, expect_mapped: u64):
             panic("expected no mapping")
     putc(10)
 
+def vmalloc_test():
+# Phase 8: 2000 big-heap alloc/free cycles of mixed sizes reuse VA; the high-water mark stays bounded
+    h0 = va_hiwater
+    f0 = frames_free
+    l0 = heap_live
+    ptrs: u64[8]
+    r: u64 = 0
+    while r < 250:
+        i: u64 = 0
+        while i < 8:
+            ptrs[i] = kmalloc(8192 + ((r * 7 + i * 13) % 32) * 4096)
+            i += 1
+        i = 0
+        while i < 8:
+            kfree(ptrs[(i * 3) % 8])
+            i += 1
+        if r == 0:
+            f0 = frames_free
+        r += 1
+    grow = va_hiwater - h0
+    puts("vmalloc: 2000 big blocks, VA high-water grew ")
+    put_u64(grow)
+    puts(" pages, ranges reused ")
+    put_u64(va_reused)
+    puts(", free ranges ")
+    put_u64(va_n)
+    puts(", frames leaked ")
+    put_u64(f0 - frames_free)
+    putc(10)
+    if grow > 8 * 40 or va_reused < 1900 or frames_free != f0 or heap_live != l0:
+        panic("vmalloc")
+    puts("vmalloc VA reuse OK\n")
+
 def buddy_test():
 # Phase 8: power-of-two blocks come back aligned, odd sizes return their tail, frees coalesce to the start state
     pas: u64[11]
@@ -388,6 +421,7 @@ def kmain_high():
     putc(10)
     heap_test()
     buddy_test()
+    vmalloc_test()
     demand_test()
     if acpi_init(bi.rsdp) == 0:
         panic("ACPI/MADT not found")

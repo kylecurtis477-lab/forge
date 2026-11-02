@@ -192,7 +192,7 @@ Generic defs/structs are recorded at prescan and skipped; an instance is created
 ## Roadmap
 The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel subset.
 
-1. ~~**Memory:** memory map, frame allocator, 4-level higher-half paging with guard pages and NX, kernel heap, ExitBootServices with the UEFI app as the loader, GOP framebuffer console.~~ **Done.** Reclaim done. Buddy allocator done (Phase 8). Still open: a virtual address allocator for the large-object heap, and PCID.
+1. ~~**Memory:** memory map, frame allocator, 4-level higher-half paging with guard pages and NX, kernel heap, ExitBootServices with the UEFI app as the loader, GOP framebuffer console.~~ **Done.** Reclaim done. Buddy allocator done (Phase 8). Virtual range allocator done (Phase 8). Still open: PCID.
 2. ~~**Interrupts and time:** PIC off, LAPIC/IOAPIC via ACPI MADT, LAPIC timer, IST stacks for #DF/NMI.~~ **Done** (atomics landed in the language too). Still open: HPET/TSC-deadline, x2APIC, and MSI.
 3. ~~**Scheduler + SMP:** preemptive kernel threads, spinlocks, INIT-SIPI AP bring-up.~~ **Done.** Since done: xsave/fxsave FPU state per thread, TLB shootdown IPIs, pinned threads, wait queues, sleeping mutexes, condvars, sleep_ticks. Still open: per-CPU run queues + load balancing, priorities.
 4. ~~**User mode:** TSS, ring 3, `syscall`/`sysret`, ELF loader, per-process address spaces.~~ **Done.** Since done: SMEP/SMAP with copy-in/out #PF fixups; Proc objects with fork (eager copy), exec, wait4, exit, brk, anonymous mmap/munmap, getargs; an interactive `sh` from `\EFI\Forge\bin\`. Still open: copy-on-write fork, signals, env, file-backed mmap.
@@ -272,3 +272,6 @@ A process holds exactly the capability bits its sealed manifest declares (fs=1, 
 
 ## Buddy allocator (Phase 8)
 Per-order free bitmaps (4 KiB..4 MiB) on top of the authoritative `frame_bits` map in `examples/kernel/mm.fsi`: allocation takes the lowest valid block of the smallest sufficient order and splits it; frees coalesce with free buddies. Stale entries (frames grabbed by direct `frame_bits` edits) are detected on take and dropped, so a double allocation is impossible; an empty map triggers one rebuild from `frame_bits`. `buddy_test` checks alignment, odd-size tails, coalescing back to the starting 4 MiB block count and zero leaks on every boot. Unsafe counts unchanged.
+
+## vmalloc (Phase 8)
+Big-heap VA comes from a coalescing first-fit free list of ranges (each with a top guard page); freed ranges are reused. `vmalloc_test` runs 2000 alloc/free cycles with bounded VA growth and no frame leaks. The bounds-overhead benchmark in `tests/bounds/run.sh` now interleaves checked/unchecked runs (best of 7) so load drift cannot fail it.

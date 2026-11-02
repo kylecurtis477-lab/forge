@@ -32,11 +32,12 @@ grep -q " 0 checked" $T/n.st && ok bounds-off-flag || no bounds-off-flag
 sed '1a # forge: no-bounds-checks' tests/bounds/oob_array.forge > tests/bounds/.p.forge
 build/forgec tests/bounds/.p.forge $T/p.s --bounds-stats 2> $T/p.st; rm -f tests/bounds/.p.forge
 grep -q " 0 checked" $T/p.st && ok bounds-off-pragma || no bounds-off-pragma
-# overhead: checked vs --no-bounds, best of 5 each, must be <= 5% slower
+# overhead: checked vs --no-bounds, best of 7 each, runs interleaved so load drift hits both; must be <= 5% slower
 ./forge tests/bounds/bench.forge -o $T/bc && FORGEC_FLAGS=--no-bounds ./forge tests/bounds/bench.forge -o $T/bn
 [ "$($T/bc)" = "$($T/bn)" ] && ok bounds-bench-same || no bounds-bench-same
-best() { b=999999; for k in 1 2 3 4 5; do s=$(date +%s%N); $1 >/dev/null; d=$(( ($(date +%s%N)-s)/1000 )); [ $d -lt $b ] && b=$d; done; echo $b; }
-c=$(best $T/bc); n=$(best $T/bn)
+tm() { s=$(date +%s%N); $1 >/dev/null; echo $(( ($(date +%s%N)-s)/1000 )); }
+c=999999; n=999999
+for k in 1 2 3 4 5 6 7; do d=$(tm $T/bc); [ $d -lt $c ] && c=$d; d=$(tm $T/bn); [ $d -lt $n ] && n=$d; done
 build/forgec tests/bounds/bench.forge $T/b.s --bounds-stats 2> $T/b.st
 echo "bounds bench: checked ${c}us, unchecked ${n}us, $(cat $T/b.st)"
 [ $((c * 100)) -le $((n * 105)) ] && ok bounds-bench-overhead || no bounds-bench-overhead

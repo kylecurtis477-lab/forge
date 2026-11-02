@@ -460,6 +460,78 @@ heap_live: u64
 kpt_pages: u64  # kernel page-table pages: created on demand, never freed (the kernel half is shared)
 slab_pages: u64  # slab pages are kept for reuse, never returned to the frame allocator
 
+# ---- vmalloc: virtual range allocator for the big heap (Phase 8) ----
+# Freed ranges go to a sorted, coalescing free list (first fit), so big-heap VA is reused instead of only bumped.
+# Each range carries a never-mapped guard page at its top. If the list is full a range is dropped (VA leak only).
+VA_SLOTS = 256
+va_base: u64[256]
+va_npg: u64[256]
+va_n: u64
+va_reused: u64
+va_hiwater: u64
+
+def va_alloc(np: u64) -> u64:
+    i: u64 = 0
+    while i < va_n:
+        if va_npg[i] >= np:
+            b = va_base[i]
+            va_base[i] = b + np * PAGE
+            va_npg[i] -= np
+            if va_npg[i] == 0:
+                j = i
+                while j + 1 < va_n:
+                    va_base[j] = va_base[j + 1]
+                    va_npg[j] = va_npg[j + 1]
+                    j += 1
+                va_n -= 1
+            va_reused += 1
+            return b
+        i += 1
+    if heap_big_next == 0:
+        heap_big_next = HEAP_BIG_BASE
+    b = heap_big_next
+    heap_big_next += np * PAGE
+    va_hiwater += np
+    return b
+
+def va_free(b: u64, np: u64):
+    i: u64 = 0
+    while i < va_n and va_base[i] < b:
+        i += 1
+    if i > 0 and va_base[i - 1] + va_npg[i - 1] * PAGE == b:
+        va_npg[i - 1] += np
+        if i < va_n and b + np * PAGE == va_base[i]:
+            va_npg[i - 1] += va_npg[i]
+            j = i
+            while j + 1 < va_n:
+                va_base[j] = va_base[j + 1]
+                va_npg[j] = va_npg[j + 1]
+                j += 1
+            va_n -= 1
+        return
+    if i < va_n and b + np * PAGE == va_base[i]:
+        va_base[i] = b
+        va_npg[i] += np
+        return
+    if va_n == VA_SLOTS:
+        return
+    j = va_n
+    while j > i:
+        va_base[j] = va_base[j - 1]
+        va_npg[j] = va_npg[j - 1]
+        j -= 1
+    va_base[i] = b
+    va_npg[i] = np
+    va_n += 1
+
+def va_free_pages() -> u64:
+    t: u64 = 0
+    i: u64 = 0
+    while i < va_n:
+        t += va_npg[i]
+        i += 1
+    return t
+
 def class_size(c: u64) -> u64:
     return u64(32) << c
 
@@ -493,11 +565,8 @@ def kmalloc_nolock(n: u64) -> u64:
         vstore64(p - 8, HEAP_MAGIC)
         heap_live += 1
         return p
-    if heap_big_next == 0:
-        heap_big_next = HEAP_BIG_BASE
     np = (need + PAGE - 1) / PAGE
-    base = heap_big_next
-    heap_big_next += (np + 1) * PAGE
+    base = va_alloc(np + 1)
     i = 0
     while i < np:
         map_page(kernel_pml4, base + i * PAGE, frame_alloc(), PTE_W | PTE_NX)
@@ -532,6 +601,7 @@ def kfree_nolock(p: u64):
                 frame_free(unmap_page(kernel_pml4, base + i * PAGE))
                 tlb_shootdown(0, base + i * PAGE, 1)
                 i += 1
+            va_free(base, np + 1)
             return
         # unmap everything, shoot down stale translations on all CPUs, only then reuse the frames
         # (the frame list is parked in the first frame, reached through the HHDM)
@@ -546,6 +616,7 @@ def kfree_nolock(p: u64):
             frame_free(vload64(p2v(f0) + i * 8))
             i += 1
         frame_free(f0)
+        va_free(base, np + 1)
         return
     vstore64(p, slab_free[h])
     slab_free[h] = p
