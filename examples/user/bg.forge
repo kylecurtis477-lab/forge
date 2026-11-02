@@ -1,3 +1,4 @@
+# forge: safe
 # forge: no-runtime
 # bg GEN: a background process for the kexec test. Reads the first half of a file, then keeps yielding
 # until the kernel generation (syscall 410) reaches GEN, then reads the rest through the same fd (its
@@ -15,7 +16,6 @@ def fnv(h: u64, n: u64) -> u64:
     return h
 
 @export
-@unsafe
 def _start():
     av: u8[128]
     sys_getargs(u64(addr(av[0])), 128)
@@ -30,7 +30,7 @@ def _start():
         sys_exit(2)
     i = 0
     while i < 2048:
-        ptr[u64](m)[i] = pid * 0x9E3779B97F4A7C15 + i
+        mem_set64(m + i * 8, pid * 0x9E3779B97F4A7C15 + i)
         i += 1
     fd = sys_open("/efi/forge/docs/big.bin")
     if is_err(fd):
@@ -73,7 +73,7 @@ def _start():
     bad: u64 = 0
     i = 0
     while i < 2048:
-        if ptr[u64](m)[i] != pid * 0x9E3779B97F4A7C15 + i:
+        if mem_get64(m + i * 8) != pid * 0x9E3779B97F4A7C15 + i:
             bad += 1
         i += 1
     out("bg: pid ")

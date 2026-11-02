@@ -1,3 +1,4 @@
+# forge: safe
 # forge: no-runtime
 # cat FILE (the whole argument is one path, spaces allowed): copy files to the console through open/read/close (and stat for the size check).
 include "ulib.fsi"

@@ -1,0 +1,36 @@
+# expect: use of moved value `b`
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Box:
+    v: u64
+    w: u64
+
+cell: Box
+
+@unsafe
+def box_new(v: u64) -> own[Box]:
+    b: own[Box] = own[Box](ptr[Box](addr(cell)))
+    b.v = v
+    b.w = 0
+    return b
+
+def box_free(b: own[Box]) -> u64:
+    return b.v
+
+def peek(r: ref[Box]) -> u64:
+    return r.v
+
+def bump(m: mut[Box]):
+    m.v = m.v + 1
+
+def both(a: ref[Box], b: ref[Box]) -> u64:
+    return a.v + b.v
+
+def pair(a: mut[Box], b: ref[Box]):
+    a.w = b.v
+
+def main() -> u64:
+    b = box_new(1)
+    c = b
+    return box_free(b)
+    return 0

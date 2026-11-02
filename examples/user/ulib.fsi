@@ -167,3 +167,20 @@ def outc(c: u64):
     if llen < 255:
         lbuf[llen] = u8(c)
         llen += 1
+
+# Phase 4.4 trusted raw-memory helpers, so `# forge: safe` programs need no unsafe code of their own
+@unsafe
+def mem_get8(a: u64) -> u64:
+    return u64(ptr[u8](a)[0])
+
+@unsafe
+def mem_set8(a: u64, v: u64):
+    ptr[u8](a)[0] = u8(v)
+
+@unsafe
+def mem_get64(a: u64) -> u64:
+    return ptr[u64](a)[0]
+
+@unsafe
+def mem_set64(a: u64, v: u64):
+    ptr[u64](a)[0] = v

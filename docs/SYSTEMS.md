@@ -81,6 +81,14 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 - Gate points: start of `fs_intrin` (list `FS_UNSAFE_FNS`), int→ptr in `fs_conv`, explicit pointer casts, non-`[0]` ptr indexing. `ptr[T](0)` is rejected before the unsafe check.
 - Report: `--unsafe-report` per region + summary (`fs_ufn`, `fs_ublk`, `fs_utot`, `fs_ubare`); baseline in tests/unsafe/baseline.txt.
 
+### Ownership and borrows (Phase 4.4)
+
+- Types: `ft_bptr(el, sg)` with `ftsg` 2 = own, 3 = ref, 4 = mut (all `fsk` 1, non-null; `ft_isnn` is `ftsg != 1`). Parsed in `fs_type`/`fs_istype` only when followed by `[` (the kernel has a field named `ref`).
+- Per-local state set in `fs_newlocal`: `fsl_mv` (move line, 0 = live), `fsl_bf` (owner a borrow local borrows from), `fsl_bk` (1 shared, 2 mut), `fsl_sh`/`fsl_mu` (live borrows of this owner), `fsl_bl` (line of the last borrow), `fsl_dead` (borrow outlived its block).
+- `fs_lchk` (from `fs_primary` local resolution) does the move/use/reassign checks; whole value = next token is not `.` or `[`. `fs_borrow` handles borrow()/borrow_mut(): in call arguments (`fs_argd` > 0) it pushes a temporary onto `fs_tb`/`fs_tbk`, released at the end of `fs_args`; otherwise it sets `fs_bpend`/`fs_bpk`, which `fs_battach` attaches to the new local (typed decl or `fs_lhs_store` new-local path). `fs_wstore` checks stores through ref/borrowed own. `fs_bconv` handles conversions.
+- Flow: `fs_stmt` wraps `fs_stmt1` and resets `fs_term` (set by return/break/continue/panic). `fs_mvsnap`/`fs_mvset`/`fs_mvor` join moved states over if branches; loops keep `fs_lb0` (entry) and `fs_lbm` (break union) and `fs_mvloop` rejects moves of outer values. `fs_suite` ends borrows declared inside it (`fs_bkill`).
+- Safe mode: `fs_safe` from `# forge: safe`; `fs_safechk` uses `fsx_f` so only the main file is restricted.
+
 ### Test blocks, forge test, forge verify
 
 - `test "name":` + block at top level (column 0) is a unit test. forgec rewrites each header line to `def __forge_test_N():` before lexing (line count unchanged, so diagnostics keep their line numbers); without `--test` they are uncalled functions and the program is unchanged. Test blocks in imported modules are renamed the same way (global counter) and never run from the importer.

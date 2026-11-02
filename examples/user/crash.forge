@@ -1,3 +1,4 @@
+# forge: safe
 # forge: no-runtime
 # crash N: fault injection for the boot test -- the block driver service dies on the N-th next request.
 include "ulib.fsi"

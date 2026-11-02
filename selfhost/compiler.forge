@@ -15448,6 +15448,26 @@ fs_ublk = 0
 fs_ucur = -1
 fs_ufixed = -1
 fs_ubare = 0
+# Phase 4.4 ownership: own[T] (ftsg 2) is affine (moved on whole-value use); ref[T] (3) / mut[T] (4)
+# are borrows from borrow()/borrow_mut(), live until the end of the declaring block (or the call, for arguments)
+fsl_mv = list(4096)
+fsl_bf = list(4096)
+fsl_bk = list(4096)
+fsl_sh = list(4096)
+fsl_mu = list(4096)
+fsl_bl = list(4096)
+fsl_dead = list(4096)
+fs_tb = list(4096)
+fs_tbk = list(4096)
+fs_bpk = 0
+nfstb = 0
+fs_argd = 0
+fs_bpend = -1
+fs_rsrc = -1
+fs_term = 0
+fs_lbm = list(256)
+fs_lb0 = list(256)
+fs_safe = 0
 fs_nbc = 0
 fs_nbe = 0
 fs_lastnm = ""
@@ -15596,7 +15616,27 @@ def ft_isnptr(t):
     return fsk[t] == 1 and ftsg[t] == 1
 
 def ft_isnn(t):
-    return fsk[t] == 1 and ftsg[t] == 0
+    return fsk[t] == 1 and ftsg[t] != 1
+
+def ft_bptr(t, sg):
+# own[T] (sg 2), ref[T] (3), mut[T] (4): non-null pointers with ownership rules
+    i = 0
+    while i < nft:
+        if fsk[i] == 1 and ftel[i] == t and ftsg[i] == sg:
+            return i
+        i += 1
+    nm = "own"
+    if sg == 3:
+        nm = "ref"
+    elif sg == 4:
+        nm = "mut"
+    return ft_add(1, t, 8, 8, sg, 0, nm)
+
+def ft_isaff(t):
+    return fsk[t] == 1 and ftsg[t] >= 2
+
+def fs_isbname(nm):
+    return str_eq(nm, "own") or str_eq(nm, "ref") or str_eq(nm, "mut")
 
 def ft_arr(t, n):
     i = 0
@@ -15665,6 +15705,16 @@ def fs_type():
         el = fs_type()
         fs_expect("]")
         t = ft_slice(el)
+    elif fs_isbname(nm) and fs_isop("["):
+        fp += 1
+        el = fs_type()
+        fs_expect("]")
+        sg = 2
+        if str_eq(nm, "ref"):
+            sg = 3
+        elif str_eq(nm, "mut"):
+            sg = 4
+        t = ft_bptr(el, sg)
     elif t < 0:
         t = ft_struct(nm)
         if t < 0:
@@ -15679,7 +15729,7 @@ def fs_type():
 def fs_istype(p):
     if tk[p] != K_ID:
         return 0
-    if ft_prim(tv[p]) >= 0 or str_eq(tv[p], "ptr") or ((str_eq(tv[p], "slice") or str_eq(tv[p], "nptr")) and tk[p + 1] == K_OP and str_eq(tv[p + 1], "[")):
+    if ft_prim(tv[p]) >= 0 or str_eq(tv[p], "ptr") or ((str_eq(tv[p], "slice") or str_eq(tv[p], "nptr") or fs_isbname(tv[p])) and tk[p + 1] == K_OP and str_eq(tv[p + 1], "[")):
         return 1
     return ft_struct(tv[p]) >= 0
 
@@ -15861,6 +15911,13 @@ def fs_newlocal(nm, t):
     fsl_t[nfsl] = t
     fsl_o[nfsl] = 0 - fs_frame
     fsl_nn[nfsl] = 0
+    fsl_mv[nfsl] = 0
+    fsl_bf[nfsl] = -1
+    fsl_bk[nfsl] = 0
+    fsl_sh[nfsl] = 0
+    fsl_mu[nfsl] = 0
+    fsl_bl[nfsl] = 0
+    fsl_dead[nfsl] = 0
     nfsl += 1
     return nfsl - 1
 
@@ -15996,12 +16053,187 @@ def fs_conv(to):
             fs_die("nptr[T] may be null: check it (if p != 0:) before using it as a ptr[T]")
         if fs_ety == FT_LIT and fs_lastimm == 0:
             fs_die("null (0) cannot be a ptr[T]; declare it nptr[T]")
+    if fsk[to] == 1 and fs_ety != to and fsk[fs_ety] == 1 and (ftsg[to] >= 2 or ftsg[fs_ety] >= 2):
+        fs_bconv(to)
     if fsk[to] == 1 and fsk[fs_ety] == 0 and not (fs_ety == FT_LIT and fs_lastimm == 0):
         fs_unsafe_op("an integer-to-pointer conversion")
     if fsk[to] == 0 and fs_ety != to:
         if not (fsk[fs_ety] == 0 and ftsz[fs_ety] <= ftsz[to] and ft_sg(fs_ety) == ftsg[to] and fs_ety != FT_LIT and to != FT_BOOL):
             fs_norm(to)
     fs_ety = to
+
+def fs_bconv(to):
+# pointer conversions involving own/ref/mut
+    s = fs_ety
+    if ftsg[s] == 4 and ftsg[to] == 3 and ftel[s] == ftel[to]:
+        return 0
+    if ftsg[s] >= 2 and ftsg[to] < 2:
+        fs_unsafe_op(c3("converting a ", ftname[s], "[T] to a raw pointer"))
+        return 0
+    if ftsg[s] < 2:
+        fs_unsafe_op(c3("converting a raw pointer to ", ftname[to], "[T]"))
+        return 0
+    if ftsg[s] == 2:
+        fs_die(c3("cannot use an own[T] as a ", ftname[to], "[T]: pass borrow(x) or borrow_mut(x)"))
+    fs_die(c4("cannot convert ", ftname[s], "[T] to ", concat(ftname[to], "[T]")))
+
+def fs_lname(l):
+    return c3("`", fsl_n[l], "`")
+
+def fs_badd(x, k):
+    if k == 1:
+        fsl_sh[x] = fsl_sh[x] + 1
+    else:
+        fsl_mu[x] = fsl_mu[x] + 1
+    fsl_bl[x] = tl[fp]
+
+def fs_brel(x, k):
+    if k == 1:
+        fsl_sh[x] = fsl_sh[x] - 1
+    else:
+        fsl_mu[x] = fsl_mu[x] - 1
+
+def fs_lchk(l, lh):
+# ownership checks for a use of local l; fp is just past its name
+    t = fsl_t[l]
+    if fsl_dead[l]:
+        fs_die(concat(fs_lname(l), " is a borrow whose block has ended"))
+    if fsl_mu[l] > 0:
+        fs_die(c3(fs_lname(l), " is mutably borrowed (at ", concat(fs_where(fsl_bl[l]), "): use the borrow until its block ends")))
+    if not ft_isaff(t):
+        return 0
+    whole = not (tk[fp] == K_OP and (str_eq(tv[fp], ".") or str_eq(tv[fp], "[")))
+    if lh and whole:
+        if ftsg[t] >= 3:
+            fs_die("a borrow local cannot be reassigned")
+        if fsl_sh[l] > 0:
+            fs_die(c3("cannot assign to ", fs_lname(l), c3(" while it is borrowed (at ", fs_where(fsl_bl[l]), ")")))
+        if not fsl_mv[l]:
+            fs_die(concat("assigning to ", concat(fs_lname(l), " would leak the own[T] it holds: move or free it first")))
+        fsl_mv[l] = 0
+        return 0
+    if fsl_mv[l]:
+        fs_die(c4("use of moved value ", fs_lname(l), " (moved at ", concat(fs_where(fsl_mv[l]), ")")))
+    if not whole:
+        return 0
+    if ftsg[t] == 2:
+        if fsl_sh[l] > 0:
+            fs_die(c3("cannot move ", fs_lname(l), c3(" while it is borrowed (at ", fs_where(fsl_bl[l]), ")")))
+        fsl_mv[l] = tl[fp - 1]
+    elif ftsg[t] == 4 and fs_argd > 0:
+    # passing a mut[T] reborrows it for the call: no other use of it in the same call
+        fs_tb_push(l, 2)
+
+def fs_tb_push(x, k):
+    global nfstb
+    fs_badd(x, k)
+    fs_tb[nfstb] = x
+    fs_tbk[nfstb] = k
+    nfstb += 1
+
+def fs_wstore(p0, bare):
+# a store through the local named at p0 (x.f = v, x[i] = v)
+    if bare or tk[p0] != K_ID:
+        return 0
+    l = fs_local(tv[p0])
+    if l < 0 or not ft_isaff(fsl_t[l]):
+        return 0
+    if ftsg[fsl_t[l]] == 3:
+        fs_die(concat("cannot assign through ", concat(fs_lname(l), ": a ref[T] is a shared borrow (use borrow_mut / mut[T])")))
+    if fsl_sh[l] > 0:
+        fs_die(c3("cannot assign through ", fs_lname(l), c3(" while it is borrowed (at ", fs_where(fsl_bl[l]), ")")))
+
+def fs_mvsnap():
+    sn = list(nfsl + 1)
+    i = 0
+    while i < nfsl:
+        sn[i] = fsl_mv[i]
+        i += 1
+    sn[nfsl] = nfsl
+    return sn
+
+def fs_mvset(sn):
+    n = sn[len(sn) - 1]
+    i = 0
+    while i < n:
+        fsl_mv[i] = sn[i]
+        i += 1
+
+def fs_mvor(acc, sn):
+# union of moved states (acc may be 0 = none yet)
+    if acc == 0:
+        return sn
+    n = sn[len(sn) - 1]
+    if acc[len(acc) - 1] < n:
+        n = acc[len(acc) - 1]
+    r = list(n + 1)
+    i = 0
+    while i < n:
+        r[i] = acc[i]
+        if r[i] == 0:
+            r[i] = sn[i]
+        i += 1
+    r[n] = n
+    return r
+
+def fs_loopend(e0):
+    global fs_term
+    if not fs_term:
+        fs_mvloop(e0)
+    fs_mvset(fs_mvor(e0, e0))
+    if fs_lbm[nfsloop] != 0:
+        fs_mvset(fs_mvor(fs_lbm[nfsloop], e0))
+    fs_term = 0
+
+def fs_mvloop(e0):
+# end of a loop body / continue: an outer own local moved here would be moved again next iteration
+    n = e0[len(e0) - 1]
+    i = 0
+    while i < n:
+        if fsl_mv[i] and not e0[i]:
+            fs_die(c3(fs_lname(i), " is moved inside a loop (moved at ", concat(fs_where(fsl_mv[i]), "); it would be used again on the next iteration")))
+        i += 1
+
+def fs_bkill(n0):
+# leaving a block: borrows held by locals declared in it end
+    i = n0
+    while i < nfsl:
+        if fsl_bk[i] > 0 and not fsl_dead[i]:
+            if fsl_bf[i] >= 0:
+                fs_brel(fsl_bf[i], fsl_bk[i])
+            fsl_dead[i] = 1
+        i += 1
+
+def fs_battach(l, vt):
+# a new local l of borrow type vt was just initialized
+    global fs_bpend
+    if fsk[vt] != 1 or ftsg[vt] < 3:
+        if fs_bpend >= 0:
+            fs_bpend = -1
+        return 0
+    fsl_bk[l] = ftsg[vt] - 2
+    if fs_bpend >= 0:
+        x = fs_bpend
+        k = fs_bpk
+        fs_bpend = -1
+        fsl_bf[l] = x
+        fsl_bk[l] = k
+        fs_badd(x, k)
+        return 0
+    if ftsg[vt] == 4:
+        fs_die("a mut[T] cannot be copied (that would alias it): pass it directly")
+    if fs_rsrc >= 0 and fsl_bf[fs_rsrc] >= 0:
+        fsl_bf[l] = fsl_bf[fs_rsrc]
+        fs_badd(fsl_bf[l], 1)
+
+def fs_inmain(ln):
+    if ln >= 1 and ln <= fsx_n:
+        return fsx_f[ln - 1] == 0
+    return 1
+
+def fs_safechk(ln, what):
+    if fs_safe and fs_inmain(ln):
+        fs_die(c3("safe mode (# forge: safe): ", what, " is not allowed here; put unsafe code in a library .fsi"))
 
 # ---- expressions ----
 def fs_imm(v):
@@ -16033,10 +16265,12 @@ def fs_strlit(s):
 
 def fs_args(maxn, ptys):
 # evaluate comma-separated args to the stack; returns count
-    global fp
+    global fp, fs_argd, nfstb
     fs_expect("(")
     n = 0
     pi = 0
+    fs_argd += 1
+    m0 = nfstb
     while not fs_isop(")"):
         fs_rexpr()
         sl = 0
@@ -16058,6 +16292,10 @@ def fs_args(maxn, ptys):
         if fs_isop(","):
             fp += 1
     fp += 1
+    while nfstb > m0:
+        nfstb -= 1
+        fs_brel(fs_tb[nfstb], fs_tbk[nfstb])
+    fs_argd -= 1
     if ptys >= 0 and pi != fsf_np[ptys]:
         fs_die(concat("wrong argument count for ", fsf_n[ptys]))
     if n > maxn:
@@ -16076,11 +16314,44 @@ def fs_callsite(target):
     if odd:
         e("add $8,%rsp")
 
+def fs_borrow(k):
+# borrow(x) -> ref[T], borrow_mut(x) -> mut[T]; x is an own[T] (or, for borrow, a mut[T]) local
+    global fp, fs_ety, fs_mode, fs_bpend, fs_bpk
+    fp += 1
+    x = -1
+    if tk[fp] == K_ID:
+        x = fs_local(tv[fp])
+    if x < 0 or not fs_isop2(fp + 1, ")") or not (ftsg[fsl_t[x]] == 2 or (k == 1 and ftsg[fsl_t[x]] == 4)) or fsk[fsl_t[x]] != 1:
+        fs_die("borrow()/borrow_mut() take a local own[T] variable (borrow() also takes a mut[T])")
+    fp += 1
+    if fsl_dead[x]:
+        fs_die(concat(fs_lname(x), " is a borrow whose block has ended"))
+    if fsl_mv[x]:
+        fs_die(c4("borrow of moved value ", fs_lname(x), " (moved at ", concat(fs_where(fsl_mv[x]), ")")))
+    if fsl_mu[x] > 0:
+        fs_die(c3("cannot borrow ", fs_lname(x), c3(": it is already mutably borrowed (at ", fs_where(fsl_bl[x]), ")")))
+    if k == 2 and fsl_sh[x] > 0:
+        fs_die(c3("cannot borrow ", fs_lname(x), c3(" as mutable: it is already borrowed (at ", fs_where(fsl_bl[x]), ")")))
+    fs_expect(")")
+    e(c3("mov ", str(fsl_o[x]), "(%rbp),%rax"))
+    fs_ety = ft_bptr(ftel[fsl_t[x]], 2 + k)
+    fs_mode = 0
+    if fs_argd > 0:
+        fs_tb_push(x, k)
+    else:
+        fs_bpend = x
+        fs_bpk = k
+    return 1
+
 def fs_intrin(nm):
 # returns 1 if nm( ... ) was compiled as an intrinsic
     global fp, fs_ety, fs_mode, fs_moff, fs_lab
     if find(FS_UNSAFE_FNS, len(FS_UNSAFE_FNS), nm) >= 0:
         fs_unsafe_op(concat(nm, "()"))
+    if (str_eq(nm, "borrow") or str_eq(nm, "borrow_mut")) and fs_func(nm) < 0:
+        if str_eq(nm, "borrow_mut"):
+            return fs_borrow(2)
+        return fs_borrow(1)
     one = ["cli", "sti", "hlt", "pause", "int3", "mfence", "lfence", "sfence", "wbinvd", "ud2", "cpu_relax"]
     k = find(one, 11, nm)
     if k >= 0:
@@ -16113,6 +16384,7 @@ def fs_intrin(nm):
         return 1
     if str_eq(nm, "slice") and fs_func("slice") < 0:
     # slice(p, n): a slice[T] over n elements at ptr[T] p (the caller vouches for p..p+n)
+        fs_unsafe_op("slice(p, n) over a raw pointer")
         fp += 1
         fs_rexpr()
         if fsk[fs_ety] != 1:
@@ -16407,7 +16679,7 @@ def fs_primary():
         fs_norm(fs_ety)
         fs_mode = 0
         return 0
-    if (str_eq(nm, "ptr") or str_eq(nm, "nptr")) and fs_isop("["):
+    if (str_eq(nm, "ptr") or str_eq(nm, "nptr") or fs_isbname(nm)) and fs_isop("[") and fs_local(nm) < 0:
         fp -= 1
         t = fs_type()
         fs_expect("(")
@@ -16420,7 +16692,9 @@ def fs_primary():
         elif fsk[src] == 0:
             fs_unsafe_op("an integer-to-pointer cast")
         elif fsk[src] == 1:
-            if ft_isnptr(src) and ft_isnn(t):
+            if ftsg[src] != ftsg[t] and (ftsg[src] >= 2 or ftsg[t] >= 2):
+                fs_unsafe_op("a cast to or from own/ref/mut")
+            elif ft_isnptr(src) and ft_isnn(t):
                 fs_unsafe_op("an nptr-to-ptr cast (check p != 0 instead)")
             elif ftel[src] != ftel[t]:
                 fs_unsafe_op("a pointer reinterpret cast")
@@ -16434,6 +16708,7 @@ def fs_primary():
         return 0
     l = fs_local(nm)
     if l >= 0:
+        fs_lchk(l, lh)
         fs_mode = 2
         fs_moff = fsl_o[l]
         fs_ety = fsl_t[l]
@@ -17104,10 +17379,12 @@ def fs_nnjoin(sn):
 def fs_suite():
     global fp
     sn = fs_nnsnap()
+    n0 = nfsl
     fs_expect(":")
     if tk[fp] != K_NL:
         fs_stmt()
         fs_nnjoin(sn)
+        fs_bkill(n0)
         return 0
     fp += 1
     if tk[fp] != K_IND:
@@ -17117,6 +17394,7 @@ def fs_suite():
         fs_stmt()
     fp += 1
     fs_nnjoin(sn)
+    fs_bkill(n0)
 
 def fs_skip_suite():
     global fp
@@ -17171,8 +17449,11 @@ def fs_lhs_store(vt):
             fs_die("cannot copy a void/struct/array value into a new local")
         l = fs_newlocal(tv[fp], t)
         fs_store(t, concat(str(fsl_o[l]), "(%rbp)"))
+        fs_battach(l, t)
         fp += 1
         return 0
+    if fs_bpend >= 0:
+        fs_die("a borrow can only initialize a new local (r: ref[T] = borrow(x))")
     fs_ety = vt
     fs_push()
     fs_lhs = tk[fp] == K_ID and fs_isop2(fp + 1, "=")
@@ -17181,6 +17462,7 @@ def fs_lhs_store(vt):
     fs_postfix()
     fs_lhs = 0
     bare = fp == p0 + 1
+    fs_wstore(p0, bare)
     tl0 = fs_lhsl
     t = fs_ety
     if fs_mode == 0:
@@ -17199,7 +17481,18 @@ def fs_lhs_store(vt):
         fsl_nn[tl0] = ft_isnn(vt)
 
 def fs_stmt():
-    global fp, nfsloop, fs_ety, fs_mode, fs_dep, nfsb, fs_ublk, fs_uops, fs_unsafe
+    global fs_term, fs_bpend, fs_rsrc
+    if tk[fp] == K_NL:
+        fs_stmt1()
+        return 0
+    fs_term = 0
+    fs_bpend = -1
+    fs_rsrc = -1
+    fs_stmt1()
+    fs_bpend = -1
+
+def fs_stmt1():
+    global fp, nfsloop, fs_ety, fs_mode, fs_dep, nfsb, fs_ublk, fs_uops, fs_unsafe, fs_term, fs_rsrc
     if tk[fp] == K_NL:
         fp += 1
         return 0
@@ -17214,20 +17507,25 @@ def fs_stmt():
             fs_conv(fs_rty)
         e(concat("jmp ", fs_ret))
         fs_eol()
+        fs_term = 1
         return 0
     if fs_isid("break") or fs_isid("continue"):
         if nfsloop == 0:
             fs_die("break/continue outside a loop")
         if fs_isid("break"):
             e(concat("jmp ", fs_brk[nfsloop - 1]))
+            fs_lbm[nfsloop - 1] = fs_mvor(fs_lbm[nfsloop - 1], fs_mvsnap())
         else:
             e(concat("jmp ", fs_cnt[nfsloop - 1]))
+            fs_mvloop(fs_lb0[nfsloop - 1])
         fp += 1
         fs_eol()
+        fs_term = 1
         return 0
     if fs_isid("with") and tk[fp + 1] == K_ID and str_eq(tv[fp + 1], "unsafe") and fs_isop2(fp + 2, ":"):
     # Phase 4.3: `with unsafe:` block
         ln0 = tl[fp]
+        fs_safechk(ln0, "a `with unsafe:` block")
         fp += 2
         fs_ublk += 1
         o0 = fs_uops
@@ -17244,6 +17542,8 @@ def fs_stmt():
         nt = fs_nulltest(fp + 1)
         if nt >= 0 and not fs_exits(fp + 1):
             nt = -1
+        macc = 0
+        alldone = 1
         while 1:
             fp += 1
             lnext = fs_newlab()
@@ -17257,6 +17557,7 @@ def fs_stmt():
             fs_rexpr()
             e("test %rax,%rax")
             e(concat("je ", lnext))
+            csn = fs_mvsnap()
             sv = fs_nnsnap()
             k = 0
             while k < nc:
@@ -17264,6 +17565,10 @@ def fs_stmt():
                 k += 1
             fs_suite()
             fs_nnjoin(sv)
+            if not fs_term:
+                macc = fs_mvor(macc, fs_mvsnap())
+                alldone = 0
+            fs_mvset(csn)
             e(concat("jmp ", lend))
             emit_raw(concat(lnext, ":\n"))
             if not fs_isid("elif"):
@@ -17273,6 +17578,15 @@ def fs_stmt():
             nt = -1
             fp += 1
             fs_suite()
+            if not fs_term:
+                macc = fs_mvor(macc, fs_mvsnap())
+                alldone = 0
+        else:
+            macc = fs_mvor(macc, fs_mvsnap())
+            alldone = 0
+        if macc != 0:
+            fs_mvset(macc)
+        fs_term = alldone
         emit_raw(concat(lend, ":\n"))
         if nt >= 0:
         # `if x == 0: return` (or break/continue/panic): x is non-null after the if
@@ -17296,6 +17610,9 @@ def fs_stmt():
         e(concat("je ", lb))
         fs_brk[nfsloop] = lb
         fs_cnt[nfsloop] = lt
+        e0 = fs_mvsnap()
+        fs_lb0[nfsloop] = e0
+        fs_lbm[nfsloop] = 0
         nfsloop += 1
         sv = fs_nnsnap()
         k = 0
@@ -17305,6 +17622,7 @@ def fs_stmt():
         fs_suite()
         fs_nnjoin(sv)
         nfsloop -= 1
+        fs_loopend(e0)
         e(concat("jmp ", lt))
         emit_raw(concat(lb, ":\n"))
         return 0
@@ -17359,6 +17677,9 @@ def fs_stmt():
         e(c3("j", cc, concat(" ", lb)))
         fs_brk[nfsloop] = lb
         fs_cnt[nfsloop] = lc
+        e0 = fs_mvsnap()
+        fs_lb0[nfsloop] = e0
+        fs_lbm[nfsloop] = 0
         nfsloop += 1
         nb0 = nfsb
         if fx >= 0 and st > 0 and fs_bodyok(vn, fsb_x[fx]):
@@ -17380,6 +17701,7 @@ def fs_stmt():
         fs_suite()
         nfsb = nb0
         nfsloop -= 1
+        fs_loopend(e0)
         emit_raw(concat(lc, ":\n"))
         e(c4("addq $", str(st), ",", concat(str(fsl_o[l]), "(%rbp)")))
         e(concat("jmp ", lt))
@@ -17394,11 +17716,13 @@ def fs_stmt():
         l = fs_newlocal(nm, t)
         if fs_isop("="):
             fp += 1
+            fs_rsrc = fs_rsrcat(fp)
             fs_rexpr()
             vt = fs_ety
             fs_conv(t)
             fs_store(t, concat(str(fsl_o[l]), "(%rbp)"))
             fsl_nn[l] = ft_isnn(vt)
+            fs_battach(l, t)
         elif ft_isnn(t):
             fs_die("a ptr[T] local needs an initializer (it cannot be null; use nptr[T])")
         elif ft_agg(t):
@@ -17416,6 +17740,7 @@ def fs_stmt():
         op = tv[a]
         if str_eq(op, "="):
             fp = a + 1
+            fs_rsrc = fs_rsrcat(fp)
             fs_rexpr()
             vt = fs_ety
             en = fp
@@ -17427,6 +17752,7 @@ def fs_stmt():
             fs_eol()
             return 0
         # augmented assignment: target address, current value, rhs, op, store
+        fs_wstore(fp, a == fp + 1)
         fs_postfix()
         t = fs_ety
         if fs_mode == 0:
@@ -17451,8 +17777,16 @@ def fs_stmt():
         fs_store(t, m)
         fs_eol()
         return 0
+    if fs_isid("panic") and fs_isop2(fp + 1, "("):
+        fs_term = 1
     fs_rexpr()
     fs_eol()
+
+def fs_rsrcat(p):
+# the local named by a bare `NAME` right-hand side at p, else -1
+    if tk[p] == K_ID and (tk[p + 1] == K_NL or tk[p + 1] == K_DED or tk[p + 1] == K_EOF):
+        return fs_local(tv[p])
+    return -1
 
 # ---- program ----
 def fs_decos():
@@ -17512,6 +17846,8 @@ def fs_struct_def(packed):
         fnm = fs_ident()
         fs_expect(":")
         ft = fs_type()
+        if ft_isaff(ft):
+            fs_die("struct fields cannot be own/ref/mut yet")
         fa = ftal[ft]
         if packed:
             fa = 1
@@ -17577,6 +17913,8 @@ def fs_sig(ext):
             fp += 1
         else:
             fsf_ret[f] = fs_type()
+            if fsk[fsf_ret[f]] == 1 and ftsg[fsf_ret[f]] >= 3:
+                fs_die("a function cannot return a borrow (ref[T]/mut[T])")
             if ft_agg(fsf_ret[f]):
                 fs_die("functions cannot return a struct, array or slice yet (pass a pointer or slice out-parameter)")
     fsf_pos[f] = fp
@@ -17632,6 +17970,8 @@ def fs_prescan():
             nfsg += 1
             fsg_n[g] = nm
             fsg_t[g] = fs_type()
+            if ft_isaff(fsg_t[g]):
+                fs_die("globals cannot be own/ref/mut")
             if ft_isnn(fsg_t[g]) and (not fs_isop("=") or (tk[fp + 1] == K_NUM and tv[fp + 1] == 0)):
                 fs_die("a ptr[T] global needs a non-null initializer (use nptr[T])")
             fsg_al[g] = fs_dal
@@ -17730,6 +18070,7 @@ def fs_function(f):
     if fs_bop(at, 136, 0):
         fs_unsafe = 1
         fs_ufn += 1
+        fs_safechk(fsf_ln[f], c3("@unsafe function ", fsf_n[f], ""))
     fs_function1(f)
     if fs_unsafe and fs_urep:
         k = "fn"
@@ -17846,11 +18187,13 @@ def fs_wrapper(f, nm, body):
     e("iretq")
 
 def fs_main(src):
-    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_ufix, fs_ubare
+    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_ufix, fs_ubare, fs_safe
     if contains(src, concat("# forge: ", "checked-ints")):
         fs_chk = 1
     if contains(src, concat("# forge: ", "no-bounds-checks")):
         fs_bchk = 0
+    if contains(src, concat("# forge: ", "safe\n")):
+        fs_safe = 1
     ai = 3
     while ai < argc():
         if str_eq(argv(ai), "--no-bounds"):
@@ -17877,6 +18220,7 @@ def fs_main(src):
             fp += 1
         elif d == 0 and fs_isid("asm") and (fp == 0 or tk[fp - 1] == K_NL or tk[fp - 1] == K_DED):
             fs_ubare += 1
+            fs_safechk(tl[fp], "top-level asm")
             if fs_urep:
                 eputs(c3("unsafe: ", fs_where(tl[fp]), " top-level asm"))
             fp += 2
