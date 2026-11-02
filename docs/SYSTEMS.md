@@ -92,6 +92,11 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 | swap / fetch_add / cas | xchg / lock xadd / lock cmpxchg (all orderings) |||||
 | fence | error | (none) | (none) | (none) | mfence |
 
+### Kernel use of typed atomics and std Vec/Map
+
+- sync.fsi: `spin_lock(l: ptr[u64])` = test-and-test-and-set with `atomic_swap(l, 1, acquire)` / `atomic_load(l, relaxed)`; `spin_unlock` = `atomic_store(l, 0, release)` (a plain mov on x86). Callers pass `addr(lock)`.
+- kernel.forge includes ../../std/vec.fsi and map.fsi; `forge_alloc` = kmalloc, `forge_free` = kfree (size ignored). Usable from any context that may take heap_lock (not from IRQ handlers that already hold it).
+
 ### Generics (Phase 4.5b)
 
 ```

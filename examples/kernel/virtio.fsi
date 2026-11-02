@@ -84,10 +84,10 @@ def vb_init() -> u64:
 
 @interrupt
 def on_vblk(frame: ptr[u64]):
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     vb_irqs += 1
     wq_wake_all_l(addr(vb_wq))
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     lapic_eoi()
 
 @unsafe
@@ -182,18 +182,18 @@ def vb_read(lba: u64, n: u64, dst: u64) -> u64:
         mutex_lock(addr(vb_m))
         vb_submit(lba, n)
         f = irq_save()
-        spin_lock(u64(addr(rq_lock)))
+        spin_lock(addr(rq_lock))
         while vb_done() == 0:
             vb_sleeps += 1
             wq_block_l(addr(vb_wq))
-        spin_unlock(u64(addr(rq_lock)))
+        spin_unlock(addr(rq_lock))
         irq_restore(f)
         ok = vb_finish(n, dst)
         mutex_unlock(addr(vb_m))
         return ok
     # polled path (early boot, interrupts off): vb_m must be free; spinning on it keeps sleepers out
     f = irq_save()
-    spin_lock(u64(addr(vb_lock)))
+    spin_lock(addr(vb_lock))
     while vb_m.locked:
         tlb_poll()
         cpu_relax()
@@ -204,11 +204,11 @@ def vb_read(lba: u64, n: u64, dst: u64) -> u64:
         cpu_relax()
         spins += 1
         if spins > 100000000:
-            spin_unlock(u64(addr(vb_lock)))
+            spin_unlock(addr(vb_lock))
             irq_restore(f)
             panic("virtio-blk: request timed out")
     ok = vb_finish(n, dst)
     vb_polled += 1
-    spin_unlock(u64(addr(vb_lock)))
+    spin_unlock(addr(vb_lock))
     irq_restore(f)
     return ok

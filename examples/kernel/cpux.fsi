@@ -103,7 +103,7 @@ def uaccess_fixup(frame: ptr[u64], err: u64, cr2: u64) -> u64:
     rip = frame[1]
     if rip == uaccess_labels(0) or rip == uaccess_labels(1):
         frame[1] = uaccess_labels(2)
-        atomic_add64(u64(addr(uaccess_faults)), 1)
+        atomic_fetch_add(addr(uaccess_faults), 1, acq_rel)
         return 1
     if rip == uaccess_labels(3):
         frame[1] = uaccess_labels(4)
@@ -209,44 +209,42 @@ tlb_park: u64
 stop_rounds: u64
 stop_parked: u64
 
-@unsafe
 def stop_machine_begin() -> u64:
 # park every other online CPU in its IPI handler (or in the spin loop it is in) with interrupts off;
 # returns the caller's saved interrupt flag. Reuses the shootdown slot, so it serialises with it.
     f = irq_save()
-    spin_lock(u64(addr(tlb_lock)))
-    nc = atomic_load64(u64(addr(ncpu_online)))
+    spin_lock(addr(tlb_lock))
+    nc = atomic_load(addr(ncpu_online), acquire)
     if nc > 1:
         tlb_cr3 = 1  # matches no address space: parked CPUs flush nothing
         tlb_n = 0
-        atomic_store64(u64(addr(tlb_acks)), 0)
-        atomic_store64(u64(addr(tlb_park)), stop_rounds + 1)
+        atomic_store(addr(tlb_acks), 0, seq_cst)
+        atomic_store(addr(tlb_park), stop_rounds + 1, seq_cst)
         me = lapic_cpu()
         cnt: u64 = 0
         c: u64 = 0
         while c < nc:
             if c != me:
-                atomic_store64(u64(addr(tlb_pending[c])), 1)
+                atomic_store(addr(tlb_pending[c]), 1, seq_cst)
                 cnt += 1
             c += 1
-        atomic_store64(u64(addr(tlb_active)), 1)
+        atomic_store(addr(tlb_active), 1, seq_cst)
         c = 0
         while c < nc:
             if c != me:
                 lapic_ipi(cpu_to_apic[c], u32(VEC_TLB))
             c += 1
-        while atomic_load64(u64(addr(tlb_acks))) < cnt:
+        while atomic_load(addr(tlb_acks), acquire) < cnt:
             cpu_relax()
         stop_parked = cnt
     stop_rounds += 1
     return f
 
-@unsafe
 def stop_machine_end(f: u64):
     cpuid4(0, 0)
-    atomic_store64(u64(addr(tlb_park)), 0)
-    atomic_store64(u64(addr(tlb_active)), 0)
-    spin_unlock(u64(addr(tlb_lock)))
+    atomic_store(addr(tlb_park), 0, seq_cst)
+    atomic_store(addr(tlb_active), 0, seq_cst)
+    spin_unlock(addr(tlb_lock))
     irq_restore(f)
 
 @unsafe
@@ -271,21 +269,21 @@ tlb_halt: u64  # kexec: parked CPUs halt for good (the successor restarts them w
 @unsafe
 def tlb_poll():
 # safe with interrupts off: called from spin loops so a CPU that waits on a lock still answers
-    if atomic_load64(u64(addr(tlb_active))) == 0:
+    if atomic_load(addr(tlb_active), acquire) == 0:
         return
     c = lapic_cpu()
-    if atomic_load64(u64(addr(tlb_pending[c]))) != 0:
+    if atomic_load(addr(tlb_pending[c]), acquire) != 0:
         tlb_local(tlb_cr3, tlb_va, tlb_n)
-        atomic_store64(u64(addr(tlb_pending[c])), 0)
-        atomic_add64(u64(addr(tlb_acks)), 1)
-        g = atomic_load64(u64(addr(tlb_park)))
+        atomic_store(addr(tlb_pending[c]), 0, seq_cst)
+        atomic_fetch_add(addr(tlb_acks), 1, acq_rel)
+        g = atomic_load(addr(tlb_park), acquire)
         if g != 0:
         # stop-machine: stay parked (interrupts off) until the initiator ends round g, then serialise
         # so this CPU refetches any instruction bytes the initiator rewrote. Waiting on the round
         # number (not on 0) means a CPU that misses the brief 0 is not trapped into the next round.
             while tlb_halt:
                 hlt()
-            while atomic_load64(u64(addr(tlb_park))) == g:
+            while atomic_load(addr(tlb_park), acquire) == g:
                 cpu_relax()
             cpuid4(0, 0)
 
@@ -294,36 +292,35 @@ def on_tlb_ipi(frame: ptr[u64]):
     tlb_poll()
     lapic_eoi()
 
-@unsafe
 def tlb_shootdown(cr3: u64, va: u64, n: u64):
 # cr3 = 0: kernel (global) mapping, flush everywhere; otherwise only CPUs running that address space
     f = irq_save()
     tlb_local(cr3, va, n)
-    if atomic_load64(u64(addr(ncpu_online))) > 1:
-        spin_lock(u64(addr(tlb_lock)))
+    if atomic_load(addr(ncpu_online), acquire) > 1:
+        spin_lock(addr(tlb_lock))
         tlb_cr3 = cr3
         tlb_va = va
         tlb_n = n
-        atomic_store64(u64(addr(tlb_acks)), 0)
+        atomic_store(addr(tlb_acks), 0, seq_cst)
         me = lapic_cpu()
         cnt: u64 = 0
         c: u64 = 0
-        nc = atomic_load64(u64(addr(ncpu_online)))
+        nc = atomic_load(addr(ncpu_online), acquire)
         while c < nc:
             if c != me:
-                atomic_store64(u64(addr(tlb_pending[c])), 1)
+                atomic_store(addr(tlb_pending[c]), 1, seq_cst)
                 cnt += 1
             c += 1
-        atomic_store64(u64(addr(tlb_active)), 1)
+        atomic_store(addr(tlb_active), 1, seq_cst)
         c = 0
         while c < nc:
             if c != me:
                 lapic_ipi(cpu_to_apic[c], u32(VEC_TLB))
             c += 1
-        while atomic_load64(u64(addr(tlb_acks))) < cnt:
+        while atomic_load(addr(tlb_acks), acquire) < cnt:
             cpu_relax()
-        atomic_store64(u64(addr(tlb_active)), 0)
+        atomic_store(addr(tlb_active), 0, seq_cst)
         tlb_ipis += cnt
         tlb_rounds += 1
-        spin_unlock(u64(addr(tlb_lock)))
+        spin_unlock(addr(tlb_lock))
     irq_restore(f)

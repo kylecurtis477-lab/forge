@@ -102,10 +102,9 @@ def mod_area_init():
         pte_addr(kernel_pml4, va, 1)
         va += 0x200000
 
-@unsafe
 def mod_fail(msg: ptr[u8]) -> nptr[Module]:
     mod_err = msg
-    atomic_add64(u64(addr(mod_rejects)), 1)
+    atomic_fetch_add(addr(mod_rejects), 1, acq_rel)
     return 0
 
 def mod_free_pages(base: u64, n: u64):
@@ -119,24 +118,24 @@ def mod_free_pages(base: u64, n: u64):
 
 def mod_slot_get() -> u64:
     f = irq_save()
-    spin_lock(u64(addr(mod_lock)))
+    spin_lock(addr(mod_lock))
     i: u64 = 0
     while i < MOD_SLOTS:
         if mod_slots[i] == 0:
             mod_slots[i] = 1
-            spin_unlock(u64(addr(mod_lock)))
+            spin_unlock(addr(mod_lock))
             irq_restore(f)
             return i
         i += 1
-    spin_unlock(u64(addr(mod_lock)))
+    spin_unlock(addr(mod_lock))
     irq_restore(f)
     return MOD_SLOTS
 
 def mod_slot_put(s: u64):
     f = irq_save()
-    spin_lock(u64(addr(mod_lock)))
+    spin_lock(addr(mod_lock))
     mod_slots[s] = 0
-    spin_unlock(u64(addr(mod_lock)))
+    spin_unlock(addr(mod_lock))
     irq_restore(f)
 
 def mod_sym(m: ptr[Module], name: ptr[u8]) -> u64:
@@ -358,7 +357,7 @@ def mod_load(img: u64, sz: u64) -> nptr[Module]:
         mod_slot_put(slot)
         kfree(u64(m))
         return mod_fail(err)
-    atomic_add64(u64(addr(mod_loads)), 1)
+    atomic_fetch_add(addr(mod_loads), 1, acq_rel)
     return m
 
 @unsafe
@@ -367,4 +366,4 @@ def mod_unload(m: ptr[Module]):
     mod_free_pages(m.base, m.npages)
     mod_slot_put(m.slot)
     kfree(u64(m))
-    atomic_add64(u64(addr(mod_unloads)), 1)
+    atomic_fetch_add(addr(mod_unloads), 1, acq_rel)

@@ -35,7 +35,7 @@ kx_freed: u64
 def kx_grab(n: u64, align: u64, offs: u64) -> u64:
 # n free contiguous frames whose start is = offs (mod align); 0 if none
     fl = irq_save()
-    spin_lock(u64(addr(pmm_lock)))
+    spin_lock(addr(pmm_lock))
     a = align / PAGE
     f = (offs + 0x200000) / PAGE
     res: u64 = 0
@@ -52,20 +52,20 @@ def kx_grab(n: u64, align: u64, offs: u64) -> u64:
             res = f * PAGE
             break
         f += a
-    spin_unlock(u64(addr(pmm_lock)))
+    spin_unlock(addr(pmm_lock))
     irq_restore(fl)
     return res
 
 def kx_release(pa: u64, n: u64, total: u64):
     fl = irq_save()
-    spin_lock(u64(addr(pmm_lock)))
+    spin_lock(addr(pmm_lock))
     j: u64 = 0
     while j < n:
         frame_clr(pa / PAGE + j)
         j += 1
     frames_free += n
     frames_total += total
-    spin_unlock(u64(addr(pmm_lock)))
+    spin_unlock(addr(pmm_lock))
     irq_restore(fl)
 
 @unsafe
@@ -127,9 +127,9 @@ def kx_fail(msg: ptr[u8], img: u64) -> u64:
 
 def kx_pid_taken(pid: u64) -> u64:
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     r = u64(proc_find_l(pid)) != 0
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
     return r
 
@@ -152,14 +152,14 @@ def kx_freeze_all(me: ptr[Proc]) -> u64:
     tries: u64 = 0
     while tries < 300:
         f = irq_save()
-        spin_lock(u64(addr(rq_lock)))
+        spin_lock(addr(rq_lock))
         wq_wake_all_l(addr(tty_q))
         i = 0
         while i < MAX_PROCS:
             if procs[i] != 0:
                 wq_wake_all_l(addr(ptr[Proc](procs[i]).childq))
             i += 1
-        spin_unlock(u64(addr(rq_lock)))
+        spin_unlock(addr(rq_lock))
         irq_restore(f)
         if kx_wait_parked(me):
             return 1

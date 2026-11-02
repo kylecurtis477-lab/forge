@@ -98,9 +98,9 @@ def pmm_init(bi: ptr[BootInfo]):
 
 def frame_alloc() -> u64:
     f = irq_save()
-    spin_lock(u64(addr(pmm_lock)))
+    spin_lock(addr(pmm_lock))
     pa = frame_alloc_nolock()
-    spin_unlock(u64(addr(pmm_lock)))
+    spin_unlock(addr(pmm_lock))
     irq_restore(f)
     return pa
 
@@ -131,7 +131,7 @@ def frame_alloc_nolock() -> u64:
 def frame_alloc_contig(n: u64) -> u64:
 # n physically contiguous zeroed frames below 4 GiB (DMA rings); 0 if none
     f = irq_save()
-    spin_lock(u64(addr(pmm_lock)))
+    spin_lock(addr(pmm_lock))
     lim = frame_limit
     if lim > 0x100000000 / PAGE:
         lim = 0x100000000 / PAGE
@@ -152,7 +152,7 @@ def frame_alloc_contig(n: u64) -> u64:
             frame_set(res + i)
             frames_free -= 1
             i += 1
-    spin_unlock(u64(addr(pmm_lock)))
+    spin_unlock(addr(pmm_lock))
     irq_restore(f)
     if res == 0:
         return 0
@@ -161,9 +161,9 @@ def frame_alloc_contig(n: u64) -> u64:
 
 def frame_free(pa: u64):
     fl = irq_save()
-    spin_lock(u64(addr(pmm_lock)))
+    spin_lock(addr(pmm_lock))
     frame_free_nolock(pa)
-    spin_unlock(u64(addr(pmm_lock)))
+    spin_unlock(addr(pmm_lock))
     irq_restore(fl)
 
 def frame_free_nolock(pa: u64):
@@ -325,9 +325,9 @@ def class_size(c: u64) -> u64:
 
 def kmalloc(n: u64) -> u64:
     f = irq_save()
-    spin_lock(u64(addr(heap_lock)))
+    spin_lock(addr(heap_lock))
     p = kmalloc_nolock(n)
-    spin_unlock(u64(addr(heap_lock)))
+    spin_unlock(addr(heap_lock))
     irq_restore(f)
     return p
 
@@ -368,9 +368,9 @@ def kmalloc_nolock(n: u64) -> u64:
 
 def kfree(p: u64):
     f = irq_save()
-    spin_lock(u64(addr(heap_lock)))
+    spin_lock(addr(heap_lock))
     kfree_nolock(p)
-    spin_unlock(u64(addr(heap_lock)))
+    spin_unlock(addr(heap_lock))
     irq_restore(f)
 
 @unsafe

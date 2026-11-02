@@ -22,6 +22,53 @@ include "module.fsi"
 include "drv.fsi"
 include "livepatch.fsi"
 include "kexec.fsi"
+include "../../std/vec.fsi"
+include "../../std/map.fsi"
+
+# std/vec.fsi + std/map.fsi allocator contract, backed by the kernel heap
+def forge_alloc(bytes: u64) -> u64:
+    return kmalloc(bytes)
+
+def forge_free(p: u64, bytes: u64):
+    kfree(p)
+
+def vecmap_test():
+# generic Vec[T] / Map[K, V] on kmalloc: grow past a page, delete, free; heap must balance
+    h0 = heap_live
+    v: Vec[u64]
+    vec_init(addr(v))
+    i: u64 = 0
+    while i < 1000:
+        vec_push(addr(v), i * 3)
+        i += 1
+    s: u64 = 0
+    i = 0
+    while i < vec_len(addr(v)):
+        s += vec_get(addr(v), i)
+        i += 1
+    m: Map[u64, u64]
+    map_init(addr(m))
+    i = 0
+    while i < 500:
+        map_put(addr(m), i * 11, i)
+        i += 1
+    i = 0
+    while i < 500:
+        if i % 2 == 0:
+            map_del(addr(m), i * 11)
+        i += 1
+    o: u64 = 0
+    ok = map_get(addr(m), 11 * 333, addr(o)) == 1 and o == 333 and map_has(addr(m), 22) == 0 and map_len(addr(m)) == 250
+    vec_free(addr(v))
+    map_free(addr(m))
+    puts("Vec/Map on the kernel heap: sum ")
+    put_u64(s)
+    puts(", map len 250, heap leaked ")
+    put_u64(heap_live - h0)
+    putc(10)
+    if s != 1498500 or not ok or heap_live != h0:
+        panic("Vec/Map test failed")
+    puts("generic Vec/Map OK\n")
 
 MB2_MAGIC = 0x36D76289
 
@@ -276,17 +323,16 @@ counter_lock: u64
 done_count: u64
 work_until: u64
 
-@unsafe
 def worker(arg: u64):
     t = cur_thread()
-    while atomic_load64(u64(addr(lapic_ticks))) < work_until:
+    while atomic_load(addr(lapic_ticks), acquire) < work_until:
         f = irq_save()
-        spin_lock(u64(addr(counter_lock)))
+        spin_lock(addr(counter_lock))
         shared_counter += 1
-        spin_unlock(u64(addr(counter_lock)))
+        spin_unlock(addr(counter_lock))
         irq_restore(f)
         t.iters += 1
-    atomic_add64(u64(addr(done_count)), 1)
+    atomic_fetch_add(addr(done_count), 1, acq_rel)
 
 def popcount(v: u64) -> u64:
     n: u64 = 0
@@ -309,7 +355,6 @@ pc_sum: u64
 pc_got: u64
 PC_ITEMS = 3000
 
-@unsafe
 def mx_worker(n: u64):
     i: u64 = 0
     while i < n:
@@ -320,9 +365,8 @@ def mx_worker(n: u64):
         mx_counter = v + 1
         mutex_unlock(addr(mx))
         i += 1
-    atomic_add64(u64(addr(mx_done)), 1)
+    atomic_fetch_add(addr(mx_done), 1, acq_rel)
 
-@unsafe
 def pc_producer(base: u64):
     i: u64 = 0
     while i < PC_ITEMS:
@@ -334,9 +378,8 @@ def pc_producer(base: u64):
         cond_signal(addr(pc_notempty))
         mutex_unlock(addr(pc_m))
         i += 1
-    atomic_add64(u64(addr(mx_done)), 1)
+    atomic_fetch_add(addr(mx_done), 1, acq_rel)
 
-@unsafe
 def pc_consumer(n: u64):
     i: u64 = 0
     while i < n:
@@ -351,7 +394,7 @@ def pc_consumer(n: u64):
         cond_signal(addr(pc_notfull))
         mutex_unlock(addr(pc_m))
         i += 1
-    atomic_add64(u64(addr(mx_done)), 1)
+    atomic_fetch_add(addr(mx_done), 1, acq_rel)
 
 @unsafe
 def sync_test():
@@ -361,7 +404,7 @@ def sync_test():
     while i < 6:
         ths[i] = u64(thread_spawn(u64(mx_worker), 2000))
         i += 1
-    while atomic_load64(u64(addr(mx_done))) < 6:
+    while atomic_load(addr(mx_done), acquire) < 6:
         yield_cpu()
     i = 0
     while i < 6:
@@ -381,7 +424,7 @@ def sync_test():
     ths[1] = u64(thread_spawn(u64(pc_producer), 1000000))
     ths[2] = u64(thread_spawn(u64(pc_consumer), PC_ITEMS))
     ths[3] = u64(thread_spawn(u64(pc_consumer), PC_ITEMS))
-    while atomic_load64(u64(addr(mx_done))) < 4:
+    while atomic_load(addr(mx_done), acquire) < 4:
         yield_cpu()
     i = 0
     while i < 4:
@@ -417,12 +460,12 @@ def tlbt_worker(cpu: u64):
 # pinned to one CPU: keep the old translation hot until the remap, then report what it sees
     s: u64 = 0
     s += vload64(TLBT_VA)
-    atomic_add64(u64(addr(tlbt_ready)), 1)
-    while atomic_load64(u64(addr(tlbt_go))) == 0:
+    atomic_fetch_add(addr(tlbt_ready), 1, acq_rel)
+    while atomic_load(addr(tlbt_go), acquire) == 0:
         s += vload64(TLBT_VA)
         cpu_relax()
     tlbt_seen[cpu] = vload64(TLBT_VA)
-    atomic_add64(u64(addr(tlbt_done)), 1)
+    atomic_fetch_add(addr(tlbt_done), 1, acq_rel)
 
 @unsafe
 def tlb_test():
@@ -440,15 +483,15 @@ def tlb_test():
         ths[i] = u64(t)
         thread_start_ready(t)
         i += 1
-    while atomic_load64(u64(addr(tlbt_ready))) < n:
+    while atomic_load(addr(tlbt_ready), acquire) < n:
         yield_cpu()
     r0 = tlb_rounds
     ip0 = tlb_ipis
     # remap the global page to a different frame; without the shootdown the other CPUs keep reading 0x1111
     vstore64(pte_addr(kernel_pml4, TLBT_VA, 0), fb | PTE_P | PTE_W | PTE_G | PTE_NX)
     tlb_shootdown(0, TLBT_VA, 1)
-    atomic_store64(u64(addr(tlbt_go)), 1)
-    while atomic_load64(u64(addr(tlbt_done))) < n:
+    atomic_store(addr(tlbt_go), 1, seq_cst)
+    while atomic_load(addr(tlbt_done), acquire) < n:
         yield_cpu()
     ok: u64 = 1
     i = 0
@@ -482,7 +525,7 @@ def sched_test():
     while i < NWORKERS:
         ths[i] = u64(thread_spawn(u64(worker), i))
         i += 1
-    while atomic_load64(u64(addr(done_count))) < NWORKERS:
+    while atomic_load(addr(done_count), acquire) < NWORKERS:
         hlt()
     total: u64 = 0
     seen: u64 = 0
@@ -490,7 +533,7 @@ def sched_test():
     i = 0
     while i < NWORKERS:
         t = ptr[Thread](ths[i])
-        while atomic_load64(u64(addr(t.state))) != T_DEAD:
+        while atomic_load(addr(t.state), acquire) != T_DEAD:
             yield_cpu()
         total += t.iters
         seen = seen | t.cpus_seen
@@ -829,14 +872,13 @@ lph_calls: u64
 lph_wrong: u64
 lph_iter: u64[4]
 
-@unsafe
 def lp_hammer(i: u64):
 # kernel threads have no process: the right answer is 0, patched or not
-    while atomic_load64(u64(addr(lph_stop))) == 0:
+    while atomic_load(addr(lph_stop), acquire) == 0:
         if sys_getpid() != 0:
-            atomic_add64(u64(addr(lph_wrong)), 1)
-        atomic_add64(u64(addr(lph_calls)), 1)
-        atomic_add64(u64(addr(lph_iter[i])), 1)
+            atomic_fetch_add(addr(lph_wrong), 1, acq_rel)
+        atomic_fetch_add(addr(lph_calls), 1, acq_rel)
+        atomic_fetch_add(addr(lph_iter[i]), 1, acq_rel)
         if (lph_iter[i] & 1023) == 0:
             yield_cpu()
 
@@ -853,17 +895,16 @@ def lp_check_flaky(fn: u64) -> u64:
         return 0
     return lp_check_getpid(fn)
 
-@unsafe
 def lp_quiesce():
 # every hammer passes its loop head twice, i.e. has left any call it was in when the text changed
     s: u64[4]
     i: u64 = 1
     while i < 4:
-        s[i] = atomic_load64(u64(addr(lph_iter[i])))
+        s[i] = atomic_load(addr(lph_iter[i]), acquire)
         i += 1
     i = 1
     while i < 4:
-        while atomic_load64(u64(addr(lph_iter[i]))) < s[i] + 2:
+        while atomic_load(addr(lph_iter[i]), acquire) < s[i] + 2:
             yield_cpu()
         i += 1
 
@@ -912,7 +953,7 @@ def livepatch_test():
     sleep_ticks(2)
     if call_ptr(mod_sym(m, "lp_calls")) != c1 or call_ptr(mod_sym(m, "lp_active")) != 0:
         panic("patched code still reached after rollback")
-    atomic_store64(u64(addr(lph_stop)), 1)
+    atomic_store(addr(lph_stop), 1, seq_cst)
     i = 1
     while i < 4:
         thread_reap(ptr[Thread](th[i]))
@@ -972,7 +1013,7 @@ def tty_swap_to(v: u64) -> u64:
         fpop = mod_sym(ptr[Module](m), "tty_pop")
     st = kmalloc(1100)
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     sv = u64(tty0_save)
     if tsw_mod != 0:
         sv = ptr[Module](tsw_mod).save
@@ -982,7 +1023,7 @@ def tty_swap_to(v: u64) -> u64:
         tty_fp_push = fpush
         tty_fp_lines = flines
         tty_fp_pop = fpop
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
     if ok == 1:
         if n > 24 and vload8(st + n - 1) != 10:
@@ -1172,6 +1213,7 @@ def after_overflow():
     sched_test()
     tlb_test()
     sync_test()
+    vecmap_test()
     user_test()
     fs_test()
     module_test()

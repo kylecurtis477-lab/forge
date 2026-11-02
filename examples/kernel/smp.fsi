@@ -100,8 +100,8 @@ def ap_main():
     lapic_wr(0x3E0, 3)
     lapic_wr(0x320, 0x20000 | VEC_TIMER)
     lapic_wr(0x380, u32(lapic_per_10ms))
-    atomic_add64(u64(addr(ncpu_online)), 1)
-    atomic_store64(u64(addr(ap_up)), 1)
+    atomic_fetch_add(addr(ncpu_online), 1, acq_rel)
+    atomic_store(addr(ap_up), 1, seq_cst)
     idle_loop(0)
 
 @unsafe
@@ -147,13 +147,13 @@ def smp_init():
         tsc_delay_us(10000)
         lapic_ipi(apic, 0x4600 | u32(tp >> 12))
         tsc_delay_us(200)
-        if atomic_load64(u64(addr(ap_up))) == 0:
+        if atomic_load(addr(ap_up), acquire) == 0:
             lapic_ipi(apic, 0x4600 | u32(tp >> 12))
         w = 0
-        while atomic_load64(u64(addr(ap_up))) == 0 and w < 1000:
+        while atomic_load(addr(ap_up), acquire) == 0 and w < 1000:
             tsc_delay_us(100)
             w += 1
-        if atomic_load64(u64(addr(ap_up))) == 0:
+        if atomic_load(addr(ap_up), acquire) == 0:
             puts("SMP: AP apic ")
             put_u64(apic)
             puts(" did not start\n")

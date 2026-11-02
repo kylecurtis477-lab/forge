@@ -70,16 +70,16 @@ def proc_find_l(pid: u64) -> nptr[Proc]:
 
 def proc_insert(p: ptr[Proc]) -> u64:
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     i = 0
     while i < MAX_PROCS:
         if procs[i] == 0:
             procs[i] = u64(p)
-            spin_unlock(u64(addr(rq_lock)))
+            spin_unlock(addr(rq_lock))
             irq_restore(f)
             return 1
         i += 1
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
     return 0
 
@@ -121,12 +121,12 @@ def file_new(type: u64) -> ptr[File]:
 @unsafe
 def file_get(fl: u64) -> u64:
     if fl != 0:
-        atomic_add64(u64(addr(ptr[File](fl).ref)), 1)
+        atomic_fetch_add(addr(ptr[File](fl).ref), 1, acq_rel)
     return fl
 
 @unsafe
 def file_put(fl: u64):
-    if fl != 0 and atomic_add64(u64(addr(ptr[File](fl).ref)), 0xFFFFFFFFFFFFFFFF) == 1:
+    if fl != 0 and (atomic_fetch_add(addr(ptr[File](fl).ref), 0xFFFFFFFFFFFFFFFF, acq_rel)) == 1:
         kfree(fl)
 
 console_obj: File
@@ -337,9 +337,9 @@ def tty_push_l(c: u64):
         wq_wake_all_l(addr(tty_q))
 
 def tty_input(c: u64):
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     tty_push_l(c)
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
 
 @unsafe
 def tty_read(ubuf: u64, n: u64) -> u64:
@@ -347,18 +347,18 @@ def tty_read(ubuf: u64, n: u64) -> u64:
     if n > 256:
         n = 256
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     if tty_fp_push == 0:
         tty_fp_push = u64(tty0_push)
         tty_fp_lines = u64(tty0_lines)
         tty_fp_pop = u64(tty0_pop)
     while call_ptr(tty_fp_lines) == 0:
         if kx_should_park():
-            spin_unlock(u64(addr(rq_lock)))
+            spin_unlock(addr(rq_lock))
             irq_restore(f)
             kx_park()
             f = irq_save()
-            spin_lock(u64(addr(rq_lock)))
+            spin_lock(addr(rq_lock))
             continue
         wq_block_l(addr(tty_q))
     got: u64 = 0
@@ -369,7 +369,7 @@ def tty_read(ubuf: u64, n: u64) -> u64:
         got += 1
         if c == 10:
             break
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
     # echo what the program consumed (cooked mode, echo at read time)
     spin_lock_irq_con()
@@ -386,12 +386,12 @@ con_irqf: u64
 
 def spin_lock_irq_con():
     f = irq_save()
-    spin_lock(u64(addr(con_lock)))
+    spin_lock(addr(con_lock))
     con_irqf = f
 
 def spin_unlock_irq_con():
     f = con_irqf
-    spin_unlock(u64(addr(con_lock)))
+    spin_unlock(addr(con_lock))
     irq_restore(f)
 
 SC_MAP: u8[58] = [0, 27, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 45, 61, 8, 9, 113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 91, 93, 10, 0, 97, 115, 100, 102, 103, 104, 106, 107, 108, 59, 39, 96, 0, 92, 122, 120, 99, 118, 98, 110, 109, 44, 46, 47, 0, 42, 0, 32]
@@ -404,7 +404,7 @@ VEC_COM1 = 0x43
 @interrupt
 @unsafe
 def on_kbd(frame: ptr[u64]):
-    atomic_add64(u64(addr(kbd_irqs)), 1)
+    atomic_fetch_add(addr(kbd_irqs), 1, acq_rel)
     while inb(0x64) & 1:
         sc = u64(inb(0x60))
         if sc == 0xE0:
@@ -428,7 +428,7 @@ def on_kbd(frame: ptr[u64]):
 @interrupt
 @unsafe
 def on_com1(frame: ptr[u64]):
-    atomic_add64(u64(addr(com_irqs)), 1)
+    atomic_fetch_add(addr(com_irqs), 1, acq_rel)
     while inb(0x3FD) & 1:
         c = u64(inb(0x3F8))
         if c == 13:
@@ -586,14 +586,14 @@ def proc_destroy(p: ptr[Proc]):
 @unsafe
 def proc_reap(t: ptr[Thread]) -> u64:
 # kernel-side wait for a process the kernel spawned
-    while atomic_load64(u64(addr(t.state))) != T_DEAD:
+    while atomic_load(addr(t.state), acquire) != T_DEAD:
         yield_cpu()
     p = ptr[Proc](t.proc)
     code = p.exit_code
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     proc_remove_l(p)
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
     proc_destroy(p)
     return code
@@ -610,7 +610,7 @@ def proc_exit(code: u64):
         p.fds[i] = 0
         i += 1
     cli()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     p.exit_code = code
     t.exit_code = code
     p.state = P_ZOMBIE
@@ -631,7 +631,7 @@ def proc_reap_orphans() -> u64:
     n: u64 = 0
     while 1:
         f = irq_save()
-        spin_lock(u64(addr(rq_lock)))
+        spin_lock(addr(rq_lock))
         z: u64 = 0
         i = 0
         while i < MAX_PROCS:
@@ -641,7 +641,7 @@ def proc_reap_orphans() -> u64:
                 z = q
                 break
             i += 1
-        spin_unlock(u64(addr(rq_lock)))
+        spin_unlock(addr(rq_lock))
         irq_restore(f)
         if z == 0:
             return n
@@ -739,7 +739,7 @@ def sys_exec(frame: u64, upath: u64, uargs: u64) -> u64:
 def sys_wait(pid: u64, ustatus: u64) -> u64:
     me = cur_proc()
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     while 1:
         found: u64 = 0
         any: u64 = 0
@@ -754,7 +754,7 @@ def sys_wait(pid: u64, ustatus: u64) -> u64:
                     break
             i += 1
         if found != 0:
-            spin_unlock(u64(addr(rq_lock)))
+            spin_unlock(addr(rq_lock))
             irq_restore(f)
             c = ptr[Proc](found)
             cpid = c.pid
@@ -764,15 +764,15 @@ def sys_wait(pid: u64, ustatus: u64) -> u64:
                 return EFAULT
             return cpid
         if any == 0:
-            spin_unlock(u64(addr(rq_lock)))
+            spin_unlock(addr(rq_lock))
             irq_restore(f)
             return ECHILD
         if kx_should_park():
-            spin_unlock(u64(addr(rq_lock)))
+            spin_unlock(addr(rq_lock))
             irq_restore(f)
             kx_park()
             f = irq_save()
-            spin_lock(u64(addr(rq_lock)))
+            spin_lock(addr(rq_lock))
             continue
         wq_block_l(addr(me.childq))
     return 0
@@ -917,7 +917,7 @@ def con_write_user(p: u64, n: u64) -> u64:
 @unsafe
 def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64:
 # entered with interrupts off (FMASK); the asm exit path disables them again before sysret
-    atomic_add64(u64(addr(syscalls)), 1)
+    atomic_fetch_add(addr(syscalls), 1, acq_rel)
     sti()
     st = cur_thread()
     st.sc[0] = nr
@@ -997,12 +997,11 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         return l
     return ENOSYS
 
-@unsafe
 def user_kill(name: ptr[u8], vec: u64, rip: u64, addr_: u64):
 # called from an exception taken in ring 3: report, and the process exits with 0x100 + vector
     t = cur_thread()
-    atomic_add64(u64(addr(user_kills)), 1)
-    spin_lock(u64(addr(con_lock)))
+    atomic_fetch_add(addr(user_kills), 1, acq_rel)
+    spin_lock(addr(con_lock))
     puts("user fault: pid ")
     put_u64(t.id)
     puts(" ")
@@ -1012,5 +1011,5 @@ def user_kill(name: ptr[u8], vec: u64, rip: u64, addr_: u64):
     puts(" addr=")
     put_hex(addr_)
     puts(" -> killed\n")
-    spin_unlock(u64(addr(con_lock)))
+    spin_unlock(addr(con_lock))
     proc_exit(0x100 + vec)

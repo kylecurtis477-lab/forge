@@ -44,7 +44,7 @@ def vb_read_drv(lba: u64, n: u64, dst: u64) -> u64:
     if rq_buf == 0:
         rq_buf = kmalloc(4096)
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     st = EIO
     if blkd_up or blkd_replay:
         rq_seq += 1
@@ -64,7 +64,7 @@ def vb_read_drv(lba: u64, n: u64, dst: u64) -> u64:
             wq_block_l(addr(rq_cliq))
         st = rq_status
         rq_state = RQ_IDLE
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
     ok: u64 = 0
     if st == 0:
@@ -78,7 +78,7 @@ def vb_read_drv(lba: u64, n: u64, dst: u64) -> u64:
 def drv_died(p: ptr[Proc]):
 # called from proc_exit of a driver process, before its address space (and DMA frames) is freed
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     outb(u16(vb_io + VIO_STATUS), 0)  # device reset: stops all DMA into the driver's frames
     blkd_up = 0
     drv_deaths += 1
@@ -95,7 +95,7 @@ def drv_died(p: ptr[Proc]):
             drv_eio += 1
     wq_wake_all_l(addr(rq_cliq))
     wq_wake_all_l(addr(drv_supq))
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
 
 def drv_port_ok(port: u64, w: u64) -> u64:
@@ -153,18 +153,18 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
     if nr == 404:
     # irq_wait(seen): block until the device interrupt count differs from seen; returns the count
         f = irq_save()
-        spin_lock(u64(addr(rq_lock)))
+        spin_lock(addr(rq_lock))
         while a != 0xFFFFFFFFFFFFFFFF and vb_irqs == a:
             wq_block_l(addr(vb_wq))
         r = vb_irqs
-        spin_unlock(u64(addr(rq_lock)))
+        spin_unlock(addr(rq_lock))
         irq_restore(f)
         return r
     if nr == 405:
     # recv(msg[4]): block for a request -> seq, lba, count, flags
         m: u64[4]
         f = irq_save()
-        spin_lock(u64(addr(rq_lock)))
+        spin_lock(addr(rq_lock))
         while rq_state != RQ_POSTED:
             wq_block_l(addr(rq_drvq))
         rq_state = RQ_TAKEN
@@ -172,7 +172,7 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
         m[1] = rq_lba
         m[2] = rq_n
         m[3] = rq_flags
-        spin_unlock(u64(addr(rq_lock)))
+        spin_unlock(addr(rq_lock))
         irq_restore(f)
         if copy_user(a, u64(addr(m[0])), 32) != 0:
             return EFAULT
@@ -182,7 +182,7 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
         if b == 0 and copy_user(rq_buf, c, rq_n * 512) != 0:
             return EFAULT
         f = irq_save()
-        spin_lock(u64(addr(rq_lock)))
+        spin_lock(addr(rq_lock))
         rr: u64 = EINVAL
         if rq_state == RQ_TAKEN and rq_seq == a:
             rq_status = EIO
@@ -192,7 +192,7 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
             drv_served += 1
             wq_wake_all_l(addr(rq_cliq))
             rr = 0
-        spin_unlock(u64(addr(rq_lock)))
+        spin_unlock(addr(rq_lock))
         irq_restore(f)
         return rr
     if nr == 407:
@@ -265,10 +265,10 @@ def blkd_spawn(args: ptr[u8]) -> nptr[Thread]:
 def supervisor(arg: u64):
     while 1:
         f = irq_save()
-        spin_lock(u64(addr(rq_lock)))
+        spin_lock(addr(rq_lock))
         while blkd_up:
             wq_block_l(addr(drv_supq))
-        spin_unlock(u64(addr(rq_lock)))
+        spin_unlock(addr(rq_lock))
         irq_restore(f)
         old = ptr[Thread](blkd_thread)
         code = proc_reap(old)
@@ -278,13 +278,13 @@ def supervisor(arg: u64):
         if sup_restarts > SUP_MAX_RESTARTS:
             puts("supervisor: blkd keeps dying, giving up\n")
             f = irq_save()
-            spin_lock(u64(addr(rq_lock)))
+            spin_lock(addr(rq_lock))
             blkd_replay = 0
             if rq_state == RQ_POSTED:
                 rq_status = EIO
                 rq_state = RQ_DONE
                 wq_wake_all_l(addr(rq_cliq))
-            spin_unlock(u64(addr(rq_lock)))
+            spin_unlock(addr(rq_lock))
             irq_restore(f)
             return
         a: u8[64]
@@ -304,11 +304,11 @@ def supervisor(arg: u64):
         if u64(t) == 0:
             panic("supervisor: blkd image rejected")
         f = irq_save()
-        spin_lock(u64(addr(rq_lock)))
+        spin_lock(addr(rq_lock))
         blkd_thread = u64(t)
         blkd_pid = t.id
         blkd_up = 1
-        spin_unlock(u64(addr(rq_lock)))
+        spin_unlock(addr(rq_lock))
         irq_restore(f)
 
 def blkd_supervised_start(img: u64, sz: u64):
@@ -336,21 +336,21 @@ def blkd_supervised_stop():
     sup_stop = 1
     mutex_lock(addr(vb_m))
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     rq_seq += 1
     rq_n = 0
     rq_flags = 2
     rq_state = RQ_POSTED
     wq_wake_all_l(addr(rq_drvq))
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
     mutex_unlock(addr(vb_m))
     thread_reap(ptr[Thread](sup_thread))
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     rq_state = RQ_IDLE
     blkd_replay = 0
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
     vb_reinit()
     kfree(rq_buf)

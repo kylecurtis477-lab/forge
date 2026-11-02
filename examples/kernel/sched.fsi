@@ -99,7 +99,7 @@ def thread_new(fn: u64, arg: u64) -> ptr[Thread]:
     memset(u64(t), 0, sizeof(Thread))
     t.stack = kmalloc(KTHREAD_STACK)
     t.kstack_top = (t.stack + KTHREAD_STACK) & ~u64(15)
-    t.id = atomic_add64(u64(addr(next_tid)), 1) + 1
+    t.id = atomic_fetch_add(addr(next_tid), 1, acq_rel) + 1
     t.cr3 = kernel_pml4
     t.fpu = fpu_area_new()
     top = t.kstack_top
@@ -119,9 +119,9 @@ def thread_new(fn: u64, arg: u64) -> ptr[Thread]:
 
 def thread_start_ready(t: ptr[Thread]):
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     rq_push(t)
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
 
 def thread_spawn(fn: u64, arg: u64) -> ptr[Thread]:
@@ -132,9 +132,9 @@ def thread_spawn(fn: u64, arg: u64) -> ptr[Thread]:
 def thread_free(t: ptr[Thread]):
 # only for T_DEAD threads: the lock round-trip guarantees the CPU that switched away from it is done
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     st = t.state
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
     if st != T_DEAD:
         panic("thread_free: thread still alive")
@@ -145,12 +145,12 @@ def thread_free(t: ptr[Thread]):
 @export
 @unsafe
 def sched_tail():
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     sti()
 
 def schedule(exiting: u64):
 # interrupts are off (timer handler, yield, exit)
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     schedule_l(exiting)
 
 @unsafe
@@ -164,7 +164,7 @@ def schedule_l(exiting: u64):
     nxt = ptr[Thread](rq_pop(cpu))
     if u64(nxt) == 0:
         if cur.state == T_RUNNING or cur.state == T_IDLE:
-            spin_unlock(u64(addr(rq_lock)))
+            spin_unlock(addr(rq_lock))
             return
         nxt = ptr[Thread](idle_thr[cpu])
     if cur.state == T_RUNNING:
@@ -183,7 +183,7 @@ def schedule_l(exiting: u64):
     fpu_save(cur.fpu)
     fpu_restore(nxt.fpu)
     ctx_switch(u64(addr(cur.rsp)), nxt.rsp)
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
 
 def yield_cpu():
     f = irq_save()
@@ -218,7 +218,7 @@ def sched_cpu_init(cpu: u64, boot_ctx_is_idle: u64):
     else:
         t.state = T_RUNNING
         t.kstack_top = tss[cpu].rsp0
-        t.id = atomic_add64(u64(addr(next_tid)), 1) + 1
+        t.id = atomic_fetch_add(addr(next_tid), 1, acq_rel) + 1
         it = thread_new(u64(idle_loop), 0)
         it.state = T_IDLE
         idle_thr[cpu] = u64(it)
@@ -271,7 +271,7 @@ def wq_block_l(q: ptr[WaitQ]):
     wq_push(q, cur)
     wq_blocks += 1
     schedule_l(0)
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
 
 def wake_l(t: ptr[Thread]):
     t.state = T_READY
@@ -294,22 +294,22 @@ def wq_wake_all_l(q: ptr[WaitQ]) -> u64:
 
 def wq_wait(q: ptr[WaitQ]):
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     wq_block_l(q)
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
 
 def wq_wake_all(q: ptr[WaitQ]) -> u64:
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     n = wq_wake_all_l(q)
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
     return n
 
 def mutex_lock(m: ptr[Mutex]):
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     cur = current[lapic_cpu()]
     if m.locked and m.owner == cur:
         panic("mutex_lock: recursive lock")
@@ -318,7 +318,7 @@ def mutex_lock(m: ptr[Mutex]):
         wq_block_l(addr(m.q))
     m.locked = 1
     m.owner = current[lapic_cpu()]
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
 
 def mutex_unlock_l(m: ptr[Mutex]):
@@ -330,26 +330,26 @@ def mutex_unlock_l(m: ptr[Mutex]):
 
 def mutex_unlock(m: ptr[Mutex]):
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     mutex_unlock_l(m)
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
 
 def cond_wait(c: ptr[CondVar], m: ptr[Mutex]):
 # atomically release m and sleep on c, then re-acquire m
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     mutex_unlock_l(m)
     wq_block_l(addr(c.q))
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
     mutex_lock(m)
 
 def cond_signal(c: ptr[CondVar]):
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     wq_wake_one_l(addr(c.q))
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
 
 def cond_broadcast(c: ptr[CondVar]):
@@ -358,11 +358,11 @@ def cond_broadcast(c: ptr[CondVar]):
 @unsafe
 def sleep_ticks(n: u64):
     f = irq_save()
-    spin_lock(u64(addr(rq_lock)))
+    spin_lock(addr(rq_lock))
     cur = ptr[Thread](current[lapic_cpu()])
     cur.wake_at = lapic_ticks + n
     wq_block_l(addr(sleepq))
-    spin_unlock(u64(addr(rq_lock)))
+    spin_unlock(addr(rq_lock))
     irq_restore(f)
 
 @unsafe
@@ -384,8 +384,7 @@ def sleep_tick_l():
             prev = t
         t = nx
 
-@unsafe
 def thread_reap(t: ptr[Thread]):
-    while atomic_load64(u64(addr(t.state))) != T_DEAD:
+    while atomic_load(addr(t.state), acquire) != T_DEAD:
         yield_cpu()
     thread_free(t)

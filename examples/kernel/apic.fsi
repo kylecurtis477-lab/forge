@@ -58,13 +58,12 @@ def pic_disable():
     outb(0xA1, 0xFF)
 
 @interrupt
-@unsafe
 def on_lapic_timer(frame: ptr[u64]):
     if lapic_cpu() == 0:
-        atomic_add64(u64(addr(lapic_ticks)), 1)
+        atomic_fetch_add(addr(lapic_ticks), 1, acq_rel)
     lapic_eoi()
     if sched_on:
-        spin_lock(u64(addr(rq_lock)))
+        spin_lock(addr(rq_lock))
         if lapic_cpu() == 0 and sleepq.head != 0:
             sleep_tick_l()
         schedule_l(0)
