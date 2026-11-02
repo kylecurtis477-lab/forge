@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0302","file":"tests/diag/type_list_literal.forge","line":1,"col":20,"end_line":1,"end_col":21,"message":"incompatible types in assignment (expression has type list[object], variable 'names' has type list[str])","fixits":[]}

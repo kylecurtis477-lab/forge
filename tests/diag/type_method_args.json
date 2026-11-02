@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0315","file":"tests/diag/type_method_args.forge","line":9,"col":6,"end_line":9,"end_col":7,"message":"'add' takes 1 positional arguments but 2 were given","fixits":[]}

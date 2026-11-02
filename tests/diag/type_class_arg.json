@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0301","file":"tests/diag/type_class_arg.forge","line":11,"col":6,"end_line":11,"end_col":12,"message":"argument 1 to 'walk' has type Animal, expected Dog","fixits":[]}

@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0202","file":"tests/diag/lex_or_name_undef_var.forge","line":2,"col":7,"end_line":2,"end_col":8,"message":"undefined name 'y'","fixits":[{"line":2,"col":7,"end_line":2,"end_col":8,"replace":"x","note":"did you mean 'x'?"}]}

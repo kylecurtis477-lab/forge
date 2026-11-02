@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0302","file":"tests/diag/type_class_field.forge","line":7,"col":7,"end_line":7,"end_col":8,"message":"incompatible types in assignment (expression has type str, attribute 'x' has type float)","fixits":[]}

@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0201","file":"tests/diag/lex_or_name_undef_fn.forge","line":1,"col":7,"end_line":1,"end_col":8,"message":"undefined function 'g'","fixits":[]}

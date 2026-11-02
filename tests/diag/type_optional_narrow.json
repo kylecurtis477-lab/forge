@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0303","file":"tests/diag/type_optional_narrow.forge","line":6,"col":14,"end_line":6,"end_col":15,"message":"unsupported operand types for +: Optional[int] and int (check 'is None' first)","fixits":[]}

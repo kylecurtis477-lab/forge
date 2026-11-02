@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0315","file":"tests/diag/lex_or_name_arity.forge","line":3,"col":8,"end_line":3,"end_col":9,"message":"'f' takes 1 positional arguments but 2 were given","fixits":[]}

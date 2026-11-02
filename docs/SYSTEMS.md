@@ -59,6 +59,9 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
   - It is linked directly by `ld -m i386pep --subsystem 10`. `mkgpt.py` builds a GPT disk with an ESP plus placeholder Microsoft basic data and Linux partitions.
 - **Tests:** `tests/os/boot.py` boots each path headless, checks the serial markers, takes a QEMU monitor `screendump` after `KERNEL OK`, decodes every framebuffer text row against the font (KERNEL OK must be on screen, so console scrolling is checked), and then sends `q` on COM1 so the kernel exits. The three paths are BIOS+GRUB, OVMF+GRUB, and OVMF+forgex64.efi on GPT, all with `-smp 4` and a read-only virtio-blk copy of the GPT disk (its removable-media fallback loader removed so firmware never boots it).
 
+## Compiler tooling (Phase 3)
+- `--diagnostics=json`: one schema-v1 JSON object per error (file/line/col span, code, message, fix-its); goldens in `tests/diag`.
+
 ## Dual boot
 - The loader and kernel install into their own vendor directory on an existing ESP: `\EFI\Forge\forgex64.efi` and `\EFI\Forge\kernel.elf`. Add a firmware boot entry, e.g. `efibootmgr -c -d /dev/sdX -p N -L Forge -l '\EFI\Forge\forgex64.efi'`, or `bcdedit /copy {bootmgr}` + `/set {id} path \EFI\Forge\forgex64.efi` on Windows.
 - Nothing else is touched: not `\EFI\Microsoft`, not `\EFI\<distro>`, not the MBR, and no repartitioning. The loader only reads its own kernel file. The kernel's disk access is read-only: it reads only GPT headers and files under `\\EFI\\Forge\\` on the ESP and never writes. `\EFI\BOOT\BOOTX64.EFI` is used only on the throwaway test disk.

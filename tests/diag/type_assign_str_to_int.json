@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0302","file":"tests/diag/type_assign_str_to_int.forge","line":2,"col":5,"end_line":2,"end_col":6,"message":"incompatible types in assignment (expression has type str, variable 'x' has type int)","fixits":[]}

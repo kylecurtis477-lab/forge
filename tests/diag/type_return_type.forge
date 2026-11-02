@@ -1,0 +1,4 @@
+def name(i: int) -> str:
+    if i > 0:
+        return "pos"
+    return i

@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0305","file":"tests/diag/type_missing_return.forge","line":9,"col":5,"end_line":9,"end_col":8,"message":"missing return statement (function 'bad' can fall off the end without returning a value)","fixits":[]}

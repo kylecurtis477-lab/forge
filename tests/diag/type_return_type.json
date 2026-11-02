@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0306","file":"tests/diag/type_return_type.forge","line":4,"col":12,"end_line":4,"end_col":13,"message":"incompatible return value type (got int, expected str)","fixits":[]}

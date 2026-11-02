@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0306","file":"tests/diag/type_optional_ret.forge","line":5,"col":12,"end_line":5,"end_col":13,"message":"incompatible return value type (got str, expected Optional[int])","fixits":[]}

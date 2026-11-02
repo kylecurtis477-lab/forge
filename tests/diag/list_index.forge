@@ -1,0 +1,4 @@
+def f(xs: list[int]) -> int:
+    return xs["a"]
+
+print(f([1]))

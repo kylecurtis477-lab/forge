@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0308","file":"tests/diag/type_int_band_typed.forge","line":2,"col":14,"end_line":2,"end_col":33,"message":"integer literal does not fit a typed 64-bit int (2**62..2**62+3 and values beyond 64 bits need an untyped variable): variable 'a'","fixits":[]}

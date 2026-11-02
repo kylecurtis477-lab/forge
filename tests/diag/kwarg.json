@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0309","file":"tests/diag/kwarg.forge","line":4,"col":13,"end_line":4,"end_col":16,"message":"unexpected keyword argument 'nme' for 'greet'","fixits":[]}

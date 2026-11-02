@@ -1,0 +1,12 @@
+def ok1(n: int) -> int:
+    if n > 0:
+        return 1
+    else:
+        return 2
+def ok2(n: int) -> int:
+    while True:
+        n += 1
+def bad(n: int) -> int:
+    if n > 0:
+        return 1
+print(ok1(1), bad(0))

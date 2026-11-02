@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0310","file":"tests/diag/unary.forge","line":2,"col":12,"end_line":2,"end_col":13,"message":"bad operand type for unary -: str","fixits":[]}

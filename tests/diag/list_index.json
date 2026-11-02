@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0311","file":"tests/diag/list_index.forge","line":2,"col":15,"end_line":2,"end_col":16,"message":"list indices must be integers, not str","fixits":[]}

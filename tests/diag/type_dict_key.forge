@@ -1,0 +1,2 @@
+ages: dict[str, int] = {"ann": 3}
+print(ages[1])

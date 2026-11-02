@@ -4,6 +4,7 @@
 # tests/errors/*.forge: compiler must fail with "error: line N: ..."
 # tests/os/run.sh: QEMU boot tests (kernel via multiboot2 on BIOS and OVMF, native PE32+ EFI app on a GPT disk)
 # tests/fs/*.forge: freestanding (--freestanding / no-runtime pragma) programs linked with plain ld, no runtime
+# tests/diag/*.forge: --diagnostics=json output must match the golden .json (one object per error, schema v1)
 # tests/typeerrors/*.forge: static type errors; full diagnostic (line, col, source, caret) must match .expected
 cd "$(dirname "$0")"; fail=0; mkdir -p build
 for t in tests/*.forge; do
@@ -19,6 +20,16 @@ done
 for t in tests/typeerrors/*.forge; do
   build/forgec "$t" build/t_err.s > build/t_err.txt 2>&1 && { echo "FAIL $t (no error)"; fail=1; } || { diff -q build/t_err.txt "${t%.forge}.expected" >/dev/null && echo "PASS $t: $(head -1 build/t_err.txt)" || { echo "FAIL $t"; fail=1; }; }
 done
+for t in tests/diag/*.forge; do
+  build/forgec "$t" build/t_err.s --diagnostics=json > build/t_diag.json 2>&1 && { echo "FAIL $t (no error)"; fail=1; } || { diff -q build/t_diag.json "${t%.forge}.json" >/dev/null && echo "PASS $t" || { echo "FAIL $t"; fail=1; }; }
+done
+if command -v python3 >/dev/null; then
+  python3 -c 'import json,sys,glob
+for f in glob.glob("tests/diag/*.json"):
+    for l in open(f):
+        d=json.loads(l); assert d["version"]==1 and d["code"][0]=="E" and d["line"]>0 and d["col"]>0 and isinstance(d["fixits"],list), f' && echo "PASS diag-json-schema" || { echo "FAIL diag-json-schema"; fail=1; }
+fi
+build/forgec build/no_such_input.forge build/t_inc.s --diagnostics=json 2>&1 | grep -q '"code":"E0001"' && echo "PASS diag-json-input-missing" || { echo "FAIL diag-json-input-missing"; fail=1; }
 for t in tests/fs/*.forge; do
   c=""; [ -f "${t%.forge}.c" ] && gcc -O1 -ffreestanding -fno-pic -fno-stack-protector -c -o build/t_fsc.o "${t%.forge}.c" && c=build/t_fsc.o
   build/forgec "$t" build/t_fs.s $FORGEC_FLAGS && as -o build/t_fs.o build/t_fs.s && ld -o build/t_fs build/t_fs.o $c && build/t_fs | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS $t" || { echo "FAIL $t"; fail=1; }

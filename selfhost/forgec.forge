@@ -183,6 +183,16 @@ def uline(line):
 lphase = 0
 
 def die(line, msg):
+    if diag_json and not (lphase == 0 or (lphase == 2 and pos < PRETOK)):
+        if dg_off >= 0:
+            diag_emit(cur_sid, dg_off, line, msg, 0)
+        sid = main_sid
+        off = -1
+        if lphase == 2 and pos >= 0 and pos < ntok:
+            sid = tsid[pos]
+            if tl[pos] == line:
+                off = tcol[pos]
+        diag_emit(sid, off, line, msg, 0)
     if lphase == 0 or (lphase == 2 and pos < PRETOK):
         msg = concat(concat(msg, " (in prelude) tok "), str(pos))
     eputs(concat(concat(concat("error: line ", str(uline(line))), ": "), msg))
@@ -505,10 +515,11 @@ def flt_text(t):
     return join(parts, k)
 
 def lex(src, line, inner):
-    global tokst, cur_sid, nlsrc
+    global tokst, cur_sid, nlsrc, dg_off, dg_ind
     n = len(src)
     if not inner and nlsrc < 4096:
         lsrcs[nlsrc] = src
+        lnames[nlsrc] = lex_fname
         cur_sid = nlsrc
         nlsrc += 1
     i = 0
@@ -546,6 +557,8 @@ def lex(src, line, inner):
                 nind -= 1
                 add_tok(K_DED, 0, line)
             if sp != ind[nind - 1]:
+                dg_off = i
+                dg_ind = ind[nind - 1]
                 die(line, "inconsistent indentation")
         if not inner:
             tokst = i
@@ -622,6 +635,7 @@ def lex(src, line, inner):
             while i < n and char_at(src, i) != q:
                 d = char_at(src, i)
                 if d == 10:
+                    dg_off = tokst
                     die(line, "unterminated string")
                 if d == 92:
                     i += 1
@@ -633,6 +647,7 @@ def lex(src, line, inner):
                 k += 1
                 i += 1
             if i >= n:
+                dg_off = tokst
                 die(line, "unterminated string")
             i += 1
             add_tok(K_STR, substr(buf, 0, k), line)
@@ -660,6 +675,7 @@ def lex(src, line, inner):
                     add_tok(K_OP, chr(c), line)
                 i += 1
             else:
+                dg_off = i
                 die(line, concat("unexpected character ", chr(c)))
     if inner:
         return 0
@@ -6141,7 +6157,7 @@ nlm = 0
 
 def load_mod(name, dir):
     # lex dir/name.forge (once); returns 1 if it is a user module
-    global num, nlm
+    global num, nlm, lex_fname
     if find(lmods, nlm, name) >= 0:
         return 1
     if str_eq(name, "math") or std_mod(name):
@@ -6154,6 +6170,7 @@ def load_mod(name, dir):
         lmods[nlm] = name
         nlm += 1
     load_imports(ms, dir)
+    lex_fname = concat(concat(dir, name), ".forge")
     lex(ms, 1, 0)
     if num < 256:
         umods[num] = name
@@ -6265,6 +6282,8 @@ def cat3(a, b, c):
 def tc_err(p, msg):
     if tc_mode == 0:
         return 0
+    if diag_json:
+        diag_emit(tsid[p], tcol[p], tl[p], msg, 1)
     s = lsrcs[tsid[p]]
     o = tcol[p]
     a = o
@@ -13367,8 +13386,227 @@ def ir_report():
     eputs(concat(" expr islands ", str(nte_)))
     eputs(concat(concat(concat("hyb iterations ", str(hy_its)), " passes "), str(passno)))
 
+# ---------------- machine-readable diagnostics (--diagnostics=json) ----------------
+# One JSON object per line on stderr, schema version 1:
+#   {"version":1,"severity":"error","code":"E....","file":F,"line":L,"col":C,"end_line":L,"end_col":C2,
+#    "message":M,"fixits":[{"line":L,"col":C,"end_line":L,"end_col":C2,"replace":TEXT,"note":N}]}
+# Columns are 1-based byte columns; end_col is exclusive. A fix-it replaces [col,end_col) with TEXT.
+diag_json = 0
+lnames = list(4096)
+lex_fname = ""
+dg_off = -1
+dg_ind = -1
+main_sid = -1
+DG_PFX = ["unexpected character", "unterminated string", "inconsistent indentation", "newline in f-string", "cannot read input file", "cannot read include file", "include nesting too deep", "undefined function", "undefined name", "unknown method", "argument ", "incompatible types in assignment", "unsupported operand types", "missing argument", "missing return statement", "incompatible return value type", "invalid index type", "integer literal does not fit", "unexpected keyword argument", "bad operand type for unary", "list indices must be integers", "string indices must be integers", "return value expected", "default for parameter"]
+DG_CODE = ["E0101", "E0102", "E0103", "E0104", "E0001", "E0002", "E0003", "E0201", "E0202", "E0203", "E0301", "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0309", "E0310", "E0311", "E0312", "E0313", "E0314"]
+NDG = 24
+
+def dg_sw(s, p):
+    return len(p) <= len(s) and str_eq(substr(s, 0, len(p)), p)
+
+def dg_code(msg, typed):
+    if typed and contains(msg, "positional arguments but"):
+        return "E0315"
+    i = 0
+    while i < NDG:
+        if dg_sw(msg, DG_PFX[i]):
+            return DG_CODE[i]
+        i += 1
+    if typed:
+        return "E0300"
+    return "E0100"
+
+def dg_esc(s):
+    n = len(s)
+    parts = list(n + 2)
+    i = 0
+    while i < n:
+        c = char_at(s, i)
+        if c == 34:
+            parts[i] = "\\\""
+        elif c == 92:
+            parts[i] = "\\\\"
+        elif c == 10:
+            parts[i] = "\\n"
+        elif c == 9:
+            parts[i] = "\\t"
+        elif c < 32:
+            parts[i] = "?"
+        else:
+            parts[i] = chr(c)
+        i += 1
+    return concat(concat("\"", join(parts, n)), "\"")
+
+def dg_idc(c):
+    return is_alpha(c) or is_digit(c)
+
+def dg_quoted(msg):
+    # first 'name' in the message, or ""
+    a = 0
+    n = len(msg)
+    while a < n and char_at(msg, a) != 39:
+        a += 1
+    b = a + 1
+    while b < n and char_at(msg, b) != 39:
+        b += 1
+    if b >= n:
+        return ""
+    return substr(msg, a + 1, b)
+
+def dg_linestart(s, line):
+    o = 0
+    l = 1
+    n = len(s)
+    while l < line and o < n:
+        if char_at(s, o) == 10:
+            l += 1
+        o += 1
+    return o
+
+def dg_eol(s, o):
+    n = len(s)
+    while o < n and char_at(s, o) != 10:
+        o += 1
+    return o
+
+def dg_findid(s, a, b, nm):
+    # offset of identifier nm in s[a:b] (whole word), or -1
+    k = len(nm)
+    if k == 0:
+        return -1
+    o = a
+    while o + k <= b:
+        if str_eq(substr(s, o, o + k), nm) and (o == a or not dg_idc(char_at(s, o - 1))) and (o + k >= b or not dg_idc(char_at(s, o + k))):
+            return o
+        o += 1
+    return -1
+
+def dg_dist(a, b):
+    la = len(a)
+    lb = len(b)
+    prev = list(lb + 1)
+    cur = list(lb + 1)
+    j = 0
+    while j <= lb:
+        prev[j] = j
+        j += 1
+    i = 1
+    while i <= la:
+        cur[0] = i
+        j = 1
+        while j <= lb:
+            c = prev[j - 1]
+            if char_at(a, i - 1) != char_at(b, j - 1):
+                c += 1
+            if prev[j] + 1 < c:
+                c = prev[j] + 1
+            if cur[j - 1] + 1 < c:
+                c = cur[j - 1] + 1
+            cur[j] = c
+            j += 1
+        t = prev
+        prev = cur
+        cur = t
+        i += 1
+    return prev[lb]
+
+def dg_suggest(nm):
+    # closest other identifier in the user's sources (not the prelude), edit distance <= 2 (1 for short names)
+    best = ""
+    bd = 3
+    if len(nm) < 4:
+        bd = 2
+    p = PRETOK
+    while p < ntok:
+        if tk[p] == K_ID and not str_eq(tv[p], nm):
+            v = tv[p]
+            if len(v) - len(nm) < bd and len(nm) - len(v) < bd:
+                d = dg_dist(nm, v)
+                if d < bd:
+                    bd = d
+                    best = v
+        p += 1
+    return best
+
+def dg_fix(s, ls, line, c0, c1, text, note):
+    p = list(12)
+    p[0] = "{\"line\":"
+    p[1] = str(line)
+    p[2] = ",\"col\":"
+    p[3] = str(c0 - ls + 1)
+    p[4] = ",\"end_line\":"
+    p[5] = str(line)
+    p[6] = ",\"end_col\":"
+    p[7] = str(c1 - ls + 1)
+    p[8] = ",\"replace\":"
+    p[9] = dg_esc(text)
+    p[10] = concat(",\"note\":", dg_esc(note))
+    p[11] = "}"
+    return join(p, 12)
+
+def diag_emit(sid, off, line, msg, typed):
+    code = dg_code(msg, typed)
+    fname = argv(1)
+    if sid >= 0 and sid < nlsrc:
+        nm0: int = lnames[sid]
+        if nm0 != 0:
+            fname = lnames[sid]
+    fx = ""
+    col = 0
+    ecol = 0
+    if sid >= 0 and sid < nlsrc:
+        s = lsrcs[sid]
+        ls = dg_linestart(s, line)
+        le = dg_eol(s, ls)
+        if off < ls or off > le:
+            off = -1
+        q = dg_quoted(msg)
+        if str_eq(code, "E0201") or str_eq(code, "E0202") or str_eq(code, "E0203"):
+            o2 = dg_findid(s, ls, le, q)
+            if o2 >= 0:
+                off = o2
+        if off < 0:
+            off = ls
+            while off < le and (char_at(s, off) == 32 or char_at(s, off) == 9):
+                off += 1
+        e = off
+        while e < le and dg_idc(char_at(s, e)):
+            e += 1
+        if e == off and off < le:
+            e = off + 1
+        col = off - ls + 1
+        ecol = e - ls + 1
+        if str_eq(code, "E0102"):
+            fx = dg_fix(s, ls, line, le, le, chr(char_at(s, off)), "close the string")
+        elif str_eq(code, "E0101"):
+            fx = dg_fix(s, ls, line, off, off + 1, "", "delete the character")
+        elif str_eq(code, "E0103") and dg_ind >= 0:
+            sp = alloc(dg_ind + 1)
+            k = 0
+            while k < dg_ind:
+                set_byte(sp, k, 32)
+                k += 1
+            fx = dg_fix(s, ls, line, ls, off, substr(sp, 0, dg_ind), "indent to the enclosing block's level")
+        elif str_eq(code, "E0201") or str_eq(code, "E0202") or str_eq(code, "E0203"):
+            sg = dg_suggest(q)
+            if len(sg) > 0:
+                fx = dg_fix(s, ls, line, off, e, sg, concat(concat("did you mean '", sg), "'?"))
+    out = concat(concat(concat(concat("{\"version\":1,\"severity\":\"error\",\"code\":\"", code), "\",\"file\":"), dg_esc(fname)), concat(",\"line\":", str(line)))
+    out = concat(concat(concat(concat(out, ",\"col\":"), str(col)), ",\"end_line\":"), str(line))
+    out = concat(concat(concat(out, ",\"end_col\":"), str(ecol)), concat(",\"message\":", dg_esc(msg)))
+    out = concat(concat(concat(out, ",\"fixits\":["), fx), "]}")
+    eputs(out)
+    exit(1)
+
+def diag_file_err(msg):
+    # errors with no source position (missing input / include files)
+    if diag_json:
+        eputs(concat(concat(concat(concat(concat(concat("{\"version\":1,\"severity\":\"error\",\"code\":\"", dg_code(msg, 0)), "\",\"file\":"), dg_esc(argv(1))), ",\"line\":0,\"col\":0,\"end_line\":0,\"end_col\":0,\"message\":"), dg_esc(msg)), ",\"fixits\":[]}"))
+    else:
+        eputs(concat("error: ", msg))
+
 def forge_main():
-    global PRETOK, PRE, passno, soft_line, ir_stats, no_hyb, hyb_on
+    global diag_json, lex_fname, main_sid, PRETOK, PRE, passno, soft_line, ir_stats, no_hyb, hyb_on
     if argc() < 3:
         eputs("usage: forgec <input.forge> <output.s>")
         exit(2)
@@ -13389,11 +13627,13 @@ def forge_main():
             ir_stats = 3
         elif str_eq(argv(ai), "--irstats2"):
             ir_stats = 2
+        elif str_eq(argv(ai), "--diagnostics=json"):
+            diag_json = 1
         ai += 1
     src = read_file(argv(1))
     srci: int = src
     if srci == 0:
-        eputs(concat("error: cannot read input file ", argv(1)))
+        diag_file_err(concat("cannot read input file ", argv(1)))
         exit(1)
     fsm = contains(src, concat("# forge: ", "no-runtime"))
     ai = 3
@@ -13408,12 +13648,15 @@ def forge_main():
         while sl >= 0 and char_at(path, sl) != 47:
             sl -= 1
         src = fs_include(src, substr(path, 0, sl + 1), 0)
+        lex_fname = argv(1)
         lex(src, 1, 0)
+        main_sid = cur_sid
         add_tok(K_EOF, 0, 0)
         add_tok(K_EOF, 0, 0)
         fs_main(src)
         return 0
     pre = prelude_text()
+    lex_fname = "<prelude>"
     lex(pre, 1, 0)
     PRETOK = ntok
     set_lphase(1)
@@ -13424,7 +13667,9 @@ def forge_main():
     load_imports(src, substr(path, 0, sl + 1))
     if contains(src, concat("# forge: ", "wrapping-ints")):
         set_ovf(0)
+    lex_fname = argv(1)
     lex(src, 1, 0)
+    main_sid = cur_sid
     add_tok(K_EOF, 0, 0)
     typecheck()
     strip_attr_ann()
@@ -15415,7 +15660,7 @@ def fs_shr(x, r):
 def fs_include(src, dir, depth):
     # top-level lines `include "file.forge"` are replaced by that file (relative to the includer)
     if depth > 16:
-        eputs("error: include nesting too deep")
+        diag_file_err("include nesting too deep")
         exit(1)
     parts = list(4096)
     np = 0
@@ -15435,7 +15680,7 @@ def fs_include(src, dir, depth):
                 sub = read_file(f)
                 subi: int = sub
                 if subi == 0:
-                    eputs(concat("error: cannot read include file ", f))
+                    diag_file_err(concat("cannot read include file ", f))
                     exit(1)
                 sl = len(f) - 1
                 while sl >= 0 and char_at(f, sl) != 47:

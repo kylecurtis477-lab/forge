@@ -1,0 +1,8 @@
+def total(values):
+    acc = 0
+    for v in values:
+        acc += v
+    return acc
+
+counter = total([1, 2, 3])
+print(countr)

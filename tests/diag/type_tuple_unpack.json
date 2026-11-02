@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0302","file":"tests/diag/type_tuple_unpack.forge","line":5,"col":10,"end_line":5,"end_col":11,"message":"incompatible types in assignment (expression has type str, variable 'c' has type int)","fixits":[]}

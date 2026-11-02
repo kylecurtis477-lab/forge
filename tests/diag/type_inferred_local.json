@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0301","file":"tests/diag/type_inferred_local.forge","line":11,"col":13,"end_line":11,"end_col":14,"message":"argument 1 to 'shout' has type int, expected str","fixits":[]}

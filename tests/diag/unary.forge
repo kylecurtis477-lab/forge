@@ -1,0 +1,4 @@
+def f(s: str) -> int:
+    return -s
+
+print(f("a"))

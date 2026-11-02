@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0202","file":"tests/diag/typo_fixit.forge","line":8,"col":7,"end_line":8,"end_col":13,"message":"undefined name 'countr'","fixits":[{"line":8,"col":7,"end_line":8,"end_col":13,"replace":"counter","note":"did you mean 'counter'?"}]}
