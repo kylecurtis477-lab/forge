@@ -14840,8 +14840,11 @@ def ast_main():
     lex_fname = argv(1)
     lex(src, 1, 0)
     main_sid = cur_sid
-    add_tok(K_EOF, 0, 0)
-    add_tok(K_EOF, 0, 0)
+    eofl = 1
+    if ntok > 0:
+        eofl = tl[ntok - 1]
+    add_tok(K_EOF, 0, eofl)
+    add_tok(K_EOF, 0, eofl)
     root = ast_parse()
     # "# forge: ..." pragma comment lines change code generation, so they are part of the tree
     prg = list(64)

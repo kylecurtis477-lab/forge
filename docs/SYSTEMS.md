@@ -63,6 +63,10 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 - `--diagnostics=json`: one schema-v1 JSON object per error (file/line/col span, code, message, fix-its); goldens in `tests/diag`.
 
 
+### Grammar freeze
+- docs/GRAMMAR.md is the frozen grammar (v1); the strict `a_*` parser behind `--emit=ast-json` is its reference implementation, and changing either needs a version bump of both.
+- tests/grammar/{valid,invalid} plus tools/grammar_fuzz.py (`--seed N --n COUNT`, writes to build/fuzz) check it; see BUILD_PLAN Phase 3 item 3.
+
 ### AST export (`--emit=ast-json`, `--emit=pretty`)
 - Entry: `forge_main` sees the flag and calls `ast_main`, which lexes only the named file with `ast_raw=1` (`add_id` then skips std-module renaming), parses it with `ast_parse` into flat node arrays (`ak` kind, `av` value, `al` line, `acs`/`acn` child slice into `akid`), and writes JSON (`ast_json`) or source (`pp_s`/`pp_e`).
 - Schema v1: `{"forge_ast":1,"file","pragmas":[lines],"root"}`, nodes `{"k","l"[,"v"][,"c"]}`. Kinds: Module Block Expr Assign AugAssign(v=op) AnnAssign Pass Break Continue Return Raise Global Nonlocal Import ImportFrom Alias Assert Del Include Def(Decorators, Params, ret|Empty, Block) ExternDef Class/Struct(Decorators, Bases, Block) Decorator If(v="elif" in chains) While For Try Handler Else Finally With WithItem Param(v=[*|**]name; type, default) Params Empty Name Const Num Float Str BinOp BoolOp Not Unary Compare(v=comma-joined ops) IfExp Lambda Call Kw Star DStar Attr Sub Slice Tuple List Set Dict Pair ListComp SetComp GenExp DictComp CompFor CompIf Yield YieldFrom.
