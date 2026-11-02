@@ -8,12 +8,15 @@ fs_sec: u64  # scratch sector (kmalloc 512)
 fs_fatsec_lba: u64
 fs_fatsec: u64
 
+@unsafe
 def le16(p: u64) -> u64:
     return vload64(p) & 0xFFFF
 
+@unsafe
 def le32(p: u64) -> u64:
     return vload64(p) & 0xFFFFFFFF
 
+@unsafe
 def gpt_find_esp() -> u64:
     hdr = kmalloc(512)
     ents = kmalloc(512)
@@ -52,6 +55,7 @@ def gpt_find_esp() -> u64:
     kfree(ents)
     return res
 
+@unsafe
 def fs_mount() -> u64:
     fs_part = gpt_find_esp()
     if fs_part == 0:
@@ -102,6 +106,7 @@ def fs_sector(lba: u64) -> u64:
         fs_dsec_lba = lba
     return fs_dsec
 
+@unsafe
 def lfn_put(name: ptr[u8], pos: u64, ch: u64):
     if pos < 255:
         if ch == 0 or ch == 0xFFFF:
@@ -116,6 +121,7 @@ def lfn_put(name: ptr[u8], pos: u64, ch: u64):
 # 8.3-only entries honour the NT lower-case flags (byte 12: 0x08 base, 0x10 extension).
 LFN_OFFS: u8[13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
 
+@unsafe
 def dir_next(dc: u64, idx: u64, name: ptr[u8], ent: u64) -> u64:
     epc = fs_spc * 16
     c = dc
@@ -182,6 +188,7 @@ def lower(c: u64) -> u64:
         return c + 32
     return c
 
+@unsafe
 def name_eq(a: ptr[u8], b: ptr[u8], blen: u64) -> u64:
 # a: NUL-terminated directory name, b: path component (blen bytes); case-insensitive
     i: u64 = 0
@@ -196,6 +203,7 @@ def ent_cluster(ent: u64) -> u64:
 
 # walks a path like "/EFI/Forge/bin/Read Me.txt" (case-insensitive, long names); returns 1 with the
 # entry in ent. The root itself ("" or "/") returns 2 (no entry).
+@unsafe
 def fs_lookup(path: ptr[u8], ent: u64) -> u64:
     nm: u8[256]
     c = fs_root
@@ -265,6 +273,7 @@ def fs_list(path: ptr[u8]):
     mutex_unlock(addr(fs_m))
 
 # reads a whole file into a new kmalloc buffer; returns it (size in *size) or 0
+@unsafe
 def fs_read_file(path: ptr[u8], size: ptr[u64]) -> u64:
     ent: u8[32]
     e = u64(addr(ent[0]))

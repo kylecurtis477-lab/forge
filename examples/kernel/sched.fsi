@@ -60,6 +60,7 @@ idle_thr: u64[8]
 next_tid: u64
 ctx_switches: u64
 
+@unsafe
 def rq_push(t: ptr[Thread]):
     t.next = 0
     if rq_tail == 0:
@@ -68,6 +69,7 @@ def rq_push(t: ptr[Thread]):
         ptr[Thread](rq_tail).next = u64(t)
     rq_tail = u64(t)
 
+@unsafe
 def rq_pop(cpu: u64) -> u64:
 # first runnable thread allowed on this CPU (pin = 0: anywhere, else cpu + 1)
     prev: u64 = 0
@@ -87,9 +89,11 @@ def rq_pop(cpu: u64) -> u64:
         t = ptr[Thread](t).next
     return 0
 
+@unsafe
 def cur_thread() -> ptr[Thread]:
     return ptr[Thread](current[lapic_cpu()])
 
+@unsafe
 def thread_new(fn: u64, arg: u64) -> ptr[Thread]:
     t = ptr[Thread](kmalloc(sizeof(Thread)))
     memset(u64(t), 0, sizeof(Thread))
@@ -139,6 +143,7 @@ def thread_free(t: ptr[Thread]):
     kfree(u64(t))
 
 @export
+@unsafe
 def sched_tail():
     spin_unlock(u64(addr(rq_lock)))
     sti()
@@ -148,6 +153,7 @@ def schedule(exiting: u64):
     spin_lock(u64(addr(rq_lock)))
     schedule_l(exiting)
 
+@unsafe
 def schedule_l(exiting: u64):
 # rq_lock held, interrupts off; returns with rq_lock released. A T_BLOCKED caller is parked on a
 # wait queue already and is not put back on the run queue.
@@ -185,16 +191,19 @@ def yield_cpu():
     irq_restore(f)
 
 @export
+@unsafe
 def thread_exit():
     cli()
     schedule(1)
     panic("dead thread resumed")
 
+@unsafe
 def idle_loop(arg: u64):
     while 1:
         sti()
         hlt()
 
+@unsafe
 def sched_cpu_init(cpu: u64, boot_ctx_is_idle: u64):
 # the code running now becomes this CPU's boot thread: the idle thread on APs, `main` on the BSP
     t = ptr[Thread](kmalloc(sizeof(Thread)))
@@ -236,6 +245,7 @@ sleepq: WaitQ
 wq_blocks: u64
 wq_wakes: u64
 
+@unsafe
 def wq_push(q: ptr[WaitQ], t: ptr[Thread]):
     t.next = 0
     if q.tail == 0:
@@ -244,6 +254,7 @@ def wq_push(q: ptr[WaitQ], t: ptr[Thread]):
         ptr[Thread](q.tail).next = u64(t)
     q.tail = u64(t)
 
+@unsafe
 def wq_pop(q: ptr[WaitQ]) -> u64:
     t = q.head
     if t != 0:
@@ -252,6 +263,7 @@ def wq_pop(q: ptr[WaitQ]) -> u64:
             q.tail = 0
     return t
 
+@unsafe
 def wq_block_l(q: ptr[WaitQ]):
 # rq_lock held, irqs off: park the current thread on q and run something else; returns with rq_lock re-held
     cur = ptr[Thread](current[lapic_cpu()])
@@ -266,6 +278,7 @@ def wake_l(t: ptr[Thread]):
     rq_push(t)
     wq_wakes += 1
 
+@unsafe
 def wq_wake_one_l(q: ptr[WaitQ]) -> u64:
     t = wq_pop(q)
     if t != 0:
@@ -342,6 +355,7 @@ def cond_signal(c: ptr[CondVar]):
 def cond_broadcast(c: ptr[CondVar]):
     wq_wake_all(addr(c.q))
 
+@unsafe
 def sleep_ticks(n: u64):
     f = irq_save()
     spin_lock(u64(addr(rq_lock)))
@@ -351,6 +365,7 @@ def sleep_ticks(n: u64):
     spin_unlock(u64(addr(rq_lock)))
     irq_restore(f)
 
+@unsafe
 def sleep_tick_l():
 # cpu 0 timer, rq_lock held: wake every sleeper whose deadline passed
     prev: u64 = 0
@@ -369,6 +384,7 @@ def sleep_tick_l():
             prev = t
         t = nx
 
+@unsafe
 def thread_reap(t: ptr[Thread]):
     while atomic_load64(u64(addr(t.state))) != T_DEAD:
         yield_cpu()

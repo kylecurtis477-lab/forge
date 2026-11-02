@@ -86,6 +86,7 @@ def tramp_page() -> u64:
     return 0
 
 @export
+@unsafe
 def ap_main():
     cpu = ap_boot_cpu
     gdt_load(cpu)
@@ -103,6 +104,7 @@ def ap_main():
     atomic_store64(u64(addr(ap_up)), 1)
     idle_loop(0)
 
+@unsafe
 def smp_init():
     ncpu_online = 1
     bsp = u64(lapic_rd(0x20) >> 24)

@@ -59,13 +59,14 @@ def kx_park():
 nforks: u64
 nexecs: u64
 
+@unsafe
 def proc_find_l(pid: u64) -> nptr[Proc]:
     i = 0
     while i < MAX_PROCS:
         if procs[i] != 0 and ptr[Proc](procs[i]).pid == pid:
             return ptr[Proc](procs[i])
         i += 1
-    return ptr[Proc](0)
+    return 0
 
 def proc_insert(p: ptr[Proc]) -> u64:
     f = irq_save()
@@ -89,6 +90,7 @@ def proc_remove_l(p: ptr[Proc]):
             procs[i] = 0
         i += 1
 
+@unsafe
 def cur_proc() -> ptr[Proc]:
     return ptr[Proc](cur_thread().proc)
 
@@ -108,6 +110,7 @@ struct File:
 
 console_file: u64
 
+@unsafe
 def file_new(type: u64) -> ptr[File]:
     fl = ptr[File](kmalloc(sizeof(File)))
     memset(u64(fl), 0, sizeof(File))
@@ -115,11 +118,13 @@ def file_new(type: u64) -> ptr[File]:
     fl.ref = 1
     return fl
 
+@unsafe
 def file_get(fl: u64) -> u64:
     if fl != 0:
         atomic_add64(u64(addr(ptr[File](fl).ref)), 1)
     return fl
 
+@unsafe
 def file_put(fl: u64):
     if fl != 0 and atomic_add64(u64(addr(ptr[File](fl).ref)), 0xFFFFFFFFFFFFFFFF) == 1:
         kfree(fl)
@@ -134,9 +139,10 @@ def console() -> u64:
         console_file = u64(addr(console_obj))
     return file_get(console_file)
 
+@unsafe
 def fd_get(p: ptr[Proc], fd: u64) -> nptr[File]:
     if fd >= NFD:
-        return ptr[File](0)
+        return 0
     return ptr[File](p.fds[fd])
 
 def vfs_open(path: ptr[u8]) -> u64:
@@ -197,6 +203,7 @@ def file_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
     mutex_unlock(addr(fs_m))
     return done
 
+@unsafe
 def dir_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
 # getdents records: u64 size, u8 is_dir, name, NUL (only whole records are returned)
     ent: u8[32]
@@ -284,6 +291,7 @@ def tty0_pop() -> u64:
         tty_lines -= 1
     return c
 
+@unsafe
 def tty0_save(st: u64, cap: u64) -> u64:
     if cap < 24 + tty_count:
         return 0
@@ -296,6 +304,7 @@ def tty0_save(st: u64, cap: u64) -> u64:
         i += 1
     return 24 + tty_count
 
+@unsafe
 def tty0_restore(st: u64, n: u64) -> u64:
     if n < 24 or vload64(st) != 0x54545931:
         return 0
@@ -311,6 +320,7 @@ def tty0_restore(st: u64, n: u64) -> u64:
         i += 1
     return 1
 
+@unsafe
 def tty_push_l(c: u64):
 # rq_lock held (interrupt context)
     tty_pushed += 1
@@ -331,6 +341,7 @@ def tty_input(c: u64):
     tty_push_l(c)
     spin_unlock(u64(addr(rq_lock)))
 
+@unsafe
 def tty_read(ubuf: u64, n: u64) -> u64:
     kb: u8[256]
     if n > 256:
@@ -391,6 +402,7 @@ VEC_KBD = 0x42
 VEC_COM1 = 0x43
 
 @interrupt
+@unsafe
 def on_kbd(frame: ptr[u64]):
     atomic_add64(u64(addr(kbd_irqs)), 1)
     while inb(0x64) & 1:
@@ -414,6 +426,7 @@ def on_kbd(frame: ptr[u64]):
     lapic_eoi()
 
 @interrupt
+@unsafe
 def on_com1(frame: ptr[u64]):
     atomic_add64(u64(addr(com_irqs)), 1)
     while inb(0x3FD) & 1:
@@ -423,6 +436,7 @@ def on_com1(frame: ptr[u64]):
         tty_input(c)
     lapic_eoi()
 
+@unsafe
 def input_init():
 # PS/2: flush, enable the first port's interrupt (config bit 0), keep scan-code translation (set 1)
     while inb(0x64) & 1:
@@ -443,12 +457,14 @@ def input_init():
     outb(0x3FC, inb(0x3FC) | 8)
     outb(0x3F9, 1)
 
+@unsafe
 def input_off():
     outb(0x3F9, 0)
     ioapic_mask(4)
     ioapic_mask(1)
 
 # ---- address spaces: clone (fork), user page mapping (brk/mmap) ----
+@unsafe
 def clone_tbl(t: u64, lvl: u64) -> u64:
     nt = frame_alloc()
     memset(p2v(nt), 0, PAGE)
@@ -465,6 +481,7 @@ def clone_tbl(t: u64, lvl: u64) -> u64:
         i += 1
     return nt
 
+@unsafe
 def as_clone(src: u64) -> u64:
     pml4 = as_new()
     i = 0
@@ -475,6 +492,7 @@ def as_clone(src: u64) -> u64:
         i += 1
     return pml4
 
+@unsafe
 def user_map_zero(pml4: u64, va: u64) -> u64:
     e = user_pte(pml4, va)
     if (vload64(e) & PTE_P) == 0:
@@ -485,6 +503,7 @@ def user_map_zero(pml4: u64, va: u64) -> u64:
         vstore64(e, f | PTE_P | PTE_W | PTE_U | PTE_NX)
     return 1
 
+@unsafe
 def user_unmap(pml4: u64, va: u64):
     if user_page_ok(pml4, va, 0) == 0:
         return
@@ -507,6 +526,7 @@ def map_ustack(pml4: u64):
         user_map_zero(pml4, USTACK_TOP - (i + 1) * PAGE)
         i += 1
 
+@unsafe
 def proc_new(ppid: u64) -> ptr[Proc]:
     p = ptr[Proc](kmalloc(sizeof(Proc)))
     memset(u64(p), 0, sizeof(Proc))
@@ -515,12 +535,13 @@ def proc_new(ppid: u64) -> ptr[Proc]:
     p.mmap_next = MMAP_BASE
     return p
 
+@unsafe
 def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> nptr[Thread]:
     pml4 = as_new()
     entry = elf_load(pml4, img, len)
     if entry == 0:
         as_free(pml4)
-        return ptr[Thread](0)
+        return 0
     map_ustack(pml4)
     p = proc_new(0)
     p.pml4 = pml4
@@ -554,6 +575,7 @@ def proc_spawn_ok(img: u64, len: u64) -> ptr[Thread]:
         panic("proc_spawn: image rejected by ELF loader")
     return t
 
+@unsafe
 def proc_destroy(p: ptr[Proc]):
 # p is a zombie whose thread is dead and which is no longer in the table
     t = ptr[Thread](p.thread)
@@ -561,6 +583,7 @@ def proc_destroy(p: ptr[Proc]):
     as_free(p.pml4)
     kfree(u64(p))
 
+@unsafe
 def proc_reap(t: ptr[Thread]) -> u64:
 # kernel-side wait for a process the kernel spawned
     while atomic_load64(u64(addr(t.state))) != T_DEAD:
@@ -575,6 +598,7 @@ def proc_reap(t: ptr[Thread]) -> u64:
     proc_destroy(p)
     return code
 
+@unsafe
 def proc_exit(code: u64):
     t = cur_thread()
     p = ptr[Proc](t.proc)
@@ -602,6 +626,7 @@ def proc_exit(code: u64):
     schedule_l(1)
     panic("dead process resumed")
 
+@unsafe
 def proc_reap_orphans() -> u64:
     n: u64 = 0
     while 1:
@@ -623,6 +648,7 @@ def proc_reap_orphans() -> u64:
         proc_destroy(ptr[Proc](z))
         n += 1
 
+@unsafe
 def sys_fork(frame: u64) -> u64:
     t = cur_thread()
     p = ptr[Proc](t.proc)
@@ -667,6 +693,7 @@ def thread_free_new(t: ptr[Thread]):
     t.state = T_DEAD
     thread_free(t)
 
+@unsafe
 def sys_exec(frame: u64, upath: u64, uargs: u64) -> u64:
     path: u8[128]
     args: u8[128]
@@ -708,6 +735,7 @@ def sys_exec(frame: u64, upath: u64, uargs: u64) -> u64:
     nexecs += 1
     return 0
 
+@unsafe
 def sys_wait(pid: u64, ustatus: u64) -> u64:
     me = cur_proc()
     f = irq_save()
@@ -807,6 +835,7 @@ def sys_open(upath: u64) -> u64:
     p.fds[fd] = fl
     return fd
 
+@unsafe
 def sys_stat(upath: u64, ubuf: u64) -> u64:
     st: u64[2]
     path: u8[256]
@@ -885,6 +914,7 @@ def con_write_user(p: u64, n: u64) -> u64:
     return n
 
 @export
+@unsafe
 def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64:
 # entered with interrupts off (FMASK); the asm exit path disables them again before sysret
     atomic_add64(u64(addr(syscalls)), 1)
@@ -967,6 +997,7 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         return l
     return ENOSYS
 
+@unsafe
 def user_kill(name: ptr[u8], vec: u64, rip: u64, addr_: u64):
 # called from an exception taken in ring 3: report, and the process exits with 0x100 + vector
     t = cur_thread()

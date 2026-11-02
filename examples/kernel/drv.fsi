@@ -38,6 +38,7 @@ drv_replays: u64
 spawn_drv: u64
 drv_supq: WaitQ  # supervisor waiting for a driver death
 
+@unsafe
 def vb_read_drv(lba: u64, n: u64, dst: u64) -> u64:
     mutex_lock(addr(vb_m))
     if rq_buf == 0:
@@ -73,6 +74,7 @@ def vb_read_drv(lba: u64, n: u64, dst: u64) -> u64:
     mutex_unlock(addr(vb_m))
     return ok
 
+@unsafe
 def drv_died(p: ptr[Proc]):
 # called from proc_exit of a driver process, before its address space (and DMA frames) is freed
     f = irq_save()
@@ -99,6 +101,7 @@ def drv_died(p: ptr[Proc]):
 def drv_port_ok(port: u64, w: u64) -> u64:
     return port >= vb_io and port + w <= vb_io + DRV_IO_LEN and (w == 1 or w == 2 or w == 4)
 
+@unsafe
 def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
     p = cur_proc()
     if nr == 408:
@@ -198,6 +201,7 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
         return vb_msix
     return ENOSYS
 
+@unsafe
 def vb_reinit():
 # take the device back into the kernel's own driver: reset, fresh ring in the original frames
     mutex_lock(addr(vb_m))
@@ -257,6 +261,7 @@ def blkd_spawn(args: ptr[u8]) -> nptr[Thread]:
     spawn_drv = 0
     return t
 
+@unsafe
 def supervisor(arg: u64):
     while 1:
         f = irq_save()
@@ -325,6 +330,7 @@ def blkd_supervised_start(img: u64, sz: u64):
     mutex_unlock(addr(vb_m))
     sup_thread = u64(thread_spawn(u64(supervisor), 0))
 
+@unsafe
 def blkd_supervised_stop():
 # ask the driver to exit (request flag 2); the supervisor sees sup_stop and returns
     sup_stop = 1

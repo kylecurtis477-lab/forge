@@ -20,6 +20,7 @@ def read_line() -> u64:
     line[n] = 0
     return n
 
+@unsafe
 def do_ls(dir: ptr[u8]):
     fd = sys_open(dir)
     if is_err(fd):
@@ -53,6 +54,7 @@ def do_ls(dir: ptr[u8]):
     sys_close(fd)
 
 @export
+@unsafe
 def _start():
     out("Forge sh: builtins ls, wait, kexec [next], exit, cmd &; programs from /efi/forge/bin\n")
     flush()

@@ -33,6 +33,7 @@ VEC_VBLK = 0x50
 VIO_MSIX_CFG = 0x14
 VIO_MSIX_Q = 0x16
 
+@unsafe
 def vb_init() -> u64:
     if pci_vblk == 0:
         return 0
@@ -89,6 +90,7 @@ def on_vblk(frame: ptr[u64]):
     spin_unlock(u64(addr(rq_lock)))
     lapic_eoi()
 
+@unsafe
 def vb_msix_init(bdf: u64):
 # find the MSI-X capability (id 0x11), point table entry 0 at the BSP's LAPIC, bind queue 0 to it
     if (pci_rd32(bdf, 4) & 0x100000) == 0:
@@ -134,11 +136,13 @@ def vb_msix_init(bdf: u64):
     vb_msix = 1
     puts("virtio-blk: MSI-X vector 0x50 -> cpu0, sleeping requests\n")
 
+@unsafe
 def vb_desc(i: u64, pa: u64, len: u64, flags: u64, next: u64):
     d = vb_q + i * 16
     vstore64(d, pa)
     vstore64(d + 8, (len & 0xFFFFFFFF) | (flags << 32) | (next << 48))
 
+@unsafe
 def vb_submit(lba: u64, n: u64):
     vstore64(vb_req, 0)  # type IN, reserved
     vstore64(vb_req + 8, lba)
@@ -154,9 +158,11 @@ def vb_submit(lba: u64, n: u64):
     mfence()
     outw(u16(vb_io + VIO_QNOTIFY), 0)
 
+@unsafe
 def vb_done() -> u64:
     return ((vload64(vb_q + vb_used_off) >> 16) & 0xFFFF) != vb_last_used
 
+@unsafe
 def vb_finish(n: u64, dst: u64) -> u64:
     vb_last_used = (vb_last_used + 1) & 0xFFFF
     ok = (vload64(vb_req + 64) & 0xFF) == 0

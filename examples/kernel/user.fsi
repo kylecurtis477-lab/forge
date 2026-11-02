@@ -134,6 +134,7 @@ SF_RSP = 9
 def syscall_entry_addr() -> u64:
     asm("lea syscall_entry(%rip), %rax", "ret")
 
+@unsafe
 def cpu_syscall_init(cpu: u64):
     percpu_kstack[cpu * 4 + 2] = cpu
     wrmsr(MSR_EFER, rdmsr(MSR_EFER) | 1)
@@ -144,6 +145,7 @@ def cpu_syscall_init(cpu: u64):
     wrmsr(MSR_KGS_BASE, u64(addr(percpu_kstack[cpu * 4])))
 
 # ---- user address spaces ----
+@unsafe
 def upt_next(table: u64, idx: u64) -> u64:
     e = p2v(table) + idx * 8
     v = vload64(e)
@@ -159,6 +161,7 @@ def user_pte(pml4: u64, va: u64) -> u64:
     t = upt_next(t, (va >> 21) & 511)
     return p2v(t) + ((va >> 12) & 511) * 8
 
+@unsafe
 def user_page_ok(pml4: u64, va: u64, write: u64) -> u64:
     t = pml4
     lvl = 0
@@ -182,6 +185,7 @@ def user_range_ok(pml4: u64, va: u64, len: u64, write: u64) -> u64:
         p += PAGE
     return 1
 
+@unsafe
 def as_new() -> u64:
     pml4 = frame_alloc()
     i = 256
@@ -190,6 +194,7 @@ def as_new() -> u64:
         i += 1
     return pml4
 
+@unsafe
 def as_free_level(t: u64, lvl: u64) -> u64:
     n: u64 = 0
     i = 0
@@ -205,6 +210,7 @@ def as_free_level(t: u64, lvl: u64) -> u64:
     frame_free(t)
     return n + 1
 
+@unsafe
 def as_free(pml4: u64) -> u64:
 # frees every user page and table (lower half only), then the PML4 itself
     n: u64 = 0
@@ -218,14 +224,17 @@ def as_free(pml4: u64) -> u64:
     return n + 1
 
 # ---- ELF64 loader ----
+@unsafe
 def ld16(p: u64) -> u64:
     return vload64(p) & 0xFFFF
 
+@unsafe
 def ld32(p: u64) -> u64:
     return vload64(p) & 0xFFFFFFFF
 
 elf_end: u64
 
+@unsafe
 def elf_load(pml4: u64, img: u64, len: u64) -> u64:
 # returns the entry point, or 0 if the image is rejected
     if len < 64 or ld32(img) != 0x464C457F or (vload64(img + 4) & 0xFF) != 2 or ld16(img + 18) != 62:

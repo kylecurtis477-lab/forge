@@ -1,0 +1,8 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+# expect: is unsafe
+def main() -> u64:
+    x: u64 = 0
+    p: ptr[u64] = addr(x)
+    b: ptr[u8] = ptr[u8](p)
+    return 0

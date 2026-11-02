@@ -4,8 +4,10 @@
 #   fmt    - canonical formatting (forge fmt --check)
 #   build  - full compile: typecheck + codegen + as + ld (forgec)
 #   test   - every `test "name":` block passes (forge test), if the file has any
+#   unsafe - with --unsafe-report: freestanding files get the unsafe-region summary (functions, blocks, ops, asm)
 # Prints one JSON report and exits 1 if any check fails. Default set: tests/unit/*.forge.
 D="$(cd "$(dirname "$0")/.." && pwd)"
+UR=0; [ "$1" = --unsafe-report ] && { UR=1; shift; }
 [ $# = 0 ] && set -- "$D"/tests/unit/*.forge
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 esc() { sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' | tr -d '\r\n'; }
@@ -29,6 +31,10 @@ for f in "$@"; do
     "$D/tools/forge_test.sh" "$f" > $T/t.json
     if [ $? = 0 ]; then ck test ok; else ck test fail "$(python3 -c 'import json,sys;r=json.load(open(sys.argv[1]));print(str(r["failed"])+" failing: "+", ".join(t["name"] for f in r["files"] for t in f["tests"] if t["status"]!="pass") or "build failed")' $T/t.json)"; fi
   else ck test skip; fi
+  if [ $UR = 1 ]; then
+    u=$(cd "$(dirname "$f")" && "$D/build/forgec" "$(basename "$f")" $T/u.s --unsafe-report 2>&1 | grep '^unsafe: [0-9]* functions')
+    if [ -n "$u" ]; then ck unsafe ok "${u#unsafe: }"; else ck unsafe skip "hosted or did not build"; fi
+  fi
   printf '}}'
 done
 printf '],"ok":%s}\n' $([ $bad = 0 ] && echo true || echo false)

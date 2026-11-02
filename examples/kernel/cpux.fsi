@@ -97,6 +97,7 @@ extern def uaccess_labels(i: u64) -> u64
 
 smep_probing: u64
 
+@unsafe
 def uaccess_fixup(frame: ptr[u64], err: u64, cr2: u64) -> u64:
 # kernel-mode #PF: if it hit one of the user-access instructions, resume at the failure path
     rip = frame[1]
@@ -112,6 +113,7 @@ def uaccess_fixup(frame: ptr[u64], err: u64, cr2: u64) -> u64:
         return 1
     return 0
 
+@unsafe
 def fpu_area_new() -> u64:
 # 64-byte aligned save area; the raw pointer is stored just below it for kfree
     raw = kmalloc(fpu_size + 64 + 8)
@@ -123,6 +125,7 @@ def fpu_area_new() -> u64:
         memset(a, 0, fpu_size)
     return a
 
+@unsafe
 def fpu_area_free(a: u64):
     if a != 0:
         kfree(vload64(a - 8))
@@ -142,6 +145,7 @@ def cpu_features_cpu():
         xsetbv0(fpu_xcr0)
     fpu_reset()
 
+@unsafe
 def cpu_features_init():
     cpuid4(1, 0)
     ecx1 = u64(cpuid_out[2])
@@ -205,6 +209,7 @@ tlb_park: u64
 stop_rounds: u64
 stop_parked: u64
 
+@unsafe
 def stop_machine_begin() -> u64:
 # park every other online CPU in its IPI handler (or in the spin loop it is in) with interrupts off;
 # returns the caller's saved interrupt flag. Reuses the shootdown slot, so it serialises with it.
@@ -236,6 +241,7 @@ def stop_machine_begin() -> u64:
     stop_rounds += 1
     return f
 
+@unsafe
 def stop_machine_end(f: u64):
     cpuid4(0, 0)
     atomic_store64(u64(addr(tlb_park)), 0)
@@ -243,6 +249,7 @@ def stop_machine_end(f: u64):
     spin_unlock(u64(addr(tlb_lock)))
     irq_restore(f)
 
+@unsafe
 def tlb_local(cr3: u64, va: u64, n: u64):
     if cr3 != 0 and (read_cr3() & ADDR_MASK) != cr3:
         return
@@ -261,6 +268,7 @@ def tlb_local(cr3: u64, va: u64, n: u64):
 
 tlb_halt: u64  # kexec: parked CPUs halt for good (the successor restarts them with INIT-SIPI)
 
+@unsafe
 def tlb_poll():
 # safe with interrupts off: called from spin loops so a CPU that waits on a lock still answers
     if atomic_load64(u64(addr(tlb_active))) == 0:
@@ -286,6 +294,7 @@ def on_tlb_ipi(frame: ptr[u64]):
     tlb_poll()
     lapic_eoi()
 
+@unsafe
 def tlb_shootdown(cr3: u64, va: u64, n: u64):
 # cr3 = 0: kernel (global) mapping, flush everywhere; otherwise only CPUs running that address space
     f = irq_save()

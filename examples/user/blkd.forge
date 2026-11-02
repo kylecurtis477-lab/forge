@@ -10,12 +10,14 @@ def io_in(port: u64, w: u64) -> u64:
 def io_out(port: u64, w: u64, v: u64):
     syscall3(401, port, w, v)
 
+@unsafe
 def desc(q: u64, i: u64, pa: u64, len: u64, flags: u64, next: u64):
     d = q + i * 16
     vstore64(d, pa)
     vstore64(d + 8, (len & 0xFFFFFFFF) | (flags << 32) | (next << 48))
 
 @export
+@unsafe
 def _start():
     io = syscall3(407, 0, 0, 0)
     msix = syscall3(407, 1, 0, 0)

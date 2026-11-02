@@ -1,0 +1,16 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+@unsafe
+def peek(a: u64) -> u64:
+    return load64(a)
+
+def main() -> u64:
+    x: u64 = 41
+    y: u64 = 0
+    with unsafe:
+        store64(u64(addr(x)), 42)
+        p: ptr[u64] = ptr[u64](u64(addr(x)))
+        y = p[0]
+    if y == 42 and peek(u64(addr(x))) == 42:
+        puts("unsafe ok\n")
+    return 0

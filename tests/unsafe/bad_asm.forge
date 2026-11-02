@@ -1,0 +1,6 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+# expect: is unsafe
+def main() -> u64:
+    asm("nop")
+    return 0

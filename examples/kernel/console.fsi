@@ -15,6 +15,7 @@ vga_base: u64
 vga_pos: u64
 con_fg: u32
 
+@unsafe
 def serial_init():
     outb(COM1 + 1, 0x00)
     outb(COM1 + 3, 0x80)
@@ -24,16 +25,19 @@ def serial_init():
     outb(COM1 + 2, 0xC7)
     outb(COM1 + 4, 0x0B)
 
+@unsafe
 def serial_putc(c: u8):
     while (inb(COM1 + 5) & 0x20) == 0:
         cpu_relax()
     outb(COM1, c)
 
+@unsafe
 def serial_poll() -> i64:
     if (inb(COM1 + 5) & 1) == 0:
         return -1
     return i64(inb(COM1))
 
+@unsafe
 def fb_attach(virt: u64, w: u64, h: u64, pitch: u64):
     fb_base = virt
     fb_w = w
@@ -46,6 +50,7 @@ def fb_attach(virt: u64, w: u64, h: u64, pitch: u64):
     con_fg = 0x00FFFFFF
     memset(virt, 0, pitch * h)
 
+@unsafe
 def fb_glyph(cx: u64, cy: u64, c: u8):
     g = 0
     if c >= 32 and c <= 126:
@@ -63,6 +68,7 @@ def fb_glyph(cx: u64, cy: u64, c: u8):
             x += 1
         row += 1
 
+@unsafe
 def fb_newline():
     fb_col = 0
     fb_row += 1
@@ -83,6 +89,7 @@ def fb_putc(c: u8):
     if fb_col >= fb_cols:
         fb_newline()
 
+@unsafe
 def vga_putc(c: u8):
     if c == 10:
         vga_pos = (vga_pos / 80 + 1) * 80
@@ -99,6 +106,7 @@ def putc(c: u8):
     elif vga_base != 0:
         vga_putc(c)
 
+@unsafe
 def puts(s: ptr[u8]):
     i = 0
     while s[i] != 0:
@@ -134,6 +142,7 @@ def put_sig(v: u32):
         putc(u8((v >> (i * 8)) & 0xFF))
         i += 1
 
+@unsafe
 def qemu_exit(code: u32):
 # isa-debug-exit device (iobase 0xf4): qemu exits with (code << 1) | 1; no-op on real hardware
     outl(0xF4, code)
@@ -141,6 +150,7 @@ def qemu_exit(code: u32):
         cli()
         hlt()
 
+@unsafe
 def panic(msg: ptr[u8]):
     cli()
     puts("PANIC: ")
@@ -148,6 +158,7 @@ def panic(msg: ptr[u8]):
     putc(10)
     qemu_exit(0x11)
 
+@unsafe
 def forge_bounds_fail(line: u64, idx: u64, n: u64, file: ptr[u8]):
 # bounds-checked indexing failed (Phase 4.1): report the source position, then panic
     cli()

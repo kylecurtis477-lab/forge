@@ -41,6 +41,7 @@ def mod_hello():
     puts("\n")
 
 @export
+@unsafe
 def mod_save_state(buf: u64, cap: u64) -> u64:
     if cap < 16:
         return 0
@@ -49,6 +50,7 @@ def mod_save_state(buf: u64, cap: u64) -> u64:
     return 16
 
 @export
+@unsafe
 def mod_restore_state(buf: u64, n: u64) -> u64:
     if n != 16 or vload64(buf) != 0x48454C4F:
         return 0

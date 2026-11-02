@@ -5,6 +5,7 @@ include "ulib.fsi"
 marker: u64
 
 @export
+@unsafe
 def _start():
     out("fault test: pid ")
     out_u64(sys_getpid())

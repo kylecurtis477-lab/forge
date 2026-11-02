@@ -55,6 +55,7 @@ wbuf: u16[256]
 con: nptr[u64]
 bs: nptr[u64]
 
+@unsafe
 def bsfn(i: u64) -> u64:
 # boot-services table entry i (0 before efi_main has stored the table)
     b = bs
@@ -62,11 +63,13 @@ def bsfn(i: u64) -> u64:
         return 0
     return b[i]
 
+@unsafe
 def con_out(s: u64):
     c = con
     if c != 0:
         call_efi(c[1], u64(c), s)
 
+@unsafe
 def print(s: ptr[u8]):
     i = 0
     while s[i] != 0 and i < 254:
@@ -105,6 +108,7 @@ def print_hex(v: u64):
     buf[18] = 0
     print(addr(buf[0]))
 
+@unsafe
 def fail(msg: ptr[u8], status: u64) -> u64:
     print("forgex64: ")
     print(msg)
@@ -115,9 +119,11 @@ def fail(msg: ptr[u8], status: u64) -> u64:
         outl(0xF4, 0x12)
     return status
 
+@unsafe
 def guid_eq(a: u64, b: ptr[u8]) -> u64:
     return load64(a) == load64(u64(b)) and load64(a + 8) == load64(u64(b) + 8)
 
+@unsafe
 def alloc_pages(n: u64, max_addr: u64) -> u64:
 # AllocatePages(AllocateMaxAddress, EfiLoaderData, n, &addr)
     a: u64 = max_addr
@@ -127,6 +133,7 @@ def alloc_pages(n: u64, max_addr: u64) -> u64:
     memset(a, 0, n * 4096)
     return a
 
+@unsafe
 def read_kernel(image: u64, size_out: ptr[u64]) -> u64:
     li: u64 = 0
     st = call_efi(bsfn(BS_HANDLE_PROTOCOL), image, u64(addr(GUID_LOADED_IMAGE[0])), u64(addr(li)))
@@ -174,6 +181,7 @@ def read_kernel(image: u64, size_out: ptr[u64]) -> u64:
     size_out[0] = total
     return buf
 
+@unsafe
 def setup_gop(bi: ptr[BootInfo]):
     gop: u64 = 0
     st = call_efi(bsfn(BS_LOCATE_PROTOCOL), u64(addr(GUID_GOP[0])), 0, u64(addr(gop)))
@@ -211,6 +219,7 @@ def setup_gop(bi: ptr[BootInfo]):
     print_hex(bi.fb_addr)
     print("\r\n")
 
+@unsafe
 def find_rsdp(st: ptr[SystemTable]) -> u64:
     found: u64 = 0
     i: u64 = 0
@@ -236,6 +245,7 @@ def efi_mem_type(t: u32) -> u64:
         return MEM_BAD
     return MEM_RESERVED
 
+@unsafe
 def convert_map(bi: ptr[BootInfo], map: u64, size: u64, dsz: u64):
 # no allocations or firmware calls here: runs between GetMemoryMap and ExitBootServices
     bi.nregions = 0
@@ -259,6 +269,7 @@ def convert_map(bi: ptr[BootInfo], map: u64, size: u64, dsz: u64):
             bi.nregions = n + 1
         p += dsz
 
+@unsafe
 def build_tables(kdelta: u64) -> u64:
     t = alloc_pages(8, 0xFFFFFFFF)
     if t == 0:
@@ -287,6 +298,7 @@ def build_tables(kdelta: u64) -> u64:
 
 @efiapi
 @export
+@unsafe
 def efi_main(image: u64, st: ptr[SystemTable]) -> u64:
     con = st.con_out
     bs = st.boot_services

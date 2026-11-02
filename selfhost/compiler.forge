@@ -15398,6 +15398,7 @@ fsf_p0 = list(8192)
 fsf_pos = list(8192)
 fsf_at = list(8192)
 fsf_sec = list(8192)
+fsf_ln = list(8192)
 nfsf = 0
 fsp_n = list(65536)
 fsp_t = list(65536)
@@ -15435,6 +15436,18 @@ fs_dexp = 0
 fs_datt = 0
 fs_bchk = 1
 fs_bstats = 0
+# Phase 4.3 unsafe: fs_unsafe > 0 inside `with unsafe:` / @unsafe / @naked; --unsafe-report lists regions,
+# --unsafe-fix lists functions that need @unsafe instead of failing
+fs_unsafe = 0
+fs_urep = 0
+fs_ufix = 0
+fs_uops = 0
+fs_utot = 0
+fs_ufn = 0
+fs_ublk = 0
+fs_ucur = -1
+fs_ufixed = -1
+fs_ubare = 0
 fs_nbc = 0
 fs_nbe = 0
 fs_lastnm = ""
@@ -15464,6 +15477,30 @@ def c3(a, b, c):
 
 def c4(a, b, c, d):
     return concat(concat(concat(a, b), c), d)
+
+def fs_where(ln):
+# "file:line" of include-expanded line ln
+    fi = 0
+    if ln >= 1 and ln <= fsx_n:
+        fi = fsx_f[ln - 1]
+        ln = fsx_l[ln - 1]
+    return c3(fsx_fn[fi], ":", str(ln))
+
+FS_UNSAFE_FNS = ["asm", "load8", "load16", "load32", "load64", "vload8", "vload16", "vload32", "vload64", "store8", "store16", "store32", "store64", "vstore8", "vstore16", "vstore32", "vstore64", "inb", "inw", "inl", "outb", "outw", "outl", "call_ptr", "call_efi", "memcpy", "memset", "lgdt", "lidt", "ltr", "invlpg", "wrmsr", "rdmsr", "cli", "sti", "hlt", "wbinvd", "atomic_load32", "atomic_load64", "atomic_store32", "atomic_store64", "atomic_xchg32", "atomic_xchg64", "atomic_add32", "atomic_add64", "atomic_cas32", "atomic_cas64", "atomic_or32", "atomic_or64", "atomic_and32", "atomic_and64"]
+
+def fs_unsafe_op(what):
+# one unsafe operation at fp: allowed only in an unsafe region
+    global fs_uops, fs_utot, fs_ufixed
+    if fs_unsafe > 0:
+        fs_uops += 1
+        fs_utot += 1
+        return 0
+    if fs_ufix:
+        if fs_ufixed != fs_ucur:
+            fs_ufixed = fs_ucur
+            eputs(c3("unsafe-fix: ", fs_where(fsf_ln[fs_ucur]), concat(" ", fsf_n[fs_ucur])))
+        return 0
+    fs_die(concat(what, " is unsafe: put it in a `with unsafe:` block or mark the function @unsafe"))
 
 def fs_die(msg):
 # report the original file/line (fs_include splices included files into one token stream)
@@ -15959,6 +15996,8 @@ def fs_conv(to):
             fs_die("nptr[T] may be null: check it (if p != 0:) before using it as a ptr[T]")
         if fs_ety == FT_LIT and fs_lastimm == 0:
             fs_die("null (0) cannot be a ptr[T]; declare it nptr[T]")
+    if fsk[to] == 1 and fsk[fs_ety] == 0 and not (fs_ety == FT_LIT and fs_lastimm == 0):
+        fs_unsafe_op("an integer-to-pointer conversion")
     if fsk[to] == 0 and fs_ety != to:
         if not (fsk[fs_ety] == 0 and ftsz[fs_ety] <= ftsz[to] and ft_sg(fs_ety) == ftsg[to] and fs_ety != FT_LIT and to != FT_BOOL):
             fs_norm(to)
@@ -16040,6 +16079,8 @@ def fs_callsite(target):
 def fs_intrin(nm):
 # returns 1 if nm( ... ) was compiled as an intrinsic
     global fp, fs_ety, fs_mode, fs_moff, fs_lab
+    if find(FS_UNSAFE_FNS, len(FS_UNSAFE_FNS), nm) >= 0:
+        fs_unsafe_op(concat(nm, "()"))
     one = ["cli", "sti", "hlt", "pause", "int3", "mfence", "lfence", "sfence", "wbinvd", "ud2", "cpu_relax"]
     k = find(one, 11, nm)
     if k >= 0:
@@ -16366,12 +16407,23 @@ def fs_primary():
         fs_norm(fs_ety)
         fs_mode = 0
         return 0
-    if str_eq(nm, "ptr") and fs_isop("["):
+    if (str_eq(nm, "ptr") or str_eq(nm, "nptr")) and fs_isop("["):
         fp -= 1
         t = fs_type()
         fs_expect("(")
         fs_expr()
         fs_rv()
+        src = fs_ety
+        if src == FT_LIT and fs_lastimm == 0:
+            if ft_isnn(t):
+                fs_die("ptr[T](0) would be a null ptr[T]: use nptr[T] (0 converts to nptr[T] without a cast)")
+        elif fsk[src] == 0:
+            fs_unsafe_op("an integer-to-pointer cast")
+        elif fsk[src] == 1:
+            if ft_isnptr(src) and ft_isnn(t):
+                fs_unsafe_op("an nptr-to-ptr cast (check p != 0 instead)")
+            elif ftel[src] != ftel[t]:
+                fs_unsafe_op("a pointer reinterpret cast")
         fs_expect(")")
         fs_ety = t
         return 0
@@ -16542,6 +16594,8 @@ def fs_postfix():
             elif fsk[t] == 1:
                 if ftsg[t] == 1:
                     fs_die("nptr[T] may be null: check it (if p != 0:) before indexing")
+                if not (tk[fp + 1] == K_NUM and tv[fp + 1] == 0 and fs_isop2(fp + 2, "]")):
+                    fs_unsafe_op("indexing a ptr[T] (unchecked; use a slice)")
                 fs_rv()
             else:
                 fs_die("indexing needs a pointer, array or slice")
@@ -17145,7 +17199,7 @@ def fs_lhs_store(vt):
         fsl_nn[tl0] = ft_isnn(vt)
 
 def fs_stmt():
-    global fp, nfsloop, fs_ety, fs_mode, fs_dep, nfsb
+    global fp, nfsloop, fs_ety, fs_mode, fs_dep, nfsb, fs_ublk, fs_uops, fs_unsafe
     if tk[fp] == K_NL:
         fp += 1
         return 0
@@ -17170,6 +17224,20 @@ def fs_stmt():
             e(concat("jmp ", fs_cnt[nfsloop - 1]))
         fp += 1
         fs_eol()
+        return 0
+    if fs_isid("with") and tk[fp + 1] == K_ID and str_eq(tv[fp + 1], "unsafe") and fs_isop2(fp + 2, ":"):
+    # Phase 4.3: `with unsafe:` block
+        ln0 = tl[fp]
+        fp += 2
+        fs_ublk += 1
+        o0 = fs_uops
+        fs_uops = 0
+        fs_unsafe += 1
+        fs_suite()
+        fs_unsafe -= 1
+        if fs_urep:
+            eputs(c4("unsafe: ", fs_where(ln0), " block in ", c3(fsf_n[fs_ucur], " ops=", str(fs_uops))))
+        fs_uops = o0 + fs_uops
         return 0
     if fs_isid("if"):
         lend = fs_newlab()
@@ -17410,6 +17478,8 @@ def fs_decos():
             fs_datt = fs_bop(fs_datt, 32, 1)
         elif str_eq(nm, "patchable"):
             fs_datt = fs_bop(fs_datt, 64, 1)
+        elif str_eq(nm, "unsafe"):
+            fs_datt = fs_bop(fs_datt, 128, 1)
         elif str_eq(nm, "align"):
             fs_expect("(")
             fs_dal = fs_ceval()
@@ -17472,6 +17542,7 @@ def fs_sig(ext):
     f = nfsf
     nfsf += 1
     fsf_n[f] = nm
+    fsf_ln[f] = tl[fp - 1]
     fsf_p0[f] = nfsp
     fsf_at[f] = fs_datt
     fsf_sec[f] = fs_dsec
@@ -17651,6 +17722,23 @@ def fs_gdata(g):
     emit_raw(c4("    ", fs_dirw(t), " ", concat(str(fs_ceval()), "\n")))
 
 def fs_function(f):
+    global fs_unsafe, fs_uops, fs_ufn, fs_ucur
+    fs_ucur = f
+    at = fsf_at[f]
+    fs_unsafe = 0
+    fs_uops = 0
+    if fs_bop(at, 136, 0):
+        fs_unsafe = 1
+        fs_ufn += 1
+    fs_function1(f)
+    if fs_unsafe and fs_urep:
+        k = "fn"
+        if fs_bop(at, 8, 0):
+            k = "naked fn"
+        eputs(c4("unsafe: ", fs_where(fsf_ln[f]), c3(" ", k, " "), c3(fsf_n[f], " ops=", str(fs_uops))))
+    fs_unsafe = 0
+
+def fs_function1(f):
     global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop
     at = fsf_at[f]
     nm = fsf_n[f]
@@ -17758,7 +17846,7 @@ def fs_wrapper(f, nm, body):
     e("iretq")
 
 def fs_main(src):
-    global fp, fs_chk, fs_bchk, fs_bstats
+    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_ufix, fs_ubare
     if contains(src, concat("# forge: ", "checked-ints")):
         fs_chk = 1
     if contains(src, concat("# forge: ", "no-bounds-checks")):
@@ -17769,6 +17857,10 @@ def fs_main(src):
             fs_bchk = 0
         if str_eq(argv(ai), "--bounds-stats"):
             fs_bstats = 1
+        if str_eq(argv(ai), "--unsafe-report"):
+            fs_urep = 1
+        if str_eq(argv(ai), "--unsafe-fix"):
+            fs_ufix = 1
         ai += 1
     ft_init()
     fs_prescan()
@@ -17784,6 +17876,9 @@ def fs_main(src):
             d -= 1
             fp += 1
         elif d == 0 and fs_isid("asm") and (fp == 0 or tk[fp - 1] == K_NL or tk[fp - 1] == K_DED):
+            fs_ubare += 1
+            if fs_urep:
+                eputs(c3("unsafe: ", fs_where(tl[fp]), " top-level asm"))
             fp += 2
             while tk[fp] == K_STR:
                 emit_raw(concat(tv[fp], "\n"))
@@ -17808,6 +17903,8 @@ def fs_main(src):
         emit_raw(fs_rod[i])
         i += 1
     emit_raw(".section .note.GNU-stack,\"\",@progbits\n")
+    if fs_urep:
+        eputs(c4("unsafe: ", str(fs_ufn), c3(" functions, ", str(fs_ublk), " blocks, "), c3(str(fs_utot), " ops, ", concat(str(fs_ubare), " top-level asm blocks"))))
     if fs_bstats:
         eputs(c4("bounds: ", str(fs_nbc + fs_nbe), c3(" sites, ", str(fs_nbc), " checked, "), concat(str(fs_nbe), " elided")))
     write_file(argv(2), join(out, nout))

@@ -41,6 +41,7 @@ bp_count: u64
 df_rsp: u64
 df_recover: u64
 
+@unsafe
 def tss_install(cpu: u64, kstack: u64, ist1: u64, ist2: u64):
     t = addr(tss[cpu])
     memset(u64(t), 0, sizeof(Tss))
@@ -53,6 +54,7 @@ def tss_install(cpu: u64, kstack: u64, ist1: u64, ist2: u64):
     gdt[5 + 2 * cpu] = (lim & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (u64(0x89) << 40) | (((lim >> 16) & 0xF) << 48) | (((base >> 24) & 0xFF) << 56)
     gdt[6 + 2 * cpu] = base >> 32
 
+@unsafe
 def gdt_load(cpu: u64):
     lgdt(addr(gdtr))
     asm("push $8", "lea 1f(%rip),%rax", "push %rax", "lretq", "1:", "mov $16,%ax", "mov %ax,%ds", "mov %ax,%es", "mov %ax,%ss", "xor %eax,%eax", "mov %ax,%fs", "mov %ax,%gs")
@@ -79,6 +81,7 @@ def idt_set(n: u32, handler: u64, ist: u8):
     e.off_hi = u32(handler >> 32)
     e.zero = 0
 
+@unsafe
 def fault(name: ptr[u8], frame: ptr[u64], has_err: u64):
     if (frame[1 + has_err] & 3) == 3:
         user_kill(name, 0, frame[has_err], 0)
@@ -120,6 +123,7 @@ def on_breakpoint(frame: ptr[u64]):
     bp_count += 1
 
 @interrupt_err
+@unsafe
 def on_page_fault(frame: ptr[u64]):
     cr2 = read_cr2()
     if frame[0] & 4:
@@ -133,6 +137,7 @@ def on_page_fault(frame: ptr[u64]):
     fault("#PF", frame, 1)
 
 @interrupt_err
+@unsafe
 def on_double_fault(frame: ptr[u64]):
 # runs on IST1 even though the faulting stack is gone; frame = [err, rip, cs, rflags, rsp, ss]
     df_rsp = u64(frame)
@@ -148,6 +153,7 @@ def on_double_fault(frame: ptr[u64]):
     frame[4] = KSTACK_TOP - 8
     df_recover = 0
 
+@unsafe
 def idt_init():
     idt_set(0, u64(on_de), 0)
     idt_set(2, u64(on_nmi), 2)

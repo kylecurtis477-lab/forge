@@ -19,6 +19,7 @@ def mod_exit():
     pass
 
 @export
+@unsafe
 def lp_getpid() -> u64:
     atomic_add64(u64(addr(active)), 1)
     atomic_add64(u64(addr(calls)), 1)
@@ -31,9 +32,11 @@ def lp_getpid_bad() -> u64:
     return kcur_pid() + 12345
 
 @export
+@unsafe
 def lp_calls() -> u64:
     return atomic_load64(u64(addr(calls)))
 
 @export
+@unsafe
 def lp_active() -> u64:
     return atomic_load64(u64(addr(active)))

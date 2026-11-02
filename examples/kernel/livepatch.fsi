@@ -16,6 +16,7 @@ lp_applied: u64
 lp_reverted: u64
 lp_rollbacks: u64
 
+@unsafe
 def lp_fnv(va: u64, n: u64) -> u64:
     h: u64 = 0xcbf29ce484222325
     i: u64 = 0
@@ -24,6 +25,7 @@ def lp_fnv(va: u64, n: u64) -> u64:
         i += 1
     return h
 
+@unsafe
 def lp_is_nop(va: u64) -> u64:
     return u64(vload8(va) == 0x0F and vload8(va + 1) == 0x1F and vload8(va + 2) == 0x44 and vload8(va + 3) == 0 and vload8(va + 4) == 0)
 
@@ -34,6 +36,7 @@ def lp_register(target: u64) -> u64:
     lp_hash = lp_fnv(target, 32)
     return 0
 
+@unsafe
 def lp_write5(target: u64, b: u64):
 # b: the new low 5 bytes; the other 3 bytes of the aligned word are kept
     w = p2v(virt_to_phys(kernel_pml4, target))
@@ -54,6 +57,7 @@ def lp_apply(target: u64, newfn: u64) -> u64:
     lp_applied += 1
     return 0
 
+@unsafe
 def lp_revert(target: u64) -> u64:
     if target != lp_target or vload8(target) != 0xE9:
         return LP_ENOTPATCHABLE
@@ -65,6 +69,7 @@ def lp_revert(target: u64) -> u64:
 
 lp_rejects: u64
 
+@unsafe
 def lp_apply_checked(target: u64, newfn: u64, check: u64) -> u64:
 # check(fn) -> 1 if fn behaves. It runs on the replacement before it is installed (a failing
 # replacement is never reachable), then on the live entry point; failing there rolls back.

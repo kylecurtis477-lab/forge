@@ -1,0 +1,7 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+# expect: store64() is unsafe
+def main() -> u64:
+    x: u64 = 0
+    store64(u64(addr(x)), 1)
+    return 0

@@ -68,6 +68,7 @@ def kx_release(pa: u64, n: u64, total: u64):
     spin_unlock(u64(addr(pmm_lock)))
     irq_restore(fl)
 
+@unsafe
 def kx_walk(pml4: u64, idx: u64, data: u64) -> u64:
 # counts (idx = 0) or serialises every present 4 KiB user page of an address space
     n: u64 = 0
@@ -98,6 +99,7 @@ def kx_walk(pml4: u64, idx: u64, data: u64) -> u64:
         i4 += 1
     return n
 
+@unsafe
 def kx_hash(p: u64, n: u64) -> u64:
     h: u64 = 0xCBF29CE484222325
     i: u64 = 0
@@ -131,6 +133,7 @@ def kx_pid_taken(pid: u64) -> u64:
     irq_restore(f)
     return r
 
+@unsafe
 def kx_wait_parked(me: ptr[Proc]) -> u64:
 # 1 when every other non-driver user process is parked at a syscall boundary or is a zombie
     i = 0
@@ -142,6 +145,7 @@ def kx_wait_parked(me: ptr[Proc]) -> u64:
         i += 1
     return 1
 
+@unsafe
 def kx_freeze_all(me: ptr[Proc]) -> u64:
     kx_caller = u64(me)
     kx_freeze = 1
@@ -174,9 +178,11 @@ def kx_file_index(fl: u64) -> u64:
     kx_nfile += 1
     return i
 
+@unsafe
 def kx_kept(q: ptr[Proc], me: ptr[Proc]) -> u64:
     return u64(q) != 0 and q.drv == 0 and (u64(q) == u64(me) or q.state == P_ZOMBIE or ptr[Thread](q.thread).kx_parked != 0)
 
+@unsafe
 def sys_kexec(frame: u64, which: u64) -> u64:
     if ktest_hooks == 0:
         return EPERM
@@ -450,6 +456,7 @@ def sys_kexec(frame: u64, which: u64) -> u64:
     panic("kexec stub returned")
     return 0
 
+@unsafe
 def kx_restore() -> nptr[Thread]:
 # in the new kernel: rebuild every handed-over process, then give the handoff region back.
 # Returns the caller's thread (0 if the handoff could not be adopted: the kernel boots fresh).
@@ -475,7 +482,7 @@ def kx_restore() -> nptr[Thread]:
         puts("kexec: unsupported handoff format, its processes are dropped\n")
         kx_release(hb, total, total)
         bi.handoff = 0
-        return ptr[Thread](0)
+        return 0
     nproc = vload64(h + 32)
     nfile = vload64(h + 40)
     npg = vload64(h + 48)

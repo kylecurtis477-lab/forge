@@ -74,6 +74,7 @@ def sys_cpu() -> u64:
 lbuf: u8[256]
 llen: u64
 
+@unsafe
 def out(s: ptr[u8]):
     i = 0
     while s[i] != 0 and llen < 255:
@@ -153,6 +154,7 @@ def sys_getargs(p: u64, n: u64) -> u64:
 def is_err(v: u64) -> u64:
     return v > 0xFFFFFFFFFFFFF000
 
+@unsafe
 def streq(a: ptr[u8], b: ptr[u8]) -> u64:
     i = 0
     while a[i] == b[i]:

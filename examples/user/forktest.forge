@@ -12,6 +12,7 @@ def fail(s: ptr[u8]):
     sys_exit(1)
 
 @export
+@unsafe
 def _start():
     x = 1
     st: u64 = 0

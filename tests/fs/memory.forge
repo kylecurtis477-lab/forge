@@ -5,6 +5,7 @@ include "linux.fsi"
 arena: u8[256]
 counter: u32 = 7
 
+@unsafe
 def main() -> i64:
     p: ptr[u8] = addr(arena[0])
     memset(p, 0xAB, 16)

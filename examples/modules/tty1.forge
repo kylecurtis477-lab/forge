@@ -53,6 +53,7 @@ def tty_pop() -> u64:
     return c
 
 @export
+@unsafe
 def mod_save_state(st: u64, cap: u64) -> u64:
     if cap < 24 + count:
         return 0
@@ -66,6 +67,7 @@ def mod_save_state(st: u64, cap: u64) -> u64:
     return 24 + count
 
 @export
+@unsafe
 def mod_restore_state(st: u64, n: u64) -> u64:
     if n < 24 or vload64(st) != 0x54545931:
         return 0

@@ -20,14 +20,17 @@ def spawn(fnp: u64, stack_top: u64) -> i64:
         "pop %rax", "call *%rax", "mov $60,%eax", "xor %edi,%edi", "syscall",
         "1: ret")
 
+@unsafe
 def spin_lock(l: ptr[u32]):
     while atomic_cas32(u64(l), 0, 1) != 0:
         while atomic_load32(u64(l)) != 0:
             pause()
 
+@unsafe
 def spin_unlock(l: ptr[u32]):
     atomic_store32(u64(l), 0)
 
+@unsafe
 def worker():
     i = 0
     while i < N:
@@ -39,6 +42,7 @@ def worker():
     atomic_or32(u64(addr(flags)), 1)
     atomic_add64(u64(addr(done)), 1)
 
+@unsafe
 def main() -> i64:
     x: u64 = 5
     put_u64(atomic_cas64(u64(addr(x)), 4, 9))

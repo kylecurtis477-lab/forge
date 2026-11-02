@@ -9,6 +9,7 @@ madt_apic: u64[8]
 irq_gsi: u32[16]
 irq_flags: u16[16]
 
+@unsafe
 def acpi_sum(p: u64, n: u64) -> u64:
     s: u64 = 0
     i = 0
@@ -17,6 +18,7 @@ def acpi_sum(p: u64, n: u64) -> u64:
         i += 1
     return s & 0xFF
 
+@unsafe
 def rsdp_scan() -> u64:
 # legacy BIOS area fallback when the boot loader gave us no RSDP
     p = p2v(0xE0000)
@@ -26,6 +28,7 @@ def rsdp_scan() -> u64:
         p += 16
     return 0
 
+@unsafe
 def madt_parse(m: u64):
     lapic_phys = vload32(m + 36)
     end = m + vload32(m + 4)
@@ -53,6 +56,7 @@ def madt_parse(m: u64):
 
 rsdp_save: u8[64]  # copy of the RSDP for a kexec successor (the original may be reclaimed)
 
+@unsafe
 def acpi_init(rsdp_phys: u64) -> u64:
     i = 0
     while i < 16:

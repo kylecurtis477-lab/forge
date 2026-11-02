@@ -7,10 +7,12 @@ SYS_EXIT = 60
 def _start():
     asm("xor %rbp,%rbp", "and $-16,%rsp", "call main", "mov %rax,%rdi", "mov $60,%eax", "syscall")
 
+@unsafe
 def sys3(n: u64, a: u64, b: u64, c: u64) -> i64:
     asm("mov %rdi,%rax", "mov %rsi,%rdi", "mov %rdx,%rsi", "mov %rcx,%rdx", "syscall", "leave", "ret")
     return 0
 
+@unsafe
 def strlen(s: ptr[u8]) -> u64:
     n: u64 = 0
     while s[n] != 0:

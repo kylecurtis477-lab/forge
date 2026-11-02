@@ -9,20 +9,24 @@ def read_rflags() -> u64:
     asm("pushfq", "pop %rax", "ret")
 
 
+@unsafe
 def spin_lock(l: u64):
     while atomic_xchg64(l, 1) != 0:
         while atomic_load64(l) != 0:
             tlb_poll()
             cpu_relax()
 
+@unsafe
 def spin_unlock(l: u64):
     atomic_store64(l, 0)
 
+@unsafe
 def irq_save() -> u64:
     f = read_rflags()
     cli()
     return f
 
+@unsafe
 def irq_restore(f: u64):
     if f & 0x200:
         sti()

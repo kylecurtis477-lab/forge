@@ -67,6 +67,7 @@ def reserve_range(base: u64, len: u64):
             frames_free -= 1
         f += 1
 
+@unsafe
 def pmm_init(bi: ptr[BootInfo]):
     memset(u64(addr(frame_bits[0])), 0xFF, sizeof(u64[65536]))
     frames_free = 0
@@ -103,6 +104,7 @@ def frame_alloc() -> u64:
     irq_restore(f)
     return pa
 
+@unsafe
 def frame_alloc_nolock() -> u64:
     w = frame_hint >> 6
     lim = frame_limit >> 6
@@ -125,6 +127,7 @@ def frame_alloc_nolock() -> u64:
     panic("out of physical memory")
     return 0
 
+@unsafe
 def frame_alloc_contig(n: u64) -> u64:
 # n physically contiguous zeroed frames below 4 GiB (DMA rings); 0 if none
     f = irq_save()
@@ -174,6 +177,7 @@ def frame_free_nolock(pa: u64):
 
 # ---- paging ----
 
+@unsafe
 def pt_next(table: u64, idx: u64, create: u64) -> u64:
     e = p2v(table) + idx * 8
     v = vload64(e)
@@ -200,14 +204,17 @@ def pte_addr(pml4: u64, va: u64, create: u64) -> u64:
         return 0
     return p2v(t) + ((va >> 12) & 511) * 8
 
+@unsafe
 def map_page(pml4: u64, va: u64, pa: u64, flags: u64):
     vstore64(pte_addr(pml4, va, 1), (pa & ADDR_MASK) | flags | PTE_P)
 
+@unsafe
 def map_2m(pml4: u64, va: u64, pa: u64, flags: u64):
     t = pt_next(pml4, (va >> 39) & 511, 1)
     t = pt_next(t, (va >> 30) & 511, 1)
     vstore64(p2v(t) + ((va >> 21) & 511) * 8, pa | flags | PTE_P | PTE_PS)
 
+@unsafe
 def unmap_page(pml4: u64, va: u64) -> u64:
     e = pte_addr(pml4, va, 0)
     if e == 0:
@@ -217,6 +224,7 @@ def unmap_page(pml4: u64, va: u64) -> u64:
     invlpg(va)
     return v & ADDR_MASK
 
+@unsafe
 def virt_to_phys(pml4: u64, va: u64) -> u64:
 # walks all levels honouring 1G/2M pages; returns 1 (odd, never a real result) when unmapped
     t = pml4
@@ -249,6 +257,7 @@ def map_stack(pml4: u64, top: u64, pages: u64):
 def is_mmio_2m(pa: u64) -> u64:
     return pa == 0xFEC00000 or pa == 0xFEE00000
 
+@unsafe
 def paging_init(fb_phys: u64, fb_len: u64) -> u64:
 # enable NX + global pages
     wrmsr(0xC0000080, rdmsr(0xC0000080) | 0x800)
@@ -322,6 +331,7 @@ def kmalloc(n: u64) -> u64:
     irq_restore(f)
     return p
 
+@unsafe
 def kmalloc_nolock(n: u64) -> u64:
     need = n + 16
     c = 0
@@ -363,6 +373,7 @@ def kfree(p: u64):
     spin_unlock(u64(addr(heap_lock)))
     irq_restore(f)
 
+@unsafe
 def kfree_nolock(p: u64):
     if p == 0:
         return

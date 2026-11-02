@@ -1,0 +1,7 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+# expect: is unsafe
+def main() -> u64:
+    a: u64 = 4096
+    p: ptr[u64] = a
+    return 0

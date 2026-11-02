@@ -75,6 +75,12 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 - Narrowing is a per-local flag `fsl_nn` (set means "this nptr local is non-null here"). `fs_primary` gives a narrowed local the `ptr[T]` type. Sources: `fs_nnscan` (if/while conjuncts), `fs_andor` (rhs of `and` / `x == 0 or`), `fs_nulltest`+`fs_exits` (early-exit ifs), stores in `fs_lhs_store` / typed decls. `fs_suite` ANDs facts with the entry snapshot on exit; `fs_loopkill` clears facts for locals a loop assigns (reuses `fs_bodyok`).
 - `fs_die` maps include-expanded lines back to file:line.
 
+### Unsafe regions (Phase 4.3)
+
+- State: `fs_unsafe` (depth; function-level from decorator bit 128 or naked bit 8 in the `fs_function` wrapper around `fs_function1`, block-level from `with unsafe:` in `fs_stmt`). `fs_unsafe_op(what)` counts an op when inside, else dies (or, with `--unsafe-fix`, prints `unsafe-fix: FILE:LINE fn` once per function via `fsf_ln`).
+- Gate points: start of `fs_intrin` (list `FS_UNSAFE_FNS`), int→ptr in `fs_conv`, explicit pointer casts, non-`[0]` ptr indexing. `ptr[T](0)` is rejected before the unsafe check.
+- Report: `--unsafe-report` per region + summary (`fs_ufn`, `fs_ublk`, `fs_utot`, `fs_ubare`); baseline in tests/unsafe/baseline.txt.
+
 ### Test blocks, forge test, forge verify
 
 - `test "name":` + block at top level (column 0) is a unit test. forgec rewrites each header line to `def __forge_test_N():` before lexing (line count unchanged, so diagnostics keep their line numbers); without `--test` they are uncalled functions and the program is unchanged. Test blocks in imported modules are renamed the same way (global counter) and never run from the importer.

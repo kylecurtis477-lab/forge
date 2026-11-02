@@ -15,6 +15,7 @@ def fnv(h: u64, n: u64) -> u64:
     return h
 
 @export
+@unsafe
 def _start():
     av: u8[128]
     sys_getargs(u64(addr(av[0])), 128)

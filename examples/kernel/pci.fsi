@@ -5,10 +5,12 @@ pci_vblk: u64  # bus<<16 | dev<<11 | fn<<8 of the first virtio-blk device, +1 (0
 def pci_addr(bdf: u64, off: u64) -> u32:
     return u32(0x80000000 | (bdf << 8) | (off & 0xFC))
 
+@unsafe
 def pci_rd32(bdf: u64, off: u64) -> u64:
     outl(0xCF8, pci_addr(bdf, off))
     return u64(inl(0xCFC))
 
+@unsafe
 def pci_wr32(bdf: u64, off: u64, v: u64):
     outl(0xCF8, pci_addr(bdf, off))
     outl(0xCFC, u32(v))

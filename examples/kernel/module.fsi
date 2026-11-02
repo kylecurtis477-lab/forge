@@ -66,6 +66,7 @@ def mod_err_str() -> ptr[u8]:
         return e
     return "(none)"
 
+@unsafe
 def kstreq(a: u64, b: u64) -> u64:
     i: u64 = 0
     while vload8(a + i) == vload8(b + i):
@@ -101,10 +102,11 @@ def mod_area_init():
         pte_addr(kernel_pml4, va, 1)
         va += 0x200000
 
+@unsafe
 def mod_fail(msg: ptr[u8]) -> nptr[Module]:
     mod_err = msg
     atomic_add64(u64(addr(mod_rejects)), 1)
-    return ptr[Module](0)
+    return 0
 
 def mod_free_pages(base: u64, n: u64):
     i: u64 = 0
@@ -145,6 +147,7 @@ def mod_sym(m: ptr[Module], name: ptr[u8]) -> u64:
         i += 1
     return 0
 
+@unsafe
 def mod_load(img: u64, sz: u64) -> nptr[Module]:
     secaddr: u64[64]
     # ---- ELF header ----
@@ -235,7 +238,7 @@ def mod_load(img: u64, sz: u64) -> nptr[Module]:
     m.base = base
     m.npages = npages
     # ---- relocations ----
-    err: ptr[u8] = ptr[u8](0)
+    err: nptr[u8] = 0
     r: u64 = 0
     while r < shnum and u64(err) == 0:
         rsh = img + shoff + r * 64
@@ -358,6 +361,7 @@ def mod_load(img: u64, sz: u64) -> nptr[Module]:
     atomic_add64(u64(addr(mod_loads)), 1)
     return m
 
+@unsafe
 def mod_unload(m: ptr[Module]):
     call_ptr(m.exit)
     mod_free_pages(m.base, m.npages)

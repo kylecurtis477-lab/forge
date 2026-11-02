@@ -11,9 +11,11 @@ lapic_per_10ms: u64
 tsc_per_ms: u64
 sched_on: u64
 
+@unsafe
 def lapic_rd(r: u64) -> u32:
     return vload32(lapic + r)
 
+@unsafe
 def lapic_wr(r: u64, v: u32):
     vstore32(lapic + r, v)
 
@@ -32,14 +34,17 @@ def tsc_delay_us(us: u64):
 def lapic_eoi():
     lapic_wr(0xB0, 0)
 
+@unsafe
 def ioapic_rd(r: u32) -> u32:
     vstore32(ioapic, r)
     return vload32(ioapic + 0x10)
 
+@unsafe
 def ioapic_wr(r: u32, v: u32):
     vstore32(ioapic, r)
     vstore32(ioapic + 0x10, v)
 
+@unsafe
 def pic_disable():
     outb(0x20, 0x11)
     outb(0xA0, 0x11)
@@ -53,6 +58,7 @@ def pic_disable():
     outb(0xA1, 0xFF)
 
 @interrupt
+@unsafe
 def on_lapic_timer(frame: ptr[u64]):
     if lapic_cpu() == 0:
         atomic_add64(u64(addr(lapic_ticks)), 1)
@@ -72,6 +78,7 @@ def on_pit(frame: ptr[u64]):
 def on_spurious(frame: ptr[u64]):
     cpu_relax()
 
+@unsafe
 def pit2_wait_10ms_start():
 # PIT channel 2, mode 0, 11932 ticks of 1.193182 MHz = 10 ms; OUT2 is visible in port 0x61 bit 5
     outb(0x61, (inb(0x61) & 0xFD) | 1)
@@ -82,6 +89,7 @@ def pit2_wait_10ms_start():
     outb(0x61, v)
     outb(0x61, v | 1)
 
+@unsafe
 def lapic_init():
     lapic = p2v(lapic_phys)
     # make sure the APIC is globally enabled (IA32_APIC_BASE bit 11)

@@ -3,6 +3,7 @@
 include "linux.fsi"
 
 @section(".text.privileged")
+@unsafe
 def privileged(v: u64):
     cli()
     sti()
@@ -20,6 +21,7 @@ def privileged(v: u64):
 def add_asm():
     asm("lea (%rdi,%rsi),%rax", "ret")
 
+@unsafe
 def main() -> i64:
     t0 = rdtsc()
     mfence()

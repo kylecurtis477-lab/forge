@@ -39,6 +39,7 @@ def add_region(base: u64, len: u64, typ: u64):
         r.typ = typ
         bi.nregions += 1
 
+@unsafe
 def mb2_parse(info: u64):
     total = u64(load32(info))
     bi.info_base = info
@@ -159,6 +160,7 @@ def check_mapping(name: ptr[u8], va: u64, expect_mapped: u64):
             panic("expected no mapping")
     putc(10)
 
+@unsafe
 def heap_test():
     ptrs: u64[64]
     before = frames_free
@@ -195,6 +197,7 @@ def heap_test():
     if before != frames_free or heap_live != 0:
         panic("heap leak")
 
+@unsafe
 def demand_test():
     a = DEMAND_BASE
     vstore64(a + 0x10, 0x1111)
@@ -273,6 +276,7 @@ counter_lock: u64
 done_count: u64
 work_until: u64
 
+@unsafe
 def worker(arg: u64):
     t = cur_thread()
     while atomic_load64(u64(addr(lapic_ticks))) < work_until:
@@ -305,6 +309,7 @@ pc_sum: u64
 pc_got: u64
 PC_ITEMS = 3000
 
+@unsafe
 def mx_worker(n: u64):
     i: u64 = 0
     while i < n:
@@ -317,6 +322,7 @@ def mx_worker(n: u64):
         i += 1
     atomic_add64(u64(addr(mx_done)), 1)
 
+@unsafe
 def pc_producer(base: u64):
     i: u64 = 0
     while i < PC_ITEMS:
@@ -330,6 +336,7 @@ def pc_producer(base: u64):
         i += 1
     atomic_add64(u64(addr(mx_done)), 1)
 
+@unsafe
 def pc_consumer(n: u64):
     i: u64 = 0
     while i < n:
@@ -346,6 +353,7 @@ def pc_consumer(n: u64):
         i += 1
     atomic_add64(u64(addr(mx_done)), 1)
 
+@unsafe
 def sync_test():
     ths: u64[8]
     b0 = wq_blocks
@@ -404,6 +412,7 @@ tlbt_go: u64
 tlbt_done: u64
 tlbt_seen: u64[8]
 
+@unsafe
 def tlbt_worker(cpu: u64):
 # pinned to one CPU: keep the old translation hot until the remap, then report what it sees
     s: u64 = 0
@@ -415,6 +424,7 @@ def tlbt_worker(cpu: u64):
     tlbt_seen[cpu] = vload64(TLBT_VA)
     atomic_add64(u64(addr(tlbt_done)), 1)
 
+@unsafe
 def tlb_test():
     n = ncpu_online
     fa = frame_alloc()
@@ -464,6 +474,7 @@ def tlb_test():
         puts("NO\n")
         panic("stale TLB entry after shootdown")
 
+@unsafe
 def sched_test():
     ths: u64[8]
     work_until = lapic_ticks + 30
@@ -566,6 +577,7 @@ def user_test():
         panic("user mode test: leak")
     puts("ring 3 + syscall/sysret + ELF loader OK\n")
 
+@unsafe
 def fs_test():
     pci_scan()
     if vb_init() == 0:
@@ -656,6 +668,7 @@ def mod_expect_reject(img: u64, sz: u64, what: ptr[u8]):
         mod_err_sym = 0
     putc(10)
 
+@unsafe
 def module_test():
     kexports_init()
     mod_area_init()
@@ -742,6 +755,7 @@ def module_test():
 blkd_img: u64
 blkd_sz: u64
 
+@unsafe
 def blk_same(buf: u64, sz: u64) -> u64:
     hi = uimg(0)
     if sz != uimg(1) - hi:
@@ -815,6 +829,7 @@ lph_calls: u64
 lph_wrong: u64
 lph_iter: u64[4]
 
+@unsafe
 def lp_hammer(i: u64):
 # kernel threads have no process: the right answer is 0, patched or not
     while atomic_load64(u64(addr(lph_stop))) == 0:
@@ -825,6 +840,7 @@ def lp_hammer(i: u64):
         if (lph_iter[i] & 1023) == 0:
             yield_cpu()
 
+@unsafe
 def lp_check_getpid(fn: u64) -> u64:
     return u64(call_ptr(fn) == kcur_pid())
 
@@ -837,6 +853,7 @@ def lp_check_flaky(fn: u64) -> u64:
         return 0
     return lp_check_getpid(fn)
 
+@unsafe
 def lp_quiesce():
 # every hammer passes its loop head twice, i.e. has left any call it was in when the text changed
     s: u64[4]
@@ -850,6 +867,7 @@ def lp_quiesce():
             yield_cpu()
         i += 1
 
+@unsafe
 def livepatch_test():
     f0 = frames_free
     h0 = heap_live
@@ -937,6 +955,7 @@ tsw_swaps: u64
 tsw_partial: u64
 tsw_thread: u64
 
+@unsafe
 def tty_swap_to(v: u64) -> u64:
     m: u64 = 0
     rst = u64(tty0_restore)
@@ -986,6 +1005,7 @@ def tty_swapper(arg: u64):
     if tty_swap_to(0) != 1:
         panic("tty swap back to v0 failed")
 
+@unsafe
 def shell_test():
 # the interactive shell from \EFI\Forge\bin\sh; the boot test types its commands
     input_init()
@@ -1111,6 +1131,7 @@ def kexec_resume():
     puts("kexec handoff OK\n")
 
 @export
+@unsafe
 def after_overflow():
     puts("recovered from #DF on a fresh stack\n")
     pic_disable()
@@ -1188,6 +1209,7 @@ def kmain_mb2(magic: u32, info: u32):
     kernel_start()
 
 @export
+@unsafe
 def kmain_efi(info: u64):
     serial_init()
     puts("Forge kernel (UEFI loader entry)\n")

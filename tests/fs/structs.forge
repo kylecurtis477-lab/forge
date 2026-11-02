@@ -26,6 +26,7 @@ def sum(n: ptr[Node]) -> i64:
         n = n.next
     return t
 
+@unsafe
 def main() -> i64:
     put_u64(sizeof(Pair))
     puts(" ")
