@@ -220,3 +220,7 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
 - Compiler (selfhost/compiler.forge, freestanding backend): pragma `# forge: stack-protector` sets `fs_sp`; each frame reserves -8(%rbp). Functions with a buffer local (`fs_hasbuf`) get `mov stack_canary(%rip),%r11; mov %r11,-8(%rbp)` after the frame setup and `mov -8(%rbp),%r11; xor stack_canary(%rip),%r11; jz ok; call stack_smashed` at the single return label. `stack_smashed` itself is never instrumented. Programs without the pragma compile byte-for-byte as before (FIXPOINT unaffected).
 - Kernel: `stack_canary` global, `canary_init` (no buffer locals, so it is not instrumented) seeds it first thing in `kmain_high`; `stack_smashed` panics, except in the armed self-test, where it kills the thread.
 - Not covered: user programs and modules (no pragma yet); the canary is per boot, not per thread.
+
+## KASLR, partial (Phase 5.4d)
+- `canary_init` (kernel.forge) also sets `heap_big_next` = HEAP_BIG_BASE + rand16 * 2 MiB and `kstack_next` = KSTACKS_BASE + rand16 * 2 MiB, before the first big allocation or thread. Both stay in PML4 slot 384, so user address spaces created later share them. Logged as `KASLR: big heap at ..., thread stacks at ...`.
+- Fixed: the kernel image (KBASE), KSTACK_TOP/IST stacks, the HHDM, DEMAND_BASE. Entropy is the TSC (no RDRAND yet).

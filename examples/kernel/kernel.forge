@@ -579,6 +579,18 @@ def canary_init():
     t = rdtsc()
     v = (t ^ (t << 29) ^ u64(addr(bi))) * 0x9E3779B97F4A7C15
     stack_canary = (v ^ (v >> 31)) & ~u64(255)  # low byte 0 stops string over-reads too
+    # KASLR for the dynamic kernel regions: big heap and thread stacks start at a random 2 MiB slot
+    # (16 bits each, inside their PML4 slot); the image itself stays at KBASE
+    r = (v >> 7) * 0xBF58476D1CE4E5B9
+    if heap_big_next == 0:
+        heap_big_next = HEAP_BIG_BASE + ((r >> 11) & 0xFFFF) * 0x200000
+    if kstack_next == 0:
+        kstack_next = KSTACKS_BASE + ((r >> 37) & 0xFFFF) * 0x200000
+    puts("KASLR: big heap at ")
+    put_hex(heap_big_next)
+    puts(", thread stacks at ")
+    put_hex(kstack_next)
+    putc(10)
 
 @export
 def stack_smashed():
