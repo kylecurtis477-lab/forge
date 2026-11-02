@@ -8437,6 +8437,8 @@ O_BOX = 33
 O_FCMP = 34
 O_FNEG = 35
 O_FCST = 36
+O_SCST = 37
+NRT_OK = ["concat", "substr", "str_eq", "chr", "join", "char_at"]
 T_DBL = 7
 raw_at = -1
 fcN = list(200)
@@ -8944,6 +8946,8 @@ def cond_range(a, b, l, sense):
     nx = sv6
     nrf = sv7
     nlp = sv8
+    if ir_stats > 3:
+        eputs(concat("texc ", irwhy))
     irfail = 0
     ip = a
     v = x_texpr(a, 1)
@@ -9000,6 +9004,13 @@ def cond_leaf(a, b, l, sense):
             else:
                 icbr(r, cst(0), 0, l)
             return 0
+        if cc < 2 and oty(x) == T_STR and oty(y) == T_STR and hyb and not inl_on:
+            r = rt_call2(11, x, y, T_INT)
+            if (cc == 0) == (sense != 0):
+                icbr(r, cst(0), 1, l)
+            else:
+                icbr(r, cst(0), 0, l)
+            return 0
         if not sense:
             cc = CC_NEG[cc]
         icbr(x, y, cc, l)
@@ -9009,10 +9020,24 @@ def cond_leaf(a, b, l, sense):
     if ip != b:
         o_fail("cond expr")
         return 0
+    if oty(x) == T_BOOL:
+        r = new_vr(0)
+        iadd(O_AND, r, x, cst(1))
+        x = r
     if sense:
         icbr(x, cst(0), 1, l)
     else:
         icbr(x, cst(0), 0, l)
+
+def rt_call2(rb, x, y, ty):
+    st = nargb
+    o_argpush(x)
+    o_argpush(y)
+    dd = new_vr(1)
+    k = iadd(O_CALL, dd, st, 2)
+    iimm[k] = -1 - rb
+    vtt[dd] = ty
+    return dd
 
 def xe_more(p):
     if tk[p] == K_OP:
@@ -9282,6 +9307,8 @@ def x_post() -> int:
     nx = sv6
     nrf = sv7
     nlp = sv8
+    if ir_stats > 3:
+        eputs(concat("texp ", irwhy))
     irfail = 0
     ip = p0
     return x_texpr(p0, 0)
@@ -9353,6 +9380,13 @@ def x_tex2(p0, en, t, kind) -> int:
     ix[k] = en
     ic[k] = kind
     cur_tex += 1
+    if ir_stats == 5:
+        tq = p0
+        tsig = "TEX"
+        while tq < en and tq < p0 + 6:
+            tsig = concat(concat(tsig, " "), str(tv[tq]))
+            tq += 1
+        eputs(tsig)
     ip = en
     return d
 
@@ -9367,6 +9401,12 @@ def x_post0() -> int:
         v = new_vr(1)
         vtt[v] = T_DBL
         kk = iadd(O_FCST, v, -1, -1)
+        iimm[kk] = ip
+        ip += 1
+    elif k == K_STR and hyb and not inl_on and tk[ip + 1] != K_STR:
+        v = new_vr(1)
+        vtt[v] = T_STR
+        kk = iadd(O_SCST, v, -1, -1)
         iimm[kk] = ip
         ip += 1
     elif tok_is_op(ip, "("):
@@ -9518,6 +9558,44 @@ def x_call() -> int:
         k = iadd(O_NEG, dd, dd, -1)
         iovf[k] = ovf_on
         ilabel(sk)
+        return dd
+    if f < 0 and hyb and not inl_on and find(NRT_OK, 6, name) >= 0:
+        rb = find(BI_NAMES, NBI, name)
+        rty = T_INT
+        if rb < 0:
+            rb = NBI
+        else:
+            rty = BI_TY[rb]
+            if n != BI_ARGS[rb]:
+                o_fail("rt args")
+                return cst(0)
+        if rb == NBI and n != 2:
+            o_fail("rt args")
+            return cst(0)
+        ip = lp + 1
+        rvals = list(n + 1)
+        i = 0
+        while i < n:
+            rvals[i] = xbox(x_expr())
+            if i < n - 1:
+                if not tok_is_op(ip, ","):
+                    o_fail("arg")
+                    return cst(0)
+                ip += 1
+            i += 1
+        if ip != rp:
+            o_fail("rt call")
+            return cst(0)
+        ip = rp + 1
+        st = nargb
+        i = 0
+        while i < n:
+            o_argpush(rvals[i])
+            i += 1
+        dd = new_vr(1)
+        k = iadd(O_CALL, dd, st, n)
+        iimm[k] = -1 - rb
+        vtt[dd] = rty
         return dd
     gen = 0
     if not fn_ok(f, n) or fpre[f]:
@@ -10359,7 +10437,7 @@ def is_pure(k):
     op = iop[k]
     if op == O_MOV or op == O_PARAM or op == O_AND or op == O_OR or op == O_XOR or op == O_SAR or op == O_NOT or op == O_LDATA or op == O_LNEW or op == O_VLD:
         return 1
-    if op >= O_I2D and op <= O_FCST:
+    if op >= O_I2D and op <= O_SCST:
         return 1
     if op == O_FOP:
         return iimm[k] < 3
@@ -11754,8 +11832,13 @@ def em_call(k):
             e2("pushq ", vl(o))
         j += 1
     f = iimm[k]
-    e2("call ", flabel[f])
-    add_edge(f)
+    if f == -1 - NBI:
+        e("call rt_char_at")
+    elif f < 0:
+        e2("call ", BI_RT[-1 - f])
+    else:
+        e2("call ", flabel[f])
+        add_edge(f)
     if n > 0:
         e3("add $", str(8 * n), ", %rsp")
     if idst[k] >= 0:
@@ -11846,6 +11929,13 @@ def o_ins(k, fi, x_epi):
     elif op == O_TSTMT:
         pos = iimm[k]
         stmt()
+    elif op == O_SCST:
+        if idst[k] >= 0:
+            if in_reg(idst[k]):
+                e3("lea ", emit_str(tv[iimm[k]]), concat("(%rip), ", vl(idst[k])))
+            else:
+                e3("lea ", emit_str(tv[iimm[k]]), "(%rip), %rax")
+                e2("mov %rax, ", vl(idst[k]))
     elif op >= O_FOP:
         em_flt(k)
     elif op == O_TSET:
@@ -12322,6 +12412,8 @@ def forge_main():
             no_hyb = 1
         elif str_eq(argv(ai), "--irstats4"):
             ir_stats = 4
+        elif str_eq(argv(ai), "--irstats5"):
+            ir_stats = 5
         elif str_eq(argv(ai), "--irstats3"):
             ir_stats = 3
         elif str_eq(argv(ai), "--irstats2"):
