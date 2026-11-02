@@ -1,0 +1,16 @@
+# forge: no-runtime
+# Misbehaving user program: touches kernel memory from ring 3. The kernel must kill it and carry on.
+include "ulib.fsi"
+
+@export
+def _start():
+    out("fault test: pid ")
+    out_u64(sys_getpid())
+    out(" reads kernel memory from ring 3\n")
+    flush()
+    v = vload64(0xFFFFFFFF80100000)
+    out("FAULT TEST FAILED: read ")
+    out_u64(v)
+    out("\n")
+    flush()
+    sys_exit(1)

@@ -314,6 +314,64 @@ def sched_test():
         panic("not all CPUs ran threads")
     puts("preemptive SMP scheduler OK\n")
 
+asm(".section .rodata",
+    ".balign 16",
+    "user_hello_elf: .incbin \"hello.elf\"",
+    "user_hello_end:",
+    ".balign 16",
+    "user_fault_elf: .incbin \"fault.elf\"",
+    "user_fault_end:",
+    ".text")
+
+@naked
+def uimg(i: u64) -> u64:
+    asm("lea user_hello_elf(%rip), %rax", "cmp $1, %rdi", "jb 1f",
+        "lea user_hello_end(%rip), %rax", "je 1f",
+        "lea user_fault_elf(%rip), %rax", "cmp $3, %rdi", "jb 1f",
+        "lea user_fault_end(%rip), %rax", "1: ret")
+
+def user_test():
+    f0 = frames_free
+    h0 = heap_live
+    hi = uimg(0)
+    hl = uimg(1) - hi
+    fi = uimg(2)
+    fl = uimg(3) - fi
+    bad = proc_spawn(hi + 1, hl - 1)
+    if u64(bad) != 0:
+        panic("ELF loader accepted a corrupt image")
+    a = proc_spawn(hi, hl)
+    b = proc_spawn(hi, hl)
+    c = proc_spawn(fi, fl)
+    d = proc_spawn(hi, hl)
+    ida = a.id
+    idb = b.id
+    idd = d.id
+    ca = proc_reap(a)
+    cb = proc_reap(b)
+    cc = proc_reap(c)
+    cd = proc_reap(d)
+    puts("user mode: 4 processes, exit codes ")
+    put_u64(ca)
+    puts(" ")
+    put_u64(cb)
+    puts(" ")
+    put_hex(cc)
+    puts(" ")
+    put_u64(cd)
+    puts(", syscalls ")
+    put_u64(syscalls)
+    puts(", frames leaked ")
+    put_u64(f0 - frames_free)
+    puts(", heap leaked ")
+    put_u64(heap_live - h0)
+    putc(10)
+    if ca != (ida & 0xFF) or cb != (idb & 0xFF) or cd != (idd & 0xFF) or cc != 0x10E:
+        panic("user mode test: wrong exit codes")
+    if frames_free != f0 or heap_live != h0:
+        panic("user mode test: leak")
+    puts("ring 3 + syscall/sysret + ELF loader OK\n")
+
 @export
 def after_overflow():
     puts("recovered from #DF on a fresh stack\n")
@@ -342,6 +400,7 @@ def after_overflow():
     puts(" irq(s)\n")
     if pit_irqs == 0:
         panic("no IOAPIC interrupt")
+    cpu_syscall_init(0)
     smp_init()
     puts("SMP: ")
     put_u64(ncpu_online)
@@ -350,6 +409,7 @@ def after_overflow():
     sched_on = 1
     sti()
     sched_test()
+    user_test()
     cli()
     puts("KERNEL OK\n")
     # test harness: wait up to 5 s (LAPIC ticks) for 'q' on COM1 so it can take a screenshot first

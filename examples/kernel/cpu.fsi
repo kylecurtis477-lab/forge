@@ -80,6 +80,8 @@ def idt_set(n: u32, handler: u64, ist: u8):
     e.zero = 0
 
 def fault(name: ptr[u8], frame: ptr[u64], has_err: u64):
+    if (frame[1 + has_err] & 3) == 3:
+        user_kill(name, 0, frame[has_err], 0)
     puts("\nEXCEPTION ")
     puts(name)
     if has_err:
@@ -120,6 +122,8 @@ def on_breakpoint(frame: ptr[u64]):
 @interrupt_err
 def on_page_fault(frame: ptr[u64]):
     cr2 = read_cr2()
+    if frame[0] & 4:
+        user_kill("#PF", 14, frame[1], cr2)
     if (frame[0] & 1) == 0 and demand_fault(cr2):
         return
     puts("\n#PF cr2=")

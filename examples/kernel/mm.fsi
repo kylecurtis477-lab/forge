@@ -246,6 +246,11 @@ def paging_init(fb_phys: u64, fb_len: u64) -> u64:
     map_stack(pml4, KSTACK_TOP, KSTACK_PAGES)
     map_stack(pml4, IST1_TOP, IST_PAGES)
     map_stack(pml4, IST2_TOP, IST_PAGES)
+    # pre-create every kernel-half PML4 entry so per-process PML4 copies always see new kernel mappings
+    i = 256
+    while i < 512:
+        pt_next(pml4, i, 1)
+        i += 1
     return pml4
 
 def paging_activate(pml4: u64):

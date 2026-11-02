@@ -3,8 +3,9 @@
 set -e
 cd "$(dirname "$0")"
 B=../../build/kernel; mkdir -p $B/iso/boot/grub
+sh ../user/build.sh
 ../../build/forgec kernel.forge $B/kernel.s $FORGEC_FLAGS
-as -o $B/kernel.o $B/kernel.s
+as -I ../../build/user -o $B/kernel.o $B/kernel.s
 ld -n -T linker.ld -o $B/kernel.elf $B/kernel.o
 grub-file --is-x86-multiboot2 $B/kernel.elf
 cp $B/kernel.elf $B/iso/boot/kernel.elf
