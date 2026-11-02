@@ -16,41 +16,50 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
   - `cli sti hlt pause int3 ud2 mfence lfence sfence wbinvd`
   - `inb/inw/inl outb/outw/outl`
   - `lgdt lidt ltr invlpg read_crN write_crN rdmsr wrmsr rdtsc`
-  - `call_ptr(f, ...)` (SysV) and `call_efi(f, ...)` (Microsoft x64, with shadow space)
+  - `call_ptr(f, ...)` (SysV, up to 6 args) and `call_efi(f, ...)` (Microsoft x64: shadow space, args 5–9 on the stack)
+  - Atomics (all `lock`-prefixed or implicitly locked, sequentially consistent; the address is a `u64`):
+    `atomic_load32/64`, `atomic_store32/64`, `atomic_xchg32/64`, `atomic_add32/64` (returns the old value),
+    `atomic_cas32/64(addr, expected, new)` (returns the old value), `atomic_or32/64`, `atomic_and32/64`.
+    tests/fs/atomics runs 4 `clone` threads hammering one counter.
 - **ABI:**
   - `extern def` declares C functions. `@export` makes a symbol global.
   - Narrow arguments and return values are normalized at the boundary, so mixed Forge/C code is safe (tests/fs/cabi).
   - `@interrupt` and `@interrupt_err` generate a register-saving `iretq` wrapper. The body gets `frame: ptr[u64]`, which points at the error code or RIP.
-  - `@efiapi` generates an MS-ABI entry. `@naked` emits no prologue. `@section("...")` places the function in a named section.
-- **Globals:** `name: T = init` goes in .data, otherwise .bss. Initializers can be constants, arrays `[..]`, strings, or symbols. `NAME = constexpr` defines a constant. `include "file"` does textual inclusion.
+  - `@efiapi` generates an MS-ABI entry (up to 6 params, 5th/6th from the stack). `@naked` emits no prologue. `@section("...")` places the function in a named section.
+- **Globals:** `name: T = init` goes in .data, otherwise .bss. Initializers can be constants, arrays `[..]`, strings, or symbols. `NAME = constexpr` defines a constant. `include "file"` does textual inclusion (relative to the including file, or absolute).
 
 ## Demos (tested by `tests/os/run.sh`, also called from run_tests.sh)
-- **`examples/kernel/`:** an x86-64 kernel.
-  - It has a Multiboot2 header and a 32→64-bit trampoline, then `kmain` in Forge.
-  - kmain drives COM1 serial and the VGA console, parses Multiboot2 tags, loads its own GDT/IDT, and handles #BP, #PF (with CR2), and #GP.
-  - It is built into a BIOS+UEFI hybrid GRUB ISO and boots under both SeaBIOS and OVMF.
-- **`examples/efi/`:** a native PE32+ UEFI application written in Forge.
-  - It is linked directly by `ld -m i386pep --subsystem 10` and writes through `ConOut->OutputString`.
-  - `mkgpt.py` builds a GPT disk with an ESP plus placeholder Microsoft basic data and Linux partitions, and OVMF boots the app from it.
+- **`examples/kernel/`:** a higher-half x86-64 kernel (`boot.fsi bootinfo.fsi console.fsi mm.fsi cpu.fsi acpi.fsi apic.fsi kernel.forge`).
+  - **Layout:** linked at `0xFFFFFFFF80000000 + phys` with a small identity-linked `.boot` section at 1 MiB (Multiboot2 header, 32→64-bit trampoline, `FORGEKRN` header for the UEFI loader). The image is position-independent in physical memory: the loader may put it anywhere 2 MiB-congruent (`kdelta`).
+  - **Two entries, one BootInfo:** `kmain_mb2` parses Multiboot2 tags (memory map, framebuffer, RSDP, EFI marker); `kmain_efi` copies the BootInfo filled by the Forge UEFI loader. Both continue in the same `kernel_start`.
+  - **Physical memory:** bitmap frame allocator (up to 16 GiB) over usable regions, reserving the low 1 MiB, the kernel image and the boot info.
+  - **Paging:** the kernel builds its own 4-level tables: HHDM at `0xFFFF800000000000` (2 MiB pages, NX, PCD on the IOAPIC/LAPIC pages), kernel `.text` RX / `.rodata` R+NX / `.data/.bss` RW+NX in 4 KiB global pages, a 64 KiB kernel stack plus two IST stacks each with an unmapped guard page. The identity map is dropped (verified by a page walk). EFER.NXE and CR4.PGE are enabled.
+  - **Heap:** `kmalloc/kfree` with 8 slab size classes (32–4096 bytes incl. header) and page-backed large blocks in their own virtual range; frees return frames (the test checks for leaks over three rounds).
+  - **Demand paging:** #PF on the `0xFFFF900000000000` region maps a zeroed frame and resumes.
+  - **Console:** COM1 + framebuffer text with an 8×16 font (`tools/mkfont.py` → `font.fsi`, rendered from DejaVu Sans Mono), from the GOP (Forge loader) or the Multiboot2 framebuffer tag (GRUB, BIOS VBE or UEFI GOP); VGA text as fallback.
+  - **CPU:** GDT with a 64-bit TSS (`ltr`), IST1 for #DF and IST2 for NMI/#MC. The test overflows the kernel stack into its guard page; the #DF arrives on IST1, prints, and `iretq`s into a recovery continuation on a fresh stack.
+  - **ACPI/APIC:** RSDP → XSDT/RSDT (checksums) → MADT (CPUs, LAPIC, IOAPIC, interrupt source overrides). The 8259 PIC is remapped and masked; the LAPIC timer is calibrated against PIT channel 2 and runs periodically at 100 Hz; the PIT's IRQ0 is routed through the IOAPIC using the override (GSI 2) and delivered once.
+- **`examples/efi/loader.forge` → `forgex64.efi`:** the native UEFI boot loader, written in Forge.
+  - LoadedImage → SimpleFileSystem reads `\EFI\Forge\kernel.elf` from its own volume. It then loads the PT_LOAD segments at a 2 MiB-congruent base below 1 GiB and finds the entry through the `FORGEKRN` header.
+  - It picks GOP 1024×768 when offered, finds the ACPI 2.0 RSDP in the configuration table, and builds identity (0–4 GiB) plus −2 GiB tables.
+  - It runs GetMemoryMap → ExitBootServices (retried when the map key is stale), converts the map into BootInfo, switches CR3 and jumps to `kentry64`.
+  - It is linked directly by `ld -m i386pep --subsystem 10`. `mkgpt.py` builds a GPT disk with an ESP plus placeholder Microsoft basic data and Linux partitions.
+- **Tests:** `tests/os/boot.py` boots each path headless, checks the serial markers, takes a QEMU monitor `screendump` after `KERNEL OK`, decodes the first framebuffer text row against the font, and then sends `q` on COM1 so the kernel exits. The three paths are BIOS+GRUB, OVMF+GRUB, and OVMF+forgex64.efi on GPT.
 
 ## Dual boot
-- The EFI app installs into its own vendor directory, `\EFI\Forge\forgex64.efi`, on an existing ESP. Add a firmware boot entry for it, e.g. `efibootmgr -c -d /dev/sdX -p N -L Forge -l '\EFI\Forge\forgex64.efi'`, or `bcdedit` on Windows.
-- It never touches `\EFI\Microsoft`, `\EFI\<distro>`, or the MBR, and does not repartition. `\EFI\BOOT\BOOTX64.EFI` is used only on the throwaway test disk.
-- The kernel can also be started from an existing Linux GRUB with a `multiboot2 /boot/forge/kernel.elf` entry (see examples/kernel/grub.cfg).
-- The kernel identity-maps 1 GiB with 2 MiB pages and touches no disks.
+- The loader and kernel install into their own vendor directory on an existing ESP: `\EFI\Forge\forgex64.efi` and `\EFI\Forge\kernel.elf`. Add a firmware boot entry, e.g. `efibootmgr -c -d /dev/sdX -p N -L Forge -l '\EFI\Forge\forgex64.efi'`, or `bcdedit /copy {bootmgr}` + `/set {id} path \EFI\Forge\forgex64.efi` on Windows.
+- Nothing else is touched: not `\EFI\Microsoft`, not `\EFI\<distro>`, not the MBR, and no repartitioning. The loader only reads its own kernel file, and the kernel touches no disks. `\EFI\BOOT\BOOTX64.EFI` is used only on the throwaway test disk.
+- The kernel can also be started from an existing Linux GRUB with a `multiboot2 /boot/forge/kernel.elf` entry (see examples/kernel/grub.cfg, which loads `all_video` so the framebuffer tag works on both BIOS and UEFI GRUB). GRUB can also chainload `forgex64.efi` (`chainloader /EFI/Forge/forgex64.efi`).
+- If `forgex64.efi` fails, it prints the reason and returns to the firmware boot manager, so the next boot entry (Windows/Linux) still works.
 
 ## Roadmap
-1. **Memory:**
-   - Parse the Multiboot2/UEFI memory map, then build a physical frame allocator (bitmap or buddy).
-   - Use 4-level paging with a higher-half kernel, guard pages, and NX.
-   - Add a kernel heap (slab plus a large-object allocator).
-   - Exit UEFI boot services so the native EFI path can become the kernel loader (GetMemoryMap → ExitBootServices → jump). This makes GRUB optional.
-2. **Interrupts and time:** remap or disable the PIC, then add the LAPIC/IOAPIC via ACPI MADT, the HPET/LAPIC timer, and IST stacks for #DF/NMI.
-3. **Scheduler:** kernel threads with context switching (asm stubs), preemptive round-robin then priorities, spinlocks/mutexes (needs atomics intrinsics: `lock cmpxchg`, `xchg`), and SMP bring-up via INIT-SIPI.
+1. ~~**Memory:** memory map, frame allocator, 4-level higher-half paging with guard pages and NX, kernel heap, ExitBootServices with the UEFI app as the loader, GOP framebuffer console.~~ **Done.** Still open: a buddy allocator for contiguous frames, reclaiming loader and ACPI-reclaimable memory, a virtual address allocator for the large-object heap, and PCID.
+2. ~~**Interrupts and time:** PIC off, LAPIC/IOAPIC via ACPI MADT, LAPIC timer, IST stacks for #DF/NMI.~~ **Done** (atomics landed in the language too). Still open: HPET/TSC-deadline, x2APIC, and MSI.
+3. **Scheduler:** kernel threads with context switching (asm stubs), preemptive round-robin then priorities, spinlocks/mutexes (atomics are now available), and SMP bring-up via INIT-SIPI.
 4. **User mode:** TSS/`ltr`, ring 3, `syscall`/`sysret`, an ELF loader, and per-process address spaces.
-5. **Drivers:** PS/2 keyboard, framebuffer via GOP (UEFI) or the multiboot2 framebuffer tag, PCI enumeration, AHCI/NVMe, virtio-blk/net, and a read-only FAT/ext2 to start.
+5. **Drivers:** PS/2 keyboard, PCI enumeration, AHCI/NVMe, virtio-blk/net, and a read-only FAT/ext2 to start.
 6. **Language and compiler:**
-   - Atomics and memory-ordering intrinsics, and `unsafe`-scoped raw pointers.
+   - Weaker memory orderings (acquire/release) and `unsafe`-scoped raw pointers.
    - Slices with bounds checks, generics for containers, `defer`, and a register allocator for fs mode (the IR backend currently covers hosted code only).
    - Debug info (DWARF line tables), so GDB works on QEMU's gdbstub.
 7. **Toolchain independence:** a built-in assembler and an ELF64/PE32+ writer and linker in Forge, which removes `as`/`ld`/`objcopy`, plus linker-script equivalents (section placement, entry, image base).

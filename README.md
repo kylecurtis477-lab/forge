@@ -114,8 +114,8 @@ Best of 5 wall clock. Rust: rustc -C opt-level=3 (unstripped binaries). Phase 1 
 Eligible functions are plain int functions with int params. They are lowered to a three-address IR with virtual registers and basic blocks. The passes are const/copy propagation with folding, unreachable-block and jump cleanup, local CSE, liveness-based DCE, and elimination of tag and bounds checks for typed non-escaping `list[int]` locals. Registers are assigned by linear scan over rsi/rdi/r8-r10 and rbx/r12-r15, with spilling. Division by a constant uses magic numbers. Any function that is not eligible uses the direct code generator.
 
 ## Systems programming (freestanding mode)
-`# forge: no-runtime` or `--freestanding` selects a runtime-free backend. It has fixed-width ints, pointers, C-layout and `@packed` structs, inline asm, port I/O and CPU intrinsics, C ABI extern/export, and interrupt and UEFI entry attributes.
-It powers `examples/kernel` (a Multiboot2 x86-64 kernel that boots on BIOS and UEFI) and `examples/efi` (a native PE32+ UEFI app on a GPT disk shared with Windows and Linux).
+`# forge: no-runtime` or `--freestanding` selects a runtime-free backend. It has fixed-width ints, pointers, C-layout and `@packed` structs, inline asm, port I/O, CPU and atomic intrinsics, C and MS x64 ABI extern/export, and interrupt and UEFI entry attributes.
+It powers `examples/kernel` and `examples/efi`. The kernel is a higher-half x86-64 kernel with a frame allocator, its own 4-level paging, a heap, demand paging, a framebuffer console, ACPI/IOAPIC/LAPIC timer and IST stacks. `examples/efi` is a native UEFI loader written in Forge (`\EFI\Forge\forgex64.efi`) that loads the kernel from a GPT ESP shared with Windows and Linux. The kernel boots through GRUB on BIOS and UEFI, or through the Forge loader (see docs/SYSTEMS.md).
 Both are boot-tested headless in QEMU/OVMF by `tests/os/run.sh`. See docs/SYSTEMS.md for the subset, dual-boot design, and roadmap.
 
 ## Limitations
