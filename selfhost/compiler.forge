@@ -8441,6 +8441,7 @@ O_SCST = 37
 O_GIDX = 38
 O_GCMP = 39
 O_GTRU = 40
+O_MKB = 42
 O_GBIN = 41
 EXT_RT = ["rt_char_at", "rt_itos", "rt_len"]
 GCMP_RT = [10, 11, 12, 14, 13, 15]
@@ -9086,6 +9087,47 @@ def xe_more(p):
         return find(CMPS, 6, tv[p]) >= 0
     return tok_is_id(p, "and") or tok_is_id(p, "or") or tok_is_id(p, "in") or tok_is_id(p, "is") or tok_is_id(p, "not")
 
+def vb_end(p):
+    d = 0
+    while tk[p] != K_EOF:
+        if is_open(p):
+            d += 1
+        elif is_close(p):
+            d -= 1
+            if d < 0:
+                return p
+        elif d == 0 and (tk[p] == K_NL or tk[p] == K_DED or tok_is_op(p, ",") or tok_is_op(p, ":") or tok_is_id(p, "if") or tok_is_id(p, "else") or tok_is_id(p, "for") or tok_is_op(p, "=") or is_aug(p)):
+            return p
+        p += 1
+    return p
+
+def vb_leaf(a, b):
+    while tok_is_op(a, "(") and match_close(a) == b - 1:
+        a += 1
+        b -= 1
+    if a >= b:
+        return 0
+    q = find_top_kw(a, b, "or")
+    if q < 0:
+        q = find_top_kw(a, b, "and")
+    if q >= 0:
+        return vb_leaf(a, q) and vb_leaf(q + 1, b)
+    if tok_is_id(a, "not"):
+        return 1
+    if b == a + 1 and (tok_is_id(a, "True") or tok_is_id(a, "False")):
+        return 1
+    return find_top_cmp(a, b) >= 0
+
+def vb_try(p):
+    q = vb_end(p)
+    if q <= p:
+        return 0
+    if find_top_kw(p, q, "lambda") >= 0:
+        return 0
+    if not (tok_is_id(p, "not") or find_top_kw(p, q, "and") >= 0 or find_top_kw(p, q, "or") >= 0 or find_top_cmp(p, q) >= 0):
+        return 0
+    return vb_leaf(p, q)
+
 def x_expr() -> int:
     global ip, nir, nvr, ncp, nargb, nil, nx, nrf, nlp, irfail
     if not hyb or inl_on or irfail:
@@ -9093,6 +9135,41 @@ def x_expr() -> int:
     p0 = ip
     if xf_s[p0 % TXN] == tx_id and xf_k[p0 % TXN] == p0:
         return x_texpr(p0, 1)
+    if vb_try(p0):
+        sv1 = nir
+        sv2 = nvr
+        sv3 = ncp
+        sv4 = nargb
+        sv5 = nil
+        sv6 = nx
+        sv7 = nrf
+        sv8 = nlp
+        vq = vb_end(p0)
+        vd = new_vr(0)
+        vlf = new_lab_ir()
+        vle = new_lab_ir()
+        cond_range(p0, vq, vlf, 0)
+        iadd(O_MOV, vd, cst(1), -1)
+        ibr(vle)
+        ilabel(vlf)
+        iadd(O_MOV, vd, cst(0), -1)
+        ilabel(vle)
+        vb = new_vr(1)
+        vtt[vb] = T_BOOL
+        iadd(O_MKB, vb, vd, -1)
+        if irfatal or not irfail:
+            ip = vq
+            return vb
+        nir = sv1
+        nvr = sv2
+        ncp = sv3
+        nargb = sv4
+        nil = sv5
+        nx = sv6
+        nrf = sv7
+        nlp = sv8
+        irfail = 0
+        ip = p0
     sv1 = nir
     sv2 = nvr
     sv3 = ncp
@@ -10467,7 +10544,7 @@ def find_top_eq(p):
 # ---------------- IR utilities ----------------
 def u_n(k):
     op = iop[k]
-    if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET or op == O_VST or op == O_TSET or op == O_I2D or op == O_UNB or op == O_BOX or op == O_FNEG or op == O_GTRU:
+    if op == O_MOV or op == O_NEG or op == O_NOT or op == O_LNEW or op == O_LDATA or op == O_RET or op == O_VST or op == O_TSET or op == O_I2D or op == O_UNB or op == O_BOX or op == O_FNEG or op == O_GTRU or op == O_MKB:
         return 1
     if op == O_FOP or op == O_FCMP or op == O_GIDX or op == O_GCMP or op == O_GBIN:
         return 2
@@ -12059,6 +12136,11 @@ def o_ins(k, fi, x_epi):
         e("pop %rdi")
         e("pop %rsi")
         emit_raw("2:\n")
+        if idst[k] >= 0:
+            e2("mov %rax, ", vl(idst[k]))
+    elif op == O_MKB:
+        mv_to(ia[k], "%rax", 0)
+        e("bts $62, %rax")
         if idst[k] >= 0:
             e2("mov %rax, ", vl(idst[k]))
     elif op == O_GTRU:

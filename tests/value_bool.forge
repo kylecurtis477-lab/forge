@@ -1,0 +1,22 @@
+def f(a, b):
+    x = a < b
+    y = a == b or not (a > b)
+    z = (a != b) and b >= 0
+    return [x, y, z]
+
+def g(s, t):
+    r = s == t
+    q = not (s == "x")
+    return [r, q]
+
+def main():
+    print(f(1, 2))
+    print(f(2.5, 1))
+    print(f(3, 3))
+    print(g("a", "a"))
+    print(g("x", "b"))
+    w = f(1, 2)[0] and True
+    print(w)
+    print(str(5 > 3) + "!")
+
+main()
