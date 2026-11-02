@@ -134,7 +134,7 @@ def on_page_fault(frame: ptr[u64]):
 
 @interrupt_err
 def on_double_fault(frame: ptr[u64]):
-    # runs on IST1 even though the faulting stack is gone; frame = [err, rip, cs, rflags, rsp, ss]
+# runs on IST1 even though the faulting stack is gone; frame = [err, rip, cs, rflags, rsp, ss]
     df_rsp = u64(frame)
     if df_recover == 0:
         fault("#DF", frame, 1)

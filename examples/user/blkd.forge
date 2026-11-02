@@ -19,7 +19,7 @@ def desc(q: u64, i: u64, pa: u64, len: u64, flags: u64, next: u64):
 def _start():
     io = syscall3(407, 0, 0, 0)
     msix = syscall3(407, 1, 0, 0)
-    io_out(io + 0x12, 1, 0)                 # reset
+    io_out(io + 0x12, 1, 0)  # reset
     io_out(io + 0x12, 1, 1)
     io_out(io + 0x12, 1, 3)
     hf = io_in(io, 4)
@@ -78,7 +78,7 @@ def _start():
         seen = syscall3(404, 0xFFFFFFFFFFFFFFFF, 0, 0)
         io_out(io + 0x10, 2, 0)
         if m[3] & 1:
-            # fault injection: die with the request in flight on the device
+        # fault injection: die with the request in flight on the device
             vstore64(0, 0x0BADBAD)
         while ((vload64(q + used) >> 16) & 0xFFFF) == last:
             if msix:

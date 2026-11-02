@@ -1,9 +1,9 @@
 # CPU features: FPU/SSE/AVX state (fxsave or xsave) switched with threads, SMEP/SMAP, user-memory
 # copies that survive faults (exception-table style fixups), and cross-CPU TLB shootdown.
-fpu_mode: u64       # 1 = fxsave, 2 = xsave
+fpu_mode: u64  # 1 = fxsave, 2 = xsave
 fpu_size: u64
 fpu_xcr0: u64
-fpu_template: u64   # clean state, copied into every new thread
+fpu_template: u64  # clean state, copied into every new thread
 smep_on: u64
 smap_on: u64
 cpu_feat7b: u64
@@ -98,7 +98,7 @@ extern def uaccess_labels(i: u64) -> u64
 smep_probing: u64
 
 def uaccess_fixup(frame: ptr[u64], err: u64, cr2: u64) -> u64:
-    # kernel-mode #PF: if it hit one of the user-access instructions, resume at the failure path
+# kernel-mode #PF: if it hit one of the user-access instructions, resume at the failure path
     rip = frame[1]
     if rip == uaccess_labels(0) or rip == uaccess_labels(1):
         frame[1] = uaccess_labels(2)
@@ -113,7 +113,7 @@ def uaccess_fixup(frame: ptr[u64], err: u64, cr2: u64) -> u64:
     return 0
 
 def fpu_area_new() -> u64:
-    # 64-byte aligned save area; the raw pointer is stored just below it for kfree
+# 64-byte aligned save area; the raw pointer is stored just below it for kfree
     raw = kmalloc(fpu_size + 64 + 8)
     a = (raw + 8 + 63) & ~u64(63)
     vstore64(a - 8, raw)
@@ -128,11 +128,11 @@ def fpu_area_free(a: u64):
         kfree(vload64(a - 8))
 
 def cpu_features_cpu():
-    # per CPU: x87/SSE on, the same XCR0 everywhere, SMEP/SMAP
-    write_cr0((read_cr0() | 0x22) & ~u64(0xC))        # MP|NE on, EM|TS off
-    c4 = read_cr4() | 0x600                           # OSFXSR | OSXMMEXCPT
+# per CPU: x87/SSE on, the same XCR0 everywhere, SMEP/SMAP
+    write_cr0((read_cr0() | 0x22) & ~u64(0xC))  # MP|NE on, EM|TS off
+    c4 = read_cr4() | 0x600  # OSFXSR | OSXMMEXCPT
     if fpu_mode == 2:
-        c4 = c4 | 0x40000                             # OSXSAVE
+        c4 = c4 | 0x40000  # OSXSAVE
     if smep_on:
         c4 = c4 | 0x100000
     if smap_on:
@@ -157,14 +157,14 @@ def cpu_features_init():
     if (ecx1 >> 26) & 1:
         cpuid4(0xD, 0)
         sup = u64(cpuid_out[0]) | (u64(cpuid_out[3]) << 32)
-        fpu_xcr0 = sup & 0xE7                          # x87, SSE, AVX, AVX-512 (opmask/ZMM)
+        fpu_xcr0 = sup & 0xE7  # x87, SSE, AVX, AVX-512 (opmask/ZMM)
         if (fpu_xcr0 & 0xE0) != 0xE0:
             fpu_xcr0 = fpu_xcr0 & 7
         fpu_mode = 2
     cpu_features_cpu()
     if fpu_mode == 2:
         cpuid4(0xD, 0)
-        fpu_size = u64(cpuid_out[1])                   # size for the XCR0 now enabled
+        fpu_size = u64(cpuid_out[1])  # size for the XCR0 now enabled
     fpu_template = 0
     tpl = fpu_area_new()
     memset(tpl, 0, fpu_size)
@@ -206,8 +206,8 @@ stop_rounds: u64
 stop_parked: u64
 
 def stop_machine_begin() -> u64:
-    # park every other online CPU in its IPI handler (or in the spin loop it is in) with interrupts off;
-    # returns the caller's saved interrupt flag. Reuses the shootdown slot, so it serialises with it.
+# park every other online CPU in its IPI handler (or in the spin loop it is in) with interrupts off;
+# returns the caller's saved interrupt flag. Reuses the shootdown slot, so it serialises with it.
     f = irq_save()
     spin_lock(u64(addr(tlb_lock)))
     nc = atomic_load64(u64(addr(ncpu_online)))
@@ -259,10 +259,10 @@ def tlb_local(cr3: u64, va: u64, n: u64):
         invlpg(va + i * PAGE)
         i += 1
 
-tlb_halt: u64        # kexec: parked CPUs halt for good (the successor restarts them with INIT-SIPI)
+tlb_halt: u64  # kexec: parked CPUs halt for good (the successor restarts them with INIT-SIPI)
 
 def tlb_poll():
-    # safe with interrupts off: called from spin loops so a CPU that waits on a lock still answers
+# safe with interrupts off: called from spin loops so a CPU that waits on a lock still answers
     if atomic_load64(u64(addr(tlb_active))) == 0:
         return
     c = lapic_cpu()
@@ -272,9 +272,9 @@ def tlb_poll():
         atomic_add64(u64(addr(tlb_acks)), 1)
         g = atomic_load64(u64(addr(tlb_park)))
         if g != 0:
-            # stop-machine: stay parked (interrupts off) until the initiator ends round g, then serialise
-            # so this CPU refetches any instruction bytes the initiator rewrote. Waiting on the round
-            # number (not on 0) means a CPU that misses the brief 0 is not trapped into the next round.
+        # stop-machine: stay parked (interrupts off) until the initiator ends round g, then serialise
+        # so this CPU refetches any instruction bytes the initiator rewrote. Waiting on the round
+        # number (not on 0) means a CPU that misses the brief 0 is not trapped into the next round.
             while tlb_halt:
                 hlt()
             while atomic_load64(u64(addr(tlb_park))) == g:
@@ -287,7 +287,7 @@ def on_tlb_ipi(frame: ptr[u64]):
     lapic_eoi()
 
 def tlb_shootdown(cr3: u64, va: u64, n: u64):
-    # cr3 = 0: kernel (global) mapping, flush everywhere; otherwise only CPUs running that address space
+# cr3 = 0: kernel (global) mapping, flush everywhere; otherwise only CPUs running that address space
     f = irq_save()
     tlb_local(cr3, va, n)
     if atomic_load64(u64(addr(ncpu_online))) > 1:

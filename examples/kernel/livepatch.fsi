@@ -35,7 +35,7 @@ def lp_register(target: u64) -> u64:
     return 0
 
 def lp_write5(target: u64, b: u64):
-    # b: the new low 5 bytes; the other 3 bytes of the aligned word are kept
+# b: the new low 5 bytes; the other 3 bytes of the aligned word are kept
     w = p2v(virt_to_phys(kernel_pml4, target))
     f = stop_machine_begin()
     old = vload64(w)
@@ -66,8 +66,8 @@ def lp_revert(target: u64) -> u64:
 lp_rejects: u64
 
 def lp_apply_checked(target: u64, newfn: u64, check: u64) -> u64:
-    # check(fn) -> 1 if fn behaves. It runs on the replacement before it is installed (a failing
-    # replacement is never reachable), then on the live entry point; failing there rolls back.
+# check(fn) -> 1 if fn behaves. It runs on the replacement before it is installed (a failing
+# replacement is never reachable), then on the live entry point; failing there rolls back.
     if call_ptr(check, newfn) != 1:
         lp_rejects += 1
         return LP_ESELFTEST

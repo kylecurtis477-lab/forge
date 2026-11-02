@@ -1,10 +1,10 @@
 # Read-only filesystem: GPT -> EFI System Partition -> FAT32 with VFAT long names (case-insensitive lookup).
-fs_part: u64          # partition start LBA
+fs_part: u64  # partition start LBA
 fs_spc: u64
-fs_fat: u64           # FAT start LBA
-fs_data: u64          # cluster 2 LBA
+fs_fat: u64  # FAT start LBA
+fs_data: u64  # cluster 2 LBA
 fs_root: u64
-fs_sec: u64           # scratch sector (kmalloc 512)
+fs_sec: u64  # scratch sector (kmalloc 512)
 fs_fatsec_lba: u64
 fs_fatsec: u64
 
@@ -87,9 +87,9 @@ def fat_next(c: u64) -> u64:
 def clu_lba(c: u64) -> u64:
     return fs_data + (c - 2) * fs_spc
 
-fs_m: Mutex              # serialises the FAT layer (shared sector buffers); holders may sleep on disk I/O
+fs_m: Mutex  # serialises the FAT layer (shared sector buffers); holders may sleep on disk I/O
 fs_dsec_lba: u64
-fs_dsec: u64             # directory sector cache
+fs_dsec: u64  # directory sector cache
 
 def fs_sector(lba: u64) -> u64:
     if fs_dsec == 0:
@@ -183,7 +183,7 @@ def lower(c: u64) -> u64:
     return c
 
 def name_eq(a: ptr[u8], b: ptr[u8], blen: u64) -> u64:
-    # a: NUL-terminated directory name, b: path component (blen bytes); case-insensitive
+# a: NUL-terminated directory name, b: path component (blen bytes); case-insensitive
     i: u64 = 0
     while i < blen:
         if a[i] == 0 or lower(u64(a[i])) != lower(u64(b[i])):

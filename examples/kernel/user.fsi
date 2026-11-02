@@ -206,7 +206,7 @@ def as_free_level(t: u64, lvl: u64) -> u64:
     return n + 1
 
 def as_free(pml4: u64) -> u64:
-    # frees every user page and table (lower half only), then the PML4 itself
+# frees every user page and table (lower half only), then the PML4 itself
     n: u64 = 0
     i = 0
     while i < 256:
@@ -227,7 +227,7 @@ def ld32(p: u64) -> u64:
 elf_end: u64
 
 def elf_load(pml4: u64, img: u64, len: u64) -> u64:
-    # returns the entry point, or 0 if the image is rejected
+# returns the entry point, or 0 if the image is rejected
     if len < 64 or ld32(img) != 0x464C457F or (vload64(img + 4) & 0xFF) != 2 or ld16(img + 18) != 62:
         return 0
     if ld16(img + 16) != 2:
@@ -279,4 +279,3 @@ def elf_load(pml4: u64, img: u64, len: u64) -> u64:
     if nload == 0 or entry >= USER_TOP:
         return 0
     return entry
-

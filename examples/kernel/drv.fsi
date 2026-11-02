@@ -17,10 +17,10 @@ RQ_POSTED = 1
 RQ_TAKEN = 2
 RQ_DONE = 3
 
-blkd_mode: u64        # 1: vb_read goes to the driver service
-blkd_up: u64          # the driver process is alive
+blkd_mode: u64  # 1: vb_read goes to the driver service
+blkd_up: u64  # the driver process is alive
 blkd_pid: u64
-blkd_replay: u64      # 1: a dead driver's in-flight request is kept for replay (supervisor present)
+blkd_replay: u64  # 1: a dead driver's in-flight request is kept for replay (supervisor present)
 rq_state: u64
 rq_seq: u64
 rq_lba: u64
@@ -28,15 +28,15 @@ rq_n: u64
 rq_flags: u64
 rq_status: u64
 rq_buf: u64
-rq_drvq: WaitQ        # driver waiting for a request
-rq_cliq: WaitQ        # client waiting for its reply / for a restarted driver
-blk_crash_next: u64   # fault injection: the next request carries the crash flag
+rq_drvq: WaitQ  # driver waiting for a request
+rq_cliq: WaitQ  # client waiting for its reply / for a restarted driver
+blk_crash_next: u64  # fault injection: the next request carries the crash flag
 drv_served: u64
 drv_deaths: u64
 drv_eio: u64
 drv_replays: u64
 spawn_drv: u64
-drv_supq: WaitQ       # supervisor waiting for a driver death
+drv_supq: WaitQ  # supervisor waiting for a driver death
 
 def vb_read_drv(lba: u64, n: u64, dst: u64) -> u64:
     mutex_lock(addr(vb_m))
@@ -74,10 +74,10 @@ def vb_read_drv(lba: u64, n: u64, dst: u64) -> u64:
     return ok
 
 def drv_died(p: ptr[Proc]):
-    # called from proc_exit of a driver process, before its address space (and DMA frames) is freed
+# called from proc_exit of a driver process, before its address space (and DMA frames) is freed
     f = irq_save()
     spin_lock(u64(addr(rq_lock)))
-    outb(u16(vb_io + VIO_STATUS), 0)       # device reset: stops all DMA into the driver's frames
+    outb(u16(vb_io + VIO_STATUS), 0)  # device reset: stops all DMA into the driver's frames
     blkd_up = 0
     drv_deaths += 1
     if (rq_flags & 2) != 0:
@@ -102,8 +102,8 @@ def drv_port_ok(port: u64, w: u64) -> u64:
 def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
     p = cur_proc()
     if nr == 408:
-        # fault-injection hook: make the block driver crash on the a-th next request. Disabled
-        # (EPERM) unless the kernel's own boot self-test armed it for its shell session.
+    # fault-injection hook: make the block driver crash on the a-th next request. Disabled
+    # (EPERM) unless the kernel's own boot self-test armed it for its shell session.
         if ktest_hooks == 0:
             return EPERM
         blk_crash_after = a
@@ -129,7 +129,7 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
             outl(u16(a), u32(c & 0xFFFFFFFF))
         return 0
     if nr == 402:
-        # dma_alloc(npages): one contiguous region per driver, mapped user RW NX
+    # dma_alloc(npages): one contiguous region per driver, mapped user RW NX
         if p.dma_n != 0 or a == 0 or a > 16:
             return EINVAL
         pa = frame_alloc_contig(a)
@@ -148,7 +148,7 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
     if nr == 403:
         return p.dma_pa
     if nr == 404:
-        # irq_wait(seen): block until the device interrupt count differs from seen; returns the count
+    # irq_wait(seen): block until the device interrupt count differs from seen; returns the count
         f = irq_save()
         spin_lock(u64(addr(rq_lock)))
         while a != 0xFFFFFFFFFFFFFFFF and vb_irqs == a:
@@ -158,7 +158,7 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
         irq_restore(f)
         return r
     if nr == 405:
-        # recv(msg[4]): block for a request -> seq, lba, count, flags
+    # recv(msg[4]): block for a request -> seq, lba, count, flags
         m: u64[4]
         f = irq_save()
         spin_lock(u64(addr(rq_lock)))
@@ -175,7 +175,7 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
             return EFAULT
         return 0
     if nr == 406:
-        # reply(seq, status, data): data holds count*512 bytes when status == 0
+    # reply(seq, status, data): data holds count*512 bytes when status == 0
         if b == 0 and copy_user(rq_buf, c, rq_n * 512) != 0:
             return EFAULT
         f = irq_save()
@@ -199,7 +199,7 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
     return ENOSYS
 
 def vb_reinit():
-    # take the device back into the kernel's own driver: reset, fresh ring in the original frames
+# take the device back into the kernel's own driver: reset, fresh ring in the original frames
     mutex_lock(addr(vb_m))
     io = u16(vb_io)
     outb(io + VIO_STATUS, 0)
@@ -222,7 +222,7 @@ def vb_reinit():
     mutex_unlock(addr(vb_m))
 
 def blkd_start(img: u64, sz: u64) -> ptr[Thread]:
-    # hand the device over: no kernel-driver request is in flight while vb_m is held
+# hand the device over: no kernel-driver request is in flight while vb_m is held
     mutex_lock(addr(vb_m))
     spawn_drv = DRV_BLK
     t = proc_spawn_args(img, sz, "")
@@ -248,7 +248,7 @@ sup_stop: u64
 sup_restarts: u64
 sup_thread: u64
 blkd_thread: u64
-ktest_hooks: u64      # set only by the in-kernel boot self-test (shell_test)
+ktest_hooks: u64  # set only by the in-kernel boot self-test (shell_test)
 blk_crash_after: u64  # fault injection: crash on the n-th next request (0 = off)
 
 def blkd_spawn(args: ptr[u8]) -> ptr[Thread]:
@@ -326,7 +326,7 @@ def blkd_supervised_start(img: u64, sz: u64):
     sup_thread = u64(thread_spawn(u64(supervisor), 0))
 
 def blkd_supervised_stop():
-    # ask the driver to exit (request flag 2); the supervisor sees sup_stop and returns
+# ask the driver to exit (request flag 2); the supervisor sees sup_stop and returns
     sup_stop = 1
     mutex_lock(addr(vb_m))
     f = irq_save()

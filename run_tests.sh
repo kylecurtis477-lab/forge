@@ -35,6 +35,7 @@ build/forgec build/no_such_input.forge build/t_inc.s --diagnostics=json 2>&1 | g
 tests/ast/roundtrip.sh selfhost/compiler.forge selfhost/prelude.forge tools/*.forge tests/*.forge tests/runtime/*.forge tests/fs/*.forge examples/*/*.forge examples/*/*.fsi || fail=1
 tests/ast/semantic.sh || fail=1
 tests/grammar/run.sh || fail=1
+tests/fmt/run.sh || fail=1
 tests/ast/selfpp.sh || fail=1
 build/forgec tests/tuples.forge build/t_ast.json --emit=ast-json && python3 -c 'import json;d=json.load(open("build/t_ast.json"));assert d["forge_ast"]==1 and d["root"]["k"]=="Module"' && echo "PASS ast-json-schema" || { echo "FAIL ast-json-schema"; fail=1; }
 for t in tests/fs/*.forge; do

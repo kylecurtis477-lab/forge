@@ -14,7 +14,7 @@ stacks: u8[65536]
 
 @naked
 def spawn(fnp: u64, stack_top: u64) -> i64:
-    # clone(CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM, stack); child pops fn, calls it, exits the thread
+# clone(CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM, stack); child pops fn, calls it, exits the thread
     asm("sub $16,%rsi", "mov %rdi,(%rsi)", "mov $0x50F00,%edi", "xor %edx,%edx", "xor %r10d,%r10d", "xor %r8d,%r8d",
         "mov $56,%eax", "syscall", "test %rax,%rax", "jnz 1f",
         "pop %rax", "call *%rax", "mov $60,%eax", "xor %edi,%edi", "syscall",

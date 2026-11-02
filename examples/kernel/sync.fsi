@@ -26,4 +26,3 @@ def irq_save() -> u64:
 def irq_restore(f: u64):
     if f & 0x200:
         sti()
-

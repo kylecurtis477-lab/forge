@@ -18,7 +18,7 @@ def acpi_sum(p: u64, n: u64) -> u64:
     return s & 0xFF
 
 def rsdp_scan() -> u64:
-    # legacy BIOS area fallback when the boot loader gave us no RSDP
+# legacy BIOS area fallback when the boot loader gave us no RSDP
     p = p2v(0xE0000)
     while p < p2v(0x100000):
         if vload64(p) == 0x2052545020445352 and acpi_sum(p, 20) == 0:
@@ -51,7 +51,7 @@ def madt_parse(m: u64):
             lapic_phys = vload64(p + 4)
         p += n
 
-rsdp_save: u8[64]   # copy of the RSDP for a kexec successor (the original may be reclaimed)
+rsdp_save: u8[64]  # copy of the RSDP for a kexec successor (the original may be reclaimed)
 
 def acpi_init(rsdp_phys: u64) -> u64:
     i = 0

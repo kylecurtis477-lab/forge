@@ -106,7 +106,7 @@ def guid_eq(a: u64, b: ptr[u8]) -> u64:
     return load64(a) == load64(u64(b)) and load64(a + 8) == load64(u64(b) + 8)
 
 def alloc_pages(n: u64, max_addr: u64) -> u64:
-    # AllocatePages(AllocateMaxAddress, EfiLoaderData, n, &addr)
+# AllocatePages(AllocateMaxAddress, EfiLoaderData, n, &addr)
     a: u64 = max_addr
     st = call_efi(bs[BS_ALLOCATE_PAGES], 1, 2, n, u64(addr(a)))
     if st != EFI_SUCCESS:
@@ -224,7 +224,7 @@ def efi_mem_type(t: u32) -> u64:
     return MEM_RESERVED
 
 def convert_map(bi: ptr[BootInfo], map: u64, size: u64, dsz: u64):
-    # no allocations or firmware calls here: runs between GetMemoryMap and ExitBootServices
+# no allocations or firmware calls here: runs between GetMemoryMap and ExitBootServices
     bi.nregions = 0
     p = map
     while p < map + size:

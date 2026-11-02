@@ -18,7 +18,7 @@ while i < 50:
     i += 1
 round = 0
 while round < 1500:
-    # garbage: strings, lists, objects, cycles, floats
+# garbage: strings, lists, objects, cycles, floats
     junk = []
     j = 0
     while j < 2000:

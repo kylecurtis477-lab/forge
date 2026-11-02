@@ -73,7 +73,7 @@ def on_spurious(frame: ptr[u64]):
     cpu_relax()
 
 def pit2_wait_10ms_start():
-    # PIT channel 2, mode 0, 11932 ticks of 1.193182 MHz = 10 ms; OUT2 is visible in port 0x61 bit 5
+# PIT channel 2, mode 0, 11932 ticks of 1.193182 MHz = 10 ms; OUT2 is visible in port 0x61 bit 5
     outb(0x61, (inb(0x61) & 0xFD) | 1)
     outb(0x43, 0xB0)
     outb(0x42, 0x9C)

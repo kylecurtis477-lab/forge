@@ -333,7 +333,7 @@ def __repr(x) -> str:
     return join(parts, __ld(parts, 0))
 
 def __typeid(x) -> int:
-    # class index + 1 for objects; -1 int, -2 str, -3 list, -4 dict, -5 float, -6 bool
+# class index + 1 for objects; -1 int, -2 str, -3 list, -4 dict, -5 float, -6 bool
     t: int = __tag(x)
     if t < 0:
         return -1
@@ -503,7 +503,7 @@ def __bn_add(a, b):
     return r
 
 def __bn_sub(a, b):
-    # a - b, a >= b
+# a - b, a >= b
     na: int = len(a)
     nb: int = len(b)
     r = []
@@ -721,7 +721,7 @@ def __frepr(x) -> str:
     return join(parts, len(parts))
 
 def __bn_ratio_bits(num, den) -> int:
-    # correctly rounded double nearest num/den (both > 0)
+# correctly rounded double nearest num/den (both > 0)
     e: int = __bn_bitlen(num) - __bn_bitlen(den) - 53
     q: int = 0
     rem = []
@@ -822,7 +822,7 @@ def __fparse(s0, line):
         if len(mant) == 0:
             bits = 0
         elif nd <= 15 and e10 >= -22 and e10 <= 22:
-            # Clinger's fast path: both operands exact, one correctly rounded op
+        # Clinger's fast path: both operands exact, one correctly rounded op
             fm = __itof(mi)
             if e10 >= 0:
                 fm = fm * __fpow10(e10)
@@ -867,7 +867,7 @@ def __bigmk(sg: int, m):
             hi = m[1]
         lo: int = m[0]
         if hi < 2147483648 and not (sg > 0 and hi == 1073741824 and lo <= 3):
-            # 2**62 .. 2**62+3 would alias the bool/None encodings, so keep them boxed
+        # 2**62 .. 2**62+3 would alias the bool/None encodings, so keep them boxed
             v: int = (hi << 32) | lo
             if sg < 0:
                 return 0 - v
@@ -920,7 +920,7 @@ def __bigaddm(sa: int, ma, sb: int, mb):
     return __bigmk(sb, __bn_sub(mb, ma))
 
 def __bigop(a, b, op: int, line):
-    # a, b: ints or bigints; op 0 + 1 - 2 * 4 // 5 % 3 /
+# a, b: ints or bigints; op 0 + 1 - 2 * 4 // 5 % 3 /
     if op == 3:
         return __bigtof(a) / __bigtof(b)
     sa: int = __bigsg(a)
@@ -1023,7 +1023,7 @@ def __bigpow(a, b: int):
     return r
 
 def __callv(f, vals, np: int, kwn, line):
-    # slow path for calling a function value: defaults and keyword arguments
+# slow path for calling a function value: defaults and keyword arguments
     if __tag(f) != 8 or __ld(f, 0) == 0:
         __err(line, "object is not callable")
     na: int = __ld(f, 1)
@@ -1420,7 +1420,7 @@ def __dresize(d):
     return 0
 
 def __ddel(d, k, line) -> int:
-    # remove k; returns 1 if it was present
+# remove k; returns 1 if it was present
     i: int = __dfind(d, k, __hash(k))
     hs = __ld(d, 2)
     if __ld(hs, i) == 0:
@@ -1594,7 +1594,7 @@ def remove(s, x):
     return None
 
 def __sop(a, b, op: int):
-    # 0 & 1 | 2 ^ 3 -
+# 0 & 1 | 2 ^ 3 -
     r = set()
     if op == 1:
         for x in __ld(a, 5):
@@ -1790,7 +1790,7 @@ def __islo(c: int) -> int:
     return c >= 97 and c <= 122
 
 def __chcase(s, mode: int) -> str:
-    # 0 title, 1 capitalize, 2 swapcase
+# 0 title, 1 capitalize, 2 swapcase
     n: int = __aux(s)
     r = substr(s, 0, n)
     prev: int = 0
@@ -1906,7 +1906,7 @@ def rsplit(s, sep=None, maxsplit=-1):
     return r
 
 def __sfmt(s, args) -> str:
-    # str.format: args = [key-or-0, value, ...]
+# str.format: args = [key-or-0, value, ...]
     pos = []
     kw = {}
     i: int = 0
@@ -2148,7 +2148,7 @@ def int(x) -> int:
         __iovf(0)
     v = 0 - v
     if (v >> 2) == 1152921504606846976:
-        # 2**62 .. 2**62+3 alias the bool/None encodings
+    # 2**62 .. 2**62+3 alias the bool/None encodings
         __iovf(0)
     return v
 
@@ -2555,7 +2555,7 @@ def __bn_str(a) -> str:
     return out
 
 def __fscaled(x, k: int):
-    # round-half-even of |x| * 10**k as a bignum
+# round-half-even of |x| * 10**k as a bignum
     bits: int = __fbits(x)
     er: int = (bits >> 52) & 2047
     m: int = bits & 4503599627370495
@@ -2604,7 +2604,7 @@ def __ffix(x, p: int) -> str:
     return concat(concat(substr(d, 0, n - p), "."), substr(d, n - p, n))
 
 def __fexpd(x, p: int):
-    # [digits (p+1 of them), exponent]
+# [digits (p+1 of them), exponent]
     if __fbits(x) << 1 == 0:
         return [__strmul("0", p + 1), 0]
     ex: int = __ftoi(__math(__math(__math(x, 10), 9), 1), 0)
@@ -3279,7 +3279,7 @@ class __Stream:
         return join(parts, len(parts))
 
     def readline(self):
-        # unbuffered so that no state is needed; the kernel keeps the position
+    # unbuffered so that no state is needed; the kernel keeps the position
         parts = []
         buf = alloc(8)
         while True:

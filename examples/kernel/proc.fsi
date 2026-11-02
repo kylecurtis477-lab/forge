@@ -40,8 +40,8 @@ struct Proc:
     dma_n: u64
 
 procs: u64[64]
-kx_freeze: u64      # a kexec handoff is collecting every user process at a syscall boundary
-kx_caller: u64      # the Proc doing the handoff (it is not parked)
+kx_freeze: u64  # a kexec handoff is collecting every user process at a syscall boundary
+kx_caller: u64  # the Proc doing the handoff (it is not parked)
 
 def kx_should_park() -> u64:
     if kx_freeze == 0:
@@ -50,7 +50,7 @@ def kx_should_park() -> u64:
     return u64(p) != 0 and p.drv == 0 and u64(p) != kx_caller
 
 def kx_park():
-    # park at a syscall boundary until the handoff happens (never returns then) or is abandoned
+# park at a syscall boundary until the handoff happens (never returns then) or is abandoned
     t = cur_thread()
     t.kx_parked = 1
     while kx_freeze != 0:
@@ -100,11 +100,11 @@ F_DIR = 3
 struct File:
     type: u64
     ref: u64
-    clu: u64        # first cluster (file) / directory cluster
+    clu: u64  # first cluster (file) / directory cluster
     size: u64
-    pos: u64        # byte offset (file) / entry index (dir)
-    ccl: u64        # cached cluster for sequential reads
-    cidx: u64       # its index in the chain
+    pos: u64  # byte offset (file) / entry index (dir)
+    ccl: u64  # cached cluster for sequential reads
+    cidx: u64  # its index in the chain
 
 console_file: u64
 
@@ -127,7 +127,7 @@ def file_put(fl: u64):
 console_obj: File
 
 def console() -> u64:
-    # one static console File shared by every process; its huge refcount means it is never freed
+# one static console File shared by every process; its huge refcount means it is never freed
     if console_file == 0:
         console_obj.type = F_CONSOLE
         console_obj.ref = 1000000000
@@ -164,7 +164,7 @@ def vfs_open(path: ptr[u8]) -> u64:
     return u64(fl)
 
 def file_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
-    # FAT32 file -> user buffer, sector by sector through a bounce buffer
+# FAT32 file -> user buffer, sector by sector through a bounce buffer
     kb: u8[512]
     if fl.pos >= fl.size:
         return 0
@@ -198,7 +198,7 @@ def file_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
     return done
 
 def dir_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
-    # getdents records: u64 size, u8 is_dir, name, NUL (only whole records are returned)
+# getdents records: u64 size, u8 is_dir, name, NUL (only whole records are returned)
     ent: u8[32]
     nm: u8[256]
     rec: u8[272]
@@ -256,7 +256,7 @@ def kcur_pid() -> u64:
 
 @patchable
 def sys_getpid() -> u64:
-    # live-patch target (Phase 2.5): entry is a 5-byte nop that livepatch.fsi turns into a jmp
+# live-patch target (Phase 2.5): entry is a 5-byte nop that livepatch.fsi turns into a jmp
     return kcur_pid()
 
 def tty0_push(c: u64) -> u64:
@@ -312,7 +312,7 @@ def tty0_restore(st: u64, n: u64) -> u64:
     return 1
 
 def tty_push_l(c: u64):
-    # rq_lock held (interrupt context)
+# rq_lock held (interrupt context)
     tty_pushed += 1
     if tty_fp_push == 0:
         tty_fp_push = u64(tty0_push)
@@ -424,7 +424,7 @@ def on_com1(frame: ptr[u64]):
     lapic_eoi()
 
 def input_init():
-    # PS/2: flush, enable the first port's interrupt (config bit 0), keep scan-code translation (set 1)
+# PS/2: flush, enable the first port's interrupt (config bit 0), keep scan-code translation (set 1)
     while inb(0x64) & 1:
         inb(0x60)
     outb(0x64, 0x20)
@@ -491,7 +491,7 @@ def user_unmap(pml4: u64, va: u64):
     e = user_pte(pml4, va)
     v = vload64(e)
     vstore64(e, 0)
-    invlpg(va)              # only this single-threaded process uses pml4, on this CPU
+    invlpg(va)  # only this single-threaded process uses pml4, on this CPU
     frame_free(v & ADDR_MASK)
 
 def page_up(v: u64) -> u64:
@@ -548,14 +548,14 @@ def proc_spawn(img: u64, len: u64) -> ptr[Thread]:
     return proc_spawn_args(img, len, "")
 
 def proc_destroy(p: ptr[Proc]):
-    # p is a zombie whose thread is dead and which is no longer in the table
+# p is a zombie whose thread is dead and which is no longer in the table
     t = ptr[Thread](p.thread)
     thread_free(t)
     as_free(p.pml4)
     kfree(u64(p))
 
 def proc_reap(t: ptr[Thread]) -> u64:
-    # kernel-side wait for a process the kernel spawned
+# kernel-side wait for a process the kernel spawned
     while atomic_load64(u64(addr(t.state))) != T_DEAD:
         yield_cpu()
     p = ptr[Proc](t.proc)
@@ -639,12 +639,12 @@ def sys_fork(frame: u64) -> u64:
         vstore64(sp + i * 8, vload64(ct.kstack_top - 72 + i * 8))
         i += 1
     memcpy(cf, frame, SF_SIZE)
-    vstore64(sp + 16, cf)              # r13 = arg = frame
+    vstore64(sp + 16, cf)  # r13 = arg = frame
     ct.rsp = sp
     ct.cr3 = c.pml4
     ct.user = 1
     ct.proc = u64(c)
-    fpu_save(ct.fpu)                   # the parent's live FPU/SSE registers
+    fpu_save(ct.fpu)  # the parent's live FPU/SSE registers
     c.pid = ct.id
     c.thread = u64(ct)
     if proc_insert(c) == 0:
@@ -766,7 +766,7 @@ def sys_mmap(len: u64) -> u64:
     if p.mmap_next + n > MMAP_TOP:
         return ENOMEM
     va = p.mmap_next
-    p.mmap_next += n + PAGE            # one unmapped guard page between mappings
+    p.mmap_next += n + PAGE  # one unmapped guard page between mappings
     i: u64 = 0
     while i < n:
         if user_map_zero(p.pml4, va + i) == 0:
@@ -856,7 +856,7 @@ def sys_close(fd: u64) -> u64:
     return 0
 
 def user_ptr_ok(va: u64, len: u64) -> u64:
-    # only the range check: the copy itself survives unmapped pages through the #PF fixup
+# only the range check: the copy itself survives unmapped pages through the #PF fixup
     return va < USER_TOP and va + len <= USER_TOP and va + len >= va
 
 def con_write_user(p: u64, n: u64) -> u64:
@@ -879,7 +879,7 @@ def con_write_user(p: u64, n: u64) -> u64:
 
 @export
 def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64:
-    # entered with interrupts off (FMASK); the asm exit path disables them again before sysret
+# entered with interrupts off (FMASK); the asm exit path disables them again before sysret
     atomic_add64(u64(addr(syscalls)), 1)
     sti()
     st = cur_thread()
@@ -928,7 +928,7 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
     if nr == 110:
         return cur_proc().ppid
     if nr == 200:
-        # self-test probes: 1 = kernel read of user memory without stac, 2 = kernel call into user code
+    # self-test probes: 1 = kernel read of user memory without stac, 2 = kernel call into user code
         if user_ptr_ok(b, 8) == 0:
             return EFAULT
         if a == 1:
@@ -948,7 +948,7 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
     if nr >= 400 and nr <= 408:
         return sys_drv(nr, a, b, c)
     if nr == 300:
-        # getargs(buf, n): the argument string given to exec
+    # getargs(buf, n): the argument string given to exec
         p = cur_proc()
         l: u64 = 0
         while l < 127 and p.args[l] != 0:
@@ -961,7 +961,7 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
     return ENOSYS
 
 def user_kill(name: ptr[u8], vec: u64, rip: u64, addr_: u64):
-    # called from an exception taken in ring 3: report, and the process exits with 0x100 + vector
+# called from an exception taken in ring 3: report, and the process exits with 0x100 + vector
     t = cur_thread()
     atomic_add64(u64(addr(user_kills)), 1)
     spin_lock(u64(addr(con_lock)))

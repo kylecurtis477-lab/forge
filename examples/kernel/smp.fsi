@@ -73,7 +73,7 @@ def lapic_ipi(apic: u64, cmd: u32):
         guard += 1
 
 def tramp_page() -> u64:
-    # a page of usable RAM below 640 KiB that nobody else uses (the low 1 MiB is never handed out)
+# a page of usable RAM below 640 KiB that nobody else uses (the low 1 MiB is never handed out)
     pg: u64 = 0x8000
     while pg < 0x9F000:
         i = 0

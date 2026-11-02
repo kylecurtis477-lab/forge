@@ -126,7 +126,7 @@ def frame_alloc_nolock() -> u64:
     return 0
 
 def frame_alloc_contig(n: u64) -> u64:
-    # n physically contiguous zeroed frames below 4 GiB (DMA rings); 0 if none
+# n physically contiguous zeroed frames below 4 GiB (DMA rings); 0 if none
     f = irq_save()
     spin_lock(u64(addr(pmm_lock)))
     lim = frame_limit
@@ -188,7 +188,7 @@ def pt_next(table: u64, idx: u64, create: u64) -> u64:
     return v & ADDR_MASK
 
 def pte_addr(pml4: u64, va: u64, create: u64) -> u64:
-    # virtual address of the level-1 entry for va (0 if missing and !create)
+# virtual address of the level-1 entry for va (0 if missing and !create)
     t = pt_next(pml4, (va >> 39) & 511, create)
     if t == 0:
         return 0
@@ -218,7 +218,7 @@ def unmap_page(pml4: u64, va: u64) -> u64:
     return v & ADDR_MASK
 
 def virt_to_phys(pml4: u64, va: u64) -> u64:
-    # walks all levels honouring 1G/2M pages; returns 1 (odd, never a real result) when unmapped
+# walks all levels honouring 1G/2M pages; returns 1 (odd, never a real result) when unmapped
     t = pml4
     lvl = 3
     while lvl >= 0:
@@ -240,7 +240,7 @@ def map_kernel_range(pml4: u64, start: u64, end: u64, flags: u64):
         va += PAGE
 
 def map_stack(pml4: u64, top: u64, pages: u64):
-    # pages below `top`; the page under them stays unmapped as a guard
+# pages below `top`; the page under them stays unmapped as a guard
     i = 1
     while i <= pages:
         map_page(pml4, top - i * PAGE, frame_alloc(), PTE_W | PTE_NX | PTE_G)
@@ -250,7 +250,7 @@ def is_mmio_2m(pa: u64) -> u64:
     return pa == 0xFEC00000 or pa == 0xFEE00000
 
 def paging_init(fb_phys: u64, fb_len: u64) -> u64:
-    # enable NX + global pages
+# enable NX + global pages
     wrmsr(0xC0000080, rdmsr(0xC0000080) | 0x800)
     write_cr4(read_cr4() | 0x80)
     pml4 = frame_alloc()
@@ -285,7 +285,7 @@ def paging_init(fb_phys: u64, fb_len: u64) -> u64:
     return pml4
 
 def paging_activate(pml4: u64):
-    # no identity map from here on: physical memory is only reachable through the HHDM
+# no identity map from here on: physical memory is only reachable through the HHDM
     write_cr3(pml4)
     kernel_pml4 = pml4
     p2v_base = HHDM
@@ -294,7 +294,7 @@ def paging_activate(pml4: u64):
         frame_limit = (phys_top + PAGE - 1) / PAGE
 
 def demand_fault(va: u64) -> u64:
-    # #PF hook: lazily back the demand region with zeroed frames
+# #PF hook: lazily back the demand region with zeroed frames
     if va < DEMAND_BASE or va >= DEMAND_BASE + DEMAND_SIZE or kernel_pml4 == 0:
         return 0
     map_page(kernel_pml4, va & ~u64(PAGE - 1), frame_alloc(), PTE_W | PTE_NX)

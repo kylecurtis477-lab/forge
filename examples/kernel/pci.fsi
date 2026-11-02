@@ -1,6 +1,6 @@
 # PCI configuration space via mechanism #1 (ports 0xCF8/0xCFC); bus 0..255 brute-force scan.
 pci_count: u64
-pci_vblk: u64      # bus<<16 | dev<<11 | fn<<8 of the first virtio-blk device, +1 (0 = none)
+pci_vblk: u64  # bus<<16 | dev<<11 | fn<<8 of the first virtio-blk device, +1 (0 = none)
 
 def pci_addr(bdf: u64, off: u64) -> u32:
     return u32(0x80000000 | (bdf << 8) | (off & 0xFC))

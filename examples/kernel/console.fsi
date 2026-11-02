@@ -67,7 +67,7 @@ def fb_newline():
     fb_col = 0
     fb_row += 1
     if fb_row >= fb_rows:
-        # scroll one text row
+    # scroll one text row
         memcpy(fb_base, fb_base + 16 * fb_pitch, (fb_rows - 1) * 16 * fb_pitch)
         memset(fb_base + (fb_rows - 1) * 16 * fb_pitch, 0, 16 * fb_pitch)
         fb_row = fb_rows - 1
@@ -135,7 +135,7 @@ def put_sig(v: u32):
         i += 1
 
 def qemu_exit(code: u32):
-    # isa-debug-exit device (iobase 0xf4): qemu exits with (code << 1) | 1; no-op on real hardware
+# isa-debug-exit device (iobase 0xf4): qemu exits with (code << 1) | 1; no-op on real hardware
     outl(0xF4, code)
     while 1:
         cli()

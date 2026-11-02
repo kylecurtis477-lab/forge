@@ -2,6 +2,14 @@
 # forge <file.forge> [-o out] : compile with the self-hosted compiler, then assemble+link (binutils as/ld)
 set -e
 D="$(cd "$(dirname "$0")" && pwd)"
+# forge fmt [--check] [files...] : canonical formatter (tools/fmt.forge); no files = repo set
+if [ "$1" = "fmt" ]; then
+  shift
+  [ "$D/build/fmt" -nt "$D/tools/fmt.forge" ] || "$0" "$D/tools/fmt.forge" -o "$D/build/fmt"
+  chk=""; [ "$1" = "--check" ] && { chk="--check"; shift; }
+  if [ $# = 0 ]; then cd "$D"; set -- $(tools/fmt_files.sh); fi
+  exec "$D/build/fmt" $chk "$@"
+fi
 src="$1"; out="${src%.forge}"
 [ "$2" = "-o" ] && out="$3"
 "$D/build/forgec" "$src" "$out.s" $FORGEC_FLAGS

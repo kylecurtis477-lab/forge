@@ -91,7 +91,7 @@ def mb2_parse(info: u64):
         p = (p + size + 7) & ~u64(7)
 
 def kernel_version() -> ptr[u8]:
-    # build identity; examples/kernel/build.sh makes kernel-next.elf with a different string
+# build identity; examples/kernel/build.sh makes kernel-next.elf with a different string
     return "forge-kernel 0.2.6"
 
 def kernel_start():
@@ -214,7 +214,7 @@ def recurse(n: u64) -> u64:
 
 @export
 def kmain_high():
-    # now on the guarded kernel stack, identity map gone, physical memory via HHDM
+# now on the guarded kernel stack, identity map gone, physical memory via HHDM
     if bi.fb_addr != 0:
         fb_attach(p2v(bi.fb_addr), bi.fb_width, bi.fb_height, bi.fb_pitch)
         puts("Forge kernel: framebuffer console ")
@@ -311,7 +311,7 @@ def mx_worker(n: u64):
         mutex_lock(addr(mx))
         v = mx_counter
         if (i & 15) == 0:
-            yield_cpu()          # hold the mutex across a reschedule: others must sleep, not spin
+            yield_cpu()  # hold the mutex across a reschedule: others must sleep, not spin
         mx_counter = v + 1
         mutex_unlock(addr(mx))
         i += 1
@@ -405,7 +405,7 @@ tlbt_done: u64
 tlbt_seen: u64[8]
 
 def tlbt_worker(cpu: u64):
-    # pinned to one CPU: keep the old translation hot until the remap, then report what it sees
+# pinned to one CPU: keep the old translation hot until the remap, then report what it sees
     s: u64 = 0
     s += vload64(TLBT_VA)
     atomic_add64(u64(addr(tlbt_ready)), 1)
@@ -813,7 +813,7 @@ lph_wrong: u64
 lph_iter: u64[4]
 
 def lp_hammer(i: u64):
-    # kernel threads have no process: the right answer is 0, patched or not
+# kernel threads have no process: the right answer is 0, patched or not
     while atomic_load64(u64(addr(lph_stop))) == 0:
         if sys_getpid() != 0:
             atomic_add64(u64(addr(lph_wrong)), 1)
@@ -828,14 +828,14 @@ def lp_check_getpid(fn: u64) -> u64:
 lp_fail_post: u64
 
 def lp_check_flaky(fn: u64) -> u64:
-    # passes on the replacement, fails once on the live entry: exercises the post-install rollback
+# passes on the replacement, fails once on the live entry: exercises the post-install rollback
     if fn == u64(sys_getpid) and lp_fail_post:
         lp_fail_post = 0
         return 0
     return lp_check_getpid(fn)
 
 def lp_quiesce():
-    # every hammer passes its loop head twice, i.e. has left any call it was in when the text changed
+# every hammer passes its loop head twice, i.e. has left any call it was in when the text changed
     s: u64[4]
     i: u64 = 1
     while i < 4:
@@ -984,7 +984,7 @@ def tty_swapper(arg: u64):
         panic("tty swap back to v0 failed")
 
 def shell_test():
-    # the interactive shell from \EFI\Forge\bin\sh; the boot test types its commands
+# the interactive shell from \EFI\Forge\bin\sh; the boot test types its commands
     input_init()
     # the block driver runs as a supervised ring-3 service for the whole shell session
     f0 = frames_free
@@ -1076,7 +1076,7 @@ def shell_test():
     puts("processes + VFS + keyboard/serial input + sh OK\n")
 
 def kexec_test():
-    # a second shell session that replaces the kernel under itself (sh builtin `kexec`, syscall 409)
+# a second shell session that replaces the kernel under itself (sh builtin `kexec`, syscall 409)
     input_init()
     ktest_hooks = 1
     sz: u64 = 0

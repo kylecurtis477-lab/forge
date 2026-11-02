@@ -20,20 +20,20 @@
 #   +256 args (128 B) +384 syscall frame
 # file record: +0 type +8 first cluster +16 size +24 position +32 fds referring to it
 KXH_MAGIC = 0x464F48584B475246
-KXH_VERSION = 2         # format written by this kernel
-KXH_MIN_VERSION = 2     # oldest format this kernel can adopt
+KXH_VERSION = 2  # format written by this kernel
+KXH_MIN_VERSION = 2  # oldest format this kernel can adopt
 KXH_BYTES = 448
 KX_FIXED_PAGES = 12
 EBUSY = 0xFFFFFFFFFFFFFFF0
 kx_nproc: u64
 kx_nfile: u64
 kx_files: u64[1024]
-kx_gen: u64          # how many handoffs this kernel descends from (BootInfo.kx_gen)
+kx_gen: u64  # how many handoffs this kernel descends from (BootInfo.kx_gen)
 kx_restored: u64
 kx_freed: u64
 
 def kx_grab(n: u64, align: u64, offs: u64) -> u64:
-    # n free contiguous frames whose start is = offs (mod align); 0 if none
+# n free contiguous frames whose start is = offs (mod align); 0 if none
     fl = irq_save()
     spin_lock(u64(addr(pmm_lock)))
     a = align / PAGE
@@ -69,7 +69,7 @@ def kx_release(pa: u64, n: u64, total: u64):
     irq_restore(fl)
 
 def kx_walk(pml4: u64, idx: u64, data: u64) -> u64:
-    # counts (idx = 0) or serialises every present 4 KiB user page of an address space
+# counts (idx = 0) or serialises every present 4 KiB user page of an address space
     n: u64 = 0
     i4: u64 = 0
     while i4 < 256:
@@ -132,7 +132,7 @@ def kx_pid_taken(pid: u64) -> u64:
     return r
 
 def kx_wait_parked(me: ptr[Proc]) -> u64:
-    # 1 when every other non-driver user process is parked at a syscall boundary or is a zombie
+# 1 when every other non-driver user process is parked at a syscall boundary or is a zombie
     i = 0
     while i < MAX_PROCS:
         q = ptr[Proc](procs[i])
@@ -451,8 +451,8 @@ def sys_kexec(frame: u64, which: u64) -> u64:
     return 0
 
 def kx_restore() -> ptr[Thread]:
-    # in the new kernel: rebuild every handed-over process, then give the handoff region back.
-    # Returns the caller's thread (0 if the handoff could not be adopted: the kernel boots fresh).
+# in the new kernel: rebuild every handed-over process, then give the handoff region back.
+# Returns the caller's thread (0 if the handoff could not be adopted: the kernel boots fresh).
     hb = bi.handoff
     h = p2v(hb)
     j: u64 = 0

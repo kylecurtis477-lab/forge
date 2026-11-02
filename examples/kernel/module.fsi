@@ -81,7 +81,7 @@ def kexport_find(name: u64, abi: u64) -> u64:
     return 0
 
 def mod_area_init():
-    # pre-build the page tables of the whole module area so loads never allocate (or leak) table frames
+# pre-build the page tables of the whole module area so loads never allocate (or leak) table frames
     va = MOD_BASE
     while va < MOD_BASE + MOD_SLOT * MOD_SLOTS:
         pte_addr(kernel_pml4, va, 1)
@@ -322,8 +322,8 @@ def mod_load(img: u64, sz: u64) -> ptr[Module]:
         if (m.abi >> 16) != KABI_MAJOR or (m.abi & 0xFFFF) > KABI_MINOR:
             err = "ABI version mismatch"
     if u64(err) == 0:
-        # second pass for imports newer than the module's ABI minor (resolution above allowed all):
-        # reject the module if it imports a symbol exported only since a later minor
+    # second pass for imports newer than the module's ABI minor (resolution above allowed all):
+    # reject the module if it imports a symbol exported only since a later minor
         i = 0
         while i < nsym:
             s = img + symoff + i * 24

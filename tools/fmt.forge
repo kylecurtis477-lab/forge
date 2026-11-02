@@ -1,0 +1,268 @@
+# forge fmt: canonical source formatter working on lines and tokens, so comments, hex
+# literals, f-strings and pragmas survive untouched. Rules (idempotent):
+#   1. indentation is 4 spaces per block level (continuation lines keep their offset
+#      relative to the line that opened them);
+#   2. no trailing whitespace; at most 2 consecutive blank lines; no blank lines at the
+#      start or end of the file; the file ends with exactly one newline;
+#   3. between tokens of a line: runs of spaces become one space, no space after an
+#      opening bracket or before a closing bracket or a comma, one space after a comma
+#      (unless a closing bracket follows);
+#   4. an inline comment is preceded by exactly two spaces; comment text is unchanged.
+# Strings (including multi-line triple-quoted strings) are never changed.
+# usage: fmt [--check] files...   (--check: list files that would change, exit 1 if any)
+
+import sys
+
+OPS3 = ["**=", "//=", ">>=", "<<=", "..."]
+OPS2 = ["**", "//", ">>", "<<", "<=", ">=", "==", "!=", "->", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", ":="]
+
+def is_word(c):
+    return c.isalnum() or c == "_"
+
+def scan_string(s, i):
+# s[i] is a quote; returns (end index, triple-quote kind if unterminated else "")
+    q = s[i]
+    if s[i:i + 3] == q * 3:
+        j = s.find(q * 3, i + 3)
+        while j > 0 and s[j - 1] == "\\" and not esc_even(s, i + 3, j):
+            j = s.find(q * 3, j + 1)
+        if j < 0:
+            return len(s), q * 3
+        return j + 3, ""
+    j = i + 1
+    while j < len(s):
+        if s[j] == "\\":
+            j += 2
+            continue
+        if s[j] == q:
+            return j + 1, ""
+        j += 1
+    return len(s), ""
+
+def esc_even(s, start, j):
+# True when the run of backslashes ending at j-1 has even length
+    n = 0
+    k = j - 1
+    while k >= start and s[k] == "\\":
+        n += 1
+        k -= 1
+    return n % 2 == 0
+
+def tokenize(s):
+# -> (tokens, spaces_before, comment, open_triple). Tokens never contain spaces except strings.
+    toks = []
+    gaps = []
+    i = 0
+    gap = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c == " ":
+            gap += 1
+            i += 1
+            continue
+        if c == "#":
+            return toks, gaps, s[i:], "", gap
+        st = i
+        if c == "\"" or c == "'":
+            e, tq = scan_string(s, i)
+            toks.append(s[st:e])
+            gaps.append(gap)
+            if len(tq) > 0:
+                return toks, gaps, "", tq, 0
+            i = e
+        elif (c == "f" or c == "b") and i + 1 < n and (s[i + 1] == "\"" or s[i + 1] == "'") and (i == 0 or not is_word(s[i - 1])):
+            e, tq = scan_string(s, i + 1)
+            toks.append(s[st:e])
+            gaps.append(gap)
+            if len(tq) > 0:
+                return toks, gaps, "", tq, 0
+            i = e
+        elif c.isdigit():
+            i += 1
+            while i < n and (is_word(s[i]) or (s[i] == "." and not (i + 1 < n and s[i + 1] == "."))):
+                if (s[i] == "e" or s[i] == "E") and i + 1 < n and (s[i + 1] == "+" or s[i + 1] == "-") and not s[st:st + 2].lower() == "0x":
+                    i += 1
+                i += 1
+            toks.append(s[st:i])
+            gaps.append(gap)
+        elif is_word(c):
+            while i < n and is_word(s[i]):
+                i += 1
+            toks.append(s[st:i])
+            gaps.append(gap)
+        else:
+            t = c
+            if s[i:i + 3] in OPS3:
+                t = s[i:i + 3]
+            elif s[i:i + 2] in OPS2:
+                t = s[i:i + 2]
+            toks.append(t)
+            gaps.append(gap)
+            i += len(t)
+        gap = 0
+    return toks, gaps, "", "", gap
+
+def opener(t):
+    return t == "(" or t == "[" or t == "{"
+
+def closer(t):
+    return t == ")" or t == "]" or t == "}"
+
+def join_tokens(toks, gaps):
+    out = []
+    k = 0
+    while k < len(toks):
+        t = toks[k]
+        if k > 0:
+            p = toks[k - 1]
+            sp = gaps[k] > 0
+            if opener(p) or closer(t) or t == "," or t == ":":
+                sp = False
+            elif p == ",":
+                sp = True
+            if sp:
+                out.append(" ")
+        out.append(t)
+        k += 1
+    return "".join(out)
+
+def lead(line):
+    n = 0
+    while n < len(line) and line[n] == " ":
+        n += 1
+    return n
+
+def fmt_text(src):
+    lines = src.split("\n")
+    if len(lines) > 0 and lines[len(lines) - 1] == "":
+        lines.pop()
+    out = []
+    stack = [0]
+    triple = ""
+    depth = 0
+    cont = False
+    shift = 0
+    for line in lines:
+        if len(triple) > 0:
+        # inside a multi-line string: unchanged
+            out.append(line)
+            j = line.find(triple)
+            while j > 0 and not esc_even(line, 0, j):
+                j = line.find(triple, j + 1)
+            if j >= 0:
+                rest = line[j + 3:]
+                triple = ""
+                toks, gaps, com, tq, tail = tokenize(rest)
+                for t in toks:
+                    if opener(t):
+                        depth += 1
+                    elif closer(t):
+                        depth -= 1
+                triple = tq
+                cont = depth > 0 or (len(toks) > 0 and toks[len(toks) - 1] == "\\" and len(com) == 0)
+            continue
+        if cont:
+        # continuation line: keep its offset relative to the opening line
+            w = lead(line)
+            body = line[w:]
+            toks, gaps, com, tq, tail = tokenize(body)
+            nw = w + shift
+            if nw < 0:
+                nw = 0
+            if len(tq) > 0:
+                out.append(" " * nw + body)
+            else:
+                out.append((" " * nw + body).rstrip())
+            for t in toks:
+                if opener(t):
+                    depth += 1
+                elif closer(t):
+                    depth -= 1
+            triple = tq
+            cont = depth > 0 or (len(toks) > 0 and toks[len(toks) - 1] == "\\" and len(com) == 0)
+            continue
+        if len(line.strip()) == 0:
+            out.append("")
+            continue
+        w = lead(line)
+        body = line[w:]
+        if body[0] == "#":
+            lv = 0
+            while lv + 1 < len(stack) and stack[lv + 1] <= w:
+                lv += 1
+            out.append(" " * (4 * lv) + body.rstrip())
+            continue
+        if w > stack[len(stack) - 1]:
+            stack.append(w)
+        else:
+            while len(stack) > 1 and w < stack[len(stack) - 1]:
+                stack.pop()
+        nw = 4 * (len(stack) - 1)
+        shift = nw - w
+        toks, gaps, com, tq, tail = tokenize(body)
+        if len(tq) > 0:
+        # line ends inside a triple-quoted string: format the code before it only
+            text = join_tokens(toks[0:len(toks) - 1], gaps[0:len(gaps) - 1])
+            last = toks[len(toks) - 1]
+            g = ""
+            if len(toks) > 1 and gaps[len(gaps) - 1] > 0 and not opener(toks[len(toks) - 2]):
+                g = " "
+            if len(toks) > 1 and toks[len(toks) - 2] == ",":
+                g = " "
+            out.append(" " * nw + text + g + last)
+        else:
+            text = join_tokens(toks, gaps)
+            if len(com) > 0:
+                if len(text) > 0:
+                    text = text + "  " + com.rstrip()
+                else:
+                    text = com.rstrip()
+            out.append(" " * nw + text)
+        for t in toks:
+            if opener(t):
+                depth += 1
+            elif closer(t):
+                depth -= 1
+        triple = tq
+        cont = depth > 0 or (len(toks) > 0 and toks[len(toks) - 1] == "\\" and len(com) == 0 and len(tq) == 0)
+    # blank-line rules
+    res = []
+    blanks = 0
+    for l in out:
+        if len(l) == 0:
+            blanks += 1
+            continue
+        if len(res) > 0:
+            if blanks > 2:
+                blanks = 2
+            k = 0
+            while k < blanks:
+                res.append("")
+                k += 1
+        blanks = 0
+        res.append(l)
+    return "\n".join(res) + "\n"
+
+def main():
+    args = sys.argv[1:]
+    check = False
+    changed = 0
+    for f in args:
+        if f == "--check":
+            check = True
+            continue
+        src = read_file(f)
+        new = fmt_text(src)
+        if new != src:
+            changed += 1
+            if check:
+                print("would reformat " + f)
+            else:
+                write_file(f, new)
+                print("formatted " + f)
+    if check and changed > 0:
+        return 1
+    return 0
+
+exit(main())

@@ -63,6 +63,10 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 - `--diagnostics=json`: one schema-v1 JSON object per error (file/line/col span, code, message, fix-its); goldens in `tests/diag`.
 
 
+### forge fmt
+
+`forge fmt [--check] [files]` runs tools/fmt.forge (token-level, comment-preserving, AST- and line-number-preserving). `--check` exits 1 and prints `would reformat F` for any file not in canonical form. The CI file set is tools/fmt_files.sh; tests in tests/fmt/run.sh.
+
 ### Grammar freeze
 - docs/GRAMMAR.md is the frozen grammar (v1); the strict `a_*` parser behind `--emit=ast-json` is its reference implementation, and changing either needs a version bump of both.
 - tests/grammar/{valid,invalid} plus tools/grammar_fuzz.py (`--seed N --n COUNT`, writes to build/fuzz) check it; see BUILD_PLAN Phase 3 item 3.

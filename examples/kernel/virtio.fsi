@@ -9,15 +9,15 @@ VIO_QSEL = 0x0E
 VIO_QNOTIFY = 0x10
 VIO_STATUS = 0x12
 VIO_CAP = 0x14
-VBLK_F_RO = 32       # bit 5
+VBLK_F_RO = 32  # bit 5
 
 vb_io: u64
-vb_q: u64            # virtual address of the ring area
+vb_q: u64  # virtual address of the ring area
 vb_q_pa: u64
 vb_qsz: u64
 vb_used_off: u64
 vb_last_used: u64
-vb_req: u64          # one page: header at 0, status at 64, data at 512 (up to 7 sectors)
+vb_req: u64  # one page: header at 0, status at 64, data at 512 (up to 7 sectors)
 vb_req_pa: u64
 vb_cap: u64
 vb_ro: u64
@@ -41,7 +41,7 @@ def vb_init() -> u64:
     if (bar & 1) == 0:
         return 0
     vb_io = bar & 0xFFFC
-    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 5)          # I/O space + bus master
+    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 5)  # I/O space + bus master
     io = u16(vb_io)
     outb(io + VIO_STATUS, 0)
     outb(io + VIO_STATUS, 1)
@@ -90,7 +90,7 @@ def on_vblk(frame: ptr[u64]):
     lapic_eoi()
 
 def vb_msix_init(bdf: u64):
-    # find the MSI-X capability (id 0x11), point table entry 0 at the BSP's LAPIC, bind queue 0 to it
+# find the MSI-X capability (id 0x11), point table entry 0 at the BSP's LAPIC, bind queue 0 to it
     if (pci_rd32(bdf, 4) & 0x100000) == 0:
         return
     c = pci_rd32(bdf, 0x34) & 0xFC
@@ -115,7 +115,7 @@ def vb_msix_init(bdf: u64):
     if base == 0 or base >= 0x100000000:
         puts("virtio-blk: MSI-X table above 4 GiB, polling\n")
         return
-    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 2)          # memory space for the table
+    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 2)  # memory space for the table
     t = p2v(base + (tb & 0xFFFFFFF8))
     idt_set(VEC_VBLK, u64(on_vblk), 0)
     vstore32(t, u32(0xFEE00000 | (cpu_to_apic[0] << 12)))
@@ -140,7 +140,7 @@ def vb_desc(i: u64, pa: u64, len: u64, flags: u64, next: u64):
     vstore64(d + 8, (len & 0xFFFFFFFF) | (flags << 32) | (next << 48))
 
 def vb_submit(lba: u64, n: u64):
-    vstore64(vb_req, 0)                 # type IN, reserved
+    vstore64(vb_req, 0)  # type IN, reserved
     vstore64(vb_req + 8, lba)
     vstore64(vb_req + 64, 0xFF)
     vb_desc(0, vb_req_pa, 16, 1, 1)
@@ -166,13 +166,13 @@ def vb_finish(n: u64, dst: u64) -> u64:
     return u64(ok)
 
 def vb_read(lba: u64, n: u64, dst: u64) -> u64:
-    # reads n (<= 7) sectors into dst; returns 1 on success
+# reads n (<= 7) sectors into dst; returns 1 on success
     if n == 0 or n > 7 or lba + n > vb_cap:
         return 0
     if blkd_mode:
         return vb_read_drv(lba, n, dst)
     if vb_msix and sched_on and (read_rflags() & 0x200) != 0:
-        # sleeping path: one request in flight, owned through vb_m; sleep until the MSI-X completion
+    # sleeping path: one request in flight, owned through vb_m; sleep until the MSI-X completion
         mutex_lock(addr(vb_m))
         vb_submit(lba, n)
         f = irq_save()

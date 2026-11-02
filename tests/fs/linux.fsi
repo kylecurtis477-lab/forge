@@ -41,4 +41,3 @@ def put_i64(v: i64):
 
 def nl():
     puts("\n")
-
