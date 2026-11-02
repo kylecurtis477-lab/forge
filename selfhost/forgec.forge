@@ -8495,6 +8495,8 @@ nargb = 0
 nil = 0
 labpos = list(IRMAX)
 labasm = list(IRMAX)
+lpos = list(IRMAX)
+lbk = list(IRMAX)
 irfail = 0
 irwhy = ""
 ip = 0
@@ -11419,11 +11421,29 @@ def em_call(k):
     if idst[k] >= 0:
         e2("mov %rax, ", vl(idst[k]))
 
+def mark_loops():
+    l = 0
+    while l <= nil:
+        lpos[l] = -1
+        lbk[l] = 0
+        l += 1
+    j = 0
+    while j < nir:
+        if iop[j] == O_LABEL:
+            lpos[ic[j]] = j
+        elif (iop[j] == O_BR or iop[j] == O_CBR) and lpos[ic[j]] >= 0:
+            lbk[ic[j]] = 1
+        j += 1
+
 def o_ins(k, fi, x_epi):
     global pos, pstop
     n = fargs[fi]
     op = iop[k]
+    if k == 0:
+        mark_loops()
     if op == O_LABEL:
+        if lbk[ic[k]]:
+            e(".p2align 5")
         put_label(labasm[ic[k]])
     elif op == O_MOV:
         if idst[k] >= 0:
