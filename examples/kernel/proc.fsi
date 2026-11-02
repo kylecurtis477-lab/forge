@@ -35,6 +35,9 @@ struct Proc:
     fds: u64[16]
     args: u8[128]
     childq: WaitQ
+    drv: u64
+    dma_pa: u64
+    dma_n: u64
 
 procs: u64[64]
 nforks: u64
@@ -420,6 +423,7 @@ def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> ptr[Thread]:
     map_ustack(pml4)
     p = proc_new(0)
     p.pml4 = pml4
+    p.drv = spawn_drv
     p.brk_base = page_up(elf_end)
     p.brk = p.brk_base
     p.fds[0] = console()
@@ -466,6 +470,8 @@ def proc_reap(t: ptr[Thread]) -> u64:
 def proc_exit(code: u64):
     t = cur_thread()
     p = ptr[Proc](t.proc)
+    if p.drv != 0:
+        drv_died(p)
     i = 0
     while i < NFD:
         file_put(p.fds[i])
@@ -819,6 +825,8 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         if a == 3:
             return u64(smep_on) | (u64(smap_on) << 1)
         return EINVAL
+    if nr >= 400 and nr <= 407:
+        return sys_drv(nr, a, b, c)
     if nr == 300:
         # getargs(buf, n): the argument string given to exec
         p = cur_proc()

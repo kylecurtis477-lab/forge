@@ -13,6 +13,7 @@ VBLK_F_RO = 32       # bit 5
 
 vb_io: u64
 vb_q: u64            # virtual address of the ring area
+vb_q_pa: u64
 vb_qsz: u64
 vb_used_off: u64
 vb_last_used: u64
@@ -59,6 +60,7 @@ def vb_init() -> u64:
     if pa == 0:
         return 0
     vb_q = p2v(pa)
+    vb_q_pa = pa
     outl(io + VIO_QPFN, u32(pa >> 12))
     vb_req_pa = frame_alloc()
     vb_req = p2v(vb_req_pa)
@@ -167,6 +169,8 @@ def vb_read(lba: u64, n: u64, dst: u64) -> u64:
     # reads n (<= 7) sectors into dst; returns 1 on success
     if n == 0 or n > 7 or lba + n > vb_cap:
         return 0
+    if blkd_mode:
+        return vb_read_drv(lba, n, dst)
     if vb_msix and sched_on and (read_rflags() & 0x200) != 0:
         # sleeping path: one request in flight, owned through vb_m; sleep until the MSI-X completion
         mutex_lock(addr(vb_m))

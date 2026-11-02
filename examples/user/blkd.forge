@@ -1,0 +1,84 @@
+# forge: no-runtime
+# blkd: the virtio-blk driver as a ring-3 service. It owns the device through kernel-granted
+# capabilities only (port I/O in the device window, its MSI-X interrupt, one DMA region) and serves
+# block reads to the kernel over the driver IPC channel (recv / reply).
+include "ulib.fsi"
+
+def io_in(port: u64, w: u64) -> u64:
+    return syscall3(400, port, w, 0)
+
+def io_out(port: u64, w: u64, v: u64):
+    syscall3(401, port, w, v)
+
+def desc(q: u64, i: u64, pa: u64, len: u64, flags: u64, next: u64):
+    d = q + i * 16
+    vstore64(d, pa)
+    vstore64(d + 8, (len & 0xFFFFFFFF) | (flags << 32) | (next << 48))
+
+@export
+def _start():
+    io = syscall3(407, 0, 0, 0)
+    msix = syscall3(407, 1, 0, 0)
+    io_out(io + 0x12, 1, 0)                 # reset
+    io_out(io + 0x12, 1, 1)
+    io_out(io + 0x12, 1, 3)
+    hf = io_in(io, 4)
+    io_out(io + 4, 4, hf & 32)
+    io_out(io + 0x0E, 2, 0)
+    qsz = io_in(io + 0x0C, 2)
+    used = (16 * qsz + 6 + 2 * qsz + 4095) & ~u64(4095)
+    total = used + ((6 + 8 * qsz + 4095) & ~u64(4095))
+    np = total / 4096 + 1
+    q = syscall3(402, np, 0, 0)
+    if is_err(q):
+        out("blkd: no DMA region\n")
+        flush()
+        sys_exit(1)
+    qpa = syscall3(403, 0, 0, 0)
+    req = q + total
+    rpa = qpa + total
+    io_out(io + 0x08, 4, qpa >> 12)
+    if msix:
+        io_out(io + 0x14, 2, 0xFFFF)
+        io_out(io + 0x0E, 2, 0)
+        io_out(io + 0x16, 2, 0)
+    io_out(io + 0x12, 1, 7)
+    out("blkd: pid ")
+    out_u64(sys_getpid())
+    out(" owns virtio-blk io port ")
+    out_u64(io)
+    out(", queue ")
+    out_u64(qsz)
+    out(", DMA ")
+    out_u64(np)
+    out(" pages\n")
+    flush()
+    m: u64[4]
+    last: u64 = 0
+    while 1:
+        syscall3(405, u64(addr(m[0])), 0, 0)
+        vstore64(req, 0)
+        vstore64(req + 8, m[1])
+        vstore64(req + 64, 0xFF)
+        desc(q, 0, rpa, 16, 1, 1)
+        desc(q, 1, rpa + 512, m[2] * 512, 3, 2)
+        desc(q, 2, rpa + 64, 1, 2, 0)
+        av = q + 16 * qsz
+        idx = (vload64(av) >> 16) & 0xFFFF
+        vstore16(av + 4 + (idx % qsz) * 2, 0)
+        vstore16(av + 2, u16((idx + 1) & 0xFFFF))
+        seen = syscall3(404, 0xFFFFFFFFFFFFFFFF, 0, 0)
+        io_out(io + 0x10, 2, 0)
+        if m[3] & 1:
+            # fault injection: die with the request in flight on the device
+            vstore64(0, 0x0BADBAD)
+        while ((vload64(q + used) >> 16) & 0xFFFF) == last:
+            if msix:
+                seen = syscall3(404, seen, 0, 0)
+            else:
+                sys_yield()
+        last = (last + 1) & 0xFFFF
+        st: u64 = 1
+        if (vload64(req + 64) & 0xFF) == 0:
+            st = 0
+        syscall3(406, m[0], st, req + 512)

@@ -19,6 +19,7 @@ include "virtio.fsi"
 include "fat.fsi"
 include "proc.fsi"
 include "module.fsi"
+include "drv.fsi"
 
 MB2_MAGIC = 0x36D76289
 
@@ -720,6 +721,74 @@ def module_test():
     put_u64(mod_rejects)
     puts(" rejected\n")
 
+blkd_img: u64
+blkd_sz: u64
+
+def blk_same(buf: u64, sz: u64) -> u64:
+    hi = uimg(0)
+    if sz != uimg(1) - hi:
+        return 0
+    i: u64 = 0
+    while i < sz:
+        if vload8(buf + i) != vload8(hi + i):
+            return 0
+        i += 1
+    return 1
+
+def drv_test():
+    blkd_img = fs_read_file("EFI/Forge/bin/blkd", addr(blkd_sz))
+    if blkd_img == 0:
+        panic("cannot read \\EFI\\Forge\\bin\\blkd")
+    ff = frames_free
+    hl = heap_live
+    t = blkd_start(blkd_img, blkd_sz)
+    if u64(t) == 0:
+        panic("blkd rejected by the ELF loader")
+    # the FAT layer and file reads now go through the ring-3 driver
+    sz: u64 = 0
+    buf = fs_read_file("EFI/Forge/init.elf", addr(sz))
+    if buf == 0 or blk_same(buf, sz) == 0:
+        panic("read through blkd failed")
+    kfree(buf)
+    puts("blkd: read \\EFI\\Forge\\init.elf through the user-mode driver, identical; ")
+    put_u64(drv_served)
+    puts(" requests served\n")
+    # a process without the capability is refused
+    if sys_drv(400, vb_io, 1, 0) != EPERM:
+        panic("driver capability not enforced")
+    # fault injection: the driver dies with a request in flight on the device
+    sec = kmalloc(512)
+    blk_crash_next = 1
+    ok = vb_read(0, 1, sec)
+    code = proc_reap(t)
+    puts("blkd crashed (exit ")
+    put_hex(code)
+    puts("), client got ")
+    if ok == 0:
+        puts("EIO")
+    else:
+        puts("data")
+    puts(" and is still running; device reset, deaths=")
+    put_u64(drv_deaths)
+    putc(10)
+    if ok != 0 or code != 0x10E or drv_eio != 1:
+        panic("driver crash not contained")
+    vb_reinit()
+    if vb_read(0, 1, sec) == 0:
+        panic("kernel driver did not take the device back")
+    kfree(sec)
+    if rq_buf != 0:
+        kfree(rq_buf)
+        rq_buf = 0
+    puts("blkd: frames leaked ")
+    put_u64(ff - frames_free)
+    puts(", heap leaked ")
+    put_u64(hl - heap_live)
+    putc(10)
+    if ff != frames_free or hl != heap_live:
+        panic("driver service leaks memory")
+    puts("isolated driver service OK\n")
+
 def shell_test():
     # the interactive shell from \EFI\Forge\bin\sh; the boot test types its commands
     input_init()
@@ -815,6 +884,7 @@ def after_overflow():
     user_test()
     fs_test()
     module_test()
+    drv_test()
     shell_test()
     cli()
     puts("KERNEL OK\n")

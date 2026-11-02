@@ -16,7 +16,7 @@ mcopy -i $B/esp.fat ../../build/kernel/kernel.elf ::/EFI/Forge/kernel.elf
 mcopy -i $B/esp.fat ../../build/user/hello.elf ::/EFI/Forge/init.elf
 mmd -i $B/esp.fat ::/EFI/Forge/bin ::/EFI/Forge/docs ::/EFI/Forge/mod
 for m in hello badabi unresolved newer; do mcopy -i $B/esp.fat ../../build/modules/$m.ko ::/EFI/Forge/mod/$m.ko; done
-for p in sh hello cat forktest fault; do mcopy -i $B/esp.fat ../../build/user/$p.elf ::/EFI/Forge/bin/$p; done
+for p in sh hello cat forktest fault blkd; do mcopy -i $B/esp.fat ../../build/user/$p.elf ::/EFI/Forge/bin/$p; done
 printf 'Forge long file name test: this file lives at \\EFI\\Forge\\docs\\Long File Name Notes.txt\nIt spans more than one 13-character LFN entry and is read with open/read/stat/close.\n' > $B/notes.txt
 mcopy -i $B/esp.fat $B/notes.txt "::/EFI/Forge/docs/Long File Name Notes.txt"
 mcopy -i $B/esp.fat $B/forgex64.efi ::/EFI/BOOT/BOOTX64.EFI
