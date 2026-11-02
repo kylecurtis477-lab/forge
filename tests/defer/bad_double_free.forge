@@ -1,0 +1,18 @@
+# expect: use of moved value `b`
+# forge: no-runtime
+include "../fs/linux.fsi"
+cell: u64
+
+@unsafe
+def mk() -> own[u64]:
+    return own[u64](ptr[u64](addr(cell)))
+
+def drop(b: own[u64]):
+    pass
+
+def main() -> u64:
+    b = mk()
+    with defer:
+        drop(b)
+    drop(b)
+    return 0

@@ -1,0 +1,10 @@
+# expect: break/continue outside a loop
+# forge: no-runtime
+include "../fs/linux.fsi"
+def main() -> u64:
+    k: u64 = 0
+    while k < 2:
+        k += 1
+    with defer:
+        break
+    return 0

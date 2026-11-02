@@ -1,0 +1,44 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+log: u64[16]
+nlog: u64 = 0
+
+def note(v: u64):
+    log[nlog] = v
+    nlog += 1
+
+def f(x: u64) -> u64:
+    note(1)
+    with defer:
+        note(10)
+    with defer:
+        note(20)
+    if x > 5:
+        return x * 2
+    k: u64 = 0
+    while k < 3:
+        k += 1
+        if k == 2:
+            break
+    note(2)
+    return x + k
+
+def g():
+    with defer:
+        note(30)
+    note(3)
+
+def main() -> u64:
+    a = f(7)
+    b = f(1)
+    g()
+    i: u64 = 0
+    while i < nlog:
+        put_u64(log[i])
+        puts(" ")
+        i += 1
+    put_u64(a)
+    puts(" ")
+    put_u64(b)
+    nl()
+    return 0

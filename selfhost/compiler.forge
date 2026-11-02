@@ -15468,6 +15468,12 @@ fs_term = 0
 fs_lbm = list(256)
 fs_lb0 = list(256)
 fs_safe = 0
+# Phase 4.5 defer: `with defer:` blocks at a function's top level run (LIFO) before every return
+fs_dfp = list(64)
+fs_dfu = list(64)
+nfsdf = 0
+fs_indef = 0
+fs_sdep = 0
 fs_nbc = 0
 fs_nbe = 0
 fs_lastnm = ""
@@ -17377,6 +17383,12 @@ def fs_nnjoin(sn):
         i += 1
 
 def fs_suite():
+    global fs_sdep
+    fs_sdep += 1
+    fs_suite1()
+    fs_sdep -= 1
+
+def fs_suite1():
     global fp
     sn = fs_nnsnap()
     n0 = nfsl
@@ -17492,7 +17504,7 @@ def fs_stmt():
     fs_bpend = -1
 
 def fs_stmt1():
-    global fp, nfsloop, fs_ety, fs_mode, fs_dep, nfsb, fs_ublk, fs_uops, fs_unsafe, fs_term, fs_rsrc
+    global fp, nfsloop, fs_ety, fs_mode, fs_dep, nfsb, fs_ublk, fs_uops, fs_unsafe, fs_term, fs_rsrc, nfsdf
     if tk[fp] == K_NL:
         fp += 1
         return 0
@@ -17501,10 +17513,13 @@ def fs_stmt1():
         fs_eol()
         return 0
     if fs_isid("return"):
+        if fs_indef:
+            fs_die("return inside a `with defer:` block")
         fp += 1
         if tk[fp] != K_NL and tk[fp] != K_DED:
             fs_rexpr()
             fs_conv(fs_rty)
+        fs_rundefers()
         e(concat("jmp ", fs_ret))
         fs_eol()
         fs_term = 1
@@ -17521,6 +17536,20 @@ def fs_stmt1():
         fp += 1
         fs_eol()
         fs_term = 1
+        return 0
+    if fs_isid("with") and tk[fp + 1] == K_ID and str_eq(tv[fp + 1], "defer") and fs_isop2(fp + 2, ":"):
+    # Phase 4.5: `with defer:` registers its block to run before every later return / the end of the function
+        if fs_indef:
+            fs_die("`with defer:` inside a `with defer:` block")
+        if fs_sdep != 1:
+            fs_die("`with defer:` must be at the top level of a function body")
+        if nfsdf >= 64:
+            fs_die("too many `with defer:` blocks in one function")
+        fs_dfp[nfsdf] = fp + 2
+        fs_dfu[nfsdf] = fs_unsafe
+        nfsdf += 1
+        fp += 2
+        fs_skip_suite()
         return 0
     if fs_isid("with") and tk[fp + 1] == K_ID and str_eq(tv[fp + 1], "unsafe") and fs_isop2(fp + 2, ":"):
     # Phase 4.3: `with unsafe:` block
@@ -17781,6 +17810,53 @@ def fs_stmt1():
         fs_term = 1
     fs_rexpr()
     fs_eol()
+
+def fs_rundefers():
+# emit the registered defer blocks (newest first); %rax (the return value) is preserved
+    global fp, nfsloop, fs_indef, fs_term, fs_unsafe
+    if nfsdf == 0:
+        return 0
+    e("push %rax")
+    e("push %rax")
+    fp0 = fp
+    nl0 = nfsloop
+    t0 = fs_term
+    u0 = fs_unsafe
+    n = nfsl
+    sh = list(n + 1)
+    mu = list(n + 1)
+    dd = list(n + 1)
+    i = 0
+    while i < n:
+        sh[i] = fsl_sh[i]
+        mu[i] = fsl_mu[i]
+        dd[i] = fsl_dead[i]
+        i += 1
+    # the function is ending: its block-scoped borrows are over
+    fs_bkill(0)
+    nfsloop = 0
+    fs_indef = 1
+    i = nfsdf - 1
+    while i >= 0:
+        sn = fs_mvsnap()
+        fp = fs_dfp[i]
+        fs_unsafe = fs_dfu[i]
+        fs_suite()
+        fs_mvset(sn)
+        i -= 1
+    i = 0
+    while i < n:
+        fsl_sh[i] = sh[i]
+        fsl_mu[i] = mu[i]
+        fsl_dead[i] = dd[i]
+        i += 1
+    fs_indef = 0
+    fs_unsafe = u0
+    nfsloop = nl0
+    fs_term = t0
+    fp = fp0
+    e("pop %rax")
+    e("pop %rax")
 
 def fs_rsrcat(p):
 # the local named by a bare `NAME` right-hand side at p, else -1
@@ -18080,7 +18156,7 @@ def fs_function(f):
     fs_unsafe = 0
 
 def fs_function1(f):
-    global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop
+    global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop, nfsdf, fs_sdep, fs_term
     at = fsf_at[f]
     nm = fsf_n[f]
     sec = fsf_sec[f]
@@ -18114,6 +18190,8 @@ def fs_function1(f):
     nfsloop = 0
     fs_ret = fs_newlab()
     fs_rty = fsf_ret[f]
+    nfsdf = 0
+    fs_sdep = 0
     i = 0
     r = 0
     while i < fsf_np[f]:
@@ -18130,7 +18208,13 @@ def fs_function1(f):
             r += 1
         i += 1
     fp = fsf_pos[f]
+    fs_term = 0
     fs_suite()
+    if not fs_term:
+        fp1 = fp
+        e("xor %eax,%eax")
+        fs_rundefers()
+        fp = fp1
     e("xor %eax,%eax")
     emit_raw(concat(fs_ret, ":\n"))
     e("leave")

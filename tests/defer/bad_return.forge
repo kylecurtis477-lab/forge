@@ -1,0 +1,7 @@
+# expect: return inside a `with defer:`
+# forge: no-runtime
+include "../fs/linux.fsi"
+def main() -> u64:
+    with defer:
+        return 1
+    return 0

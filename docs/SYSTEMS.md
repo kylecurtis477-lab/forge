@@ -81,6 +81,10 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 - Gate points: start of `fs_intrin` (list `FS_UNSAFE_FNS`), int→ptr in `fs_conv`, explicit pointer casts, non-`[0]` ptr indexing. `ptr[T](0)` is rejected before the unsafe check.
 - Report: `--unsafe-report` per region + summary (`fs_ufn`, `fs_ublk`, `fs_utot`, `fs_ubare`); baseline in tests/unsafe/baseline.txt.
 
+### defer (Phase 4.5a)
+
+- `with defer:` in `fs_stmt1` records the suite position in `fs_dfp` (and the unsafe depth in `fs_dfu`) and skips it; only allowed when `fs_sdep` (suite depth, maintained by the `fs_suite` wrapper around `fs_suite1`) is 1. `fs_rundefers` (called by `return` and by `fs_function1` when the body falls through) pushes %rax, ends block borrows (`fs_bkill(0)`, state restored afterwards), re-parses each block newest first with the move state snapshotted around it, then pops %rax.
+
 ### Ownership and borrows (Phase 4.4)
 
 - Types: `ft_bptr(el, sg)` with `ftsg` 2 = own, 3 = ref, 4 = mut (all `fsk` 1, non-null; `ft_isnn` is `ftsg != 1`). Parsed in `fs_type`/`fs_istype` only when followed by `[` (the kernel has a field named `ref`).
