@@ -4,7 +4,7 @@ cd "$(dirname "$0")"
 FC=$PWD/../../build/forgec
 T=$(mktemp -d)
 fail=0
-if $FC ok.forge $T/ok.s && as -o $T/ok.o $T/ok.s && ld -o $T/ok $T/ok.o && [ "$($T/ok)" = "own ok" ]; then
+if $FC ok.forge $T/ok.s && ../../build/fas -o $T/ok.o $T/ok.s && ../../build/fld -o $T/ok $T/ok.o && [ "$($T/ok)" = "own ok" ]; then
     echo "PASS own-ok"
 else
     echo "FAIL own-ok"; fail=1

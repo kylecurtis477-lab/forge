@@ -85,7 +85,7 @@ asm(
     "xor %ebp, %ebp",
     "call *%rsi",
     "4: cli", "hlt", "jmp 4b",
-    # krel_apply(base, slide): image KASLR self-relocation over the tools/krel.py table; base is a writable
+    # krel_apply(base, slide): image KASLR self-relocation over the .krel table tools/fld writes; base is a writable
     # alias of KBASE (the HHDM view of the image), entries are offset | kind << 56
     ".globl krel_apply",
     "krel_apply:",

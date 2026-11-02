@@ -1,5 +1,5 @@
 #!/bin/sh
-# forge <file.forge> [-o out] : compile with the self-hosted compiler, then assemble+link (binutils as/ld)
+# forge <file.forge> [-o out] : compile with the self-hosted compiler, then assemble+link (tools/fas + tools/fld)
 set -e
 D="$(cd "$(dirname "$0")" && pwd)"
 # forge test [files] / forge verify [files] : JSON reports (tools/forge_test.sh, tools/forge_verify.sh)
@@ -16,4 +16,4 @@ fi
 src="$1"; out="${src%.forge}"
 [ "$2" = "-o" ] && out="$3"
 "$D/build/forgec" "$src" "$out.s" $FORGEC_FLAGS
-as -o "$out.o" "$out.s" && ld -Ttext-segment=0x100000000000 -o "$out" "$out.o" && rm -f "$out.o"
+"$D/build/fas" -o "$out.o" "$out.s" && "$D/build/fld" --base 0x100000000000 -o "$out" "$out.o" && rm -f "$out.o"

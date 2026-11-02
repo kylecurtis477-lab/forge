@@ -37,6 +37,7 @@ tests/ast/semantic.sh || fail=1
 tests/grammar/run.sh || fail=1
 tests/fmt/run.sh || fail=1
 tests/fas/run.sh || fail=1
+tests/fld/run.sh || fail=1
 tests/testblocks/run.sh || fail=1
 tests/bounds/run.sh || fail=1
 tests/nonnull/run.sh || fail=1
@@ -50,7 +51,7 @@ tests/ast/selfpp.sh || fail=1
 build/forgec tests/tuples.forge build/t_ast.json --emit=ast-json && python3 -c 'import json;d=json.load(open("build/t_ast.json"));assert d["forge_ast"]==1 and d["root"]["k"]=="Module"' && echo "PASS ast-json-schema" || { echo "FAIL ast-json-schema"; fail=1; }
 for t in tests/fs/*.forge; do
   c=""; [ -f "${t%.forge}.c" ] && gcc -O1 -ffreestanding -fno-pic -fno-stack-protector -c -o build/t_fsc.o "${t%.forge}.c" && c=build/t_fsc.o
-  build/forgec "$t" build/t_fs.s $FORGEC_FLAGS && as -o build/t_fs.o build/t_fs.s && ld -o build/t_fs build/t_fs.o $c && build/t_fs | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS $t" || { echo "FAIL $t"; fail=1; }
+  build/forgec "$t" build/t_fs.s $FORGEC_FLAGS && build/fas -o build/t_fs.o build/t_fs.s && build/fld -o build/t_fs build/t_fs.o $c && build/t_fs | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS $t" || { echo "FAIL $t"; fail=1; }
 done
 # missing input / include files: clean diagnostic, exit 1, no crash
 printf 'include "no_such_file.fsi"\n' > build/t_inc.forge

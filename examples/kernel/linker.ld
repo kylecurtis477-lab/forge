@@ -1,4 +1,5 @@
 /* Higher-half layout: low identity-linked boot stub at 1 MiB, everything else at -2 GiB + phys. */
+/* Reference only: tools/fld --format kernel builds this layout; tests/fld/run.sh checks they agree. */
 ENTRY(_start)
 KBASE = 0xFFFFFFFF80000000;
 /* W^X at the ELF level: every PT_LOAD is RX, R or RW, never RWX. */

@@ -2,7 +2,7 @@
 # forge verify [files...] : one gate over the checkers that exist today, per file:
 #   parse  - strict frozen-grammar parser (forgec --emit=ast-json)
 #   fmt    - canonical formatting (forge fmt --check)
-#   build  - full compile: typecheck + codegen + as + ld (forgec)
+#   build  - full compile: typecheck + codegen + fas + fld (forgec)
 #   test   - every `test "name":` block passes (forge test), if the file has any
 #   unsafe - with --unsafe-report: freestanding files get the unsafe-region summary (functions, blocks, ops, asm)
 # Prints one JSON report and exits 1 if any check fails. Default set: tests/unit/*.forge.
@@ -26,7 +26,7 @@ for f in "$@"; do
   cf=1
   if "$D/build/forgec" "$f" $T/a.json --emit=ast-json 2>$T/e >/dev/null; then ck parse ok; else ck parse fail "$(head -1 $T/e)"; fi
   if "$D/build/fmt" --check "$f" >$T/e 2>&1; then ck fmt ok; else ck fmt fail "$(head -1 $T/e)"; fi
-  if "$D/build/forgec" "$f" $T/b.s $FORGEC_FLAGS 2>$T/e >/dev/null && as -o $T/b.o $T/b.s 2>>$T/e && ld -Ttext-segment=0x100000000000 -o $T/b $T/b.o 2>>$T/e; then ck build ok; else ck build fail "$(head -1 $T/e)"; fi
+  if "$D/build/forgec" "$f" $T/b.s $FORGEC_FLAGS 2>$T/e >/dev/null && "$D/build/fas" -o $T/b.o $T/b.s 2>>$T/e && "$D/build/fld" --base 0x100000000000 -o $T/b $T/b.o 2>>$T/e; then ck build ok; else ck build fail "$(head -1 $T/e)"; fi
   if grep -q '^test "' "$f"; then
     "$D/tools/forge_test.sh" "$f" > $T/t.json
     if [ $? = 0 ]; then ck test ok; else ck test fail "$(python3 -c 'import json,sys;r=json.load(open(sys.argv[1]));print(str(r["failed"])+" failing: "+", ".join(t["name"] for f in r["files"] for t in f["tests"] if t["status"]!="pass") or "build failed")' $T/t.json)"; fi

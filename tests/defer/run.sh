@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 FC=$PWD/../../build/forgec
 T=$(mktemp -d)
 fail=0
-if $FC ok.forge $T/ok.s $FORGEC_FLAGS && as -o $T/ok.o $T/ok.s && ld -o $T/ok $T/ok.o && [ "$($T/ok)" = "$(cat ok.expected)" ]; then
+if $FC ok.forge $T/ok.s $FORGEC_FLAGS && ../../build/fas -o $T/ok.o $T/ok.s && ../../build/fld -o $T/ok $T/ok.o && [ "$($T/ok)" = "$(cat ok.expected)" ]; then
     echo "PASS defer-ok"
 else
     echo "FAIL defer-ok: $($T/ok)"; fail=1

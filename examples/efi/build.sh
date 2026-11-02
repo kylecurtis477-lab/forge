@@ -4,8 +4,8 @@ set -e
 cd "$(dirname "$0")"
 B=../../build/efi; mkdir -p $B
 ../../build/forgec loader.forge $B/loader.s $FORGEC_FLAGS
-as -o $B/loader.o $B/loader.s
-ld -m i386pep --subsystem 10 --image-base 0x10000000 -e efi_main --dynamicbase -o $B/forgex64.efi $B/loader.o
+../../build/fas -o $B/loader.o $B/loader.s
+../../build/fld --format pe --subsystem 10 --image-base 0x10000000 -e efi_main -o $B/forgex64.efi $B/loader.o
 ../kernel/build.sh >/dev/null
 rm -f $B/esp.fat
 mformat -C -F -c 1 -i $B/esp.fat -T 131072 -v FORGE_ESP ::

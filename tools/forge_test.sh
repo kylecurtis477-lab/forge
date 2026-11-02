@@ -11,7 +11,7 @@ printf '{"forge_test":1,"files":['
 for f in "$@"; do
   [ $first = 1 ] || printf ','; first=0
   fe=$(printf '%s' "$f" | esc)
-  if ! "$D/build/forgec" "$f" $T/t.s --test $FORGEC_FLAGS 2>$T/err || ! as -o $T/t.o $T/t.s 2>>$T/err || ! ld -Ttext-segment=0x100000000000 -o $T/t $T/t.o 2>>$T/err; then
+  if ! "$D/build/forgec" "$f" $T/t.s --test $FORGEC_FLAGS 2>$T/err || ! "$D/build/fas" -o $T/t.o $T/t.s 2>>$T/err || ! "$D/build/fld" --base 0x100000000000 -o $T/t $T/t.o 2>>$T/err; then
     nf=$((nf+1)); printf '{"file":"%s","build":"fail","message":"%s","tests":[]}' "$fe" "$(head -1 $T/err | esc)"; continue
   fi
   # the program's own top-level output comes first, then the marker line, then one name per line

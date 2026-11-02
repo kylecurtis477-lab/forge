@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # krel.py KERNEL.ELF OUT.s -- build the kernel's self-relocation table for image KASLR.
+# Reference implementation only: the build uses tools/fld --format kernel; tests/fld/run.sh checks they agree.
 # Input: a kernel linked with `ld -q` (relocations kept). Every place in the high half (-2 GiB) image that
 # encodes an absolute high-half address, or a PC-relative reference from the high half to the low boot stub,
 # becomes one u64 entry: (offset from KBASE) | (kind << 56). At boot the kernel adds its slide s:

@@ -10,8 +10,8 @@ K=$B/seal.key
 python3 ../../tools/forgeseal.py --pub $K > $B/seal.pub
 for p in hello fault sh cat forktest blkd crash sum bg captest chantest sbtest wxtest capdeny; do
   ../../build/forgec $p.forge $B/$p.s $FORGEC_FLAGS
-  as -o $B/$p.o $B/$p.s
-  ld -static -nostdlib -e _start -z noexecstack -z separate-code -o $B/$p.elf $B/$p.o
+  ../../build/fas -o $B/$p.o $B/$p.s
+  ../../build/fld -o $B/$p.elf $B/$p.o
   cp $B/$p.elf $B/$p.raw
   python3 ../../tools/forgeseal.py $p.forge $B/$p.elf $K ../../tests/unsafe/baseline.txt >/dev/null
 done
