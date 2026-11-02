@@ -100,6 +100,12 @@ width[u16]()         # explicit type arguments
 
 Generic defs/structs are recorded at prescan and skipped; an instance is created the first time a type tuple is used (struct layout computed then; function signature registered and the body emitted by the normal function loop with a binding frame T -> concrete type). Inference dry-runs the argument expressions (no code kept, move/borrow/unsafe state rolled back) and unifies them with the declared parameter types. There are no trait bounds; errors in a body are reported per instance.
 
+### Vec / Map stdlib (Phase 4.5c)
+
+- `include "std/vec.fsi"` / `"std/map.fsi"`; the program defines `forge_alloc(bytes: u64) -> u64` (0 on failure) and `forge_free(p: u64, bytes: u64)`.
+- Storage is held as u64 addresses inside the struct and reinterpreted as `ptr[T]` inside `@unsafe` library functions; the public calls take `ptr[Vec[T]]` / `ptr[Map[K, V]]` (from `addr(x)`, safe) and are themselves callable from `# forge: safe` code.
+- Vec grows x2 (min 4); Map grows x2 (min 8) at 75% occupancy counting tombstones; hash is `u64(k) * 2654435761` folded with `>> 29`, mod capacity.
+
 ### defer (Phase 4.5a)
 
 - `with defer:` in `fs_stmt1` records the suite position in `fs_dfp` (and the unsafe depth in `fs_dfu`) and skips it; only allowed when `fs_sdep` (suite depth, maintained by the `fs_suite` wrapper around `fs_suite1`) is 1. `fs_rundefers` (called by `return` and by `fs_function1` when the body falls through) pushes %rax, ends block borrows (`fs_bkill(0)`, state restored afterwards), re-parses each block newest first with the move state snapshotted around it, then pops %rax.

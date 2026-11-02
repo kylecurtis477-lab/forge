@@ -1,0 +1,24 @@
+# forge: no-runtime
+# vec_get past len must trap through forge_bounds_fail (exit status != 0)
+include "../fs/linux.fsi"
+include "../../std/vec.fsi"
+heap: u8[4096]
+htop: u64 = 0
+
+@unsafe
+def forge_alloc(bytes: u64) -> u64:
+    p = u64(addr(heap[htop]))
+    htop += (bytes + 15) / 16 * 16
+    return p
+
+def forge_free(p: u64, bytes: u64):
+    return
+
+def main() -> u64:
+    v: Vec[u32]
+    vec_init(addr(v))
+    vec_push(addr(v), 1)
+    vec_push(addr(v), 2)
+    put_u64(u64(vec_get(addr(v), 5)))
+    nl()
+    return 0

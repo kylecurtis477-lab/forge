@@ -1,0 +1,73 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+include "../../std/vec.fsi"
+include "../../std/map.fsi"
+heap: u8[65536]
+htop: u64 = 0
+nalloc: u64 = 0
+nfree: u64 = 0
+
+@unsafe
+def forge_alloc(bytes: u64) -> u64:
+    b = (bytes + 15) / 16 * 16
+    if htop + b > 65536:
+        return 0
+    p = u64(addr(heap[htop]))
+    htop += b
+    nalloc += 1
+    return p
+
+def forge_free(p: u64, bytes: u64):
+    nfree += 1
+
+def main() -> u64:
+    v: Vec[u64]
+    vec_init(addr(v))
+    i: u64 = 0
+    while i < 100:
+        vec_push(addr(v), i * i)
+        i += 1
+    put_u64(vec_len(addr(v)))
+    puts(" ")
+    put_u64(vec_get(addr(v), 99))
+    puts(" ")
+    vec_set(addr(v), 3, 7)
+    put_u64(vec_get(addr(v), 3))
+    puts(" ")
+    x: u64 = 0
+    vec_pop(addr(v), addr(x))
+    put_u64(x)
+    puts(" ")
+    b: Vec[u8]
+    vec_init(addr(b))
+    vec_push(addr(b), 65)
+    vec_push(addr(b), 66)
+    put_u64(u64(vec_get(addr(b), 1)))
+    puts(" ")
+    m: Map[u64, u32]
+    map_init(addr(m))
+    i = 0
+    while i < 50:
+        map_put(addr(m), i * 7, u32(i))
+        i += 1
+    map_put(addr(m), 14, 999)
+    map_del(addr(m), 21)
+    o: u32 = 0
+    map_get(addr(m), 14, addr(o))
+    put_u64(u64(o))
+    puts(" ")
+    map_get(addr(m), 343, addr(o))
+    put_u64(u64(o))
+    puts(" ")
+    put_u64(map_has(addr(m), 21))
+    put_u64(map_has(addr(m), 28))
+    put_u64(map_has(addr(m), 5))
+    puts(" ")
+    put_u64(map_len(addr(m)))
+    puts(" ")
+    vec_free(addr(v))
+    vec_free(addr(b))
+    map_free(addr(m))
+    put_u64(nalloc - nfree)
+    nl()
+    return 0

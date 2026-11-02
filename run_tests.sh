@@ -32,7 +32,7 @@ for f in glob.glob("tests/diag/*.json"):
         d=json.loads(l); assert d["version"]==1 and d["code"][0]=="E" and d["line"]>0 and d["col"]>0 and isinstance(d["fixits"],list), f' && echo "PASS diag-json-schema" || { echo "FAIL diag-json-schema"; fail=1; }
 fi
 build/forgec build/no_such_input.forge build/t_inc.s --diagnostics=json 2>&1 | grep -q '"code":"E0001"' && echo "PASS diag-json-input-missing" || { echo "FAIL diag-json-input-missing"; fail=1; }
-tests/ast/roundtrip.sh selfhost/compiler.forge selfhost/prelude.forge tools/*.forge tests/*.forge tests/runtime/*.forge tests/fs/*.forge tests/unit/*.forge tests/testblocks/*.forge tests/bounds/*.forge tests/nonnull/*.forge tests/unsafe/*.forge tests/own/*.forge tests/defer/*.forge tests/generic/*.forge examples/*/*.forge examples/*/*.fsi || fail=1
+tests/ast/roundtrip.sh selfhost/compiler.forge selfhost/prelude.forge tools/*.forge tests/*.forge tests/runtime/*.forge tests/fs/*.forge tests/unit/*.forge tests/testblocks/*.forge tests/bounds/*.forge tests/nonnull/*.forge tests/unsafe/*.forge tests/own/*.forge tests/defer/*.forge tests/generic/*.forge std/*.fsi examples/*/*.forge examples/*/*.fsi || fail=1
 tests/ast/semantic.sh || fail=1
 tests/grammar/run.sh || fail=1
 tests/fmt/run.sh || fail=1
