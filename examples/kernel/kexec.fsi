@@ -463,7 +463,8 @@ def sys_kexec(frame: u64, which: u64) -> u64:
     puts("), nothing written to disk\n")
     # quiesce: input and disk interrupts off, device reset, other CPUs halted for good, timer stopped
     input_off()
-    outb(u16(vb_io + VIO_STATUS), 0)
+    hw_quiesce()
+    pio_wr(vb_io + VIO_STATUS, 1, 0)
     i = 0
     while i < 24:
         ioapic_mask_pin(i)

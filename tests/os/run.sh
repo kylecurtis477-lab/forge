@@ -47,5 +47,8 @@ if [ "$NK" -ge 5 ] && [ "$NI" -ge 5 ] && [ "$NU" -eq 6 ] && [ "$NL" -eq 1 ] && [
     echo "PASS os/kaslr ($NK heap/stack layouts, $NI image bases in 6 boots)"
 else echo "FAIL os/kaslr (layouts $NK, image bases $NI, unslid unmapped $NU, loader $NL, kexec $NX)"; fi
 
+# Phase 8.7: hardware drivers on q35 (read-only disks, ARP only on restricted user netdevs)
+bash tests/os/drivers.sh
+
 # Phase 7.3: -g kernel, DWARF line table, gdb breakpoint at schedule over the QEMU gdbstub
 bash tests/dwarf/run.sh

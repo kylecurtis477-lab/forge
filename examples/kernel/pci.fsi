@@ -5,17 +5,17 @@ pci_vblk: u64  # bus<<16 | dev<<11 | fn<<8 of the first virtio-blk device, +1 (0
 def pci_addr(bdf: u64, off: u64) -> u32:
     return u32(0x80000000 | (bdf << 8) | (off & 0xFC))
 
-@unsafe
 def pci_rd32(bdf: u64, off: u64) -> u64:
-    outl(0xCF8, pci_addr(bdf, off))
-    return u64(inl(0xCFC))
+    pio_wr(0xCF8, 4, pci_addr(bdf, off))
+    return pio_rd(0xCFC, 4)
 
-@unsafe
 def pci_wr32(bdf: u64, off: u64, v: u64):
-    outl(0xCF8, pci_addr(bdf, off))
-    outl(0xCFC, u32(v))
+    pio_wr(0xCF8, 4, pci_addr(bdf, off))
+    pio_wr(0xCFC, 4, v)
 
 def pci_scan():
+    pio_add(0xCF8, 8)
+    pci_n = 0
     pci_count = 0
     pci_vblk = 0
     bus: u64 = 0
@@ -32,6 +32,11 @@ def pci_scan():
                         nfn = 8
                     cls = pci_rd32(bdf, 8)
                     pci_count += 1
+                    if pci_n < PCI_MAX:
+                        pci_bdf[pci_n] = bdf
+                        pci_id[pci_n] = id
+                        pci_cls[pci_n] = cls >> 8
+                        pci_n += 1
                     puts("PCI ")
                     put_hex8(bus)
                     putc(58)
@@ -57,3 +62,66 @@ def pci_scan():
     puts("PCI: ")
     put_u64(pci_count)
     puts(" functions\n")
+
+# Phase 8 driver support: every function found by pci_scan, so drivers can look devices up by class.
+PCI_MAX = 64
+pci_bdf: u64[64]
+pci_id: u64[64]
+pci_cls: u64[64]  # class << 16 | subclass << 8 | prog-if
+pci_n: u64
+
+def pci_find(cls: u64, nth: u64) -> u64:
+# bdf + 1 of the nth function with this class code (0 = none)
+    i: u64 = 0
+    k: u64 = 0
+    while i < pci_n:
+        if pci_cls[i] == cls:
+            if k == nth:
+                return pci_bdf[i] + 1
+            k += 1
+        i += 1
+    return 0
+
+def pci_find_id(id: u64) -> u64:
+    i: u64 = 0
+    while i < pci_n:
+        if pci_id[i] == id:
+            return pci_bdf[i] + 1
+        i += 1
+    return 0
+
+def pci_bar(bdf: u64, i: u64, size_out: ptr[u64]) -> u64:
+# physical base of memory BAR i (64-bit aware) and its size; 0 for an I/O or empty BAR.
+# Sizing writes all-ones with memory decoding off, then restores the BAR and the command register.
+    off = 0x10 + i * 4
+    b = pci_rd32(bdf, off)
+    if (b & 1) != 0:
+        return 0
+    is64 = (b & 6) == 4
+    cmd = pci_rd32(bdf, 4)
+    pci_wr32(bdf, 4, cmd & ~u64(3))
+    pci_wr32(bdf, off, 0xFFFFFFFF)
+    lo = pci_rd32(bdf, off) & 0xFFFFFFF0
+    pci_wr32(bdf, off, b)
+    hi: u64 = 0xFFFFFFFF
+    bh: u64 = 0
+    if is64:
+        bh = pci_rd32(bdf, off + 4)
+        pci_wr32(bdf, off + 4, 0xFFFFFFFF)
+        hi = pci_rd32(bdf, off + 4)
+        pci_wr32(bdf, off + 4, bh)
+    pci_wr32(bdf, 4, cmd)
+    m = (hi << 32) | lo
+    size_out[0] = ~m + 1
+    return (b & 0xFFFFFFF0) | (bh << 32)
+
+def pci_map_bar(bdf: u64, i: u64, maxlen: u64) -> u64:
+# map memory BAR i uncached (at most maxlen bytes) and enable memory decoding + bus mastering
+    sz: u64 = 0
+    pa = pci_bar(bdf, i, addr(sz))
+    if pa == 0 or sz == 0:
+        return 0
+    if sz > maxlen:
+        sz = maxlen
+    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 6)
+    return mmio_map(pa, sz)

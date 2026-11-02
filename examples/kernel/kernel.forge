@@ -8,6 +8,7 @@ include "bootinfo.fsi"
 include "console.fsi"
 include "sync.fsi"
 include "mm.fsi"
+include "mmio.fsi"
 include "cpu.fsi"
 include "acpi.fsi"
 include "apic.fsi"
@@ -17,6 +18,11 @@ include "smp.fsi"
 include "user.fsi"
 include "pci.fsi"
 include "virtio.fsi"
+include "nvme.fsi"
+include "ahci.fsi"
+include "xhci.fsi"
+include "net.fsi"
+include "hw.fsi"
 include "fat.fsi"
 include "proc.fsi"
 include "chan.fsi"
@@ -1570,6 +1576,7 @@ def after_overflow():
     vecmap_test()
     user_test()
     fs_test()
+    hw_test()
     module_test()
     drv_test()
     livepatch_test()

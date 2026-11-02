@@ -33,7 +33,6 @@ VEC_VBLK = 0x50
 VIO_MSIX_CFG = 0x14
 VIO_MSIX_Q = 0x16
 
-@unsafe
 def vb_init() -> u64:
     if pci_vblk == 0:
         return 0
@@ -42,16 +41,17 @@ def vb_init() -> u64:
     if (bar & 1) == 0:
         return 0
     vb_io = bar & 0xFFFC
+    pio_add(vb_io, DRV_IO_LEN)
     pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 5)  # I/O space + bus master
-    io = u16(vb_io)
-    outb(io + VIO_STATUS, 0)
-    outb(io + VIO_STATUS, 1)
-    outb(io + VIO_STATUS, 3)
-    hf = u64(inl(io + VIO_HOSTF))
+    io = vb_io
+    pio_wr(io + VIO_STATUS, 1, 0)
+    pio_wr(io + VIO_STATUS, 1, 1)
+    pio_wr(io + VIO_STATUS, 1, 3)
+    hf = pio_rd(io + VIO_HOSTF, 4)
     vb_ro = (hf >> 5) & 1
-    outl(io + VIO_GUESTF, u32(hf & (u64(1) << VBLK_F_RO)))
-    outw(io + VIO_QSEL, 0)
-    vb_qsz = u64(inw(io + VIO_QSIZE))
+    pio_wr(io + VIO_GUESTF, 4, hf & (u64(1) << VBLK_F_RO))
+    pio_wr(io + VIO_QSEL, 2, 0)
+    vb_qsz = pio_rd(io + VIO_QSIZE, 2)
     if vb_qsz == 0:
         return 0
     used = (16 * vb_qsz + 6 + 2 * vb_qsz + PAGE - 1) & ~u64(PAGE - 1)
@@ -60,13 +60,13 @@ def vb_init() -> u64:
     pa = frame_alloc_contig(total / PAGE)
     if pa == 0:
         return 0
-    vb_q = p2v(pa)
+    vb_q = mmio_add(p2v(pa), total)
     vb_q_pa = pa
-    outl(io + VIO_QPFN, u32(pa >> 12))
+    pio_wr(io + VIO_QPFN, 4, pa >> 12)
     vb_req_pa = frame_alloc()
-    vb_req = p2v(vb_req_pa)
-    outb(io + VIO_STATUS, 7)
-    vb_cap = u64(inl(io + VIO_CAP)) | (u64(inl(io + VIO_CAP + 4)) << 32)
+    vb_req = mmio_add(p2v(vb_req_pa), PAGE)
+    pio_wr(io + VIO_STATUS, 1, 7)
+    vb_cap = pio_rd(io + VIO_CAP, 4) | (pio_rd(io + VIO_CAP + 4, 4) << 32)
     puts("virtio-blk: io 0x")
     put_hex16(vb_io)
     puts(", queue ")
@@ -90,7 +90,6 @@ def on_vblk(frame: ptr[u64]):
     spin_unlock(addr(rq_lock))
     lapic_eoi()
 
-@unsafe
 def vb_msix_init(bdf: u64):
 # find the MSI-X capability (id 0x11), point table entry 0 at the BSP's LAPIC, bind queue 0 to it
     if (pci_rd32(bdf, 4) & 0x100000) == 0:
@@ -118,54 +117,51 @@ def vb_msix_init(bdf: u64):
         puts("virtio-blk: MSI-X table above 4 GiB, polling\n")
         return
     pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 2)  # memory space for the table
-    t = p2v(base + (tb & 0xFFFFFFF8))
+    t = mmio_add(p2v(base + (tb & 0xFFFFFFF8)), 16)
     idt_set(VEC_VBLK, u64(on_vblk), 0)
-    vstore32(t, u32(0xFEE00000 | (cpu_to_apic[0] << 12)))
-    vstore32(t + 4, 0)
-    vstore32(t + 8, VEC_VBLK)
-    vstore32(t + 12, 0)
+    mmio_wr(t, 4, 0xFEE00000 | (cpu_to_apic[0] << 12))
+    mmio_wr(t + 4, 4, 0)
+    mmio_wr(t + 8, 4, VEC_VBLK)
+    mmio_wr(t + 12, 4, 0)
     # message control: enable (bit 15), clear function mask (bit 14)
     pci_wr32(bdf, c, (pci_rd32(bdf, c) | 0x80000000) & ~u64(0x40000000))
-    io = u16(vb_io)
-    outw(io + VIO_MSIX_CFG, 0xFFFF)
-    outw(io + VIO_QSEL, 0)
-    outw(io + VIO_MSIX_Q, 0)
-    if inw(io + VIO_MSIX_Q) != 0:
+    io = vb_io
+    pio_wr(io + VIO_MSIX_CFG, 2, 0xFFFF)
+    pio_wr(io + VIO_QSEL, 2, 0)
+    pio_wr(io + VIO_MSIX_Q, 2, 0)
+    if pio_rd(io + VIO_MSIX_Q, 2) != 0:
         puts("virtio-blk: queue vector rejected, polling\n")
         return
     vb_msix = 1
     puts("virtio-blk: MSI-X vector 0x50 -> cpu0, sleeping requests\n")
 
-@unsafe
 def vb_desc(i: u64, pa: u64, len: u64, flags: u64, next: u64):
     d = vb_q + i * 16
-    vstore64(d, pa)
-    vstore64(d + 8, (len & 0xFFFFFFFF) | (flags << 32) | (next << 48))
+    mmio_wr(d, 8, pa)
+    mmio_wr(d + 8, 8, (len & 0xFFFFFFFF) | (flags << 32) | (next << 48))
 
-@unsafe
 def vb_submit(lba: u64, n: u64):
-    vstore64(vb_req, 0)  # type IN, reserved
-    vstore64(vb_req + 8, lba)
-    vstore64(vb_req + 64, 0xFF)
+    mmio_wr(vb_req, 8, 0)  # type IN, reserved
+    mmio_wr(vb_req + 8, 8, lba)
+    mmio_wr(vb_req + 64, 8, 0xFF)
     vb_desc(0, vb_req_pa, 16, 1, 1)
     vb_desc(1, vb_req_pa + 512, n * 512, 3, 2)
     vb_desc(2, vb_req_pa + 64, 1, 2, 0)
     av = vb_q + 16 * vb_qsz
-    idx = (vload64(av) >> 16) & 0xFFFF
-    vstore16(av + 4 + (idx % vb_qsz) * 2, 0)
+    idx = (mmio_rd(av, 8) >> 16) & 0xFFFF
+    mmio_wr(av + 4 + (idx % vb_qsz) * 2, 2, 0)
     mfence()
-    vstore16(av + 2, u16((idx + 1) & 0xFFFF))
+    mmio_wr(av + 2, 2, (idx + 1) & 0xFFFF)
     mfence()
-    outw(u16(vb_io + VIO_QNOTIFY), 0)
+    pio_wr((vb_io + VIO_QNOTIFY), 2, 0)
 
-@unsafe
 def vb_done() -> u64:
-    return ((vload64(vb_q + vb_used_off) >> 16) & 0xFFFF) != vb_last_used
+    return ((mmio_rd(vb_q + vb_used_off, 8) >> 16) & 0xFFFF) != vb_last_used
 
 @unsafe
 def vb_finish(n: u64, dst: u64) -> u64:
     vb_last_used = (vb_last_used + 1) & 0xFFFF
-    ok = (vload64(vb_req + 64) & 0xFF) == 0
+    ok = (mmio_rd(vb_req + 64, 8) & 0xFF) == 0
     if ok:
         memcpy(dst, vb_req + 512, n * 512)
     vb_reads += 1

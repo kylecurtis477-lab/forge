@@ -74,12 +74,11 @@ def vb_read_drv(lba: u64, n: u64, dst: u64) -> u64:
     mutex_unlock(addr(vb_m))
     return ok
 
-@unsafe
 def drv_died(p: ptr[Proc]):
 # called from proc_exit of a driver process, before its address space (and DMA frames) is freed
     f = irq_save()
     spin_lock(addr(rq_lock))
-    outb(u16(vb_io + VIO_STATUS), 0)  # device reset: stops all DMA into the driver's frames
+    pio_wr(vb_io + VIO_STATUS, 1, 0)  # device reset: stops all DMA into the driver's frames
     blkd_up = 0
     drv_deaths += 1
     if (rq_flags & 2) != 0:
@@ -117,19 +116,19 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
         if drv_port_ok(a, b) == 0:
             return EPERM
         if b == 1:
-            return u64(inb(u16(a)))
+            return pio_rd(a, 1)
         if b == 2:
-            return u64(inw(u16(a)))
-        return u64(inl(u16(a)))
+            return pio_rd(a, 2)
+        return pio_rd(a, 4)
     if nr == 401:
         if drv_port_ok(a, b) == 0:
             return EPERM
         if b == 1:
-            outb(u16(a), u8(c & 0xFF))
+            pio_wr((a), 1, c & 0xFF)
         elif b == 2:
-            outw(u16(a), u16(c & 0xFFFF))
+            pio_wr((a), 2, c & 0xFFFF)
         else:
-            outl(u16(a), u32(c & 0xFFFFFFFF))
+            pio_wr((a), 4, c & 0xFFFFFFFF)
         return 0
     if nr == 402:
     # dma_alloc(npages): one contiguous region per driver, mapped user RW NX
@@ -205,23 +204,23 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
 def vb_reinit():
 # take the device back into the kernel's own driver: reset, fresh ring in the original frames
     mutex_lock(addr(vb_m))
-    io = u16(vb_io)
-    outb(io + VIO_STATUS, 0)
+    io = vb_io
+    pio_wr(io + VIO_STATUS, 1, 0)
     used = vb_used_off
     total = used + ((6 + 8 * vb_qsz + PAGE - 1) & ~u64(PAGE - 1))
     memset(vb_q, 0, total)
     vb_last_used = 0
-    outb(io + VIO_STATUS, 1)
-    outb(io + VIO_STATUS, 3)
-    hf = u64(inl(io + VIO_HOSTF))
-    outl(io + VIO_GUESTF, u32(hf & (u64(1) << VBLK_F_RO)))
-    outw(io + VIO_QSEL, 0)
-    outl(io + VIO_QPFN, u32(vb_q_pa >> 12))
+    pio_wr(io + VIO_STATUS, 1, 1)
+    pio_wr(io + VIO_STATUS, 1, 3)
+    hf = pio_rd(io + VIO_HOSTF, 4)
+    pio_wr(io + VIO_GUESTF, 4, hf & (u64(1) << VBLK_F_RO))
+    pio_wr(io + VIO_QSEL, 2, 0)
+    pio_wr(io + VIO_QPFN, 4, vb_q_pa >> 12)
     if vb_msix:
-        outw(io + VIO_MSIX_CFG, 0xFFFF)
-        outw(io + VIO_QSEL, 0)
-        outw(io + VIO_MSIX_Q, 0)
-    outb(io + VIO_STATUS, 7)
+        pio_wr(io + VIO_MSIX_CFG, 2, 0xFFFF)
+        pio_wr(io + VIO_QSEL, 2, 0)
+        pio_wr(io + VIO_MSIX_Q, 2, 0)
+    pio_wr(io + VIO_STATUS, 1, 7)
     blkd_mode = 0
     mutex_unlock(addr(vb_m))
 

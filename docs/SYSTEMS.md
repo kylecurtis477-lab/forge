@@ -281,3 +281,6 @@ Per-CPU PCID slots (1..63, from the PML4 frame) let a context switch keep TLB en
 
 ## x2APIC (Phase 8)
 When CPUID offers it, every CPU runs its local APIC in x2APIC mode. Register access goes through MSRs behind the old xAPIC offset interface; IPIs are one 64-bit ICR write to MSR 0x830 with the destination taken from a per-CPU copy of the ICR-high value. Tested on every boot under QEMU (BIOS, UEFI, kexec).
+
+## Hardware drivers (Phase 8)
+All device register access goes through checked accessors in `mmio.fsi` that only allow registered MMIO/DMA windows and port ranges (others panic). NVMe and AHCI are read-only (identify + read), xHCI enumerates one device up to its device descriptor, e1000 and virtio-net exchange an ARP request/reply. Tested by `tests/os/drivers.sh`, which checks the disk images are unchanged.

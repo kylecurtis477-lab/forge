@@ -70,15 +70,13 @@ def tsc_delay_us(us: u64):
 def lapic_eoi():
     lapic_wr(0xB0, 0)
 
-@unsafe
 def ioapic_rd(r: u32) -> u32:
-    vstore32(ioapic, r)
-    return vload32(ioapic + 0x10)
+    mmio_wr(ioapic, 4, r)
+    return mmio_rd(ioapic + 0x10, 4)
 
-@unsafe
 def ioapic_wr(r: u32, v: u32):
-    vstore32(ioapic, r)
-    vstore32(ioapic + 0x10, v)
+    mmio_wr(ioapic, 4, r)
+    mmio_wr(ioapic + 0x10, 4, v)
 
 @unsafe
 def pic_disable():
@@ -223,7 +221,7 @@ def ioapic_mask_pin(pin: u64):
     ioapic_wr(u32(0x10 + pin * 2), 0x10000)
 
 def ioapic_init():
-    ioapic = p2v(ioapic_phys)
+    ioapic = mmio_add(p2v(ioapic_phys), 0x20)
     ver = ioapic_rd(1)
     n = ((ver >> 16) & 0xFF) + 1
     puts("IOAPIC id=")
