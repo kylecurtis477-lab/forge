@@ -30,8 +30,9 @@ def read_ppm(path):
     w, h = int(toks[1]), int(toks[2])
     return w, h, d[i+1:]
 
-def decode_row0(path, n):
+def decode_row(path, n, row=0):
     w, h, px = read_ppm(path)
+    if n is None: n = w // 8
     f = font()
     out = ''
     for cx in range(n):
@@ -39,7 +40,7 @@ def decode_row0(path, n):
         for r in range(16):
             b = 0
             for x in range(8):
-                o = (r * w + cx * 8 + x) * 3
+                o = ((row * 16 + r) * w + cx * 8 + x) * 3
                 b = (b << 1) | (1 if px[o] + px[o+1] + px[o+2] > 384 else 0)
             bits.append(b)
         ch = '?'
@@ -72,8 +73,10 @@ def main():
                         if os.path.exists(shot) and os.path.getsize(shot) > 0: break
                         time.sleep(0.1)
                     time.sleep(0.3); s.close()
-                    w, h, row = decode_row0(shot, len(fbtext))
-                    fbmsg = f'{w}x{h} row0="{row}"'
+                    w, h, _ = read_ppm(shot)
+                    rows = [decode_row(shot, None, r)[2].rstrip() for r in range(h // 16)]
+                    hit = [i for i, t in enumerate(rows) if fbtext in t]
+                    fbmsg = f'{w}x{h} row{hit[-1]}="{rows[hit[-1]]}"' if hit else f'{w}x{h} text not found, last row="{rows[-1]}"'
                 except Exception as ex:
                     fbmsg = f'screendump failed: {ex}'
             try:
@@ -93,7 +96,7 @@ def main():
     for m in [m for m in markers.split('|') if m]:
         if m not in text:
             print(f'FAIL os/{name} (missing: {m}, qemu rc={rc})'); return
-    if fbtext and f'row0="{fbtext}"' not in fbmsg:
+    if fbtext and f'="{fbtext}"' not in fbmsg:
         print(f'FAIL os/{name} (framebuffer: {fbmsg})'); return
     if rc != 33:
         print(f'FAIL os/{name} (qemu rc={rc})'); return

@@ -13,6 +13,9 @@ include "apic.fsi"
 include "sched.fsi"
 include "smp.fsi"
 include "user.fsi"
+include "pci.fsi"
+include "virtio.fsi"
+include "fat.fsi"
 
 MB2_MAGIC = 0x36D76289
 
@@ -372,6 +375,53 @@ def user_test():
         panic("user mode test: leak")
     puts("ring 3 + syscall/sysret + ELF loader OK\n")
 
+def fs_test():
+    pci_scan()
+    if vb_init() == 0:
+        panic("no virtio-blk disk")
+    if fs_mount() == 0:
+        panic("no FAT32 ESP on the virtio disk")
+    puts("ESP \\EFI\\Forge:")
+    fs_list("EFI/Forge")
+    putc(10)
+    sz: u64 = 0
+    buf = fs_read_file("EFI/Forge/init.elf", addr(sz))
+    if buf == 0:
+        panic("cannot read \\EFI\\Forge\\init.elf")
+    same = 1
+    hi = uimg(0)
+    if sz != uimg(1) - hi:
+        same = 0
+    i: u64 = 0
+    while same and i < sz:
+        if (vload64(buf + i) & 0xFF) != (vload64(hi + i) & 0xFF):
+            same = 0
+        i += 1
+    puts("read \\EFI\\Forge\\init.elf from disk: ")
+    put_u64(sz)
+    puts(" bytes, ")
+    put_u64(vb_reads)
+    puts(" virtio requests")
+    if same:
+        puts(", identical to the build output")
+    putc(10)
+    if same == 0:
+        panic("init.elf contents differ")
+    t = proc_spawn(buf, sz)
+    if u64(t) == 0:
+        panic("init.elf rejected by ELF loader")
+    id = t.id
+    code = proc_reap(t)
+    kfree(buf)
+    puts("init (pid ")
+    put_u64(id)
+    puts(") from disk exited with ")
+    put_u64(code)
+    putc(10)
+    if code != (id & 0xFF):
+        panic("init from disk failed")
+    puts("PCI + virtio-blk + FAT32 (read-only) OK\n")
+
 @export
 def after_overflow():
     puts("recovered from #DF on a fresh stack\n")
@@ -410,6 +460,7 @@ def after_overflow():
     sti()
     sched_test()
     user_test()
+    fs_test()
     cli()
     puts("KERNEL OK\n")
     # test harness: wait up to 5 s (LAPIC ticks) for 'q' on COM1 so it can take a screenshot first

@@ -147,3 +147,19 @@ def panic(msg: ptr[u8]):
     puts(msg)
     putc(10)
     qemu_exit(0x11)
+
+def put_hexn(v: u64, digits: u64):
+    i = digits
+    while i > 0:
+        i -= 1
+        d = (v >> (i * 4)) & 15
+        if d < 10:
+            putc(48 + d)
+        else:
+            putc(87 + d)
+
+def put_hex8(v: u64):
+    put_hexn(v, 2)
+
+def put_hex16(v: u64):
+    put_hexn(v, 4)

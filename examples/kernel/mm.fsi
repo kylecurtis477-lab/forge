@@ -125,6 +125,37 @@ def frame_alloc_nolock() -> u64:
     panic("out of physical memory")
     return 0
 
+def frame_alloc_contig(n: u64) -> u64:
+    # n physically contiguous zeroed frames below 4 GiB (DMA rings); 0 if none
+    f = irq_save()
+    spin_lock(u64(addr(pmm_lock)))
+    lim = frame_limit
+    if lim > 0x100000000 / PAGE:
+        lim = 0x100000000 / PAGE
+    s: u64 = 256
+    run: u64 = 0
+    res: u64 = 0
+    while s + run < lim and res == 0:
+        if frame_used(s + run):
+            s = s + run + 1
+            run = 0
+        else:
+            run += 1
+            if run == n:
+                res = s
+    if res != 0:
+        i: u64 = 0
+        while i < n:
+            frame_set(res + i)
+            frames_free -= 1
+            i += 1
+    spin_unlock(u64(addr(pmm_lock)))
+    irq_restore(f)
+    if res == 0:
+        return 0
+    memset(p2v(res * PAGE), 0, n * PAGE)
+    return res * PAGE
+
 def frame_free(pa: u64):
     fl = irq_save()
     spin_lock(u64(addr(pmm_lock)))
