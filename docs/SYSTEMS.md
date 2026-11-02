@@ -284,3 +284,6 @@ When CPUID offers it, every CPU runs its local APIC in x2APIC mode. Register acc
 
 ## Hardware drivers (Phase 8)
 All device register access goes through checked accessors in `mmio.fsi` that only allow registered MMIO/DMA windows and port ranges (others panic). NVMe and AHCI are read-only (identify + read), xHCI enumerates one device up to its device descriptor, e1000 and virtio-net exchange an ARP request/reply. Tested by `tests/os/drivers.sh`, which checks the disk images are unchanged.
+
+## Framebuffer console (Phase 8)
+The loader sets a 1024x768 GOP mode when offered. The kernel keeps two cell grids (wanted and drawn) and draws only changed cells; scrolling never reads the framebuffer. The boot tests decode the screen and check the console's consistency line above KERNEL OK.

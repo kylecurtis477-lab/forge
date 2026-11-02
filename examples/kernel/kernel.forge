@@ -1586,6 +1586,23 @@ def after_overflow():
         shell_test()
         kexec_test()
     cli()
+    if fb_base != 0:
+        if fb_consistent() == 0:
+            panic("fb console: back buffer and screen differ")
+        full = con_scrolls * fb_cols * fb_rows
+        if con_scrolls > 0 and con_redrawn >= full:
+            panic("fb console: scrolling redrew every cell")
+        puts("fb console: double-buffered ")
+        put_u64(fb_cols)
+        puts("x")
+        put_u64(fb_rows)
+        puts(" cells, ")
+        put_u64(con_scrolls)
+        puts(" scrolls, ")
+        put_u64(con_redrawn)
+        puts(" cells drawn (full redraws would be ")
+        put_u64(full)
+        puts("), back == front\n")
     puts("KERNEL OK\n")
     # test harness: wait up to 5 s (LAPIC ticks) for 'q' on COM1 so it can take a screenshot first
     t_end = lapic_ticks + 500

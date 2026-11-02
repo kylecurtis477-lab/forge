@@ -98,8 +98,9 @@ def main():
                     time.sleep(0.3); s.close()
                     w, h, _ = read_ppm(shot)
                     rows = [decode_row(shot, None, r)[2].rstrip() for r in range(h // 16)]
-                    hit = [i for i, t in enumerate(rows) if fbtext in t]
-                    fbmsg = f'{w}x{h} row{hit[-1]}="{rows[hit[-1]]}"' if hit else f'{w}x{h} text not found, last row="{rows[-1]}"'
+                    want = fbtext.split('^')  # 'A^B': row i-1 contains A and row i contains B
+                    hit = [i for i, t in enumerate(rows) if want[-1] in t and (len(want) == 1 or (i > 0 and want[0] in rows[i - 1]))]
+                    fbmsg = (f'{w}x{h} row{hit[-1]-1}="{rows[hit[-1]-1]}" ' if len(want) > 1 else '') + f'{w}x{h} row{hit[-1]}="{rows[hit[-1]]}"' if hit else f'{w}x{h} text not found, last row="{rows[-1]}"'
                 except Exception as ex:
                     fbmsg = f'screendump failed: {ex}'
             try:
@@ -119,7 +120,7 @@ def main():
     for m in [m for m in markers.split('|') if m]:
         if m not in text:
             print(f'FAIL os/{name} (missing: {m}, qemu rc={rc})'); return
-    if fbtext and f'="{fbtext}"' not in fbmsg:
+    if fbtext and f'="{fbtext.split("^")[-1]}"' not in fbmsg:
         print(f'FAIL os/{name} (framebuffer: {fbmsg})'); return
     if rc != 33:
         print(f'FAIL os/{name} (qemu rc={rc})'); return

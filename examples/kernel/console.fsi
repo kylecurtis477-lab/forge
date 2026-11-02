@@ -37,6 +37,15 @@ def serial_poll() -> i64:
         return -1
     return i64(inb(COM1))
 
+# Double-buffered text console: con_back holds what the screen should show, con_front what was last
+# drawn. Writes go to con_back; fb_flush redraws only cells that differ, so scrolling never reads the
+# (uncached) framebuffer and redraws only changed cells.
+CON_MAX = 32768
+con_back: u8[32768]
+con_front: u8[32768]
+con_scrolls: u64
+con_redrawn: u64
+
 @unsafe
 def fb_attach(virt: u64, w: u64, h: u64, pitch: u64):
     fb_base = virt
@@ -45,10 +54,23 @@ def fb_attach(virt: u64, w: u64, h: u64, pitch: u64):
     fb_pitch = pitch
     fb_cols = w / 8
     fb_rows = h / 16
+    while fb_cols * fb_rows > CON_MAX:
+        fb_rows -= 1
     fb_col = 0
     fb_row = 0
     con_fg = 0x00FFFFFF
-    memset(virt, 0, pitch * h)
+    i = 0
+    while i < fb_cols * fb_rows:
+        con_back[i] = 32
+        con_front[i] = 32
+        i += 1
+    y = 0
+    while y < h:
+        x = 0
+        while x < w:
+            vstore32(virt + y * pitch + x * 4, 0)
+            x += 1
+        y += 1
 
 @unsafe
 def fb_glyph(cx: u64, cy: u64, c: u8):
@@ -68,15 +90,39 @@ def fb_glyph(cx: u64, cy: u64, c: u8):
             x += 1
         row += 1
 
-@unsafe
+def fb_flush():
+    i = 0
+    n = fb_cols * fb_rows
+    while i < n:
+        if con_back[i] != con_front[i]:
+            fb_glyph(i % fb_cols, i / fb_cols, con_back[i])
+            con_front[i] = con_back[i]
+            con_redrawn += 1
+        i += 1
+
+def fb_consistent() -> u64:
+    i = 0
+    while i < fb_cols * fb_rows:
+        if con_back[i] != con_front[i]:
+            return 0
+        i += 1
+    return 1
+
 def fb_newline():
     fb_col = 0
     fb_row += 1
     if fb_row >= fb_rows:
-    # scroll one text row
-        memcpy(fb_base, fb_base + 16 * fb_pitch, (fb_rows - 1) * 16 * fb_pitch)
-        memset(fb_base + (fb_rows - 1) * 16 * fb_pitch, 0, 16 * fb_pitch)
+        n = (fb_rows - 1) * fb_cols
+        i = 0
+        while i < n:
+            con_back[i] = con_back[i + fb_cols]
+            i += 1
+        while i < n + fb_cols:
+            con_back[i] = 32
+            i += 1
         fb_row = fb_rows - 1
+        con_scrolls += 1
+        fb_flush()
 
 def fb_putc(c: u8):
     if c == 10:
@@ -84,7 +130,14 @@ def fb_putc(c: u8):
         return
     if c == 13:
         return
-    fb_glyph(fb_col, fb_row, c)
+    if c < 32 or c > 126:
+        c = 32
+    k = fb_row * fb_cols + fb_col
+    con_back[k] = c
+    if con_front[k] != c:
+        fb_glyph(fb_col, fb_row, c)
+        con_front[k] = c
+        con_redrawn += 1
     fb_col += 1
     if fb_col >= fb_cols:
         fb_newline()

@@ -200,12 +200,14 @@ def setup_gop(bi: ptr[BootInfo]):
     mode = load64(gop + 24)
     maxm = u64(load32(mode))
     m: u64 = 0
+    picked = maxm
     while m < maxm:
         isz: u64 = 0
         info: u64 = 0
         if call_efi(load64(gop), gop, m, u64(addr(isz)), u64(addr(info))) == EFI_SUCCESS:
             if load32(info + 4) == 1024 and load32(info + 8) == 768 and load32(info + 12) < 2:
-                call_efi(load64(gop + 8), gop, m)
+                if call_efi(load64(gop + 8), gop, m) == EFI_SUCCESS:
+                    picked = m
                 break
         m += 1
     mode = load64(gop + 24)
@@ -220,6 +222,14 @@ def setup_gop(bi: ptr[BootInfo]):
     bi.fb_pitch = u64(load32(info + 32)) * 4
     bi.fb_bpp = 32
     bi.fb_format = u64(fmt)
+    print("GOP modes ")
+    print_u64(maxm)
+    if picked < maxm:
+        print(", set mode ")
+        print_u64(picked)
+    else:
+        print(", 1024x768 not offered, kept firmware mode")
+    print("\r\n")
     print("GOP ")
     print_u64(bi.fb_width)
     print("x")
