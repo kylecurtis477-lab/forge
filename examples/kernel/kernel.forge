@@ -600,6 +600,8 @@ def fs_test():
 def shell_test():
     # the interactive shell from \EFI\Forge\bin\sh; the boot test types its commands
     input_init()
+    f0 = frames_free
+    h0 = heap_live
     sz: u64 = 0
     img = fs_read_file("/EFI/Forge/bin/sh", addr(sz))
     if img == 0:
@@ -624,6 +626,24 @@ def shell_test():
     puts(", orphans reaped ")
     put_u64(orph)
     putc(10)
+    puts("virtio-blk: ")
+    put_u64(vb_reads)
+    puts(" requests, ")
+    put_u64(vb_irqs)
+    puts(" MSI-X completions, ")
+    put_u64(vb_sleeps)
+    puts(" sleeps, ")
+    put_u64(vb_polled)
+    puts(" polled\n")
+    puts("shell session: frames leaked ")
+    put_u64(f0 - frames_free)
+    puts(", heap leaked ")
+    put_u64(heap_live - h0)
+    putc(10)
+    if frames_free != f0 or heap_live != h0:
+        panic("shell session leaked memory")
+    if vb_msix == 0 or vb_irqs == 0 or vb_sleeps == 0:
+        panic("virtio-blk interrupts not used")
     if code != 0 or kbd_irqs == 0 or com_irqs == 0:
         panic("interactive shell test failed")
     puts("processes + VFS + keyboard/serial input + sh OK\n")

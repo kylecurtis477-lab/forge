@@ -1,4 +1,6 @@
-# virtio-blk over the legacy (transitional) PCI interface: I/O BAR0, one split virtqueue, polled.
+# virtio-blk over the legacy (transitional) PCI interface: I/O BAR0, one split virtqueue.
+# Completion is signalled by an MSI-X interrupt; requesters sleep on a mutex and a wait queue.
+# Without MSI-X (or with interrupts off) a request is polled under a spinlock as before.
 VIO_HOSTF = 0x00
 VIO_GUESTF = 0x04
 VIO_QPFN = 0x08
@@ -20,6 +22,15 @@ vb_cap: u64
 vb_ro: u64
 vb_lock: u64
 vb_reads: u64
+vb_m: Mutex
+vb_wq: WaitQ
+vb_msix: u64
+vb_irqs: u64
+vb_sleeps: u64
+vb_polled: u64
+VEC_VBLK = 0x50
+VIO_MSIX_CFG = 0x14
+VIO_MSIX_Q = 0x16
 
 def vb_init() -> u64:
     if pci_vblk == 0:
@@ -65,19 +76,68 @@ def vb_init() -> u64:
     if vb_ro:
         puts(", read-only")
     putc(10)
+    vb_msix_init(bdf)
     return 1
+
+@interrupt
+def on_vblk(frame: ptr[u64]):
+    spin_lock(u64(addr(rq_lock)))
+    vb_irqs += 1
+    wq_wake_all_l(addr(vb_wq))
+    spin_unlock(u64(addr(rq_lock)))
+    lapic_eoi()
+
+def vb_msix_init(bdf: u64):
+    # find the MSI-X capability (id 0x11), point table entry 0 at the BSP's LAPIC, bind queue 0 to it
+    if (pci_rd32(bdf, 4) & 0x100000) == 0:
+        return
+    c = pci_rd32(bdf, 0x34) & 0xFC
+    g = 0
+    while c != 0 and g < 48:
+        h = pci_rd32(bdf, c)
+        if (h & 0xFF) == 0x11:
+            break
+        c = (h >> 8) & 0xFC
+        g += 1
+    if c == 0 or g == 48:
+        puts("virtio-blk: no MSI-X, polling\n")
+        return
+    tb = pci_rd32(bdf, c + 4)
+    bir = tb & 7
+    bar = pci_rd32(bdf, 0x10 + bir * 4)
+    if bar & 1:
+        return
+    base = bar & 0xFFFFFFF0
+    if (bar & 6) == 4:
+        base = base | (pci_rd32(bdf, 0x14 + bir * 4) << 32)
+    if base == 0 or base >= 0x100000000:
+        puts("virtio-blk: MSI-X table above 4 GiB, polling\n")
+        return
+    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 2)          # memory space for the table
+    t = p2v(base + (tb & 0xFFFFFFF8))
+    idt_set(VEC_VBLK, u64(on_vblk), 0)
+    vstore32(t, u32(0xFEE00000 | (cpu_to_apic[0] << 12)))
+    vstore32(t + 4, 0)
+    vstore32(t + 8, VEC_VBLK)
+    vstore32(t + 12, 0)
+    # message control: enable (bit 15), clear function mask (bit 14)
+    pci_wr32(bdf, c, (pci_rd32(bdf, c) | 0x80000000) & ~u64(0x40000000))
+    io = u16(vb_io)
+    outw(io + VIO_MSIX_CFG, 0xFFFF)
+    outw(io + VIO_QSEL, 0)
+    outw(io + VIO_MSIX_Q, 0)
+    if inw(io + VIO_MSIX_Q) != 0:
+        puts("virtio-blk: queue vector rejected, polling\n")
+        return
+    vb_msix = 1
+    puts("virtio-blk: MSI-X vector 0x50 -> cpu0, sleeping requests\n")
 
 def vb_desc(i: u64, pa: u64, len: u64, flags: u64, next: u64):
     d = vb_q + i * 16
     vstore64(d, pa)
     vstore64(d + 8, (len & 0xFFFFFFFF) | (flags << 32) | (next << 48))
 
-def vb_read(lba: u64, n: u64, dst: u64) -> u64:
-    # reads n (<= 7) sectors into dst; returns 1 on success
-    if n == 0 or n > 7 or lba + n > vb_cap:
-        return 0
-    f = irq_save()
-    spin_lock(u64(addr(vb_lock)))
+def vb_submit(lba: u64, n: u64):
     vstore64(vb_req, 0)                 # type IN, reserved
     vstore64(vb_req + 8, lba)
     vstore64(vb_req + 64, 0xFF)
@@ -91,9 +151,45 @@ def vb_read(lba: u64, n: u64, dst: u64) -> u64:
     vstore16(av + 2, u16((idx + 1) & 0xFFFF))
     mfence()
     outw(u16(vb_io + VIO_QNOTIFY), 0)
-    ud = vb_q + vb_used_off
+
+def vb_done() -> u64:
+    return ((vload64(vb_q + vb_used_off) >> 16) & 0xFFFF) != vb_last_used
+
+def vb_finish(n: u64, dst: u64) -> u64:
+    vb_last_used = (vb_last_used + 1) & 0xFFFF
+    ok = (vload64(vb_req + 64) & 0xFF) == 0
+    if ok:
+        memcpy(dst, vb_req + 512, n * 512)
+    vb_reads += 1
+    return u64(ok)
+
+def vb_read(lba: u64, n: u64, dst: u64) -> u64:
+    # reads n (<= 7) sectors into dst; returns 1 on success
+    if n == 0 or n > 7 or lba + n > vb_cap:
+        return 0
+    if vb_msix and sched_on and (read_rflags() & 0x200) != 0:
+        # sleeping path: one request in flight, owned through vb_m; sleep until the MSI-X completion
+        mutex_lock(addr(vb_m))
+        vb_submit(lba, n)
+        f = irq_save()
+        spin_lock(u64(addr(rq_lock)))
+        while vb_done() == 0:
+            vb_sleeps += 1
+            wq_block_l(addr(vb_wq))
+        spin_unlock(u64(addr(rq_lock)))
+        irq_restore(f)
+        ok = vb_finish(n, dst)
+        mutex_unlock(addr(vb_m))
+        return ok
+    # polled path (early boot, interrupts off): vb_m must be free; spinning on it keeps sleepers out
+    f = irq_save()
+    spin_lock(u64(addr(vb_lock)))
+    while vb_m.locked:
+        tlb_poll()
+        cpu_relax()
+    vb_submit(lba, n)
     spins: u64 = 0
-    while ((vload64(ud) >> 16) & 0xFFFF) == vb_last_used:
+    while vb_done() == 0:
         tlb_poll()
         cpu_relax()
         spins += 1
@@ -101,11 +197,8 @@ def vb_read(lba: u64, n: u64, dst: u64) -> u64:
             spin_unlock(u64(addr(vb_lock)))
             irq_restore(f)
             panic("virtio-blk: request timed out")
-    vb_last_used = (vb_last_used + 1) & 0xFFFF
-    ok = (vload64(vb_req + 64) & 0xFF) == 0
-    if ok:
-        memcpy(dst, vb_req + 512, n * 512)
-    vb_reads += 1
+    ok = vb_finish(n, dst)
+    vb_polled += 1
     spin_unlock(u64(addr(vb_lock)))
     irq_restore(f)
-    return u64(ok)
+    return ok

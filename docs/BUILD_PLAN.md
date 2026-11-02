@@ -43,7 +43,7 @@ A phase is done when every listed test passes in CI (`run_tests.sh`) on both -O2
 
 ---
 
-## Phase 1 — Interactive multi-process kernel (in progress)
+## Phase 1 — Interactive multi-process kernel (done)
 *Pillars: C, D, F. Closes SYSTEMS.md items 3–5.*
 
 | Deliverable | Test that proves it |
@@ -51,12 +51,12 @@ A phase is done when every listed test passes in CI (`run_tests.sh`) on both -O2
 | FPU/SSE/AVX state saved with xsave/fxsave on every context switch **(done, b14b23e)** | User programs fill xmm0–15, yield 20 times across 4 CPUs, and verify every register |
 | SMEP + SMAP, with copy_user/copy_str_user and #PF fixups **(done)** | Probe syscall: a kernel read without `stac` is blocked and a kernel call into user code is blocked; bad pointers return EFAULT |
 | TLB shootdown IPIs; frames reused only after the shootdown **(done)** | Pinned readers on all CPUs see the new frame after a global page is remapped |
-| Wait queues, sleeping mutexes, condvars, `sleep_ticks` | Mutex-protected counter that yields inside the critical section; a producer/consumer ring; no lost wakeups over 10k iterations |
-| Proc objects: fork (eager copy), exec, wait, exit, brk, anonymous mmap/munmap, getargs | `forktest`: parent and child diverge memory, the child execs `hello`, and the parent's wait returns its code. A brk/mmap stress test frees every frame (leak = 0) |
-| VFS with fd table: open/read/close/stat/getdents; FAT32 long names (LFN) | `cat` reads a long-named file under `\EFI\Forge\bin\`; stat sizes match the host-side `mdir` |
-| virtio-blk with MSI-X interrupts; requests sleep instead of polling | The interrupt count equals the request count, and the CPU idles while I/O is in flight |
-| PS/2 keyboard (IRQ1) and COM1 RX (IRQ4) feeding one tty input queue | The harness types `ls /efi/forge/bin` and `hello` through QEMU `sendkey`, and the output appears |
-| User-mode Forge shell `sh` loaded from disk: `ls`, run a program (fork+exec+wait), `exit` | Boot test reaches `sh$`, lists the programs, runs `hello`, gets its exit code, and then reaches KERNEL OK |
+| Wait queues, sleeping mutexes, condvars, `sleep_ticks` **(done, 2ba9709)** | Mutex-protected counter that yields inside the critical section; a producer/consumer ring; no lost wakeups over 10k iterations |
+| Proc objects: fork (eager copy), exec, wait, exit, brk, anonymous mmap/munmap, getargs **(done, f1d151f)** | `forktest`: parent and child diverge memory, the child execs `hello`, and the parent's wait returns its code. A brk/mmap stress test frees every frame (leak = 0) |
+| VFS with fd table: open/read/close/stat/getdents; FAT32 long names (LFN) **(done, f1d151f)** | `cat` reads `\EFI\Forge\docs\Long File Name Notes.txt` (path with spaces); the read byte count matches `stat`; `ls /EFI/Forge` shows case-preserved names |
+| virtio-blk with MSI-X interrupts; requests sleep instead of polling **(done)** | Boot test: every request after MSI-X setup completes by interrupt (211 requests = 211 completions = 211 sleeps, 0 polled) |
+| PS/2 keyboard (IRQ1) and COM1 RX (IRQ4) feeding one tty input queue **(done, f1d151f)** | The harness types `ls`, `forktest`, `nosuch` and `ls /EFI/Forge` (shifted keys) through QEMU `sendkey`, and `cat …`, `hello a b` and `exit` over COM1 |
+| User-mode Forge shell `sh` loaded from disk: `ls`, run a program (fork+exec+wait), `exit` **(done, f1d151f)** | Boot test reaches `sh$`, lists the programs, runs `hello`, gets its exit code, and then reaches KERNEL OK |
 
 ## Phase 2 — Never reboot: self-healing, live-updatable system (signature feature 1)
 *This phase needs Phase 1's processes, services, and wait queues. Each sub-step is finished and tested before the next one starts.*
