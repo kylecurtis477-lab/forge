@@ -2,11 +2,30 @@
 # Misbehaving user program: touches kernel memory from ring 3. The kernel must kill it and carry on.
 include "ulib.fsi"
 
+marker: u64
+
 @export
 def _start():
     out("fault test: pid ")
     out_u64(sys_getpid())
     out(" reads kernel memory from ring 3\n")
+    flush()
+    e1 = sys_write(0x1000, 8)
+    e2 = sys_write(0xFFFF800000000000, 8)
+    feat = syscall3(SYS_PROBE, 3, u64(addr(marker)), 0)
+    sm = syscall3(SYS_PROBE, 1, u64(addr(marker)), 0)
+    se = syscall3(SYS_PROBE, 2, u64(user_nop), 0)
+    out("uaccess: unmapped ptr -> ")
+    out_u64(0 - e1)
+    out(", kernel ptr -> ")
+    out_u64(0 - e2)
+    out(" (EFAULT); SMAP blocks kernel read: ")
+    out_u64(sm)
+    out(", SMEP blocks kernel exec: ")
+    out_u64(se)
+    out(" (features ")
+    out_u64(feat)
+    out(")\n")
     flush()
     v = vload64(0xFFFFFFFF80100000)
     out("FAULT TEST FAILED: read ")

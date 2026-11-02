@@ -30,10 +30,13 @@ def _start():
     out("\n")
     flush()
     n = count_primes(30000)
-    i = 0
-    while i < 5:
-        sys_yield()
-        i += 1
+    bad_fpu = xmm_yield_check(pid * 0x1000000 + 0xABC00, 20)
+    if bad_fpu != 0:
+        out("pid ")
+        out_u64(pid)
+        out(": FPU STATE LOST\n")
+        flush()
+        sys_exit(98)
     if marker != pid * 1000 + 7:
         out("pid ")
         out_u64(pid)
@@ -44,6 +47,6 @@ def _start():
     out_u64(pid)
     out(": primes below 30000 = ")
     out_u64(n)
-    out(", private data intact after yields\n")
+    out(", private data and xmm0-15 intact after 20 yields\n")
     flush()
     sys_exit(pid)

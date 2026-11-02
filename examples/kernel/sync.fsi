@@ -12,6 +12,7 @@ def read_rflags() -> u64:
 def spin_lock(l: u64):
     while atomic_xchg64(l, 1) != 0:
         while atomic_load64(l) != 0:
+            tlb_poll()
             cpu_relax()
 
 def spin_unlock(l: u64):

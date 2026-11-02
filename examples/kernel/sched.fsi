@@ -21,6 +21,8 @@ struct Thread:
     user: u64
     exit_code: u64
     proc: u64
+    fpu: u64
+    pin: u64
 
 asm(
     ".text",
@@ -62,13 +64,24 @@ def rq_push(t: ptr[Thread]):
         ptr[Thread](rq_tail).next = u64(t)
     rq_tail = u64(t)
 
-def rq_pop() -> u64:
+def rq_pop(cpu: u64) -> u64:
+    # first runnable thread allowed on this CPU (pin = 0: anywhere, else cpu + 1)
+    prev: u64 = 0
     t = rq_head
-    if t != 0:
-        rq_head = ptr[Thread](t).next
-        if rq_head == 0:
-            rq_tail = 0
-    return t
+    while t != 0:
+        p = ptr[Thread](t).pin
+        if p == 0 or p == cpu + 1:
+            nx = ptr[Thread](t).next
+            if prev == 0:
+                rq_head = nx
+            else:
+                ptr[Thread](prev).next = nx
+            if rq_tail == t:
+                rq_tail = prev
+            return t
+        prev = t
+        t = ptr[Thread](t).next
+    return 0
 
 def cur_thread() -> ptr[Thread]:
     return ptr[Thread](current[lapic_cpu()])
@@ -80,6 +93,7 @@ def thread_new(fn: u64, arg: u64) -> ptr[Thread]:
     t.kstack_top = (t.stack + KTHREAD_STACK) & ~u64(15)
     t.id = atomic_add64(u64(addr(next_tid)), 1) + 1
     t.cr3 = kernel_pml4
+    t.fpu = fpu_area_new()
     top = t.kstack_top
     sp = top - 72
     vstore64(sp, 0)
@@ -117,6 +131,7 @@ def thread_free(t: ptr[Thread]):
     if st != T_DEAD:
         panic("thread_free: thread still alive")
     kfree(t.stack)
+    fpu_area_free(t.fpu)
     kfree(u64(t))
 
 @export
@@ -131,7 +146,7 @@ def schedule(exiting: u64):
     spin_lock(u64(addr(rq_lock)))
     if exiting:
         cur.state = T_DEAD
-    nxt = ptr[Thread](rq_pop())
+    nxt = ptr[Thread](rq_pop(cpu))
     if u64(nxt) == 0:
         if cur.state == T_RUNNING or cur.state == T_IDLE:
             spin_unlock(u64(addr(rq_lock)))
@@ -150,6 +165,8 @@ def schedule(exiting: u64):
     percpu_kstack[cpu * 4] = nxt.kstack_top
     if nxt.cr3 != cur.cr3:
         write_cr3(nxt.cr3)
+    fpu_save(cur.fpu)
+    fpu_restore(nxt.fpu)
     ctx_switch(u64(addr(cur.rsp)), nxt.rsp)
     spin_unlock(u64(addr(rq_lock)))
 
@@ -174,6 +191,7 @@ def sched_cpu_init(cpu: u64, boot_ctx_is_idle: u64):
     t = ptr[Thread](kmalloc(sizeof(Thread)))
     memset(u64(t), 0, sizeof(Thread))
     t.cr3 = kernel_pml4
+    t.fpu = fpu_area_new()
     t.cpus_seen = u64(1) << cpu
     if boot_ctx_is_idle:
         t.state = T_IDLE

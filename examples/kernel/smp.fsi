@@ -59,6 +59,7 @@ def ap_off(i: u64) -> u64:
 ap_boot_cpu: u64
 ap_up: u64
 ncpu_online: u64
+cpu_to_apic: u64[8]
 
 def percpu_stack_base(cpu: u64) -> u64:
     return PERCPU_STACKS + cpu * 0x40000
@@ -89,6 +90,7 @@ def ap_main():
     cpu = ap_boot_cpu
     gdt_load(cpu)
     lidt(addr(idtr))
+    cpu_features_cpu()
     wrmsr(0x1B, rdmsr(0x1B) | 0x800)
     lapic_wr(0x80, 0)
     lapic_wr(0xF0, 0x100 | VEC_SPURIOUS)
@@ -105,6 +107,7 @@ def smp_init():
     ncpu_online = 1
     bsp = u64(lapic_rd(0x20) >> 24)
     apic_to_cpu[bsp] = 0
+    cpu_to_apic[0] = bsp
     n = ncpus
     if n > MAX_CPUS:
         n = MAX_CPUS
@@ -132,6 +135,7 @@ def smp_init():
         map_stack(kernel_pml4, sb + 0x40000, IST_PAGES)
         tss_install(cpu, sb + 0x20000, sb + 0x30000, sb + 0x40000)
         apic_to_cpu[apic] = u8(cpu)
+        cpu_to_apic[cpu] = apic
         vstore64(p2v(tp) + ap_off(2), kernel_pml4)
         vstore64(p2v(tp) + ap_off(3), sb + 0x20000 - 8)
         vstore64(p2v(tp) + ap_off(4), u64(ap_main))
@@ -159,3 +163,5 @@ def smp_init():
         puts(") online\n")
         cpu += 1
     unmap_page(kernel_pml4, tp)
+    # the APs walked through the identity-mapped trampoline: drop it from every TLB
+    tlb_shootdown(0, tp, 1)

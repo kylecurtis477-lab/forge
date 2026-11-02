@@ -252,13 +252,28 @@ def proc_reap(t: ptr[Thread]) -> u64:
     return code
 
 # ---- syscalls ----
-def con_write_user(p: u64, n: u64):
+def user_ptr_ok(va: u64, len: u64) -> u64:
+    # only the range check: the copy itself survives unmapped pages through the #PF fixup
+    return va < USER_TOP and va + len <= USER_TOP and va + len >= va
+
+def con_write_user(p: u64, n: u64) -> u64:
+    kb: u8[256]
+    done: u64 = 0
     spin_lock(u64(addr(con_lock)))
-    i = 0
-    while i < n:
-        putc(vload64(p + i) & 0xFF)
-        i += 1
+    while done < n:
+        k = n - done
+        if k > 256:
+            k = 256
+        if copy_user(u64(addr(kb[0])), p + done, k) != 0:
+            spin_unlock(u64(addr(con_lock)))
+            return 0xFFFFFFFFFFFFFFF2
+        i = 0
+        while i < k:
+            putc(kb[i])
+            i += 1
+        done += k
     spin_unlock(u64(addr(con_lock)))
+    return n
 
 @export
 def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64) -> u64:
@@ -266,10 +281,9 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64) -> u64:
     atomic_add64(u64(addr(syscalls)), 1)
     t = cur_thread()
     if nr == 1:
-        if user_range_ok(t.cr3, a, b, 0) == 0:
+        if user_ptr_ok(a, b) == 0:
             return 0xFFFFFFFFFFFFFFF2
-        con_write_user(a, b)
-        return b
+        return con_write_user(a, b)
     if nr == 24:
         schedule(0)
         return 0
@@ -282,6 +296,20 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64) -> u64:
         return lapic_ticks
     if nr == 97:
         return lapic_cpu()
+    if nr == 200:
+        # self-test probes: 1 = kernel read of user memory without stac, 2 = kernel call into user code
+        if user_ptr_ok(b, 8) == 0:
+            return 0xFFFFFFFFFFFFFFF2
+        if a == 1:
+            return smap_probe(b)
+        if a == 2:
+            smep_probing = 1
+            r = smep_probe(b)
+            smep_probing = 0
+            return r
+        if a == 3:
+            return u64(smep_on) | (u64(smap_on) << 1)
+        return 0xFFFFFFFFFFFFFFEA
     return 0xFFFFFFFFFFFFFFDA
 
 def user_kill(name: ptr[u8], vec: u64, rip: u64, addr_: u64):

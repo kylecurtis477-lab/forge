@@ -10,6 +10,7 @@ include "mm.fsi"
 include "cpu.fsi"
 include "acpi.fsi"
 include "apic.fsi"
+include "cpux.fsi"
 include "sched.fsi"
 include "smp.fsi"
 include "user.fsi"
@@ -273,6 +274,72 @@ def popcount(v: u64) -> u64:
         v = v >> 1
     return n
 
+TLBT_VA = 0xFFFFFFFFC0800000
+tlbt_ready: u64
+tlbt_go: u64
+tlbt_done: u64
+tlbt_seen: u64[8]
+
+def tlbt_worker(cpu: u64):
+    # pinned to one CPU: keep the old translation hot until the remap, then report what it sees
+    s: u64 = 0
+    s += vload64(TLBT_VA)
+    atomic_add64(u64(addr(tlbt_ready)), 1)
+    while atomic_load64(u64(addr(tlbt_go))) == 0:
+        s += vload64(TLBT_VA)
+        cpu_relax()
+    tlbt_seen[cpu] = vload64(TLBT_VA)
+    atomic_add64(u64(addr(tlbt_done)), 1)
+
+def tlb_test():
+    n = ncpu_online
+    fa = frame_alloc()
+    fb = frame_alloc()
+    vstore64(p2v(fa), 0x1111)
+    vstore64(p2v(fb), 0x2222)
+    map_page(kernel_pml4, TLBT_VA, fa, PTE_W | PTE_G | PTE_NX)
+    ths: u64[8]
+    i: u64 = 0
+    while i < n:
+        t = thread_new(u64(tlbt_worker), i)
+        t.pin = i + 1
+        ths[i] = u64(t)
+        thread_start_ready(t)
+        i += 1
+    while atomic_load64(u64(addr(tlbt_ready))) < n:
+        yield_cpu()
+    r0 = tlb_rounds
+    ip0 = tlb_ipis
+    # remap the global page to a different frame; without the shootdown the other CPUs keep reading 0x1111
+    vstore64(pte_addr(kernel_pml4, TLBT_VA, 0), fb | PTE_P | PTE_W | PTE_G | PTE_NX)
+    tlb_shootdown(0, TLBT_VA, 1)
+    atomic_store64(u64(addr(tlbt_go)), 1)
+    while atomic_load64(u64(addr(tlbt_done))) < n:
+        yield_cpu()
+    ok: u64 = 1
+    i = 0
+    while i < n:
+        if tlbt_seen[i] != 0x2222:
+            ok = 0
+        thread_free(ptr[Thread](ths[i]))
+        i += 1
+    unmap_page(kernel_pml4, TLBT_VA)
+    tlb_shootdown(0, TLBT_VA, 1)
+    frame_free(fa)
+    frame_free(fb)
+    puts("TLB shootdown: remapped a global page under ")
+    put_u64(n)
+    puts(" pinned readers, ")
+    put_u64(tlb_rounds - r0)
+    puts(" round, ")
+    put_u64(tlb_ipis - ip0)
+    puts(" IPIs; all cpus see the new frame: ")
+    if ok:
+        puts("yes\n")
+    else:
+        puts("NO\n")
+        panic("stale TLB entry after shootdown")
+
 def sched_test():
     ths: u64[8]
     work_until = lapic_ticks + 30
@@ -450,6 +517,8 @@ def after_overflow():
     puts(" irq(s)\n")
     if pit_irqs == 0:
         panic("no IOAPIC interrupt")
+    cpu_features_init()
+    idt_set(VEC_TLB, u64(on_tlb_ipi), 0)
     cpu_syscall_init(0)
     smp_init()
     puts("SMP: ")
@@ -459,6 +528,7 @@ def after_overflow():
     sched_on = 1
     sti()
     sched_test()
+    tlb_test()
     user_test()
     fs_test()
     cli()

@@ -374,10 +374,26 @@ def kfree_nolock(p: u64):
     if h & 0x8000000000000000:
         np = h & 0xFFFFFFFF
         base = p - 16
-        i = 0
+        if np > 512:
+            i = 0
+            while i < np:
+                frame_free(unmap_page(kernel_pml4, base + i * PAGE))
+                tlb_shootdown(0, base + i * PAGE, 1)
+                i += 1
+            return
+        # unmap everything, shoot down stale translations on all CPUs, only then reuse the frames
+        # (the frame list is parked in the first frame, reached through the HHDM)
+        f0 = unmap_page(kernel_pml4, base)
+        i = 1
         while i < np:
-            frame_free(unmap_page(kernel_pml4, base + i * PAGE))
+            vstore64(p2v(f0) + i * 8, unmap_page(kernel_pml4, base + i * PAGE))
             i += 1
+        tlb_shootdown(0, base, np)
+        i = 1
+        while i < np:
+            frame_free(vload64(p2v(f0) + i * 8))
+            i += 1
+        frame_free(f0)
         return
     vstore64(p, slab_free[h])
     slab_free[h] = p

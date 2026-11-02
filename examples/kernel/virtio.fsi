@@ -94,6 +94,7 @@ def vb_read(lba: u64, n: u64, dst: u64) -> u64:
     ud = vb_q + vb_used_off
     spins: u64 = 0
     while ((vload64(ud) >> 16) & 0xFFFF) == vb_last_used:
+        tlb_poll()
         cpu_relax()
         spins += 1
         if spins > 100000000:

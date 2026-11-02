@@ -124,6 +124,8 @@ def on_page_fault(frame: ptr[u64]):
     cr2 = read_cr2()
     if frame[0] & 4:
         user_kill("#PF", 14, frame[1], cr2)
+    if uaccess_fixup(frame, frame[0], cr2):
+        return
     if (frame[0] & 1) == 0 and demand_fault(cr2):
         return
     puts("\n#PF cr2=")

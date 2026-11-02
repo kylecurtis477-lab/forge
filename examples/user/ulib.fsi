@@ -6,6 +6,46 @@ SYS_GETPID = 39
 SYS_EXIT = 60
 SYS_TICKS = 96
 SYS_CPU = 97
+SYS_PROBE = 200
+
+# fill xmm0-15 with v, v+1, ..., yield n times, then count registers that lost their value
+@naked
+def xmm_yield_check(v: u64, n: u64) -> u64:
+    asm("push %rbx", "push %r12", "mov %rdi, %rbx", "mov %rsi, %r12",
+        "lea 0(%rbx), %rax", "movq %rax, %xmm0", "lea 1(%rbx), %rax", "movq %rax, %xmm1",
+        "lea 2(%rbx), %rax", "movq %rax, %xmm2", "lea 3(%rbx), %rax", "movq %rax, %xmm3",
+        "lea 4(%rbx), %rax", "movq %rax, %xmm4", "lea 5(%rbx), %rax", "movq %rax, %xmm5",
+        "lea 6(%rbx), %rax", "movq %rax, %xmm6", "lea 7(%rbx), %rax", "movq %rax, %xmm7",
+        "lea 8(%rbx), %rax", "movq %rax, %xmm8", "lea 9(%rbx), %rax", "movq %rax, %xmm9",
+        "lea 10(%rbx), %rax", "movq %rax, %xmm10", "lea 11(%rbx), %rax", "movq %rax, %xmm11",
+        "lea 12(%rbx), %rax", "movq %rax, %xmm12", "lea 13(%rbx), %rax", "movq %rax, %xmm13",
+        "lea 14(%rbx), %rax", "movq %rax, %xmm14", "lea 15(%rbx), %rax", "movq %rax, %xmm15",
+        "1: test %r12, %r12", "jz 2f",
+        "mov $24, %eax", "syscall",
+        "mov $2000, %ecx", "3: dec %ecx", "jnz 3b",
+        "dec %r12", "jmp 1b",
+        "2: xor %r8d, %r8d",
+        "movq %xmm0, %rax", "lea 0(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm1, %rax", "lea 1(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm2, %rax", "lea 2(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm3, %rax", "lea 3(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm4, %rax", "lea 4(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm5, %rax", "lea 5(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm6, %rax", "lea 6(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm7, %rax", "lea 7(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm8, %rax", "lea 8(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm9, %rax", "lea 9(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm10, %rax", "lea 10(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm11, %rax", "lea 11(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm12, %rax", "lea 12(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm13, %rax", "lea 13(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm14, %rax", "lea 14(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "movq %xmm15, %rax", "lea 15(%rbx), %rdx", "cmp %rax, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %r8",
+        "mov %r8, %rax", "pop %r12", "pop %rbx", "ret")
+
+@naked
+def user_nop():
+    asm("ret")
 
 @naked
 def syscall3(n: u64, a: u64, b: u64, c: u64) -> u64:
