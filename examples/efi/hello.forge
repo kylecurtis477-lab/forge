@@ -1,0 +1,77 @@
+# forge: no-runtime
+# Native UEFI application (PE32+ / EFI subsystem 10) written in Forge.
+# Install as \EFI\Forge\forgex64.efi on an existing ESP and add a boot entry (efibootmgr / bcdedit)
+# so it coexists with Windows Boot Manager, shim/GRUB, systemd-boot: nothing else on the disk is touched.
+
+EFI_SUCCESS = 0
+
+@packed
+struct TableHeader:
+    signature: u64
+    revision: u32
+    header_size: u32
+    crc32: u32
+    reserved: u32
+
+struct SystemTable:
+    hdr: TableHeader
+    firmware_vendor: ptr[u16]
+    firmware_revision: u32
+    console_in_handle: u64
+    con_in: u64
+    console_out_handle: u64
+    con_out: ptr[u64]
+    stderr_handle: u64
+    std_err: u64
+    runtime_services: u64
+    boot_services: ptr[u64]
+    num_table_entries: u64
+    config_table: u64
+
+wbuf: u16[256]
+con: ptr[u64]
+
+def print(s: ptr[u8]):
+    i = 0
+    while s[i] != 0 and i < 254:
+        wbuf[i] = u16(s[i])
+        i += 1
+    wbuf[i] = 0
+    # SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString is slot 1 (after Reset)
+    call_efi(con[1], u64(con), u64(addr(wbuf[0])))
+
+def print_w(s: ptr[u16]):
+    call_efi(con[1], u64(con), u64(s))
+
+def print_u64(v: u64):
+    buf: u8[24]
+    i = 23
+    while 1:
+        i -= 1
+        buf[i] = u8(48 + v % 10)
+        v = v / 10
+        if v == 0:
+            break
+    print(addr(buf[i]))
+
+@efiapi
+@export
+def efi_main(image: u64, st: ptr[SystemTable]) -> u64:
+    con = st.con_out
+    print("Forge UEFI app: hello from PE32+\r\n")
+    if st.hdr.signature == 0x5453595320494249:
+        print("EFI system table signature OK, revision ")
+        print_u64(u64(st.hdr.revision >> 16))
+        print(".")
+        print_u64(u64(st.hdr.revision & 0xFFFF) / 10)
+        print("\r\n")
+    print("firmware vendor: ")
+    print_w(st.firmware_vendor)
+    print("\r\n")
+    print("config tables: ")
+    print_u64(st.num_table_entries)
+    print("\r\nEFI OK\r\n")
+    # test harness only: isa-debug-exit; on real hardware we simply return to the boot manager
+    if inl(0xF4) != 0xFFFFFFFF:
+        outl(0xF4, 0x10)
+    return EFI_SUCCESS

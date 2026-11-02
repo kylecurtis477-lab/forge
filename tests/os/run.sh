@@ -1,0 +1,26 @@
+#!/bin/bash
+# Headless QEMU boot tests for the Forge OS demos. Prints PASS/FAIL lines like run_tests.sh.
+#   1. kernel via GRUB multiboot2, legacy BIOS (SeaBIOS)
+#   2. same hybrid ISO via GRUB x86_64-efi under OVMF (UEFI)
+#   3. native Forge PE32+ EFI app from the ESP of a GPT disk shared with Windows/Linux partitions
+cd "$(dirname "$0")/../.."
+OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
+OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
+Q="qemu-system-x86_64 -display none -no-reboot -net none -m 256 -serial stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04"
+examples/kernel/build.sh >/dev/null || { echo "FAIL os/kernel-build"; exit 0; }
+examples/efi/build.sh >/dev/null || { echo "FAIL os/efi-build"; exit 0; }
+check() { # name rc-log expected-markers...
+    local name=$1 log=$2; shift 2
+    local rc=$(tail -1 $log)
+    for m in "$@"; do grep -q "$m" $log || { echo "FAIL os/$name (missing: $m, qemu rc=$rc)"; return; }; done
+    [ "$rc" = 33 ] && echo "PASS os/$name" || echo "FAIL os/$name (qemu rc=$rc)"
+}
+L=build/os; mkdir -p $L
+timeout 60 $Q -cdrom build/kernel/forge.iso > $L/bios.log 2>&1; echo $? >> $L/bios.log
+check kernel-bios $L/bios.log "hello from long mode" "breakpoints handled: 2" "cr2=0x0000000040000000" "KERNEL OK"
+cp $OVMF_VARS $L/vars.fd
+timeout 90 $Q -machine q35 -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE -drive if=pflash,format=raw,file=$L/vars.fd -cdrom build/kernel/forge.iso > $L/uefi.log 2>&1; echo $? >> $L/uefi.log
+check kernel-uefi $L/uefi.log "hello from long mode" "booted via UEFI" "breakpoints handled: 2" "KERNEL OK"
+cp $OVMF_VARS $L/vars.fd
+timeout 90 $Q -machine q35 -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE -drive if=pflash,format=raw,file=$L/vars.fd -drive file=build/efi/disk.img,format=raw > $L/efi.log 2>&1; echo $? >> $L/efi.log
+check efi-app-gpt $L/efi.log "hello from PE32+" "signature OK" "EFI OK"

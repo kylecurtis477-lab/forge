@@ -1,0 +1,35 @@
+# forge: no-runtime
+# intrinsics: privileged ones are compiled+assembled (never executed in user mode); safe ones run
+include "linux.fsi"
+
+@section(".text.privileged")
+def privileged(v: u64):
+    cli()
+    sti()
+    write_cr3(read_cr3())
+    write_cr4(read_cr4() | 0x20)
+    wrmsr(0xC0000080, rdmsr(0xC0000080))
+    invlpg(v)
+    ltr(0x28)
+    outw(0x604, 0x2000)
+    x = inw(0x60) + inl(0xCF8)
+    wbinvd()
+    hlt()
+
+@naked
+def add_asm():
+    asm("lea (%rdi,%rsi),%rax", "ret")
+
+def main() -> i64:
+    t0 = rdtsc()
+    mfence()
+    lfence()
+    sfence()
+    pause()
+    if rdtsc() >= t0:
+        puts("rdtsc ok\n")
+    put_u64(call_ptr(add_asm, 40, 2))
+    nl()
+    put_u64(u64(privileged) != 0)
+    nl()
+    return 0
