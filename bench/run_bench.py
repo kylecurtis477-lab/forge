@@ -7,7 +7,7 @@ def timed(cmd):
 def best(cmd): return min(timed(cmd)[0] for _ in range(5))
 print("| bench | Forge run | Rust -O3 run | CPython run | Forge compile | Rust compile | Forge bin | Rust bin | output |")
 print("|---|---|---|---|---|---|---|---|---|")
-for b in ["fib", "loop", "strbuild", "lists"]:
+for b in ["fib", "loop", "strbuild", "lists", "floats", "strops"]:
     fc, _ = timed(["../forge", f"{b}.forge", "-o", f"out/{b}-forge"])
     rc, _ = timed(["rustc", "-C", "opt-level=3", "-o", f"out/{b}-rust", f"{b}.rs"])
     outs = {timed(c)[1] for c in ([f"out/{b}-forge"], [f"out/{b}-rust"], ["python3", f"{b}.py"])}

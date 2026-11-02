@@ -628,7 +628,7 @@ rt_copy:
     mov 24(%rsp), %rdi
     mov 16(%rsp), %rsi
     mov 8(%rsp), %rcx
-    rep movsb
+    call rt_mcpy_r
     xor %eax, %eax
     ret
 rt_mark:
@@ -769,7 +769,7 @@ rt_out_r:
     add rt_on(%rip), %rdi
     mov %rdx, %rcx
     add %rdx, rt_on(%rip)
-    rep movsb
+    call rt_mcpy_r
     ret
 rt_slen_r:
     # rsi = string -> rdx = length
@@ -913,7 +913,7 @@ rt_substr:
     mov 24(%rsp), %rsi
     add %r10, %rsi
     mov %r11, %rcx
-    rep movsb
+    call rt_mcpy_r
     ret
 rt_chr:
     mov $1, %edi
