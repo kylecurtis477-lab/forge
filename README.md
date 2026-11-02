@@ -108,7 +108,7 @@ Best of 5 wall clock. Rust: rustc -C opt-level=3 (unstripped binaries). Phase 1 
 | floats | 0.031s | 0.015s | 0.18s | 237ms | 174ms | 137,776 B | 11,390,192 B | 1500122368 |
 | strops | 0.018s | 0.017s | 0.04s | 165ms | 324ms | 138,656 B | 11,516,016 B | 38408 977889 22311 |
 
-(Run 2026-11-01 with the default -O, including the 2**62 band checks. Earlier Phase 5 -O0 numbers: The -O0 fallback gives fib 0.009s, loop 0.097s, strbuild 0.069s, lists 0.119s; see bench/results.md.)
+(Run 2026-11-01 20:08 CST with the default -O, including the 2**62 band checks; self-compile 1.25s. Full history and -O0 numbers in bench/results.md.)
 
 ### Optimizing backend (default; `-O0` turns it off)
 Eligible functions are plain int functions with int params. They are lowered to a three-address IR with virtual registers and basic blocks. The passes are const/copy propagation with folding, unreachable-block and jump cleanup, local CSE, liveness-based DCE, and elimination of tag and bounds checks for typed non-escaping `list[int]` locals. Registers are assigned by linear scan over rsi/rdi/r8-r10 and rbx/r12-r15, with spilling. Division by a constant uses magic numbers. Any function that is not eligible uses the direct code generator.
