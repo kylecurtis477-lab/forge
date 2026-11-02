@@ -18,3 +18,6 @@ cp $B/hello.raw $B/unsealed.elf
 python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[0x1010]^=1; open(sys.argv[2],'wb').write(d)" $B/hello.elf $B/tampered.elf
 # ... and a sealed copy whose manifest claims every capability (MAC no longer matches)
 python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[-128+32]=0x7f; open(sys.argv[2],'wb').write(d)" $B/hello.elf $B/forged.elf
+# 6.4: hello re-tagged as a Linux ABI binary (EI_OSABI = 3) and properly sealed: still refused
+python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" $B/hello.raw $B/linuxabi.elf
+python3 ../../tools/forgeseal.py hello.forge $B/linuxabi.elf $K ../../tests/unsafe/baseline.txt >/dev/null

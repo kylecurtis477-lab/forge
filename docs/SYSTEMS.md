@@ -235,3 +235,8 @@ Every user ELF is sealed at build time by `tools/forgeseal.py`, which is the ver
 
 ## Capability grants (Phase 6.2)
 A process holds exactly the capability bits its sealed manifest declares (fs=1, spawn=2, ipc=4, drv=8, kexec=16, probe=32, ktest=64); exec can only narrow them (declared ∩ held), fork copies them, kexec hands them over (handoff v3). Base syscalls (read/write/close/mmap/munmap/brk/yield/getpid/exit/ticks/cpu/getppid/getargs/dup/rights/restrict/kx_gen) need none. The check sits at the top of `syscall_dispatch`, before the handle-rights and sandbox checks, which still apply.
+
+## Refusal paths and the Linux ABI gate (Phase 6.3, 6.4)
+- Reason codes from `image_verify`: 1 no manifest, 2 bad version, 3 length mismatch, 4 bad signature, 5 hash mismatch, 6 Linux ABI image outside the compat sandbox.
+- Reason 6 is checked after the seal succeeds: an image whose ELF EI_OSABI byte is 3 is refused while `compat_sandbox_ready == 0`. Nothing sets it today; Phase 11 will set it only for processes launched in the compat sandbox.
+- The shell test runs unsealed, tampered, forged, linuxabi (all refused, exit 127) and capdeny (fork and probe get EACCES).

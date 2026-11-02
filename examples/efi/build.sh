@@ -17,7 +17,7 @@ mcopy -i $B/esp.fat ../../build/kernel/kernel-next.elf ::/EFI/Forge/kernel-next.
 mcopy -i $B/esp.fat ../../build/user/hello.elf ::/EFI/Forge/init.elf
 mmd -i $B/esp.fat ::/EFI/Forge/bin ::/EFI/Forge/docs ::/EFI/Forge/mod
 for m in hello badabi unresolved newer tty1 tty2 getpid2; do mcopy -i $B/esp.fat ../../build/modules/$m.ko ::/EFI/Forge/mod/$m.ko; done
-for p in sh hello cat forktest fault blkd crash sum bg captest chantest sbtest wxtest capdeny unsealed tampered forged; do mcopy -i $B/esp.fat ../../build/user/$p.elf ::/EFI/Forge/bin/$p; done
+for p in sh hello cat forktest fault blkd crash sum bg captest chantest sbtest wxtest capdeny unsealed tampered forged linuxabi; do mcopy -i $B/esp.fat ../../build/user/$p.elf ::/EFI/Forge/bin/$p; done
 printf 'Forge long file name test: this file lives at \\EFI\\Forge\\docs\\Long File Name Notes.txt\nIt spans more than one 13-character LFN entry and is read with open/read/stat/close.\n' > $B/notes.txt
 mcopy -i $B/esp.fat $B/notes.txt "::/EFI/Forge/docs/Long File Name Notes.txt"
 python3 -c "import sys; sys.stdout.buffer.write(bytes((i * 7 + (i >> 9)) & 255 for i in range(98304)))" > $B/big.bin

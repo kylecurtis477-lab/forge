@@ -151,6 +151,7 @@ seal_key: Dig
 seal_key_ok: u64
 seal_ok_count: u64
 seal_refused: u64
+compat_sandbox_ready: u64  # 6.4: set by the Phase 11 Linux ABI layer; 0 = no compat sandbox
 seal_why: u64  # reason code of the last refusal
 
 def hmac_pad(s: ptr[Sha], pad: u64):
@@ -173,6 +174,8 @@ def seal_reason(code: u64) -> ptr[u8]:
         return "bad manifest signature"
     if code == 5:
         return "image hash mismatch"
+    if code == 6:
+        return "Linux ABI image needs the compatibility sandbox (Phase 11, not built)"
     return "?"
 
 def seal_fail(code: u64) -> u64:
@@ -221,6 +224,10 @@ def image_verify(img: u64, len: u64) -> u64:
     sha_final(s, addr(inner))
     if seal_eq(addr(inner), t, 0) == 0:
         return seal_fail(5)
+    # 6.4: Linux-ABI images (EI_OSABI = 3) run only inside the explicit compat sandbox;
+    # checked after the seal so a sealed Linux image is still refused
+    if compat_sandbox_ready == 0 and ((ptr[Ehdr](img).w0 >> 56) & 0xFF) == 3:
+        return seal_fail(6)
     seal_ok_count += 1
     return SEAL_OK | (t.caps & 0xFFFFFFFF)
 
@@ -257,9 +264,11 @@ def seal_test():
         panic("tampered image refused for the wrong reason")
     if seal_check("EFI/Forge/bin/forged", 0) != 4:
         panic("forged manifest refused for the wrong reason")
-    if seal_refused - n0 != 3:
+    if seal_check("EFI/Forge/bin/linuxabi", 0) != 6:
+        panic("Linux ABI image refused for the wrong reason")
+    if seal_refused - n0 != 4:
         panic("seal refusals not counted")
-    puts("proof manifest: 3 sealed images accepted with their declared caps; unsealed, tampered and forged images refused\n")
+    puts("proof manifest: 3 sealed images accepted with their declared caps; unsealed, tampered and forged images refused; Linux ABI image confined to compat sandbox\n")
 
 # ---- Phase 6.2: the kernel grants exactly the declared capabilities ----
 CAPB_FS = 1
