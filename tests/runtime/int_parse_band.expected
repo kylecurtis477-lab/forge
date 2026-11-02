@@ -1,0 +1,4 @@
+4611686018427387903
+-4611686018427387904
+error: line 0: integer overflow in 64-bit int arithmetic (value was inferred or declared int; bigints only promote in dynamic code)
+exit 1

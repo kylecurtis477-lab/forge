@@ -2118,7 +2118,10 @@ def int(x) -> int:
         v: int = x
         return v & 1
     if t == 5:
-        return __ftoi(x, 0)
+        f: int = __ftoi(x, 0)
+        if (f >> 2) == 1152921504606846976:
+            __iovf(0)
+        return f
     if t != 1:
         return x
     s = strip(x)
@@ -2135,10 +2138,15 @@ def int(x) -> int:
         c: int = char_at(s, i) - 48
         if c < 0 or c > 9:
             __err(0, concat("invalid literal for int(): ", __repr(x)))
+        if v > (9223372036854775807 - c) // 10:
+            __iovf(0)
         v = v * 10 + c
         i += 1
     if neg:
         return 0 - v
+    if (v >> 2) == 1152921504606846976:
+        # 2**62 .. 2**62+3 alias the bool/None encodings
+        __iovf(0)
     return v
 
 # ---- numbers and lists ----
