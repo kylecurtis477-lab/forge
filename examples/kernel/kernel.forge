@@ -1,186 +1,293 @@
 # forge: no-runtime
-# Minimal x86-64 kernel in Forge: serial + VGA console, own GDT/IDT, exception handlers, multiboot2 info.
+# Forge x86-64 kernel: higher half, own 4-level page tables, frame allocator, heap, GOP/VBE framebuffer
+# console, TSS/IST, ACPI MADT, LAPIC timer, IOAPIC. Boots via GRUB multiboot2 (BIOS or UEFI) or via the
+# native Forge UEFI loader (examples/efi/loader.forge) after ExitBootServices.
 include "boot.fsi"
+include "bootinfo.fsi"
+include "console.fsi"
+include "mm.fsi"
+include "cpu.fsi"
+include "acpi.fsi"
+include "apic.fsi"
 
-COM1 = 0x3F8
-VGA = 0xB8000
 MB2_MAGIC = 0x36D76289
 
-@packed
-struct GdtDesc:
-    limit: u16
-    base: u64
+bi: BootInfo
 
-@packed
-struct IdtEntry:
-    off_lo: u16
-    sel: u16
-    ist: u8
-    attr: u8
-    off_mid: u16
-    off_hi: u32
-    zero: u32
+@naked
+def read_rsp() -> u64:
+    asm("lea 8(%rsp),%rax", "ret")
 
-gdt: u64[3] = [0, 0x00AF9A000000FFFF, 0x00CF92000000FFFF]
-gdtr: GdtDesc
-idt: IdtEntry[256]
-idtr: GdtDesc
-vga_pos: u32
-ticks: u64
+def add_region(base: u64, len: u64, typ: u64):
+    if bi.nregions < MAX_REGIONS and len != 0:
+        r = addr(bi.regions[bi.nregions])
+        r.base = base
+        r.len = len
+        r.typ = typ
+        bi.nregions += 1
 
-def serial_init():
-    outb(COM1 + 1, 0x00)
-    outb(COM1 + 3, 0x80)
-    outb(COM1 + 0, 0x03)
-    outb(COM1 + 1, 0x00)
-    outb(COM1 + 3, 0x03)
-    outb(COM1 + 2, 0xC7)
-    outb(COM1 + 4, 0x0B)
-
-def putc(c: u8):
-    while (inb(COM1 + 5) & 0x20) == 0:
-        cpu_relax()
-    outb(COM1, c)
-    v = ptr[u16](VGA)
-    if c == 10:
-        vga_pos = (vga_pos / 80 + 1) * 80
-    else:
-        vstore16(VGA + u64(vga_pos) * 2, u16(c) | 0x0F00)
-        vga_pos += 1
-    if vga_pos >= 80 * 25:
-        vga_pos = 0
-
-def puts(s: ptr[u8]):
-    i = 0
-    while s[i] != 0:
-        putc(s[i])
-        i += 1
-
-def put_hex(v: u64):
-    puts("0x")
-    i = 60
-    while i >= 0:
-        d = u8((v >> i) & 15)
-        if d < 10:
-            putc(48 + d)
-        else:
-            putc(87 + d)
-        i -= 4
-
-def put_u64(v: u64):
-    buf: u8[24]
-    i = 23
-    while 1:
-        i -= 1
-        buf[i] = u8(48 + v % 10)
-        v = v / 10
-        if v == 0:
-            break
-    puts(addr(buf[i]))
-
-def qemu_exit(code: u32):
-    # isa-debug-exit device (iobase 0xf4): qemu exits with (code << 1) | 1
-    outl(0xF4, code)
-    while 1:
-        cli()
-        hlt()
-
-def idt_set(n: u32, handler: u64):
-    e = addr(idt[n])
-    e.off_lo = u16(handler)
-    e.sel = 8
-    e.ist = 0
-    e.attr = 0x8E
-    e.off_mid = u16(handler >> 16)
-    e.off_hi = u32(handler >> 32)
-    e.zero = 0
-
-@interrupt
-def on_breakpoint(frame: ptr[u64]):
-    ticks += 1
-    puts("[int3] rip=")
-    put_hex(frame[0])
-    puts(" cs=")
-    put_hex(frame[1])
-    putc(10)
-
-@interrupt_err
-def on_page_fault(frame: ptr[u64]):
-    puts("[#PF] err=")
-    put_hex(frame[0])
-    puts(" cr2=")
-    put_hex(read_cr2())
-    putc(10)
-    puts("KERNEL OK\n")
-    qemu_exit(0x10)
-
-@interrupt_err
-def on_gp(frame: ptr[u64]):
-    puts("[#GP] err=")
-    put_hex(frame[0])
-    putc(10)
-    qemu_exit(0x11)
-
-def gdt_init():
-    gdtr.limit = u16(sizeof(u64[3]) - 1)
-    gdtr.base = u64(addr(gdt))
-    lgdt(addr(gdtr))
-    asm("push $8", "lea 1f(%rip),%rax", "push %rax", "lretq", "1:", "mov $16,%ax", "mov %ax,%ds", "mov %ax,%es", "mov %ax,%ss")
-
-def idt_init():
-    idt_set(3, u64(on_breakpoint))
-    idt_set(13, u64(on_gp))
-    idt_set(14, u64(on_page_fault))
-    idtr.limit = u16(sizeof(IdtEntry) * 256 - 1)
-    idtr.base = u64(addr(idt))
-    lidt(addr(idtr))
-
-def mb2_scan(info: u64):
-    total = load32(info)
-    puts("multiboot2 info bytes=")
-    put_u64(total)
-    putc(10)
+def mb2_parse(info: u64):
+    total = u64(load32(info))
+    bi.info_base = info
+    bi.info_len = total
     p = info + 8
     while p < info + total:
         typ = load32(p)
-        size = load32(p + 4)
+        size = u64(load32(p + 4))
         if typ == 0:
             break
         if typ == 2:
             puts("bootloader: ")
             puts(ptr[u8](p + 8))
             putc(10)
-        if typ == 4:
-            puts("mem upper KiB=")
-            put_u64(load32(p + 12))
-            putc(10)
+        if typ == 6:
+            esz = u64(load32(p + 8))
+            q = p + 16
+            while q < p + size:
+                t = u64(load32(q + 16))
+                mt = MEM_RESERVED
+                if t == 1:
+                    mt = MEM_USABLE
+                elif t == 3:
+                    mt = MEM_ACPI_RECLAIM
+                elif t == 4:
+                    mt = MEM_ACPI_NVS
+                elif t == 5:
+                    mt = MEM_BAD
+                add_region(load64(q), load64(q + 8), mt)
+                q += esz
+        if typ == 8:
+            fbt = load8(p + 29)
+            if fbt == 1 and load8(p + 28) == 32:
+                bi.fb_addr = load64(p + 8)
+                bi.fb_pitch = u64(load32(p + 16))
+                bi.fb_width = u64(load32(p + 20))
+                bi.fb_height = u64(load32(p + 24))
+                bi.fb_bpp = 32
+                bi.fb_format = FB_RGBX
+                if load8(p + 32) == 0:
+                    bi.fb_format = FB_BGRX
+            elif fbt == 2:
+                vga_base = load64(p + 8)
         if typ == 12:
-            puts("booted via UEFI (EFI64 system table tag)\n")
+            bi.method = BOOT_MB2_UEFI
+        if typ == 14 and bi.rsdp == 0:
+            bi.rsdp = p + 8
+        if typ == 15:
+            bi.rsdp = p + 8
         p = (p + size + 7) & ~u64(7)
 
+def kernel_start():
+    puts("boot method: ")
+    if bi.method == BOOT_MB2_BIOS:
+        puts("multiboot2 (BIOS)\n")
+    elif bi.method == BOOT_MB2_UEFI:
+        puts("multiboot2 (UEFI)\n")
+    else:
+        puts("Forge UEFI loader (ExitBootServices done)\n")
+    kdelta = bi.kdelta
+    usable: u64 = 0
+    i = 0
+    while i < bi.nregions:
+        if bi.regions[i].typ == MEM_USABLE:
+            usable += bi.regions[i].len
+        i += 1
+    puts("memory map: ")
+    put_u64(bi.nregions)
+    puts(" regions, ")
+    put_u64(usable / 1048576)
+    puts(" MiB usable\n")
+    pmm_init(addr(bi))
+    puts("frames: ")
+    put_u64(frames_free)
+    puts(" free of ")
+    put_u64(frames_total)
+    puts(", phys top ")
+    put_hex(phys_top)
+    puts(", kernel phys ")
+    put_hex(ksym(6) + kdelta)
+    putc(10)
+    fb_len = bi.fb_pitch * bi.fb_height
+    pml4 = paging_init(bi.fb_addr, fb_len)
+    puts("page tables built: pml4 at ")
+    put_hex(pml4)
+    puts(", frames used ")
+    put_u64(frames_total - frames_free)
+    putc(10)
+    paging_activate(pml4)
+    switch_stack(KSTACK_TOP, u64(kmain_high))
+
+def check_mapping(name: ptr[u8], va: u64, expect_mapped: u64):
+    pa = virt_to_phys(kernel_pml4, va)
+    puts("  ")
+    puts(name)
+    puts(" ")
+    put_hex(va)
+    if pa == 1:
+        puts(" -> unmapped")
+        if expect_mapped:
+            panic("expected mapping")
+    else:
+        puts(" -> ")
+        put_hex(pa)
+        if expect_mapped == 0:
+            panic("expected no mapping")
+    putc(10)
+
+def heap_test():
+    ptrs: u64[64]
+    before = frames_free
+    round = 0
+    while round < 3:
+        i: u64 = 0
+        while i < 64:
+            n = (i * 37) % 1500 + 1
+            if i % 16 == 15:
+                n = 20000 + i * 100
+            p = kmalloc(n)
+            memset(p, u8(i), n)
+            ptrs[i] = p
+            i += 1
+        i = 0
+        while i < 64:
+            n = (i * 37) % 1500 + 1
+            if i % 16 == 15:
+                n = 20000 + i * 100
+            if vload8(ptrs[i] + n - 1) != u8(i) or vload8(ptrs[i]) != u8(i):
+                panic("heap corruption")
+            kfree(ptrs[i])
+            i += 1
+        if round == 0:
+            before = frames_free
+        round += 1
+    puts("heap: 3 rounds x 64 blocks (slabs 32..4096 + page-backed large), live=")
+    put_u64(heap_live)
+    puts(", frames after round1/round3: ")
+    put_u64(before)
+    puts("/")
+    put_u64(frames_free)
+    putc(10)
+    if before != frames_free or heap_live != 0:
+        panic("heap leak")
+
+def demand_test():
+    a = DEMAND_BASE
+    vstore64(a + 0x10, 0x1111)
+    vstore64(a + 0x5008, 0x2222)
+    vstore64(a + 0xFFFFF0, 0x3333)
+    s = vload64(a + 0x10) + vload64(a + 0x5008) + vload64(a + 0xFFFFF0)
+    puts("demand paging: ")
+    put_u64(demand_faults)
+    puts(" faults, sum ")
+    put_hex(s)
+    putc(10)
+
+def recurse(n: u64) -> u64:
+    pad: u64[32]
+    pad[n & 31] = n
+    return recurse(n + 1) + pad[3]
+
 @export
-def kmain(magic: u32, info: u32):
-    serial_init()
-    vga_pos = 0
-    puts("Forge kernel: hello from long mode\n")
-    if magic != MB2_MAGIC:
-        puts("bad multiboot2 magic\n")
-        qemu_exit(0x12)
-    mb2_scan(u64(info))
+def kmain_high():
+    # now on the guarded kernel stack, identity map gone, physical memory via HHDM
+    if bi.fb_addr != 0:
+        fb_attach(p2v(bi.fb_addr), bi.fb_width, bi.fb_height, bi.fb_pitch)
+        puts("Forge kernel: framebuffer console ")
+        put_u64(fb_w)
+        puts("x")
+        put_u64(fb_h)
+        puts(" (8x16 font)\n")
+    elif vga_base != 0:
+        vga_base = p2v(vga_base)
+    puts("higher half: rip ")
+    put_hex(u64(kmain_high))
+    puts(", rsp ")
+    put_hex(read_rsp())
+    putc(10)
+    check_mapping("identity", 0x100000, 0)
+    check_mapping("hhdm", HHDM + 0x100000, 1)
+    check_mapping("kernel .text", ksym(0), 1)
+    check_mapping("stack guard", KSTACK_TOP - (KSTACK_PAGES + 1) * PAGE, 0)
     gdt_init()
     idt_init()
-    puts("GDT/IDT loaded, cr0=")
-    put_hex(read_cr0())
-    putc(10)
-    t0 = rdtsc()
+    puts("GDT+TSS loaded (IST1 ")
+    put_hex(IST1_TOP)
+    puts(", IST2 ")
+    put_hex(IST2_TOP)
+    puts("), IDT loaded\n")
     int3()
     int3()
     puts("breakpoints handled: ")
-    put_u64(ticks)
+    put_u64(bp_count)
     putc(10)
-    if rdtsc() > t0:
-        puts("tsc advancing\n")
-    puts("touching unmapped 0x40000000...\n")
-    x = vload64(0x40000000)
-    puts("unreachable\n")
-    qemu_exit(0x13)
+    heap_test()
+    demand_test()
+    if acpi_init(bi.rsdp) == 0:
+        panic("ACPI/MADT not found")
+    puts("stack overflow test: recursing into the guard page...\n")
+    df_recover = u64(after_overflow)
+    recurse(0)
+    panic("recursion returned")
+
+@export
+def after_overflow():
+    puts("recovered from #DF on a fresh stack\n")
+    pic_disable()
+    lapic_init()
+    ioapic_init()
+    idt_set(VEC_TIMER, u64(on_lapic_timer), 0)
+    idt_set(VEC_PIT, u64(on_pit), 0)
+    idt_set(VEC_SPURIOUS, u64(on_spurious), 0)
+    # IOAPIC: ISA IRQ0 (PIT channel 0) via its interrupt source override, one-shot ~1 ms
+    ioapic_route(0, VEC_PIT)
+    outb(0x43, 0x30)
+    outb(0x40, 0xA9)
+    outb(0x40, 0x04)
+    sti()
+    while lapic_ticks < 20:
+        hlt()
+    cli()
+    ioapic_mask(0)
+    puts("LAPIC timer ticks: ")
+    put_u64(lapic_ticks)
+    puts(", PIT IRQ0 via IOAPIC gsi ")
+    put_u64(irq_gsi[0])
+    puts(": ")
+    put_u64(pit_irqs)
+    puts(" irq(s)\n")
+    if pit_irqs == 0:
+        panic("no IOAPIC interrupt")
+    puts("KERNEL OK\n")
+    # test harness: wait up to 5 s (LAPIC ticks) for 'q' on COM1 so it can take a screenshot first
+    t_end = lapic_ticks + 500
+    sti()
+    while lapic_ticks < t_end:
+        if serial_poll() == 113:
+            break
+        hlt()
+    cli()
+    qemu_exit(0x10)
+
+@export
+def kmain_mb2(magic: u32, info: u32):
+    serial_init()
+    vga_base = 0
+    puts("Forge kernel (multiboot2 entry)\n")
+    if magic != MB2_MAGIC:
+        panic("bad multiboot2 magic")
+    bi.magic = BI_MAGIC
+    bi.method = BOOT_MB2_BIOS
+    bi.kdelta = 0
+    p2v_base = 0
+    mb2_parse(u64(info))
+    kernel_start()
+
+@export
+def kmain_efi(info: u64):
+    serial_init()
+    puts("Forge kernel (UEFI loader entry)\n")
+    p2v_base = 0
+    if load64(info) != BI_MAGIC:
+        panic("bad BootInfo magic")
+    memcpy(u64(addr(bi)), info, sizeof(BootInfo))
+    kernel_start()

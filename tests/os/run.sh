@@ -16,11 +16,13 @@ check() { # name rc-log expected-markers...
     [ "$rc" = 33 ] && echo "PASS os/$name" || echo "FAIL os/$name (qemu rc=$rc)"
 }
 L=build/os; mkdir -p $L
-timeout 60 $Q -cdrom build/kernel/forge.iso > $L/bios.log 2>&1; echo $? >> $L/bios.log
-check kernel-bios $L/bios.log "hello from long mode" "breakpoints handled: 2" "cr2=0x0000000040000000" "KERNEL OK"
+timeout 60 $Q -cdrom build/kernel/forge.iso < /dev/null > $L/bios.log 2>&1; echo $? >< /dev/null > $L/bios.log
+K="framebuffer console 1024x768|identity 0x0000000000100000 -> unmapped|breakpoints handled: 2|live=0|demand paging: 3 faults|MADT: cpus=|#DF on IST1|LAPIC timer ticks: 20|PIT IRQ0 via IOAPIC gsi 2: 1|KERNEL OK"
+IFS='|' read -ra KM <<< "$K"
+check kernel-bios $L/bios.log "multiboot2 (BIOS)" "${KM[@]}"
 cp $OVMF_VARS $L/vars.fd
-timeout 90 $Q -machine q35 -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE -drive if=pflash,format=raw,file=$L/vars.fd -cdrom build/kernel/forge.iso > $L/uefi.log 2>&1; echo $? >> $L/uefi.log
-check kernel-uefi $L/uefi.log "hello from long mode" "booted via UEFI" "breakpoints handled: 2" "KERNEL OK"
+timeout 90 $Q -machine q35 -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE -drive if=pflash,format=raw,file=$L/vars.fd -cdrom build/kernel/forge.iso < /dev/null > $L/uefi.log 2>&1; echo $? >< /dev/null > $L/uefi.log
+check kernel-uefi $L/uefi.log "multiboot2 (UEFI)" "ACPI rev 2 XSDT" "${KM[@]}"
 cp $OVMF_VARS $L/vars.fd
-timeout 90 $Q -machine q35 -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE -drive if=pflash,format=raw,file=$L/vars.fd -drive file=build/efi/disk.img,format=raw > $L/efi.log 2>&1; echo $? >> $L/efi.log
+timeout 90 $Q -machine q35 -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE -drive if=pflash,format=raw,file=$L/vars.fd -drive file=build/efi/disk.img,format=raw < /dev/null > $L/efi.log 2>&1; echo $? >< /dev/null > $L/efi.log
 check efi-app-gpt $L/efi.log "hello from PE32+" "signature OK" "EFI OK"

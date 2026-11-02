@@ -1,5 +1,11 @@
-# Multiboot2 header + 32-bit -> 64-bit long-mode trampoline (identity-maps the first 1 GiB with 2 MiB pages).
-# Works under GRUB on BIOS and on UEFI (GRUB x86_64-efi hands over in 32-bit protected mode for multiboot2).
+# Boot glue for the higher-half kernel (VMA 0xFFFFFFFF80000000 + phys).
+#
+# Two ways in:
+#  * multiboot2 (GRUB on BIOS or UEFI): 32-bit protected mode at _start (low, identity-linked .boot section).
+#    The trampoline maps 0..1 GiB both at 0 and at -2 GiB with 2 MiB pages, enters long mode and jumps high.
+#  * forgex64.efi loader (native UEFI, after ExitBootServices): already in long mode with the loader's
+#    page tables (identity 0..4 GiB + -2 GiB -> kernel phys); it finds `kentry64` through the FORGEKRN header
+#    and calls it with rdi = physical address of a BootInfo.
 asm(
     ".section .multiboot2,\"a\"",
     ".p2align 3",
@@ -8,16 +14,26 @@ asm(
     ".long 0",
     ".long mb2_end - mb2_start",
     ".long -(0xE85250D6 + 0 + (mb2_end - mb2_start))",
+    # framebuffer tag (type 5), optional: ask for 1024x768x32, fall back to whatever GRUB gives
+    ".short 5", ".short 1", ".long 20", ".long 1024", ".long 768", ".long 32",
+    ".long 0",
     ".short 0", ".short 0", ".long 8",
     "mb2_end:",
-    ".section .bss",
+    # header the native UEFI loader looks for (8-byte aligned, inside the first loadable segment)
+    ".p2align 3",
+    ".ascii \"FORGEKRN\"",
+    ".quad kentry64",
+    ".quad __kernel_phys_start",
+    ".quad __kernel_phys_end",
+    ".section .bss.boot,\"aw\",@nobits",
     ".p2align 12",
     "boot_pml4: .skip 4096",
-    "boot_pdpt: .skip 4096",
+    "boot_pdpt_lo: .skip 4096",
+    "boot_pdpt_hi: .skip 4096",
     "boot_pd: .skip 4096",
-    "boot_stack: .skip 16384",
-    "boot_stack_top:",
-    ".section .rodata",
+    "boot_stack32: .skip 4096",
+    "boot_stack32_top:",
+    ".section .data.boot,\"aw\",@progbits",
     ".p2align 3",
     "boot_gdt: .quad 0, 0x00AF9A000000FFFF, 0x00CF92000000FFFF",
     "boot_gdtr: .short 23",
@@ -27,11 +43,12 @@ asm(
     ".globl _start",
     "_start:",
     "cli",
-    "mov $boot_stack_top, %esp",
+    "mov $boot_stack32_top, %esp",
     "mov %eax, %edi",
     "mov %ebx, %esi",
-    "mov $boot_pdpt, %eax", "or $3, %eax", "mov %eax, boot_pml4",
-    "mov $boot_pd, %eax", "or $3, %eax", "mov %eax, boot_pdpt",
+    "mov $boot_pdpt_lo, %eax", "or $3, %eax", "mov %eax, boot_pml4",
+    "mov $boot_pdpt_hi, %eax", "or $3, %eax", "mov %eax, boot_pml4+511*8",
+    "mov $boot_pd, %eax", "or $3, %eax", "mov %eax, boot_pdpt_lo", "mov %eax, boot_pdpt_hi+510*8",
     "xor %ecx, %ecx",
     "1: mov %ecx, %eax", "shl $21, %eax", "or $0x83, %eax",
     "mov %eax, boot_pd(,%ecx,8)", "movl $0, boot_pd+4(,%ecx,8)",
@@ -41,12 +58,34 @@ asm(
     "mov $0xC0000080, %ecx", "rdmsr", "or $0x100, %eax", "wrmsr",
     "mov %cr0, %eax", "or $0x80000001, %eax", "and $0x9FFFFFFF, %eax", "mov %eax, %cr0",
     "lgdt boot_gdtr",
-    "ljmp $8, $long_entry",
+    "ljmp $8, $long_low",
     ".code64",
-    "long_entry:",
+    "long_low:",
     "mov $16, %ax", "mov %ax, %ds", "mov %ax, %es", "mov %ax, %ss", "xor %ax, %ax", "mov %ax, %fs", "mov %ax, %gs",
-    "mov $boot_stack_top, %rsp",
+    "movabs $long_high, %rax", "jmp *%rax",
+    ".text",
+    "long_high:",
+    "lea boot_stack_top(%rip), %rsp",
     "xor %ebp, %ebp",
-    "call kmain",
-    "2: cli", "hlt", "jmp 2b"
+    "call kmain_mb2",
+    "2: cli", "hlt", "jmp 2b",
+    ".globl kentry64",
+    "kentry64:",
+    "cli",
+    "lea boot_stack_top(%rip), %rsp",
+    "xor %ebp, %ebp",
+    "call kmain_efi",
+    "3: cli", "hlt", "jmp 3b",
+    # switch_stack(top, fn): continue on a new stack (never returns)
+    ".globl switch_stack",
+    "switch_stack:",
+    "mov %rdi, %rsp",
+    "xor %ebp, %ebp",
+    "call *%rsi",
+    "4: cli", "hlt", "jmp 4b",
+    ".section .bss",
+    ".p2align 12",
+    "boot_stack: .skip 32768",
+    "boot_stack_top:"
 )
+extern def switch_stack(top: u64, fn: u64)
