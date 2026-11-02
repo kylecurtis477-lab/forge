@@ -49,6 +49,8 @@ else echo "FAIL os/kaslr (layouts $NK, image bases $NI, unslid unmapped $NU, loa
 
 # Phase 8.7: hardware drivers on q35 (read-only disks, ARP only on restricted user netdevs)
 bash tests/os/drivers.sh
+# Phase 8.9: writable Forge FS on an explicitly created Forge partition only
+bash tests/os/forgefs.sh
 
 # Phase 7.3: -g kernel, DWARF line table, gdb breakpoint at schedule over the QEMU gdbstub
 bash tests/dwarf/run.sh

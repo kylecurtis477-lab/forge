@@ -23,6 +23,7 @@ include "ahci.fsi"
 include "xhci.fsi"
 include "net.fsi"
 include "hw.fsi"
+include "ffs.fsi"
 include "fat.fsi"
 include "proc.fsi"
 include "chan.fsi"
@@ -1636,6 +1637,7 @@ def after_overflow():
     fs_test()
     hw_test()
     uaccess_test()
+    ffs_test()
     module_test()
     drv_test()
     livepatch_test()

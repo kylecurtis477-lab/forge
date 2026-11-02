@@ -311,3 +311,5 @@ until the process exits. chan_recv reserves its fd slot before dequeuing. Boot t
 `user_elf_bounds_test` feeds 5 malformed headers and checks refusal, the reject counter and no frame leak.
 Not changed: drv 403 still returns the DMA physical address, because the user-mode virtio driver
 programs bus addresses directly and there is no IOMMU yet; an IOVA handle needs IOMMU support.
+## Forge FS (Phase 8)
+The only writable filesystem. It exists only on a GPT partition with the Forge type GUID, created explicitly with `tools/forge-part.py ... --yes-add-forge-partition`. The kernel validates the GPT, claims only that LBA range on NVMe, and every write outside it is refused. Tested by `tests/os/forgefs.sh`: no partition means no writes; with one, files persist across reboots and every byte outside the partition stays identical.

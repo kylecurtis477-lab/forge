@@ -1,5 +1,5 @@
 # Phase 8: NVMe, read-only. Admin queue + one I/O queue pair, polled completions. The driver has no
-# write path: the only I/O command it can build is Read (opcode 2), so it cannot modify the disk.
+# write path: nvme_write (end of file) only writes inside the range Forge FS claimed (its validated GPT partition).
 nv_regs: u64
 nv_dstrd: u64
 nv_asq: u64
@@ -172,3 +172,30 @@ def nvme_read(lba: u64) -> u64:
         return 0
     nv_reads += 1
     return nv_buf
+
+# Write path: only inside the LBA range claimed by Forge FS (nvme_claim), which only claims a validated
+# Forge-type GPT partition. Everything else is refused and counted.
+nv_own_lo: u64
+nv_own_hi: u64  # exclusive; 0 = owns nothing, all writes refused
+nv_writes: u64
+nv_refused: u64
+def nvme_claim(lo: u64, hi: u64):
+    nv_own_lo = lo
+    nv_own_hi = hi
+
+def nvme_write(lba: u64) -> u64:
+# one 4 KiB write of the DMA buffer at lba; 1 on success
+    nb = 4096 / nv_lba_sz
+    if nv_regs == 0 or nv_own_hi == 0 or lba < nv_own_lo or lba + nb > nv_own_hi or lba + nb > nv_nsze:
+        nv_refused += 1
+        return 0
+    nv_d12 = nb - 1
+    if nv_cmd(1, 1, 1, nv_buf_pa, lba & 0xFFFFFFFF, lba >> 32) != 0:
+        return 0
+    nv_writes += 1
+    return 1
+
+def nvme_flush() -> u64:
+    if nv_regs == 0:
+        return 0
+    return u64(nv_cmd(1, 0, 1, 0, 0, 0) == 0)
