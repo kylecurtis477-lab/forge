@@ -144,6 +144,8 @@ def cpu_syscall_init(cpu: u64):
     wrmsr(MSR_GS_BASE, 0)
     wrmsr(MSR_KGS_BASE, u64(addr(percpu_kstack[cpu * 4])))
 
+elf_wx_rejects: u64  # images refused for a writable+executable segment or a mixed-permission page
+
 # ---- user address spaces ----
 @unsafe
 def upt_next(table: u64, idx: u64) -> u64:
@@ -258,7 +260,10 @@ def elf_load(pml4: u64, img: u64, len: u64) -> u64:
             va = vload64(ph + 16)
             fsz = vload64(ph + 32)
             msz = vload64(ph + 40)
-            if (fl & 3) == 3 or fsz > msz or off + fsz > len or va >= USER_TOP or va + msz > USER_TOP or va < 0x10000:
+            if (fl & 3) == 3:
+                elf_wx_rejects += 1
+                return 0
+            if fsz > msz or off + fsz > len or va >= USER_TOP or va + msz > USER_TOP or va < 0x10000:
                 return 0
             pf = PTE_P | PTE_U
             if fl & 2:
@@ -268,9 +273,15 @@ def elf_load(pml4: u64, img: u64, len: u64) -> u64:
             p = va & ~u64(PAGE - 1)
             while p < va + msz:
                 e = user_pte(pml4, p)
-                if (vload64(e) & PTE_P) == 0:
-                    vstore64(e, frame_alloc() | pf)
-                fr = vload64(e) & ADDR_MASK
+                v = vload64(e)
+                if (v & PTE_P) == 0:
+                    v = frame_alloc() | pf
+                    vstore64(e, v)
+                elif (v & (PTE_W | PTE_NX)) != (pf & (PTE_W | PTE_NX)):
+                # W^X per page: segments with different permissions may not share a page
+                    elf_wx_rejects += 1
+                    return 0
+                fr = v & ADDR_MASK
                 # copy the file bytes that land in this page
                 lo = p
                 if lo < va:

@@ -1,0 +1,53 @@
+# forge: no-runtime
+# Phase 5.4: user W^X from ring 3. Children try to run code from data, heap and stack and to
+# patch their own text; each must die with #PF (exit 0x10e) while the parent carries on.
+include "ulib.fsi"
+
+code: u8[16]
+
+def fail(s: ptr[u8]):
+    out("wxtest FAIL: ")
+    out(s)
+    out("\n")
+    flush()
+    sys_exit(1)
+
+@unsafe
+def attempt(k: u64):
+    buf: u8[16]
+    if k == 0:
+        code[0] = 0xC3
+        call_ptr(u64(addr(code[0])))
+    elif k == 1:
+        h = sys_mmap(4096)
+        mem_set8(h, 0xC3)
+        call_ptr(h)
+    elif k == 2:
+        buf[0] = 0xC3
+        call_ptr(u64(addr(buf[0])))
+    else:
+        mem_set8(u64(user_nop), 0xC3)
+
+@export
+def _start():
+    names: ptr[u8][4]
+    names[0] = "data"
+    names[1] = "mmap"
+    names[2] = "stack"
+    names[3] = "write text"
+    k: u64 = 0
+    st: u64 = 0
+    while k < 4:
+        pid = sys_fork()
+        if pid == 0:
+            attempt(k)
+            sys_exit(7)
+        if is_err(pid) or sys_wait(pid, addr(st)) != pid:
+            fail("fork/wait")
+        if st != 0x10E:
+            fail(names[k])
+        k += 1
+    out("wxtest: exec data/mmap/stack and write text all killed by #PF\n")
+    out("wxtest: PASS\n")
+    flush()
+    sys_exit(0)

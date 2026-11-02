@@ -205,3 +205,8 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
 8. **ARM64 target:** an AArch64 backend for fs mode, UEFI on ARM (AAVMF in QEMU `virt`), PL011 serial, GIC, and the generic timer.
 9. **Secure Boot:** sign `forgex64.efi` (sbsign/MOK) or chain through shim so it coexists with distro and Windows Secure Boot setups.
 10. **Never reboot (BUILD_PLAN Phase 2):** 1 module ABI, 2 isolated driver services, 3 supervisor restart, 4 tty hot-swap, 5 live patching, 6 kexec handoff — done.
+
+## User W^X (Phase 5.4a)
+- `elf_load` (user.fsi) rejects a PT_LOAD with PF_W|PF_X, and rejects a segment that lands on an already-mapped page whose W/NX bits differ from its own, so no page is ever writable and executable or silently gets weaker permissions. Rejections bump `elf_wx_rejects`.
+- Text pages are mapped read-only + executable; everything else (data, bss, stack, brk, mmap) is NX. User programs are linked with `-z separate-code -z noexecstack`.
+- Tests: `user_wx_test` in kernel.forge (crafted images built in a static buffer, safe code) and `wxtest` from the boot shell (four forked children; each must exit 0x10e from #PF).
