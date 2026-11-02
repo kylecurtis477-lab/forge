@@ -59,10 +59,12 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 - If `forgex64.efi` fails, it prints the reason and returns to the firmware boot manager, so the next boot entry (Windows/Linux) still works.
 
 ## Roadmap
+The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel subset.
+
 1. ~~**Memory:** memory map, frame allocator, 4-level higher-half paging with guard pages and NX, kernel heap, ExitBootServices with the UEFI app as the loader, GOP framebuffer console.~~ **Done.** Reclaim done. Still open: a buddy allocator (contiguous frames are a linear bitmap scan), a virtual address allocator for the large-object heap, and PCID.
 2. ~~**Interrupts and time:** PIC off, LAPIC/IOAPIC via ACPI MADT, LAPIC timer, IST stacks for #DF/NMI.~~ **Done** (atomics landed in the language too). Still open: HPET/TSC-deadline, x2APIC, and MSI.
-3. ~~**Scheduler + SMP:** preemptive kernel threads, spinlocks, INIT-SIPI AP bring-up.~~ **Done.** Still open: per-CPU run queues + load balancing, priorities, sleeping mutexes/wait queues, TLB shootdown IPIs (not needed yet: kernel mappings never change after SMP start, user address spaces are freed only after their thread is dead), FPU/SSE state save (neither kernel nor user code uses SSE today, so no fxsave yet).
-4. ~~**User mode:** TSS, ring 3, `syscall`/`sysret`, ELF loader, per-process address spaces.~~ **Done.** Still open: fork/exec/wait syscalls, mmap/brk, user-space argv/env, SMAP/SMEP, copy-in/copy-out with fault recovery instead of a pre-walk.
+3. ~~**Scheduler + SMP:** preemptive kernel threads, spinlocks, INIT-SIPI AP bring-up.~~ **Done.** Since done: xsave/fxsave FPU state per thread, TLB shootdown IPIs, pinned threads, wait queues, sleeping mutexes, condvars, sleep_ticks. Still open: per-CPU run queues + load balancing, priorities.
+4. ~~**User mode:** TSS, ring 3, `syscall`/`sysret`, ELF loader, per-process address spaces.~~ **Done.** Still open: fork/exec/wait syscalls, mmap/brk, user-space argv/env, (SMEP/SMAP and copy-in/out with #PF fixups are done.)
 5. ~~**Drivers:** PCI, virtio-blk, read-only FAT32.~~ **Done** (polled, legacy virtio). Still open: interrupts/MSI-X for virtio, modern virtio 1.0 capability layout, LFN names, a VFS + open/read syscalls, PS/2 keyboard, AHCI/NVMe, virtio-net, ext2.
 6. **Language and compiler:**
    - Weaker memory orderings (acquire/release) and `unsafe`-scoped raw pointers.
