@@ -36,6 +36,7 @@ tests/ast/roundtrip.sh selfhost/compiler.forge selfhost/prelude.forge tools/*.fo
 tests/ast/semantic.sh || fail=1
 tests/grammar/run.sh || fail=1
 tests/fmt/run.sh || fail=1
+tests/fas/run.sh || fail=1
 tests/testblocks/run.sh || fail=1
 tests/bounds/run.sh || fail=1
 tests/nonnull/run.sh || fail=1

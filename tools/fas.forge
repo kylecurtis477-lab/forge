@@ -1,0 +1,2338 @@
+# fas: the Forge assembler (Phase 7.1). Assembles the AT&T-syntax x86-64 subset that forgec,
+# the kernel, the EFI loader, user programs and modules use, and writes an ELF64 relocatable
+# object that is byte-identical to GNU as 2.44 output for that input.
+# usage: fas [-I dir]... -o out.o in.s
+
+# ---------------------------------------------------------------- registers
+# code = num | size << 4 | cls << 12 | flags; cls 0 gpr, 1 seg, 2 cr, 3 xmm, 4 st, 5 dr, 6 rip
+# flag 1 << 16: byte reg needing REX (spl bpl sil dil); 1 << 17: ah ch dh bh
+REG = {}
+
+def reg_init():
+    n64 = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"]
+    n32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"]
+    n16 = ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"]
+    n8 = ["al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil"]
+    i = 0
+    while i < 8:
+        REG[n64[i]] = i | (8 << 4)
+        REG[n32[i]] = i | (4 << 4)
+        REG[n16[i]] = i | (2 << 4)
+        if i >= 4:
+            REG[n8[i]] = i | (1 << 4) | (1 << 16)
+        else:
+            REG[n8[i]] = i | (1 << 4)
+        i += 1
+    hb = ["ah", "ch", "dh", "bh"]
+    i = 0
+    while i < 4:
+        REG[hb[i]] = (i + 4) | (1 << 4) | (1 << 17)
+        i += 1
+    i = 8
+    while i < 16:
+        s = str(i)
+        REG["r" + s] = i | (8 << 4)
+        REG["r" + s + "d"] = i | (4 << 4)
+        REG["r" + s + "w"] = i | (2 << 4)
+        REG["r" + s + "b"] = i | (1 << 4)
+        i += 1
+    sg = ["es", "cs", "ss", "ds", "fs", "gs"]
+    i = 0
+    while i < 6:
+        REG[sg[i]] = i | (2 << 4) | (1 << 12)
+        i += 1
+    i = 0
+    while i < 16:
+        REG["cr" + str(i)] = i | (8 << 4) | (2 << 12)
+        REG["dr" + str(i)] = i | (8 << 4) | (5 << 12)
+        REG["xmm" + str(i)] = i | (16 << 4) | (3 << 12)
+        i += 1
+    i = 0
+    while i < 8:
+        REG["st(" + str(i) + ")"] = i | (10 << 4) | (4 << 12)
+        i += 1
+    REG["st"] = 0 | (10 << 4) | (4 << 12)
+    REG["rip"] = 0 | (8 << 4) | (6 << 12)
+
+def rnum(r):
+    return r & 15
+
+def rsize(r):
+    return (r >> 4) & 255
+
+def rcls(r):
+    return (r >> 12) & 15
+
+def die(msg):
+    print("fas: " + SRC + ":" + str(LINE) + ": " + msg)
+    exit(1)
+
+SRC = ""
+LINE = 0
+
+# ---------------------------------------------------------------- symbols and expressions
+class Expr:
+    def __init__(self, c, a, b):
+        self.c = c
+        self.a = a
+        self.b = b
+
+class Sym:
+    def __init__(self, name, issec):
+        self.name = name
+        self.sec = -1
+        self.chunk = 0
+        self.off = 0
+        self.bind = 0
+        self.temp = False
+        self.issec = issec
+        self.used = False
+        self.isglob = False
+        self.isweak = False
+
+SYMS = []
+SYMIX = {}
+
+def sym_get(name):
+    if name in SYMIX:
+        return SYMIX[name]
+    s = Sym(name, False)
+    if startswith(name, ".L") or "\x02" in name:
+        s.temp = True
+    SYMIX[name] = len(SYMS)
+    SYMS.append(s)
+    return len(SYMS) - 1
+
+# numeric local labels: "N:" defines instance k of N; "Nb" is the last one, "Nf" the next one
+NUMLAB = {}
+
+def numlab(n, fwd):
+    k = 0
+    if n in NUMLAB:
+        k = NUMLAB[n]
+    if fwd:
+        k += 1
+    return n + "\x02" + str(k)
+
+class P:
+    def __init__(self, s):
+        self.s = s
+        self.i = 0
+        self.n = len(s)
+
+def p_ws(p):
+    while p.i < p.n and (p.s[p.i] == " " or p.s[p.i] == "\t"):
+        p.i += 1
+
+def p_peek(p):
+    p_ws(p)
+    if p.i < p.n:
+        return p.s[p.i]
+    return ""
+
+def isdig(c):
+    return c >= "0" and c <= "9"
+
+def isidst(c):
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_" or c == "." or c == "$"
+
+def isidch(c):
+    return isidst(c) or isdig(c)
+
+def hexval(c):
+    if isdig(c):
+        return ord(c) - 48
+    if c >= "a" and c <= "f":
+        return ord(c) - 87
+    if c >= "A" and c <= "F":
+        return ord(c) - 55
+    return -1
+
+def p_number(p):
+    s = p.s
+    v = 0
+    if s[p.i] == "0" and p.i + 1 < p.n and (s[p.i + 1] == "x" or s[p.i + 1] == "X"):
+        p.i += 2
+        while p.i < p.n and hexval(s[p.i]) >= 0:
+            h = hexval(s[p.i])
+            if v == 288230376151711744 and h < 4 and not (p.i + 1 < p.n and hexval(s[p.i + 1]) >= 0):
+                p.i += 1
+                return BAND0 - h
+            v = (v << 4) | h
+            p.i += 1
+        return v
+    if s[p.i] == "0" and p.i + 1 < p.n and (s[p.i + 1] == "b" or s[p.i + 1] == "B") and p.i + 2 < p.n and isdig(s[p.i + 2]):
+        p.i += 2
+        while p.i < p.n and (s[p.i] == "0" or s[p.i] == "1"):
+            v = (v << 1) | (ord(s[p.i]) - 48)
+            p.i += 1
+        return v
+    if s[p.i] == "0" and p.i + 1 < p.n and isdig(s[p.i + 1]):
+        while p.i < p.n and isdig(s[p.i]):
+            v = (v << 3) | (ord(s[p.i]) - 48)
+            p.i += 1
+        return v
+    while p.i < p.n and isdig(s[p.i]):
+        d = ord(s[p.i]) - 48
+        if v == 461168601842738790 and d >= 4 and not (p.i + 1 < p.n and isdig(s[p.i + 1])):
+            p.i += 1
+            return BAND0 - (d - 4)
+        if v < 0 or v >= 288230376151711744:
+        # wraps like GNU as's 64-bit bignum truncation (only used for huge unsigned literals)
+            v = wrap_mul10(v, d)
+        else:
+            v = v * 10 + d
+        p.i += 1
+    return v
+
+# The hosted runtime reserves the int band [2^62, 2^62+3] (boxed-value tags), so typed code cannot
+# hold those four values. Literals in the band are carried as sentinels BAND0-k and expanded by le().
+# (BAND0..BAND0-3 themselves are therefore not usable as literals; chosen arbitrary and odd.)
+# Computed at run time so fas's own compiled output never contains the sentinel literal.
+BAND0 = 0 - (8070450532247928817 + argc() * 0)
+
+def wrap_mul10(v, d):
+# 64-bit wrapping v*10+d, done with shifts and masked halves so no overflow trap fires
+    lo = v & 0xffffffff
+    hi = (v >> 32) & 0xffffffff
+    lo = lo * 10 + d
+    hi = hi * 10 + (lo >> 32)
+    lo = lo & 0xffffffff
+    hi = hi & 0xffffffff
+    if hi == 0x40000000:
+    # 2^62 + lo: keep clear of the typed-int trap band
+        if lo < 4:
+            return BAND0 - lo
+        return 4611686018427387903 + (lo + 1)
+    return (hi << 32) | lo
+
+def e_const(e):
+    return e.a < 0 and e.b < 0
+
+def e_neg(e):
+    if e.c <= BAND0 and e.c >= BAND0 - 3:
+        return Expr(-4611686018427387904 - (BAND0 - e.c), e.b, e.a)
+    if e.c == -9223372036854775807 - 1:
+        return Expr(e.c, e.b, e.a)
+    return Expr(0 - e.c, e.b, e.a)
+
+def e_add(x, y):
+    a = x.a
+    b = x.b
+    c = x.c + y.c
+    for t in [y.a]:
+        if t >= 0:
+            if b == t:
+                b = -1
+            elif a < 0:
+                a = t
+            else:
+                die("expression too complex")
+    for t in [y.b]:
+        if t >= 0:
+            if a == t:
+                a = -1
+            elif b < 0:
+                b = t
+            else:
+                die("expression too complex")
+    return Expr(c, a, b)
+
+def p_primary(p):
+    c = p_peek(p)
+    if c == "(":
+        p.i += 1
+        e = p_expr(p, 0)
+        if p_peek(p) != ")":
+            die("missing )")
+        p.i += 1
+        return e
+    if c == "-":
+        p.i += 1
+        return e_neg(p_primary(p))
+    if c == "+":
+        p.i += 1
+        return p_primary(p)
+    if c == "~":
+        p.i += 1
+        e = p_primary(p)
+        e = e_fold(e)
+        return Expr(~e.c, -1, -1)
+    if c == "!":
+        p.i += 1
+        e = e_fold(p_primary(p))
+        return Expr(1 if e.c == 0 else 0, -1, -1)
+    if c == "'":
+        p.i += 1
+        v = ord(p.s[p.i])
+        p.i += 1
+        if p.i < p.n and p.s[p.i] == "'":
+            p.i += 1
+        return Expr(v, -1, -1)
+    if isdig(c):
+        st = p.i
+        while p.i < p.n and isdig(p.s[p.i]):
+            p.i += 1
+        if p.i < p.n and (p.s[p.i] == "f" or p.s[p.i] == "b") and (p.i + 1 >= p.n or not isidch(p.s[p.i + 1])):
+            nm = numlab(p.s[st:p.i], p.s[p.i] == "f")
+            p.i += 1
+            return Expr(0, sym_get(nm), -1)
+        p.i = st
+        return Expr(p_number(p), -1, -1)
+    if isidst(c):
+        st = p.i
+        while p.i < p.n and isidch(p.s[p.i]):
+            p.i += 1
+        nm = p.s[st:p.i]
+        if nm in EQU:
+            return Expr(EQU[nm], -1, -1)
+        return Expr(0, sym_get(nm), -1)
+    die("bad expression: " + p.s)
+    return Expr(0, -1, -1)
+
+EQU = {}
+
+# fold a symbol difference whose ends are known now (same section, same frag)
+def e_fold(e):
+    if e.a >= 0 and e.b >= 0:
+        sa = SYMS[e.a]
+        sb = SYMS[e.b]
+        if sa.sec >= 0 and sa.sec == sb.sec and sa.chunk == sb.chunk:
+            return Expr(e.c + sa.off - sb.off, -1, -1)
+    if not e_const(e):
+        die("non-constant expression")
+    return e
+
+def binprec(p):
+    c = p_peek(p)
+    if c == "":
+        return -1
+    if c == "*" or c == "/" or c == "%":
+        return 3
+    if c == "<" and p.i + 1 < p.n and p.s[p.i + 1] == "<":
+        return 3
+    if c == ">" and p.i + 1 < p.n and p.s[p.i + 1] == ">":
+        return 3
+    if c == "|" or c == "&" or c == "^":
+        return 2
+    if c == "+" or c == "-":
+        return 1
+    return -1
+
+def p_expr(p, minp):
+    lhs = p_primary(p)
+    while True:
+        pr = binprec(p)
+        if pr < 0 or pr < minp:
+            return lhs
+        op = p.s[p.i]
+        p.i += 1
+        if op == "<" or op == ">":
+            p.i += 1
+        rhs = p_expr(p, pr + 1)
+        if op == "+":
+            lhs = e_add(lhs, rhs)
+        elif op == "-":
+            lhs = e_add(lhs, e_neg(rhs))
+        else:
+            x = e_fold(lhs).c
+            y = e_fold(rhs).c
+            if op == "*":
+                v = x * y
+            elif op == "/":
+                v = abs(x) // abs(y)
+                if (x < 0) != (y < 0):
+                    v = 0 - v
+            elif op == "%":
+                q = abs(x) // abs(y)
+                if (x < 0) != (y < 0):
+                    q = 0 - q
+                v = x - y * q
+            elif op == "<":
+                v = x << y
+            elif op == ">":
+                v = x >> y
+            elif op == "|":
+                v = x | y
+            elif op == "&":
+                v = x & y
+            else:
+                v = x ^ y
+            lhs = Expr(v, -1, -1)
+    return lhs
+
+def parse_expr(s):
+    p = P(s)
+    e = p_expr(p, 0)
+    if p_peek(p) != "":
+        die("junk after expression: " + s)
+    return e
+
+# is e a constant at parse time (no symbols, or a difference GNU as can fold now)?
+def e_known(e):
+    if e_const(e):
+        return True
+    if e.a >= 0 and e.b >= 0:
+        sa = SYMS[e.a]
+        sb = SYMS[e.b]
+        return sa.sec >= 0 and sa.sec == sb.sec and sa.chunk == sb.chunk
+    return False
+
+def e_val(e):
+    if e_const(e):
+        return e.c
+    return e.c + SYMS[e.a].off - SYMS[e.b].off
+
+# ---------------------------------------------------------------- sections and frags
+# A section is a list of frags: fixed bytes followed by an optional variable part
+# (an alignment or a relaxable jump), the same model GNU as uses.
+class Fix:
+    def __init__(self, chunk, off, size, e, adj, kind):
+        self.chunk = chunk
+        self.off = off
+        self.size = size
+        self.e = e
+        self.adj = adj
+        self.kind = kind  # 0 abs unsigned, 1 abs signed (32S), 2 pcrel, 3 pcrel call/jmp (PLT32 if global)
+
+class Sec:
+    def __init__(self, name, flags, typ):
+        self.name = name
+        self.flags = flags
+        self.typ = typ
+        self.align = 1
+        self.parts = []
+        self.clen = 0
+        self.chunks = []
+        self.chlen = []
+        self.vkind = []
+        self.va = []
+        self.vb = []
+        self.vc = []
+        self.vmode = []
+        self.ve = []
+        self.fix = []
+        self.late = []
+        self.sym = -1
+        self.chaddr = []
+        self.vsize = []
+        self.data = ""
+        self.size = 0
+        self.relocs = []
+        self.shidx = 0
+        self.relidx = 0
+        self.code = (flags & 4) != 0
+        self.st = []
+
+SECS = []
+SECIX = {}
+CUR = 0
+MODE = 64
+
+SHF_W = 1
+SHF_A = 2
+SHF_X = 4
+
+def sec_get(name, flags, typ):
+    if name in SECIX:
+        return SECIX[name]
+    s = Sec(name, flags, typ)
+    SECIX[name] = len(SECS)
+    SECS.append(s)
+    k = Sym(name, True)
+    k.sec = len(SECS) - 1
+    k.temp = True
+    s.sym = len(SYMS)
+    SYMS.append(k)
+    return len(SECS) - 1
+
+def default_flags(name):
+    if name == ".text" or startswith(name, ".text."):
+        return SHF_A | SHF_X
+    if name == ".data" or startswith(name, ".data.") or name == ".bss" or startswith(name, ".bss."):
+        return SHF_A | SHF_W
+    if name == ".rodata" or startswith(name, ".rodata."):
+        return SHF_A
+    return 0
+
+def default_type(name):
+    if name == ".bss" or startswith(name, ".bss."):
+        return 8
+    if startswith(name, ".note"):
+        return 7
+    return 1
+
+def emit(s):
+    sc = SECS[CUR]
+    if sc.typ != 8:
+        sc.parts.append(s)
+    sc.clen += len(s)
+
+def b1(v):
+    return chr(v & 255)
+
+def le(v, n):
+    if v <= BAND0 and v >= BAND0 - 3:
+        return le(BAND0 - v, 7)[0:n] + ("\x40" if n == 8 else "")
+    out = []
+    i = 0
+    while i < n:
+        out.append(chr((v >> (8 * i)) & 255))
+        i += 1
+    return "".join(out)
+
+def close_chunk(sc, kind, a, b, c, e):
+    sc.chunks.append("".join(sc.parts))
+    sc.chlen.append(sc.clen)
+    sc.vkind.append(kind)
+    sc.va.append(a)
+    sc.vb.append(b)
+    sc.vc.append(c)
+    sc.ve.append(e)
+    sc.vmode.append(MODE)
+    sc.parts = []
+    sc.clen = 0
+
+def add_fix(size, e, adj, kind):
+    sc = SECS[CUR]
+    sc.fix.append(Fix(len(sc.chunks), sc.clen, size, e, adj, kind))
+
+def define(name):
+    i = sym_get(name)
+    s = SYMS[i]
+    if s.sec != -1:
+        die("symbol redefined: " + name)
+    sc = SECS[CUR]
+    s.sec = CUR
+    s.chunk = len(sc.chunks)
+    s.off = sc.clen
+
+# data value of size n: a constant, or a fixup
+def emit_val(e, n, kind):
+    if e_known(e):
+        emit(le(e_val(e), n))
+    else:
+        add_fix(n, e, 0, kind)
+        emit(le(0, n))
+
+def do_align(p2, fill, mx):
+    sc = SECS[CUR]
+    a = 1 << p2
+    if a > sc.align:
+        sc.align = a
+    close_chunk(sc, 1, p2, mx, fill, Expr(0, -1, -1))
+
+NOPS = ["", "\x90", "\x66\x90", "\x0f\x1f\x00", "\x0f\x1f\x40\x00", "\x0f\x1f\x44\x00\x00",
+        "\x66\x0f\x1f\x44\x00\x00", "\x0f\x1f\x80\x00\x00\x00\x00", "\x0f\x1f\x84\x00\x00\x00\x00\x00",
+        "\x66\x0f\x1f\x84\x00\x00\x00\x00\x00", "\x66\x2e\x0f\x1f\x84\x00\x00\x00\x00\x00",
+        "\x66\x66\x2e\x0f\x1f\x84\x00\x00\x00\x00\x00"]
+
+def nopfill(n):
+    out = []
+    while n > 11:
+        out.append(NOPS[11])
+        n -= 11
+    out.append(NOPS[n])
+    return "".join(out)
+
+# ---------------------------------------------------------------- operands
+class Op:
+    def __init__(self):
+        self.k = 0  # 1 register, 2 immediate, 3 memory
+        self.r = 0
+        self.e = Expr(0, -1, -1)
+        self.seg = -1
+        self.base = -1
+        self.idx = -1
+        self.sc = 1
+        self.star = False
+
+def split_ops(s):
+    out = []
+    d = 0
+    st = 0
+    i = 0
+    n = len(s)
+    q = False
+    while i < n:
+        c = s[i]
+        if c == "\"":
+            q = not q
+        elif not q:
+            if c == "(":
+                d += 1
+            elif c == ")":
+                d -= 1
+            elif c == "," and d == 0:
+                out.append(s[st:i].strip())
+                st = i + 1
+        i += 1
+    t = s[st:].strip()
+    if t != "" or len(out) > 0:
+        out.append(t)
+    return out
+
+def reg_lookup(nm):
+    if nm in REG:
+        return REG[nm]
+    die("unknown register %" + nm)
+    return 0
+
+# "%name" at position i (s[i] == "%"); returns (code, end)
+def read_reg(s, i):
+    j = i + 1
+    while j < len(s) and isidch(s[j]):
+        j += 1
+    nm = s[i + 1:j]
+    if nm == "st" and j < len(s) and s[j] == "(":
+        k = s.find(")", j)
+        nm = "st(" + s[j + 1:k].strip() + ")"
+        j = k + 1
+    return [reg_lookup(nm), j]
+
+def parse_op(o):
+    op = Op()
+    if o.startswith("*"):
+        op.star = True
+        o = o[1:].strip()
+    if o.startswith("$"):
+        op.k = 2
+        op.e = parse_expr(o[1:])
+        return op
+    if o.startswith("%"):
+        rr = read_reg(o, 0)
+        rest = o[rr[1]:].strip()
+        if rest == "":
+            op.k = 1
+            op.r = rr[0]
+            return op
+        if rest.startswith(":"):
+            op.seg = rr[0]
+            o = rest[1:].strip()
+        else:
+            die("bad operand " + o)
+    op.k = 3
+    if o.endswith(")"):
+        d = 0
+        j = len(o) - 1
+        while j >= 0:
+            if o[j] == ")":
+                d += 1
+            elif o[j] == "(":
+                d -= 1
+                if d == 0:
+                    break
+            j -= 1
+        inner = o[j + 1:len(o) - 1].strip()
+        if "%" in inner or inner.startswith(","):
+            ds = o[0:j].strip()
+            if ds != "":
+                op.e = parse_expr(ds)
+            parts = inner.split(",")
+            b = parts[0].strip()
+            if b != "":
+                op.base = read_reg(b, 0)[0]
+            if len(parts) > 1:
+                x = parts[1].strip()
+                if x != "":
+                    op.idx = read_reg(x, 0)[0]
+            if len(parts) > 2:
+                op.sc = parse_expr(parts[2]).c
+            return op
+    op.e = parse_expr(o)
+    return op
+
+# ---------------------------------------------------------------- instruction builder
+class Ins:
+    def __init__(self):
+        self.seg = 0
+        self.p67 = 0
+        self.p66 = 0
+        self.rep = 0
+        self.lock = 0
+        self.rex = 0
+        self.rexneed = False
+        self.op = ""
+        self.hasmodrm = False
+        self.mod = 0
+        self.reg = 0
+        self.rm = 0
+        self.hassib = False
+        self.sib = 0
+        self.de = Expr(0, -1, -1)
+        self.dn = 0
+        self.dk = 0
+        self.ie = Expr(0, -1, -1)
+        self.inn = 0
+        self.ik = 0
+        self.i2e = Expr(0, -1, -1)
+        self.i2n = 0
+
+SEGPFX = [0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65]
+
+def chk_byte(I, r):
+    if (r & (1 << 16)) != 0:
+        I.rexneed = True
+
+def set_reg(I, r):
+    I.hasmodrm = True
+    I.reg = r & 7
+    if (r & 15) >= 8:
+        I.rex |= 4
+    chk_byte(I, r)
+
+def set_regn(I, n):
+    I.hasmodrm = True
+    I.reg = n
+
+def set_rm_reg(I, r):
+    I.hasmodrm = True
+    I.mod = 3
+    I.rm = r & 7
+    if (r & 15) >= 8:
+        I.rex |= 1
+    chk_byte(I, r)
+
+def sx8(v):
+    return v >= -128 and v <= 127
+
+def set_mem(I, op):
+    I.hasmodrm = True
+    if op.seg >= 0:
+        I.seg = SEGPFX[rnum(op.seg)]
+    asz = MODE
+    if op.base >= 0 and rcls(op.base) == 0:
+        asz = rsize(op.base) * 8
+    elif op.idx >= 0:
+        asz = rsize(op.idx) * 8
+    if asz != MODE and not (MODE == 64 and asz == 64):
+        if not (op.base >= 0 and rcls(op.base) == 6):
+            I.p67 = 1
+    e = op.e
+    if op.base >= 0 and rcls(op.base) == 6:
+        I.mod = 0
+        I.rm = 5
+        I.de = e
+        I.dn = 4
+        I.dk = 2
+        return
+    if asz == 16:
+        if op.base >= 0 or op.idx >= 0:
+            die("16-bit base/index addressing not supported")
+        I.mod = 0
+        I.rm = 6
+        I.de = e
+        I.dn = 2
+        I.dk = 0
+        return
+    if op.base < 0 and op.idx < 0:
+        I.mod = 0
+        I.de = e
+        I.dn = 4
+        if MODE == 64:
+            I.rm = 4
+            I.hassib = True
+            I.sib = 0x25
+            I.dk = 1
+        else:
+            I.rm = 5
+            I.dk = 0
+        return
+    b = -1
+    if op.base >= 0:
+        b = rnum(op.base)
+        if b >= 8:
+            I.rex |= 1
+    x = -1
+    if op.idx >= 0:
+        x = rnum(op.idx)
+        if x >= 8:
+            I.rex |= 2
+    if x < 0 and (b & 7) != 4:
+        I.rm = b & 7
+    else:
+        I.rm = 4
+        I.hassib = True
+        ss = 0
+        if op.sc == 2:
+            ss = 1
+        elif op.sc == 4:
+            ss = 2
+        elif op.sc == 8:
+            ss = 3
+        xi = 4
+        if x >= 0:
+            xi = x & 7
+        bi = 5
+        if b >= 0:
+            bi = b & 7
+        I.sib = (ss << 6) | (xi << 3) | bi
+    I.de = e
+    I.dk = 1 if MODE == 64 else 0
+    if b < 0:
+        I.mod = 0
+        I.dn = 4
+        return
+    if e_known(e):
+        v = e_val(e)
+        if v == 0 and (b & 7) != 5:
+            I.mod = 0
+            I.dn = 0
+        elif sx8(v):
+            I.mod = 1
+            I.dn = 1
+        else:
+            I.mod = 2
+            I.dn = 4
+    else:
+        I.mod = 2
+        I.dn = 4
+
+def set_rm(I, op):
+    if op.k == 1:
+        set_rm_reg(I, op.r)
+    elif op.k == 3:
+        set_mem(I, op)
+    else:
+        die("bad operand")
+
+def set_size(I, sz):
+    if sz == 2:
+        if MODE != 16:
+            I.p66 = 1
+    elif sz == 4:
+        if MODE == 16:
+            I.p66 = 1
+    elif sz == 8:
+        I.rex |= 8
+
+def set_imm(I, e, n, sz):
+    I.ie = e
+    I.inn = n
+    I.ik = 1 if (sz == 8 and n == 4) else 0
+
+def finish(I):
+    out = []
+    if I.seg != 0:
+        out.append(chr(I.seg))
+    if I.p67:
+        out.append("\x67")
+    if I.p66:
+        out.append("\x66")
+    if I.rep != 0:
+        out.append(chr(I.rep))
+    if I.lock:
+        out.append("\xf0")
+    if I.rex != 0 or I.rexneed:
+        if MODE != 64:
+            die("REX prefix outside 64-bit mode")
+        out.append(chr(0x40 | I.rex))
+    out.append(I.op)
+    if I.hasmodrm:
+        out.append(chr((I.mod << 6) | (I.reg << 3) | I.rm))
+        if I.hassib:
+            out.append(chr(I.sib))
+    emit("".join(out))
+    if I.dn > 0:
+        if I.dk == 2:
+            if e_known(I.de):
+                emit(le(e_val(I.de), 4))
+            else:
+                add_fix(4, I.de, I.inn + I.i2n, 2)
+                emit(le(0, 4))
+        else:
+            emit_val(I.de, I.dn, I.dk)
+    if I.inn > 0:
+        emit_val(I.ie, I.inn, I.ik)
+    if I.i2n > 0:
+        emit_val(I.i2e, I.i2n, 0)
+
+# ---------------------------------------------------------------- mnemonics
+CC = {"o": 0, "no": 1, "b": 2, "c": 2, "nae": 2, "ae": 3, "nb": 3, "nc": 3, "e": 4, "z": 4,
+      "ne": 5, "nz": 5, "be": 6, "na": 6, "a": 7, "nbe": 7, "s": 8, "ns": 9, "p": 10, "pe": 10,
+      "np": 11, "po": 11, "l": 12, "nge": 12, "ge": 13, "nl": 13, "le": 14, "ng": 14, "g": 15, "nle": 15}
+ALU = {"add": 0, "or": 1, "adc": 2, "sbb": 3, "and": 4, "sub": 5, "xor": 6, "cmp": 7}
+SHF = {"rol": 0, "ror": 1, "rcl": 2, "rcr": 3, "shl": 4, "sal": 4, "shr": 5, "sar": 7}
+UNA = {"not": 2, "neg": 3, "mul": 4, "div": 6, "idiv": 7, "inc": 0, "dec": 1}
+BTO = {"bt": 4, "bts": 5, "btr": 6, "btc": 7}
+FIXED = {"ret": "\xc3", "leave": "\xc9", "ud2": "\x0f\x0b", "syscall": "\x0f\x05", "sysretq": "\x48\x0f\x07",
+         "iretq": "\x48\xcf", "iret": "\xcf", "cld": "\xfc", "std": "\xfd", "cli": "\xfa", "sti": "\xfb",
+         "hlt": "\xf4", "pause": "\xf3\x90", "wrmsr": "\x0f\x30", "rdmsr": "\x0f\x32", "rdtsc": "\x0f\x31",
+         "rdtscp": "\x0f\x01\xf9", "clac": "\x0f\x01\xca", "stac": "\x0f\x01\xcb", "swapgs": "\x0f\x01\xf8",
+         "mfence": "\x0f\xae\xf0", "lfence": "\x0f\xae\xe8", "sfence": "\x0f\xae\xf8", "int3": "\xcc",
+         "cpuid": "\x0f\xa2", "xsetbv": "\x0f\x01\xd1", "xgetbv": "\x0f\x01\xd0", "pushfq": "\x9c", "popfq": "\x9d",
+         "lretq": "\x48\xcb", "lret": "\xcb", "fninit": "\xdb\xe3", "nop": "\x90", "cqo": "\x48\x99",
+         "cqto": "\x48\x99", "cltq": "\x48\x98", "cdqe": "\x48\x98", "cltd": "\x99", "cdq": "\x99",
+         "fld1": "\xd9\xe8", "fldz": "\xd9\xee", "fldln2": "\xd9\xed", "fldl2e": "\xd9\xea", "fldpi": "\xd9\xeb", "fldlg2": "\xd9\xec", "fldl2t": "\xd9\xe9", "fyl2xp1": "\xd9\xf9", "fprem1": "\xd9\xf5", "fxtract": "\xd9\xf4", "fsincos": "\xd9\xfb", "ftst": "\xd9\xe4", "fxam": "\xd9\xe5", "fwait": "\x9b", "fnclex": "\xdb\xe2",
+         "fyl2x": "\xd9\xf1", "fpatan": "\xd9\xf3", "fsin": "\xd9\xfe", "fcos": "\xd9\xff", "fptan": "\xd9\xf2",
+         "fmulp": "\xde\xc9", "faddp": "\xde\xc1", "fsubp": "\xde\xe9", "fsubrp": "\xde\xe1", "fdivp": "\xde\xf9",
+         "fdivrp": "\xde\xf1", "frndint": "\xd9\xfc", "f2xm1": "\xd9\xf0", "fxch": "\xd9\xc9", "fscale": "\xd9\xfd",
+         "fchs": "\xd9\xe0", "fabs": "\xd9\xe1", "fsqrt": "\xd9\xfa", "fprem": "\xd9\xf8", "wbinvd": "\x0f\x09",
+         "clts": "\x0f\x06", "int1": "\xf1", "lahf": "\x9f", "sahf": "\x9e", "cmc": "\xf5", "clc": "\xf8", "stc": "\xf9"}
+STRS = {"stos": "\xaa", "movs": "\xa4", "lods": "\xac", "cmps": "\xa6", "scas": "\xae", "ins": "\x6c", "outs": "\x6e"}
+SYSM = {"lgdt": "\x0f\x01:2", "lidt": "\x0f\x01:3", "sgdt": "\x0f\x01:0", "sidt": "\x0f\x01:1", "invlpg": "\x0f\x01:7",
+        "ltr": "\x0f\x00:3", "lldt": "\x0f\x00:2", "str": "\x0f\x00:1", "ldmxcsr": "\x0f\xae:2", "stmxcsr": "\x0f\xae:3",
+        "fxsave": "\x0f\xae:0", "fxrstor": "\x0f\xae:1", "xsave": "\x0f\xae:4", "xrstor": "\x0f\xae:5",
+        "clflush": "\x0f\xae:7", "fxsave64": "\x0f\xae:0W", "fxrstor64": "\x0f\xae:1W", "xsave64": "\x0f\xae:4W",
+        "xrstor64": "\x0f\xae:5W", "fldcw": "\xd9:5", "fnstcw": "\xd9:7", "fnstenv": "\xd9:6", "fldenv": "\xd9:4"}
+X87M = {"fld": "\xd9\xdd\xdb:0:5", "fst": "\xd9\xdd:2", "fstp": "\xd9\xdd\xdb:3:7", "fild": "\xdf\xdb\xdf:0:5",
+        "fistp": "\xdf\xdb\xdf:3:7", "fist": "\xdf\xdb:2", "fadd": "\xd8\xdc:0", "fmul": "\xd8\xdc:1",
+        "fsub": "\xd8\xdc:4", "fsubr": "\xd8\xdc:5", "fdiv": "\xd8\xdc:6", "fdivr": "\xd8\xdc:7",
+        "fcom": "\xd8\xdc:2", "fcomp": "\xd8\xdc:3"}
+# SSE: prefix byte (0 none), opcode, store opcode (0 none), flags: 1 = gpr destination/source rules
+SSE = {"addsd": [0xf2, 0x58], "subsd": [0xf2, 0x5c], "mulsd": [0xf2, 0x59], "divsd": [0xf2, 0x5e],
+       "sqrtsd": [0xf2, 0x51], "minsd": [0xf2, 0x5d], "maxsd": [0xf2, 0x5f],
+       "addss": [0xf3, 0x58], "subss": [0xf3, 0x5c], "mulss": [0xf3, 0x59], "divss": [0xf3, 0x5e],
+       "sqrtss": [0xf3, 0x51], "ucomisd": [0x66, 0x2e], "comisd": [0x66, 0x2f], "ucomiss": [0, 0x2e],
+       "comiss": [0, 0x2f], "xorpd": [0x66, 0x57], "andpd": [0x66, 0x54], "andnpd": [0x66, 0x55],
+       "orpd": [0x66, 0x56], "xorps": [0, 0x57], "andps": [0, 0x54], "orps": [0, 0x56], "pxor": [0x66, 0xef],
+       "cvtss2sd": [0xf3, 0x5a], "cvtsd2ss": [0xf2, 0x5a], "unpcklpd": [0x66, 0x14], "addpd": [0x66, 0x58],
+       "mulpd": [0x66, 0x59], "subpd": [0x66, 0x5c], "divpd": [0x66, 0x5e], "paddq": [0x66, 0xd4]}
+SSEMOV = {"movapd": [0x66, 0x28, 0x29], "movaps": [0, 0x28, 0x29], "movsd": [0xf2, 0x10, 0x11],
+          "movss": [0xf3, 0x10, 0x11], "movupd": [0x66, 0x10, 0x11], "movups": [0, 0x10, 0x11],
+          "movdqa": [0x66, 0x6f, 0x7f], "movdqu": [0xf3, 0x6f, 0x7f]}
+
+def sfx_size(c):
+    if c == "b":
+        return 1
+    if c == "w":
+        return 2
+    if c == "l":
+        return 4
+    if c == "q":
+        return 8
+    return 0
+
+def is_xmm(op):
+    return op.k == 1 and rcls(op.r) == 3
+
+def opsize(ops, sz):
+    if sz != 0:
+        return sz
+    for o in ops:
+        if o.k == 1 and rcls(o.r) == 0:
+            return rsize(o.r)
+    die("operand size unknown")
+    return 0
+
+def acc(op):
+    return op.k == 1 and rcls(op.r) == 0 and rnum(op.r) == 0
+
+def imm8ok(e):
+    return e_known(e) and sx8(e_val(e))
+
+def jump(cond, e):
+    sc = SECS[CUR]
+    close_chunk(sc, 2, cond, 0, 0, e)
+
+def asm_insn(mn, ostr, pfx):
+    I = Ins()
+    if pfx == "lock":
+        I.lock = 1
+    elif pfx == "rep" or pfx == "repe" or pfx == "repz":
+        I.rep = 0xf3
+    elif pfx == "repne" or pfx == "repnz":
+        I.rep = 0xf2
+    ops = []
+    for s in split_ops(ostr):
+        ops.append(parse_op(s))
+    n = len(ops)
+    if mn in FIXED and n == 0:
+        if mn == "fxch" or mn == "fmulp" or mn == "faddp":
+            pass
+        I.op = FIXED[mn]
+        finish(I)
+        return
+    # jumps and calls
+    if mn == "jmp" or mn == "call" or (mn[0] == "j" and mn[1:] in CC):
+        o = ops[0]
+        if o.star or o.k == 1:
+            I.op = "\xff"
+            set_regn(I, 2 if mn == "call" else 4)
+            set_rm(I, o)
+            finish(I)
+            return
+        if mn == "call":
+            emit("\xe8")
+            ck = 3
+            if o.e.a >= 0 and o.e.b < 0:
+                cs = SYMS[o.e.a]
+                if cs.sec >= 0 and not cs.isglob and not cs.isweak:
+                    ck = 2  # GNU: defined local at this point -> PC32 even if made global later
+            add_fix(4, o.e, 0, ck)
+            emit(le(0, 4))
+            return
+        if mn == "jmp":
+            jump(-1, o.e)
+        else:
+            jump(CC[mn[1:]], o.e)
+        return
+    if mn == "callq" or mn == "jmpq":
+        asm_insn(mn[0:len(mn) - 1], ostr, pfx)
+        return
+    if mn == "ljmp" or mn == "ljmpl" or mn == "lcall" or mn == "lcalll":
+        lc = mn.startswith("lcall")
+        if mn.endswith("l") and MODE == 16:
+            I.p66 = 1
+        if ops[0].star:
+            I.op = "\xff"
+            set_regn(I, 3 if lc else 5)
+            set_rm(I, ops[0])
+            finish(I)
+            return
+        I.op = "\x9a" if lc else "\xea"
+        osz = 2 if (MODE == 16 and I.p66 == 0) else 4
+        set_imm(I, ops[1].e, osz, 4)
+        I.i2e = ops[0].e
+        I.i2n = 2
+        finish(I)
+        return
+    if mn == "int":
+        I.op = "\xcd"
+        set_imm(I, ops[0].e, 1, 1)
+        finish(I)
+        return
+    base = mn
+    sz = 0
+    if not (mn in KNOWN):
+        c = mn[len(mn) - 1]
+        if sfx_size(c) != 0 and mn[0:len(mn) - 1] in KNOWN:
+            base = mn[0:len(mn) - 1]
+            sz = sfx_size(c)
+    # sse
+    if base in SSE or base in SSEMOV or ((base == "movq" or base == "movd" or mn == "movq") and n == 2 and (is_xmm(ops[0]) or is_xmm(ops[1]))):
+        sse(I, mn, ops)
+        return
+    if mn.startswith("cvt"):
+        sse_cvt(I, mn, ops)
+        return
+    if base in ALU:
+        alu(I, ALU[base], ops, opsize(ops, sz))
+        return
+    if base == "mov":
+        mov(I, ops, sz)
+        return
+    if base == "movabs":
+        s2 = opsize(ops, sz)
+        set_size(I, s2)
+        if ops[0].k == 2:
+            I.op = chr(0xb8 + (rnum(ops[1].r) & 7))
+            if rnum(ops[1].r) >= 8:
+                I.rex |= 1
+            set_imm(I, ops[0].e, 8, 8)
+            finish(I)
+            return
+        die("movabs form")
+    if base in SHF:
+        s2 = opsize([ops[n - 1]], sz)
+        set_size(I, s2)
+        nb = 1 if s2 == 1 else 0
+        dst = ops[n - 1]
+        set_regn(I, SHF[base])
+        if n == 1:
+            I.op = chr(0xd1 - nb)
+        elif ops[0].k == 1:
+            I.op = chr(0xd3 - nb)
+        elif e_known(ops[0].e) and e_val(ops[0].e) == 1:
+            I.op = chr(0xd1 - nb)
+        else:
+            I.op = chr(0xc1 - nb)
+            set_imm(I, ops[0].e, 1, 1)
+        set_rm(I, dst)
+        finish(I)
+        return
+    if base == "test":
+        s2 = opsize(ops, sz)
+        set_size(I, s2)
+        nb = 1 if s2 == 1 else 0
+        if ops[0].k == 2:
+            isz = s2 if s2 < 4 else 4
+            if acc(ops[1]):
+                I.op = chr(0xa9 - nb)
+                set_imm(I, ops[0].e, isz, s2)
+                finish(I)
+                return
+            I.op = chr(0xf7 - nb)
+            set_regn(I, 0)
+            set_rm(I, ops[1])
+            set_imm(I, ops[0].e, isz, s2)
+            finish(I)
+            return
+        I.op = chr(0x85 - nb)
+        if ops[0].k == 1:
+            set_reg(I, ops[0].r)
+            set_rm(I, ops[1])
+        else:
+            set_reg(I, ops[1].r)
+            set_rm(I, ops[0])
+        finish(I)
+        return
+    if base in UNA:
+        s2 = opsize(ops, sz)
+        set_size(I, s2)
+        nb = 1 if s2 == 1 else 0
+        u = UNA[base]
+        if u < 2 and MODE != 64 and s2 > 1 and ops[0].k == 1:
+            I.op = chr(0x40 + u * 8 + rnum(ops[0].r))
+            finish(I)
+            return
+        if u < 2:
+            I.op = chr(0xff - nb)
+        else:
+            I.op = chr(0xf7 - nb)
+        set_regn(I, u)
+        set_rm(I, ops[0])
+        finish(I)
+        return
+    if base == "imul":
+        s2 = opsize(ops, sz)
+        set_size(I, s2)
+        if n == 1:
+            I.op = "\xf7" if s2 > 1 else "\xf6"
+            set_regn(I, 5)
+            set_rm(I, ops[0])
+        elif n == 2 and ops[0].k != 2:
+            I.op = "\x0f\xaf"
+            set_reg(I, ops[1].r)
+            set_rm(I, ops[0])
+        else:
+            dst = ops[n - 1]
+            src = ops[n - 2] if n == 3 else ops[1]
+            set_reg(I, dst.r)
+            set_rm(I, src)
+            if imm8ok(ops[0].e):
+                I.op = "\x6b"
+                set_imm(I, ops[0].e, 1, 1)
+            else:
+                I.op = "\x69"
+                set_imm(I, ops[0].e, 2 if s2 == 2 else 4, s2)
+        finish(I)
+        return
+    if base == "push" or base == "pop":
+        o = ops[0]
+        ps = base == "push"
+        if o.k == 1 and rcls(o.r) == 0:
+            if rsize(o.r) == 2:
+                I.p66 = 1
+            I.op = chr((0x50 if ps else 0x58) + (rnum(o.r) & 7))
+            if rnum(o.r) >= 8:
+                I.rex |= 1
+            finish(I)
+            return
+        if o.k == 1 and rcls(o.r) == 1:
+            sn = rnum(o.r)
+            if sn == 4:
+                I.op = "\x0f\xa0" if ps else "\x0f\xa1"
+            elif sn == 5:
+                I.op = "\x0f\xa8" if ps else "\x0f\xa9"
+            else:
+                I.op = chr((0x06 if ps else 0x07) + sn * 8)
+            finish(I)
+            return
+        if o.k == 2:
+            if sz == 2:
+                I.p66 = 1
+            if imm8ok(o.e):
+                I.op = "\x6a"
+                set_imm(I, o.e, 1, 1)
+            else:
+                I.op = "\x68"
+                set_imm(I, o.e, 2 if sz == 2 else 4, 8 if MODE == 64 else 4)
+            finish(I)
+            return
+        if sz == 2:
+            I.p66 = 1
+        if ps:
+            I.op = "\xff"
+            set_regn(I, 6)
+        else:
+            I.op = "\x8f"
+            set_regn(I, 0)
+        set_rm(I, o)
+        finish(I)
+        return
+    if base == "lea":
+        set_size(I, rsize(ops[1].r))
+        I.op = "\x8d"
+        set_reg(I, ops[1].r)
+        set_mem(I, ops[0])
+        finish(I)
+        return
+    if mn in MOVX:
+        mv = MOVX[mn]
+        s2 = mv[2]
+        if s2 == 0:
+            s2 = rsize(ops[1].r)
+        set_size(I, s2)
+        if mv[0] == 0x63:
+            I.op = "\x63"
+        else:
+            I.op = "\x0f" + chr(mv[0])
+        set_reg(I, ops[1].r)
+        set_rm(I, ops[0])
+        finish(I)
+        return
+    if mn.startswith("set") and mn[3:] in CC:
+        I.op = "\x0f" + chr(0x90 + CC[mn[3:]])
+        set_regn(I, 0)
+        set_rm(I, ops[0])
+        finish(I)
+        return
+    if mn.startswith("cmov") and mn[4:] in CC:
+        set_size(I, rsize(ops[1].r))
+        I.op = "\x0f" + chr(0x40 + CC[mn[4:]])
+        set_reg(I, ops[1].r)
+        set_rm(I, ops[0])
+        finish(I)
+        return
+    if base in BTO:
+        s2 = opsize(ops, sz)
+        set_size(I, s2)
+        if ops[0].k == 2:
+            I.op = "\x0f\xba"
+            set_regn(I, BTO[base])
+            set_rm(I, ops[1])
+            set_imm(I, ops[0].e, 1, 1)
+        else:
+            I.op = "\x0f" + chr(0xa3 + (BTO[base] - 4) * 8)
+            set_reg(I, ops[0].r)
+            set_rm(I, ops[1])
+        finish(I)
+        return
+    if base == "bsr" or base == "bsf" or base == "popcnt" or base == "tzcnt" or base == "lzcnt":
+        set_size(I, opsize(ops, sz))
+        if base == "bsr":
+            I.op = "\x0f\xbd"
+        elif base == "bsf":
+            I.op = "\x0f\xbc"
+        else:
+            I.rep = 0xf3
+            I.op = "\x0f\xb8" if base == "popcnt" else ("\x0f\xbc" if base == "tzcnt" else "\x0f\xbd")
+        set_reg(I, ops[1].r)
+        set_rm(I, ops[0])
+        finish(I)
+        return
+    if base == "xchg":
+        s2 = opsize(ops, sz)
+        set_size(I, s2)
+        if s2 > 1 and ops[0].k == 1 and ops[1].k == 1 and (acc(ops[0]) or acc(ops[1])):
+            o = ops[1] if acc(ops[0]) else ops[0]
+            I.op = chr(0x90 + (rnum(o.r) & 7))
+            if rnum(o.r) >= 8:
+                I.rex |= 1
+            finish(I)
+            return
+        I.op = "\x87" if s2 > 1 else "\x86"
+        if ops[0].k == 1:
+            set_reg(I, ops[0].r)
+            set_rm(I, ops[1])
+        else:
+            set_reg(I, ops[1].r)
+            set_rm(I, ops[0])
+        finish(I)
+        return
+    if base == "xadd" or base == "cmpxchg":
+        s2 = opsize(ops, sz)
+        set_size(I, s2)
+        if base == "xadd":
+            I.op = "\x0f\xc1" if s2 > 1 else "\x0f\xc0"
+        else:
+            I.op = "\x0f\xb1" if s2 > 1 else "\x0f\xb0"
+        set_reg(I, ops[0].r)
+        set_rm(I, ops[1])
+        finish(I)
+        return
+    if base == "in" or base == "out":
+        isin = base == "in"
+        d = ops[1] if isin else ops[0]
+        p = ops[0] if isin else ops[1]
+        s2 = rsize(d.r)
+        if s2 == 2:
+            set_size(I, 2)
+        elif s2 == 4 and MODE == 16:
+            I.p66 = 1
+        nb = 1 if s2 == 1 else 0
+        if p.k == 2:
+            I.op = chr((0xe5 if isin else 0xe7) - nb)
+            set_imm(I, p.e, 1, 1)
+        else:
+            I.op = chr((0xed if isin else 0xef) - nb)
+        finish(I)
+        return
+    if base in STRS or (mn[0:len(mn) - 1] in STRS and n == 0):
+        b2 = mn[0:len(mn) - 1]
+        s2 = sfx_size(mn[len(mn) - 1])
+        set_size(I, s2)
+        o = ord(STRS[b2][0])
+        I.op = chr(o if s2 == 1 else o + 1)
+        finish(I)
+        return
+    if base in SYSM:
+        t = SYSM[base]
+        k = t.find(":")
+        I.op = t[0:k]
+        set_regn(I, ord(t[k + 1]) - 48)
+        if t.endswith("W"):
+            I.rex |= 8
+        if mn.endswith("l") and MODE == 16 and base != mn:
+            I.p66 = 1
+        set_rm(I, ops[0])
+        finish(I)
+        return
+    if mn == "fnstsw" and n == 1 and ops[0].k == 1:
+        I.op = "\xdf\xe0"
+        finish(I)
+        return
+    if mn == "fnstsw":
+        I.op = "\xdd"
+        set_regn(I, 7)
+        set_mem(I, ops[0])
+        finish(I)
+        return
+    if n == 1 and ops[0].k == 1 and rcls(ops[0].r) == 4:
+        k = rnum(ops[0].r)
+        if mn == "fstp":
+            I.op = "\xdd" + chr(0xd8 + k)
+        elif mn == "fst":
+            I.op = "\xdd" + chr(0xd0 + k)
+        elif mn == "fld":
+            I.op = "\xd9" + chr(0xc0 + k)
+        elif mn == "fxch":
+            I.op = "\xd9" + chr(0xc8 + k)
+        else:
+            die("x87 form " + mn)
+        finish(I)
+        return
+    x87(I, mn, ops)
+
+KNOWN = {}
+MOVX = {"movzbl": [0xb6, 0, 4], "movzbq": [0xb6, 0, 8], "movzbw": [0xb6, 0, 2], "movzwl": [0xb7, 0, 4],
+        "movzwq": [0xb7, 0, 8], "movsbl": [0xbe, 0, 4], "movsbq": [0xbe, 0, 8], "movsbw": [0xbe, 0, 2],
+        "movswl": [0xbf, 0, 4], "movswq": [0xbf, 0, 8], "movslq": [0x63, 0, 8], "movzx": [0xb6, 0, 0]}
+
+def known_init():
+    for t in ["mov", "movabs", "test", "imul", "push", "pop", "lea", "xchg", "xadd", "cmpxchg", "in", "out",
+              "bsr", "bsf", "popcnt", "tzcnt", "lzcnt", "lgdt", "lidt", "sgdt", "sidt", "ltr", "lldt", "str"]:
+        KNOWN[t] = 1
+    for t in ALU:
+        KNOWN[t] = 1
+    for t in SHF:
+        KNOWN[t] = 1
+    for t in UNA:
+        KNOWN[t] = 1
+    for t in BTO:
+        KNOWN[t] = 1
+    for t in SYSM:
+        KNOWN[t] = 1
+
+def alu(I, k, ops, s2):
+    set_size(I, s2)
+    nb = 1 if s2 == 1 else 0
+    src = ops[0]
+    dst = ops[1]
+    if src.k == 2:
+        isz = s2 if s2 < 4 else 4
+        if s2 == 1:
+            if acc(dst):
+                I.op = chr(k * 8 + 4)
+                set_imm(I, src.e, 1, 1)
+                finish(I)
+                return
+            I.op = "\x80"
+            set_imm(I, src.e, 1, 1)
+        elif imm8ok(src.e):
+            I.op = "\x83"
+            set_imm(I, src.e, 1, 1)
+        elif acc(dst):
+            I.op = chr(k * 8 + 5)
+            set_imm(I, src.e, isz, s2)
+            finish(I)
+            return
+        else:
+            I.op = "\x81"
+            set_imm(I, src.e, isz, s2)
+        set_regn(I, k)
+        set_rm(I, dst)
+        finish(I)
+        return
+    if src.k == 1:
+        I.op = chr(k * 8 + 1 - nb)
+        set_reg(I, src.r)
+        set_rm(I, dst)
+    else:
+        I.op = chr(k * 8 + 3 - nb)
+        set_reg(I, dst.r)
+        set_rm(I, src)
+    finish(I)
+
+def mov(I, ops, sz):
+    src = ops[0]
+    dst = ops[1]
+    if dst.k == 1 and (rcls(dst.r) == 2 or rcls(dst.r) == 5):
+        I.op = "\x0f\x22" if rcls(dst.r) == 2 else "\x0f\x23"
+        set_reg(I, dst.r)
+        set_rm_reg(I, src.r)
+        finish(I)
+        return
+    if src.k == 1 and (rcls(src.r) == 2 or rcls(src.r) == 5):
+        I.op = "\x0f\x20" if rcls(src.r) == 2 else "\x0f\x21"
+        set_reg(I, src.r)
+        set_rm_reg(I, dst.r)
+        finish(I)
+        return
+    if dst.k == 1 and rcls(dst.r) == 1:
+        I.op = "\x8e"
+        if src.k == 1 and rsize(src.r) == 8:
+            I.rex |= 8
+        set_regn(I, rnum(dst.r))
+        set_rm(I, src)
+        finish(I)
+        return
+    if src.k == 1 and rcls(src.r) == 1:
+        I.op = "\x8c"
+        if dst.k == 1 and rsize(dst.r) == 2:
+            set_size(I, 2)
+        set_regn(I, rnum(src.r))
+        set_rm(I, dst)
+        finish(I)
+        return
+    s2 = opsize(ops, sz)
+    nb = 1 if s2 == 1 else 0
+    if src.k == 2:
+        if dst.k == 1:
+            r = dst.r
+            if s2 == 8:
+                if e_known(src.e) and not (e_val(src.e) >= -2147483648 and e_val(src.e) <= 2147483647):
+                    set_size(I, 8)
+                    I.op = chr(0xb8 + (rnum(r) & 7))
+                    if rnum(r) >= 8:
+                        I.rex |= 1
+                    set_imm(I, src.e, 8, 8)
+                    finish(I)
+                    return
+                set_size(I, 8)
+                I.op = "\xc7"
+                set_regn(I, 0)
+                set_rm_reg(I, r)
+                set_imm(I, src.e, 4, 8)
+                finish(I)
+                return
+            set_size(I, s2)
+            chk_byte(I, r)
+            I.op = chr((0xb0 if s2 == 1 else 0xb8) + (rnum(r) & 7))
+            if rnum(r) >= 8:
+                I.rex |= 1
+            set_imm(I, src.e, s2, s2)
+            finish(I)
+            return
+        set_size(I, s2)
+        I.op = chr(0xc7 - nb)
+        set_regn(I, 0)
+        set_mem(I, dst)
+        set_imm(I, src.e, s2 if s2 < 4 else 4, s2)
+        finish(I)
+        return
+    set_size(I, s2)
+    if MODE != 64:
+        m = dst if src.k == 1 else src
+        r = src if src.k == 1 else dst
+        if m.k == 3 and m.base < 0 and m.idx < 0 and acc(r):
+            if m.seg >= 0:
+                I.seg = SEGPFX[rnum(m.seg)]
+            if src.k == 1:
+                I.op = chr(0xa3 - nb)
+            else:
+                I.op = chr(0xa1 - nb)
+            I.de = m.e
+            I.dn = 2 if MODE == 16 else 4
+            I.dk = 0
+            finish(I)
+            return
+    if src.k == 1:
+        I.op = chr(0x89 - nb)
+        set_reg(I, src.r)
+        set_rm(I, dst)
+    else:
+        I.op = chr(0x8b - nb)
+        set_reg(I, dst.r)
+        set_rm(I, src)
+    finish(I)
+
+def sse_pfx(I, p):
+    if p == 0x66:
+        I.p66 = 1
+    elif p != 0:
+        I.rep = p
+
+def sse(I, mn, ops):
+    src = ops[0]
+    dst = ops[1]
+    if mn == "movq" or mn == "movd":
+        w = mn == "movq"
+        if is_xmm(dst) and src.k == 1 and rcls(src.r) == 0:
+            I.p66 = 1
+            if w:
+                I.rex |= 8
+            I.op = "\x0f\x6e"
+            set_reg(I, dst.r)
+            set_rm_reg(I, src.r)
+        elif is_xmm(src) and dst.k == 1 and rcls(dst.r) == 0:
+            I.p66 = 1
+            if w:
+                I.rex |= 8
+            I.op = "\x0f\x7e"
+            set_reg(I, src.r)
+            set_rm_reg(I, dst.r)
+        elif w and is_xmm(dst):
+            I.rep = 0xf3
+            I.op = "\x0f\x7e"
+            set_reg(I, dst.r)
+            set_rm(I, src)
+        elif w:
+            I.p66 = 1
+            I.op = "\x0f\xd6"
+            set_reg(I, src.r)
+            set_rm(I, dst)
+        elif is_xmm(dst):
+            I.p66 = 1
+            I.op = "\x0f\x6e"
+            set_reg(I, dst.r)
+            set_rm(I, src)
+        else:
+            I.p66 = 1
+            I.op = "\x0f\x7e"
+            set_reg(I, src.r)
+            set_rm(I, dst)
+        finish(I)
+        return
+    if mn in SSEMOV:
+        t = SSEMOV[mn]
+        sse_pfx(I, t[0])
+        if dst.k == 3:
+            I.op = "\x0f" + chr(t[2])
+            set_reg(I, src.r)
+            set_rm(I, dst)
+        else:
+            I.op = "\x0f" + chr(t[1])
+            set_reg(I, dst.r)
+            set_rm(I, src)
+        finish(I)
+        return
+    t = SSE[mn]
+    sse_pfx(I, t[0])
+    I.op = "\x0f" + chr(t[1])
+    set_reg(I, dst.r)
+    set_rm(I, src)
+    finish(I)
+
+def sse_cvt(I, mn, ops):
+    src = ops[0]
+    dst = ops[1]
+    if mn.startswith("cvtsi2sd") or mn.startswith("cvtsi2ss"):
+        I.rep = 0xf2 if mn.startswith("cvtsi2sd") else 0xf3
+        sfx = mn[8:]
+        if sfx == "q" or (src.k == 1 and rsize(src.r) == 8):
+            I.rex |= 8
+        I.op = "\x0f\x2a"
+        set_reg(I, dst.r)
+        set_rm(I, src)
+        finish(I)
+        return
+    if mn.startswith("cvttsd2si") or mn.startswith("cvtsd2si") or mn.startswith("cvttss2si") or mn.startswith("cvtss2si"):
+        I.rep = 0xf2 if "sd2" in mn else 0xf3
+        if rsize(dst.r) == 8:
+            I.rex |= 8
+        I.op = "\x0f\x2c" if mn.startswith("cvtt") else "\x0f\x2d"
+        set_reg(I, dst.r)
+        set_rm(I, src)
+        finish(I)
+        return
+    die("unsupported " + mn)
+
+def x87(I, mn, ops):
+    b = ""
+    s = ""
+    if mn.endswith("ll"):
+        b = mn[0:len(mn) - 2]
+        s = "q"
+    else:
+        b = mn[0:len(mn) - 1]
+        s = mn[len(mn) - 1]
+    if not (b in X87M) or len(ops) != 1 or ops[0].k != 3:
+        die("unsupported instruction " + mn)
+    t = X87M[b]
+    k = t.find(":")
+    opc = t[0:k]
+    rest = t[k + 1:]
+    r1 = ord(rest[0]) - 48
+    r2 = r1
+    if len(rest) > 2:
+        r2 = ord(rest[2]) - 48
+    isint = b.startswith("fi")
+    idx = 0
+    reg = r1
+    if isint:
+        if s == "s":
+            idx = 0
+        elif s == "l":
+            idx = 1
+        else:
+            idx = 2
+            reg = r2
+    else:
+        if s == "s":
+            idx = 0
+        elif s == "l":
+            idx = 1
+        else:
+            idx = 2
+            reg = r2
+    if idx >= len(opc):
+        die("unsupported instruction " + mn)
+    I.op = opc[idx]
+    set_regn(I, reg)
+    set_mem(I, ops[0])
+    finish(I)
+
+# ---------------------------------------------------------------- source lines and directives
+INCDIRS = []
+
+def strip_comment(l):
+    if not ("#" in l) and not ("/*" in l):
+        return l
+    q = False
+    i = 0
+    n = len(l)
+    while i < n:
+        c = l[i]
+        if q:
+            if c == "\\":
+                i += 1
+            elif c == "\"":
+                q = False
+        elif c == "\"":
+            q = True
+        elif c == "#":
+            return l[0:i]
+        elif c == "/" and i + 1 < n and l[i + 1] == "*":
+            k = l.find("*/", i + 2)
+            if k < 0:
+                return l[0:i]
+            l = l[0:i] + " " + l[k + 2:]
+            n = len(l)
+        i += 1
+    return l
+
+def split_stmts(l):
+    if not (";" in l):
+        return [l]
+    out = []
+    q = False
+    st = 0
+    i = 0
+    while i < len(l):
+        c = l[i]
+        if q:
+            if c == "\\":
+                i += 1
+            elif c == "\"":
+                q = False
+        elif c == "\"":
+            q = True
+        elif c == ";":
+            out.append(l[st:i])
+            st = i + 1
+        i += 1
+    out.append(l[st:])
+    return out
+
+def parse_string(s):
+    s = s.strip()
+    if not s.startswith("\""):
+        die("expected string")
+    out = []
+    i = 1
+    while i < len(s) and s[i] != "\"":
+        c = s[i]
+        if c == "\\":
+            i += 1
+            c = s[i]
+            if c == "n":
+                out.append("\n")
+            elif c == "t":
+                out.append("\t")
+            elif c == "r":
+                out.append("\r")
+            elif c == "b":
+                out.append("\b")
+            elif c == "f":
+                out.append("\f")
+            elif c == "x":
+                v = 0
+                while i + 1 < len(s) and hexval(s[i + 1]) >= 0:
+                    i += 1
+                    v = v * 16 + hexval(s[i])
+                out.append(chr(v & 255))
+            elif c >= "0" and c <= "7":
+                v = 0
+                k = 0
+                while k < 3 and i < len(s) and s[i] >= "0" and s[i] <= "7":
+                    v = v * 8 + ord(s[i]) - 48
+                    i += 1
+                    k += 1
+                i -= 1
+                out.append(chr(v & 255))
+            else:
+                out.append(c)
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+def log2(n):
+    k = 0
+    while (1 << k) < n:
+        k += 1
+    return k
+
+def switch_sec(name, flags, typ):
+    global CUR
+    CUR = sec_get(name, flags, typ)
+
+def directive(d, rest):
+    global MODE
+    if d == ".text" or d == ".data" or d == ".bss":
+        switch_sec(d, default_flags(d), default_type(d))
+        return
+    if d == ".section":
+        args = split_ops(rest)
+        nm = args[0]
+        fl = default_flags(nm)
+        ty = default_type(nm)
+        if len(args) > 1:
+            fs = parse_string(args[1])
+            fl = 0
+            for c in fs:
+                if c == "a":
+                    fl |= SHF_A
+                elif c == "w":
+                    fl |= SHF_W
+                elif c == "x":
+                    fl |= SHF_X
+                else:
+                    die("section flag " + c)
+        if len(args) > 2:
+            t = args[2]
+            if t == "@progbits":
+                ty = 1
+            elif t == "@nobits":
+                ty = 8
+            elif t == "@note":
+                ty = 7
+            else:
+                die("section type " + t)
+        switch_sec(nm, fl, ty)
+        return
+    if d == ".globl" or d == ".global" or d == ".weak":
+        for nm in split_ops(rest):
+            s = SYMS[sym_get(nm)]
+            if d == ".weak":
+                s.isweak = True
+            else:
+                s.isglob = True
+        return
+    if d == ".p2align" or d == ".balign" or d == ".align":
+        args = split_ops(rest)
+        v = parse_expr(args[0]).c
+        p2 = v if d == ".p2align" else log2(v)
+        fill = -1
+        mx = 0
+        if len(args) > 1 and args[1] != "":
+            fill = parse_expr(args[1]).c
+        if len(args) > 2:
+            mx = parse_expr(args[2]).c
+        do_align(p2, fill, mx)
+        return
+    if d == ".byte" or d == ".short" or d == ".word" or d == ".value" or d == ".2byte" or d == ".long" or d == ".int" or d == ".4byte" or d == ".quad" or d == ".8byte":
+        n = 1
+        if d == ".short" or d == ".word" or d == ".value" or d == ".2byte":
+            n = 2
+        elif d == ".long" or d == ".int" or d == ".4byte":
+            n = 4
+        elif d == ".quad" or d == ".8byte":
+            n = 8
+        for a in split_ops(rest):
+            emit_val(parse_expr(a), n, 0)
+        return
+    if d == ".zero" or d == ".skip" or d == ".space":
+        args = split_ops(rest)
+        n = parse_expr(args[0]).c
+        f = 0
+        if len(args) > 1:
+            f = parse_expr(args[1]).c
+        if SECS[CUR].typ == 8:
+            SECS[CUR].clen += n
+        else:
+            emit(chr(f & 255) * n)
+        return
+    if d == ".fill":
+        args = split_ops(rest)
+        rep = parse_expr(args[0]).c
+        sz = 1
+        val = 0
+        if len(args) > 1:
+            sz = parse_expr(args[1]).c
+        if len(args) > 2:
+            val = parse_expr(args[2]).c
+        one = le(val, sz if sz <= 4 else 4)
+        if sz > 4:
+            one = one + le(0, sz - 4)
+        emit(one * rep)
+        return
+    if d == ".ascii" or d == ".asciz" or d == ".string":
+        for a in split_ops(rest):
+            s = parse_string(a)
+            if d != ".ascii":
+                s = s + "\x00"
+            emit(s)
+        return
+    if d == ".incbin":
+        fn = parse_string(rest)
+        data = ""
+        found = False
+        if __syscall(21, fn, 0, 0) == 0:
+            data = read_file(fn)
+            found = True
+        for dd in INCDIRS:
+            if not found and __syscall(21, dd + "/" + fn, 0, 0) == 0:
+                data = read_file(dd + "/" + fn)
+                found = True
+        if not found:
+            die("incbin file not found: " + fn)
+        emit(data)
+        return
+    if d == ".code16":
+        MODE = 16
+        return
+    if d == ".code32":
+        MODE = 32
+        return
+    if d == ".code64":
+        MODE = 64
+        return
+    if d == ".set" or d == ".equ":
+        args = split_ops(rest)
+        set_equ(args[0], args[1])
+        return
+    if d == ".type" or d == ".size" or d == ".ident" or d == ".file":
+        die("directive not supported: " + d)
+    die("unknown directive " + d)
+
+def set_equ(nm, ex):
+    e = parse_expr(ex)
+    if not e_known(e):
+        die("non-constant .set")
+    EQU[nm] = e_val(e)
+
+PREFIXES = {"lock": 1, "rep": 1, "repe": 1, "repz": 1, "repne": 1, "repnz": 1}
+
+def stmt(l):
+    l = l.strip()
+    while l != "":
+        i = 0
+        n = len(l)
+        if isdig(l[0]):
+            while i < n and isdig(l[i]):
+                i += 1
+            if i < n and l[i] == ":":
+                k = l[0:i]
+                c = 0
+                if k in NUMLAB:
+                    c = NUMLAB[k]
+                NUMLAB[k] = c + 1
+                define(k + "\x02" + str(c + 1))
+                l = l[i + 1:].strip()
+                continue
+            break
+        if isidst(l[0]):
+            while i < n and isidch(l[i]):
+                i += 1
+            j = i
+            while j < n and (l[j] == " " or l[j] == "\t"):
+                j += 1
+            if j < n and l[j] == ":" and l[0] != "." or (j < n and l[j] == ":" and i == j):
+                define(l[0:i])
+                l = l[j + 1:].strip()
+                continue
+            if j < n and l[j] == "=" and (j + 1 >= n or l[j + 1] != "="):
+                set_equ(l[0:i], l[j + 1:])
+                return
+        break
+    if l == "":
+        return
+    k = 0
+    n = len(l)
+    while k < n and l[k] != " " and l[k] != "\t":
+        k += 1
+    w = l[0:k]
+    rest = l[k:].strip()
+    if w[0] == ".":
+        directive(w, rest)
+        return
+    pfx = ""
+    if w in PREFIXES:
+        pfx = w
+        k = 0
+        n = len(rest)
+        while k < n and rest[k] != " " and rest[k] != "\t":
+            k += 1
+        w = rest[0:k]
+        rest = rest[k:].strip()
+        if w == "":
+            die("bare prefix")
+    asm_insn(w, rest, pfx)
+
+def assemble(text):
+    global LINE
+    lines = text.split("\n")
+    for l in lines:
+        LINE += 1
+        l = strip_comment(l)
+        if l.strip() == "":
+            continue
+        for s in split_stmts(l):
+            stmt(s)
+
+# ---------------------------------------------------------------- layout and relaxation
+def sym_addr(s):
+    return SECS[s.sec].chaddr[s.chunk] + s.off
+
+def jlong(sc, i):
+    m = sc.vmode[i]
+    if sc.va[i] < 0:
+        return 3 if m == 16 else 5
+    return 4 if m == 16 else 6
+
+def align_pad(sc, i, addr):
+    a = 1 << sc.va[i]
+    pad = (a - (addr % a)) % a
+    if sc.vb[i] > 0 and pad > sc.vb[i]:
+        pad = 0
+    return pad
+
+def layout(si):
+    sc = SECS[si]
+    close_chunk(sc, 0, 0, 0, 0, Expr(0, -1, -1))
+    n = len(sc.chunks)
+    st = []
+    i = 0
+    while i < n:
+        v = 0
+        if sc.vkind[i] == 2:
+            e = sc.ve[i]
+            if e.a < 0 or e.b >= 0:
+                die("bad jump target")
+            t = SYMS[e.a]
+            if t.sec != si or t.isweak:
+                v = 2
+        st.append(v)
+        sc.chaddr.append(0)
+        sc.vsize.append(0)
+        i += 1
+    # regions (as in GNU relax_segment): a new region starts after each alignment
+    reg = []
+    r = 0
+    i = 0
+    while i < n:
+        reg.append(r)
+        if sc.vkind[i] == 1:
+            r += 1
+        i += 1
+    # initial pass: all jumps short
+    addr = 0
+    i = 0
+    while i < n:
+        sc.chaddr[i] = addr
+        addr += sc.chlen[i]
+        vs = 0
+        if sc.vkind[i] == 1:
+            vs = align_pad(sc, i, addr)
+        elif sc.vkind[i] == 2:
+            vs = 2 if st[i] == 0 else jlong(sc, i)
+        sc.vsize[i] = vs
+        addr += vs
+        i += 1
+    # GNU relax_segment style passes: addresses update in order; forward targets
+    # are estimated as old address + stretch so far.
+    while True:
+        ch = False
+        addr = 0
+        i = 0
+        while i < n:
+            old = sc.chaddr[i]
+            stretch = addr - old
+            sc.chaddr[i] = addr
+            addr += sc.chlen[i]
+            k = sc.vkind[i]
+            vs = sc.vsize[i]
+            if k == 1:
+                vs = align_pad(sc, i, addr)
+            elif k == 2 and st[i] == 0:
+                e = sc.ve[i]
+                t = SYMS[e.a]
+                ta = SECS[si].chaddr[t.chunk] + t.off
+                if t.chunk > i and stretch != 0:
+                    if stretch < 0 or reg[t.chunk] == reg[i]:
+                        ta += stretch
+                    elif ta < addr:
+                        ta = sc.chaddr[i + 1] + stretch
+                d = ta + e.c - (addr + 2)
+                if d < -128 or d > 127:
+                    st[i] = 1
+                    ch = True
+                    vs = jlong(sc, i)
+            sc.vsize[i] = vs
+            addr += vs
+            i += 1
+        sc.size = addr
+        if not ch:
+        # one more stable pass to settle alignment
+            break
+    return st
+
+def put(buf, off, v, n):
+# buf is a list of chunk strings; patch is done on a single string
+    return buf[0:off] + le(v, n) + buf[off + n:]
+
+class Rel:
+    def __init__(self, off, sym, typ, add):
+        self.off = off
+        self.sym = sym
+        self.typ = typ
+        self.add = add
+
+R_64 = 1
+R_PC32 = 2
+R_PLT32 = 4
+R_32 = 10
+R_32S = 11
+R_16 = 12
+R_PC16 = 13
+R_8 = 14
+R_PC8 = 15
+
+def fix_value(si, f, P, late):
+# returns [known, value, rel] ; P = section offset of the field
+    sc = SECS[si]
+    e = f.e
+    if e.b >= 0:
+        sa = SYMS[e.b]
+        if e.a < 0 or SYMS[e.a].sec != sa.sec or sa.sec < 0:
+            die("unsupported symbol difference")
+        return [1, sym_addr(SYMS[e.a]) - sym_addr(sa) + e.c, None]
+    if e.a < 0:
+        return [1, e.c, None]
+    s = SYMS[e.a]
+    pc = f.kind >= 2
+    local = not s.isglob and not s.isweak and s.sec >= 0
+    if pc:
+        if s.sec == si and local or (s.sec == si and f.kind == 3 and not s.isweak and not late and False):
+            return [1, sym_addr(s) + e.c - (P + f.size + f.adj), None]
+        t = R_PC32
+        if f.size == 2:
+            t = R_PC16
+        elif f.size == 1:
+            t = R_PC8
+        if f.kind == 3 and not local:
+            t = R_PLT32
+        if local:
+            SYMS[SECS[s.sec].sym].used = True
+            return [0, 0, Rel(P, SECS[s.sec].sym, t, sym_addr(s) + e.c - f.size - f.adj)]
+        return [0, 0, Rel(P, e.a, t, e.c - f.size - f.adj)]
+    t = R_64
+    if f.size == 4:
+        t = R_32S if f.kind == 1 else R_32
+    elif f.size == 2:
+        t = R_16
+    elif f.size == 1:
+        t = R_8
+    if local:
+        SYMS[SECS[s.sec].sym].used = True
+        return [0, 0, Rel(P, SECS[s.sec].sym, t, sym_addr(s) + e.c)]
+    return [0, 0, Rel(P, e.a, t, e.c)]
+
+def build(si):
+    sc = SECS[si]
+    st = sc.st
+    n = len(sc.chunks)
+    if sc.typ == 8:
+        sc.data = ""
+        sc.relocs = []
+        return
+    fixed = []
+    late = []
+    fi = 0
+    nf = len(sc.fix)
+    out = []
+    i = 0
+    while i < n:
+        c = sc.chunks[i]
+        if fi < nf and sc.fix[fi].chunk == i:
+            parts = []
+            pos = 0
+            while fi < nf and sc.fix[fi].chunk == i:
+                f = sc.fix[fi]
+                r = fix_value(si, f, sc.chaddr[i] + f.off, False)
+                parts.append(c[pos:f.off])
+                if r[0] == 1:
+                    parts.append(le(r[1], f.size))
+                else:
+                    parts.append(c[f.off:f.off + f.size])
+                    fixed.append(r[2])
+                pos = f.off + f.size
+                fi += 1
+            parts.append(c[pos:])
+            c = "".join(parts)
+        out.append(c)
+        k = sc.vkind[i]
+        vs = sc.vsize[i]
+        end = sc.chaddr[i] + sc.chlen[i]
+        if k == 1 and vs > 0:
+            if sc.vc[i] >= 0:
+                out.append(chr(sc.vc[i] & 255) * vs)
+            elif sc.code:
+                out.append(nopfill(vs))
+            else:
+                out.append("\x00" * vs)
+        elif k == 2:
+            e = sc.ve[i]
+            cond = sc.va[i]
+            if st[i] == 0:
+                d = sym_addr(SYMS[e.a]) + e.c - (end + 2)
+                out.append((chr(0xeb) if cond < 0 else chr(0x70 + cond)) + b1(d))
+            else:
+                op = "\xe9" if cond < 0 else "\x0f" + chr(0x80 + cond)
+                dn = vs - len(op)
+                f = Fix(0, 0, dn, e, 0, 3 if cond < 0 or True else 2)
+                f.kind = 3
+                P = end + len(op)
+                if st[i] == 1:
+                    d = sym_addr(SYMS[e.a]) + e.c - (P + dn)
+                    out.append(op + le(d, dn))
+                else:
+                    r = fix_value(si, f, P, True)
+                    out.append(op + le(0, dn))
+                    late.append(r[2])
+        i += 1
+    sc.data = "".join(out)
+    for r in late:
+        fixed.append(r)
+    sc.relocs = fixed
+
+# ---------------------------------------------------------------- ELF writer
+def revs(s):
+    out = []
+    i = len(s) - 1
+    while i >= 0:
+        out.append(s[i])
+        i -= 1
+    return "".join(out)
+
+# BFD-style string table with suffix merging; returns [blob, {name: offset}]
+def strtab(names):
+    U = []
+    seen = {}
+    for nm in names:
+        if not (nm in seen):
+            seen[nm] = 0
+            U.append(nm)
+    keys = []
+    i = 0
+    while i < len(U):
+        keys.append(revs(U[i]) + "\x00" + str(i))
+        i += 1
+    keys = sorted(keys)
+    root = {}
+    last = ""
+    j = len(keys) - 1
+    while j >= 0:
+        k = keys[j]
+        p = k.find("\x00")
+        r = k[0:p]
+        nm = U[int(k[p + 1:])]
+        if last != "" and last.startswith(r):
+            root[nm] = revs(last)
+        else:
+            last = r
+        j -= 1
+    off = {}
+    parts = ["\x00"]
+    pos = 1
+    for nm in U:
+        if not (nm in root):
+            off[nm] = pos
+            parts.append(nm + "\x00")
+            pos += len(nm) + 1
+    for nm in U:
+        if nm in root:
+            rt = root[nm]
+            off[nm] = off[rt] + len(rt) - len(nm)
+    return ["".join(parts), off]
+
+def pad_to(parts, pos, a):
+    p = (a - (pos % a)) % a
+    if p > 0:
+        parts.append("\x00" * p)
+    return pos + p
+
+def shdr(name, typ, flags, off, size, link, info, align, ent):
+    return le(name, 4) + le(typ, 4) + le(flags, 8) + le(0, 8) + le(off, 8) + le(size, 8) + le(link, 4) + le(info, 4) + le(align, 8) + le(ent, 8)
+
+def write_elf(path):
+    idx = 1
+    for sc in SECS:
+        sc.shidx = idx
+        idx += 1
+        if len(sc.relocs) > 0:
+            sc.relidx = idx
+            idx += 1
+    symi = idx
+    stri = idx + 1
+    shsi = idx + 2
+    nsh = idx + 3
+    # symbol order
+    order = []
+    for i in range(len(SYMS)):
+        s = SYMS[i]
+        if s.issec:
+            if s.used:
+                order.append(i)
+        elif not s.temp and not s.isglob and not s.isweak and s.sec >= 0:
+            order.append(i)
+    nloc = len(order) + 1
+    for i in range(len(SYMS)):
+        s = SYMS[i]
+        if not s.issec and not s.temp and (s.isglob or s.isweak or s.sec < 0):
+            order.append(i)
+    names = []
+    for i in order:
+        if not SYMS[i].issec:
+            names.append(SYMS[i].name)
+    st = strtab(names)
+    soff = st[1]
+    newix = {}
+    sym = [le(0, 24)]
+    k = 1
+    for i in order:
+        s = SYMS[i]
+        newix[i] = k
+        k += 1
+        nm = 0 if s.issec else soff[s.name]
+        bind = 0
+        if s.isweak:
+            bind = 2
+        elif s.isglob or s.sec < 0:
+            bind = 1
+        typ = 3 if s.issec else 0
+        shn = SECS[s.sec].shidx if s.sec >= 0 else 0
+        val = 0 if s.issec or s.sec < 0 else sym_addr(s)
+        sym.append(le(nm, 4) + chr(bind * 16 + typ) + "\x00" + le(shn, 2) + le(val, 8) + le(0, 8))
+    symdata = "".join(sym)
+    hassym = len(order) > 0
+    if not hassym:
+        shsi = idx
+        nsh = idx + 1
+    shn = [".symtab", ".strtab", ".shstrtab"] if hassym else [".shstrtab"]
+    for sc in SECS:
+        shn.append(sc.name)
+        if len(sc.relocs) > 0:
+            shn.append(".rela" + sc.name)
+    sh = strtab(shn)
+    shoff = sh[1]
+    parts = [""]
+    pos = 64
+    secoff = []
+    for sc in SECS:
+        pos = pad_to(parts, pos, sc.align if sc.align < 8 else 8)
+        secoff.append(pos)
+        if sc.typ != 8:
+            parts.append(sc.data)
+            pos += len(sc.data)
+    symoff = 0
+    stroff = 0
+    if hassym:
+        pos = pad_to(parts, pos, 8)
+        symoff = pos
+        parts.append(symdata)
+        pos += len(symdata)
+        stroff = pos
+        parts.append(st[0])
+        pos += len(st[0])
+    reloff = []
+    for sc in SECS:
+        if len(sc.relocs) > 0:
+            pos = pad_to(parts, pos, 8)
+            reloff.append(pos)
+            rr = []
+            for r in sc.relocs:
+                rr.append(le(r.off, 8) + le(r.typ, 4) + le(newix[r.sym], 4) + le(r.add, 8))
+            d = "".join(rr)
+            parts.append(d)
+            pos += len(d)
+        else:
+            reloff.append(0)
+    shsoff = pos
+    parts.append(sh[0])
+    pos += len(sh[0])
+    pos = pad_to(parts, pos, 8)
+    hdrs = [le(0, 64)]
+    i = 0
+    for sc in SECS:
+        hdrs.append(shdr(shoff[sc.name], sc.typ, sc.flags, secoff[i], sc.size, 0, 0, sc.align, 0))
+        if len(sc.relocs) > 0:
+            hdrs.append(shdr(shoff[".rela" + sc.name], 4, 0x40, reloff[i], 24 * len(sc.relocs), symi, sc.shidx, 8, 24))
+        i += 1
+    if hassym:
+        hdrs.append(shdr(shoff[".symtab"], 2, 0, symoff, len(symdata), stri, nloc, 8, 24))
+        hdrs.append(shdr(shoff[".strtab"], 3, 0, stroff, len(st[0]), 0, 0, 1, 0))
+    hdrs.append(shdr(shoff[".shstrtab"], 3, 0, shsoff, len(sh[0]), 0, 0, 1, 0))
+    eh = "\x7fELF\x02\x01\x01" + "\x00" * 9 + le(1, 2) + le(62, 2) + le(1, 4) + le(0, 8) + le(0, 8) + le(pos, 8) + le(0, 4) + le(64, 2) + le(0, 2) + le(0, 2) + le(64, 2) + le(nsh, 2) + le(shsi, 2)
+    parts[0] = eh
+    parts.append("".join(hdrs))
+    write_file(path, "".join(parts))
+
+def main():
+    global SRC
+    global CUR
+    reg_init()
+    known_init()
+    out = "a.out"
+    inp = ""
+    i = 1
+    n = argc()
+    while i < n:
+        a = argv(i)
+        if a == "-o":
+            out = argv(i + 1)
+            i += 1
+        elif a == "-I":
+            INCDIRS.append(argv(i + 1))
+            i += 1
+        elif a.startswith("-I"):
+            INCDIRS.append(a[2:])
+        else:
+            inp = a
+        i += 1
+    SRC = inp
+    sec_get(".text", SHF_A | SHF_X, 1)
+    sec_get(".data", SHF_A | SHF_W, 1)
+    sec_get(".bss", SHF_A | SHF_W, 8)
+    CUR = 0
+    assemble(read_file(inp))
+    for si in range(len(SECS)):
+        SECS[si].st = layout(si)
+    for si in range(len(SECS)):
+        build(si)
+    write_elf(out)
+
+main()

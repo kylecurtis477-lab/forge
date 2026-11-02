@@ -201,7 +201,7 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
    - Weaker memory orderings (acquire/release) and `unsafe`-scoped raw pointers.
    - Slices with bounds checks, generics for containers, `defer`, and a register allocator for fs mode (the IR backend currently covers hosted code only).
    - Debug info (DWARF line tables), so GDB works on QEMU's gdbstub.
-7. **Toolchain independence:** a built-in assembler and an ELF64/PE32+ writer and linker in Forge, which removes `as`/`ld`/`objcopy`, plus linker-script equivalents (section placement, entry, image base).
+7. **Toolchain independence:** a built-in assembler and an ELF64/PE32+ writer and linker in Forge, which removes `as`/`ld`/`objcopy`, plus linker-script equivalents (section placement, entry, image base). Assembler done (Phase 7.1, `tools/fas.forge`); linker open.
 8. **ARM64 target:** an AArch64 backend for fs mode, UEFI on ARM (AAVMF in QEMU `virt`), PL011 serial, GIC, and the generic timer.
 9. **Secure Boot:** sign `forgex64.efi` (sbsign/MOK) or chain through shim so it coexists with distro and Windows Secure Boot setups.
 10. **Never reboot (BUILD_PLAN Phase 2):** 1 module ABI, 2 isolated driver services, 3 supervisor restart, 4 tty hot-swap, 5 live patching, 6 kexec handoff — done.
@@ -250,3 +250,6 @@ A process holds exactly the capability bits its sealed manifest declares (fs=1, 
 - examples/modules/build.sh seals each .ko (`--module`, kind word 1). `image_verify(img, len, kind)` checks kind (reason 7, "wrong image kind") after the signature; `mod_load` calls it with SEAL_MODULE and parses only the first `len - 160` bytes.
 - Seal cache: up to 8 signed trailer prefixes (96 bytes) that already passed Ed25519; a hit skips the signature check only, never the image hash.
 - `tty_swap_to` now returns 0 on a refused module instead of panicking, and the current line discipline stays installed.
+
+## Built-in assembler (Phase 7.1)
+`build/fas` (tools/fas.forge): `fas [-I dir] [-o out.o] in.s`. Byte-identical to GNU as on everything the toolchain emits (compiler output, kernel incl. asm blocks, krel stubs, EFI loader, modules, user programs); tested by tests/fas/run.sh. Layout rules it mirrors: file offsets aligned to min(sh_addralign, 8); NOBITS takes an aligned offset without advancing; no symtab/strtab when there are no symbols; locals relocated against section symbols; PLT32 for calls unless the target was a defined local when the call was assembled; GNU relax_segment jump relaxation with alignment regions. Unsupported directives/instructions fail with `fas: file:line: ...`.
