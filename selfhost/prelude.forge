@@ -2138,12 +2138,15 @@ def int(x) -> int:
         c: int = char_at(s, i) - 48
         if c < 0 or c > 9:
             __err(0, concat("invalid literal for int(): ", __repr(x)))
-        if v > (9223372036854775807 - c) // 10:
+        if v < -922337203685477580 or (v == -922337203685477580 and c > 8):
             __iovf(0)
-        v = v * 10 + c
+        v = v * 10 - c
         i += 1
     if neg:
-        return 0 - v
+        return v
+    if v == -9223372036854775807 - 1:
+        __iovf(0)
+    v = 0 - v
     if (v >> 2) == 1152921504606846976:
         # 2**62 .. 2**62+3 alias the bool/None encodings
         __iovf(0)

@@ -1332,6 +1332,8 @@ rtp_binop:
     jmp 9f
 1:  test %rcx, %rcx
     jz 8f
+    cmp $-1, %rcx
+    je 2b
     cqo
     idiv %rcx
     test %rdx, %rdx

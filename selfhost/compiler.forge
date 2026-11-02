@@ -2547,6 +2547,8 @@ def arith(op, start, mark, lt, rt, line):
         else:
             e("test %rcx, %rcx")
             e("jz 1f")
+            e("cmp $-1, %rcx")
+            e("je 1f")
             e("cqo")
             e("idiv %rcx")
             if code == 5:
@@ -2578,6 +2580,17 @@ def divmod(start, mark, ismod, line):
     e3("mov $", str(uline(line)), ", %rdx")
     e("call rt_divzero")
     emit_raw("1:\n")
+    # x // -1 is -x (idiv would trap on the minimum int); x % -1 is 0
+    e("cmp $-1, %rcx")
+    e("jne 3f")
+    e("xor %edx, %edx")
+    e("neg %rax")
+    if pos >= PRETOK and ovf_on:
+        lo = ovf_label(line)
+        if lo >= 0 and not ismod:
+            e2("jo ", lab(lo))
+    e("jmp 2f")
+    emit_raw("3:\n")
     e("cqo")
     e("idiv %rcx")
     e("test %rdx, %rdx")
@@ -12098,6 +12111,11 @@ def o_ovlab(line):
 def o_safe(op):
     return op == O_ADD or op == O_SUB or op == O_MUL or op == O_AND or op == O_OR or op == O_XOR or op == O_SAR or op == O_DIV or op == O_MOD or op == O_NEG or op == O_NOT or op == O_CBR or op == O_MOV
 
+def o_hybband(k):
+    # hybrid functions check at the def: values may flow into islands unseen
+    if hyb and idst[k] >= 0 and iop[k] != O_MOV and o_bandable(k):
+        band_chk(vl(idst[k]), o_ovlab(iline[k]))
+
 def o_escchk(k):
     # band check deferred from arithmetic defs to the point a value escapes pure int code
     if hyb or o_safe(iop[k]):
@@ -12286,6 +12304,7 @@ def em_div(k):
             e("xor %edx, %edx")
         else:
             e("neg %rax")
+            e2("jo ", lab(o_ovlab(iline[k])))
         put_label(ld)
         if ismod:
             e("mov %rdx, %rax")
@@ -12828,6 +12847,7 @@ def o_emit(fi):
     k = 0
     while k < nir:
         o_ins(k, fi, x_epi)
+        o_hybband(k)
         k += 1
     put_label(x_epi)
     fs = ncs + nspill
@@ -13082,6 +13102,7 @@ def hyb_compile(fi, p, endp):
     k = 0
     while k < nir:
         o_ins(k, fi, 0)
+        o_hybband(k)
         k += 1
     hyb_noreg = 0
     hyb = 0

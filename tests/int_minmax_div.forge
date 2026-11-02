@@ -1,0 +1,26 @@
+def f(a: int, b: int) -> int:
+    x = a & b
+    print("x", x)
+    return x
+def mn(s: str) -> int:
+    return int(s)
+def dv(a: int, b: int) -> int:
+    return a // b
+def md(a: int, b: int) -> int:
+    return a % b
+m = -9223372036854775807 - 1
+print(int("-9223372036854775808") == m, mn("-9223372036854775807"))
+for t in range(4):
+    try:
+        if t == 0:
+            print(f(4611686018427387912, -9))
+        elif t == 1:
+            print(dv(m, -1))
+        elif t == 2:
+            print(md(m, -1))
+        else:
+            print(int("9223372036854775808"))
+    except OverflowError:
+        print("ovf", t)
+xs = [-9223372036854775807 - 1, -1]
+print(xs[0] // xs[1], xs[0] % xs[1])
