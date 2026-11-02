@@ -232,6 +232,17 @@ tty_popped: u64
 tty_erased: u64
 tty_dropped: u64
 
+def kcur_pid() -> u64:
+    p = cur_proc()
+    if u64(p) == 0:
+        return 0
+    return p.pid
+
+@patchable
+def sys_getpid() -> u64:
+    # live-patch target (Phase 2.5): entry is a 5-byte nop that livepatch.fsi turns into a jmp
+    return kcur_pid()
+
 def tty0_push(c: u64) -> u64:
     if c == 8 or c == 127:
         if tty_count > 0 and tty_buf[(tty_head + tty_count - 1) & 511] != 10:
@@ -861,7 +872,7 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         yield_cpu()
         return 0
     if nr == 39:
-        return cur_proc().pid
+        return sys_getpid()
     if nr == 57:
         return sys_fork(frame)
     if nr == 59:

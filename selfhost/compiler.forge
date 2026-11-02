@@ -14965,6 +14965,8 @@ def fs_decos():
             fs_datt = fs_bop(fs_datt, 16, 1)
         elif str_eq(nm, "packed"):
             fs_datt = fs_bop(fs_datt, 32, 1)
+        elif str_eq(nm, "patchable"):
+            fs_datt = fs_bop(fs_datt, 64, 1)
         elif str_eq(nm, "align"):
             fs_expect("(")
             fs_dal = fs_ceval()
@@ -15216,6 +15218,9 @@ def fs_function(f):
         fs_wrapper(f, nm, body)
     emit_raw(".p2align 4\n")
     emit_raw(concat(body, ":\n"))
+    if fs_bop(at, 64, 0):
+        # @patchable: one 5-byte nop at entry, which a live patch replaces by a jmp rel32 atomically
+        emit_raw("    .byte 0x0f,0x1f,0x44,0x00,0x00\n")
     e("push %rbp")
     e("mov %rsp,%rbp")
     pidx = nout

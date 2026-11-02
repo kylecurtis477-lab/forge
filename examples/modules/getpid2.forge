@@ -1,0 +1,39 @@
+# forge: no-runtime
+# Live patch for sys_getpid: same result, counts its calls; lp_getpid_bad is a deliberately wrong
+# replacement the kernel's self-test must reject and roll back.
+extern def kcur_pid() -> u64
+
+calls: u64
+active: u64
+
+@export
+def mod_abi() -> u64:
+    return 0x10000
+
+@export
+def mod_init() -> u64:
+    return 0
+
+@export
+def mod_exit():
+    pass
+
+@export
+def lp_getpid() -> u64:
+    atomic_add64(u64(addr(active)), 1)
+    atomic_add64(u64(addr(calls)), 1)
+    r = kcur_pid()
+    atomic_add64(u64(addr(active)), 0xFFFFFFFFFFFFFFFF)
+    return r
+
+@export
+def lp_getpid_bad() -> u64:
+    return kcur_pid() + 12345
+
+@export
+def lp_calls() -> u64:
+    return atomic_load64(u64(addr(calls)))
+
+@export
+def lp_active() -> u64:
+    return atomic_load64(u64(addr(active)))

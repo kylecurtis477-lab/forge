@@ -201,6 +201,47 @@ tlb_acks: u64
 tlb_pending: u64[8]
 tlb_ipis: u64
 tlb_rounds: u64
+tlb_park: u64
+stop_rounds: u64
+stop_parked: u64
+
+def stop_machine_begin() -> u64:
+    # park every other online CPU in its IPI handler (or in the spin loop it is in) with interrupts off;
+    # returns the caller's saved interrupt flag. Reuses the shootdown slot, so it serialises with it.
+    f = irq_save()
+    spin_lock(u64(addr(tlb_lock)))
+    nc = atomic_load64(u64(addr(ncpu_online)))
+    if nc > 1:
+        tlb_cr3 = 1  # matches no address space: parked CPUs flush nothing
+        tlb_n = 0
+        atomic_store64(u64(addr(tlb_acks)), 0)
+        atomic_store64(u64(addr(tlb_park)), stop_rounds + 1)
+        me = lapic_cpu()
+        cnt: u64 = 0
+        c: u64 = 0
+        while c < nc:
+            if c != me:
+                atomic_store64(u64(addr(tlb_pending[c])), 1)
+                cnt += 1
+            c += 1
+        atomic_store64(u64(addr(tlb_active)), 1)
+        c = 0
+        while c < nc:
+            if c != me:
+                lapic_ipi(cpu_to_apic[c], u32(VEC_TLB))
+            c += 1
+        while atomic_load64(u64(addr(tlb_acks))) < cnt:
+            cpu_relax()
+        stop_parked = cnt
+    stop_rounds += 1
+    return f
+
+def stop_machine_end(f: u64):
+    cpuid4(0, 0)
+    atomic_store64(u64(addr(tlb_park)), 0)
+    atomic_store64(u64(addr(tlb_active)), 0)
+    spin_unlock(u64(addr(tlb_lock)))
+    irq_restore(f)
 
 def tlb_local(cr3: u64, va: u64, n: u64):
     if cr3 != 0 and (read_cr3() & ADDR_MASK) != cr3:
@@ -227,6 +268,14 @@ def tlb_poll():
         tlb_local(tlb_cr3, tlb_va, tlb_n)
         atomic_store64(u64(addr(tlb_pending[c])), 0)
         atomic_add64(u64(addr(tlb_acks)), 1)
+        g = atomic_load64(u64(addr(tlb_park)))
+        if g != 0:
+            # stop-machine: stay parked (interrupts off) until the initiator ends round g, then serialise
+            # so this CPU refetches any instruction bytes the initiator rewrote. Waiting on the round
+            # number (not on 0) means a CPU that misses the brief 0 is not trapped into the next round.
+            while atomic_load64(u64(addr(tlb_park))) == g:
+                cpu_relax()
+            cpuid4(0, 0)
 
 @interrupt
 def on_tlb_ipi(frame: ptr[u64]):
