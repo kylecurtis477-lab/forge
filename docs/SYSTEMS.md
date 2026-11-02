@@ -240,3 +240,13 @@ A process holds exactly the capability bits its sealed manifest declares (fs=1, 
 - Reason codes from `image_verify`: 1 no manifest, 2 bad version, 3 length mismatch, 4 bad signature, 5 hash mismatch, 6 Linux ABI image outside the compat sandbox.
 - Reason 6 is checked after the seal succeeds: an image whose ELF EI_OSABI byte is 3 is refused while `compat_sandbox_ready == 0`. Nothing sets it today; Phase 11 will set it only for processes launched in the compat sandbox.
 - The shell test runs unsealed, tampered, forged, linuxabi (all refused, exit 127) and capdeny (fork and probe get EACCES).
+
+## Ed25519 seal (Phase 6 gap 1)
+- Trailer v2, 160 bytes: +0 "FORGEPRF", +8 version 2, +16 level, +24 unsafe ops, +32 caps, +40 ELF length, +48 own ops, +56 reserved, +64 SHA-256(ELF), +96 Ed25519 signature over trailer[0:96].
+- Build: `forgeseal.py --pub seal.key > seal.pub`; the kernel `.incbin`s seal.pub (uimg(4)). The private seed never leaves build/user.
+- Kernel: `ed25519_verify(sig, pk, msg, n)` in ed25519.fsi; rejects S >= L and keys that are not curve points. One verification costs two 256-bit scalar multiplications (it adds about 15 s to the whole OS test run, which execs dozens of images).
+
+## Sealed kernel modules (Phase 6 gap 2)
+- examples/modules/build.sh seals each .ko (`--module`, kind word 1). `image_verify(img, len, kind)` checks kind (reason 7, "wrong image kind") after the signature; `mod_load` calls it with SEAL_MODULE and parses only the first `len - 160` bytes.
+- Seal cache: up to 8 signed trailer prefixes (96 bytes) that already passed Ed25519; a hit skips the signature check only, never the image hash.
+- `tty_swap_to` now returns 0 on a refused module instead of panicking, and the current line discipline stays installed.

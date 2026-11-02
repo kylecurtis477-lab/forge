@@ -1,13 +1,14 @@
-# Phase 6.1: verifier-produced proof manifests. tools/forgeseal.py appends a 128-byte trailer to
+# Phase 6.1: verifier-produced proof manifests. tools/forgeseal.py appends a 160-byte trailer to
 # every user ELF (see struct Seal) carrying the safety level, the unsafe-op count and the declared
-# capabilities, the SHA-256 of the ELF bytes, and an HMAC-SHA256 over the trailer under the build's
-# seal key (embedded in the kernel image, generated per build tree, never committed). The kernel
-# refuses to start a user image whose trailer is missing, malformed, or fails the hash or MAC.
-# Honest limit: a shared-key MAC, not a public-key signature: anyone holding the kernel image holds
-# the key. Loadable modules (.ko) are not sealed yet.
+# capabilities, the SHA-256 of the ELF bytes, and (v2, gap closed after 6.4) an Ed25519 signature
+# over the trailer by the build's private seal key. The kernel embeds only the public key
+# (seal.pub), so holding the kernel image no longer lets anyone forge a seal. The kernel refuses
+# to start a user image whose trailer is missing, malformed, or fails the hash or signature.
 SEAL_MAGIC = 0x4652504547524F46
-SEAL_SIZE = 128
+SEAL_SIZE = 160
 SEAL_OK = 0x8000000000000000
+SEAL_USER = 0
+SEAL_MODULE = 1  # trailer word +56: what the image is for (forgeseal.py --module)
 
 struct Blk64:
     b: u8[64]
@@ -25,7 +26,7 @@ struct Seal:
     own_ops: u64
     rsvd: u64
     hash: u8[32]
-    mac: u8[32]
+    sig: EdSig
 
 struct Sha:
     h: u64[8]
@@ -135,33 +136,19 @@ def sha_final(s: ptr[Sha], out: ptr[Dig]):
         out.b[i] = u8((s.h[i / 4] >> (24 - (i % 4) * 8)) & 255)
         i += 1
 
-def seal_eq(a: ptr[Dig], t: ptr[Seal], mac: u64) -> u64:
-# constant-time compare against the trailer's mac (mac=1) or image hash (mac=0)
+def seal_eq(a: ptr[Dig], t: ptr[Seal]) -> u64:
+# compare a digest against the trailer's image hash
     d: u64 = 0
     i: u64 = 0
     while i < 32:
-        v = t.hash[i]
-        if mac:
-            v = t.mac[i]
-        d = d | (u64(a.b[i]) ^ u64(v))
+        d = d | (u64(a.b[i]) ^ u64(t.hash[i]))
         i += 1
     return d == 0
 
-seal_key: Dig
-seal_key_ok: u64
 seal_ok_count: u64
 seal_refused: u64
 compat_sandbox_ready: u64  # 6.4: set by the Phase 11 Linux ABI layer; 0 = no compat sandbox
 seal_why: u64  # reason code of the last refusal
-
-def hmac_pad(s: ptr[Sha], pad: u64):
-    i: u64 = 0
-    while i < 64:
-        kb: u64 = 0
-        if i < 32:
-            kb = u64(seal_key.b[i])
-        sha_byte(s, kb ^ pad)
-        i += 1
 
 def seal_reason(code: u64) -> ptr[u8]:
     if code == 1:
@@ -174,9 +161,41 @@ def seal_reason(code: u64) -> ptr[u8]:
         return "bad manifest signature"
     if code == 5:
         return "image hash mismatch"
+    if code == 7:
+        return "wrong image kind (user program vs kernel module)"
     if code == 6:
         return "Linux ABI image needs the compatibility sandbox (Phase 11, not built)"
     return "?"
+
+# cache of signed trailer contents that passed Ed25519 verification (round robin)
+struct SealCache:
+    m: EdMsg[8]
+    n: u64
+
+seal_cache: SealCache
+seal_cache_hits: u64
+
+def seal_cache_hit(msg: ptr[EdMsg]) -> u64:
+    k: u64 = 0
+    while k < seal_cache.n and k < 8:
+        d: u64 = 0
+        i: u64 = 0
+        while i < 96:
+            d = d | (u64(seal_cache.m[k].b[i]) ^ u64(msg.b[i]))
+            i += 1
+        if d == 0:
+            seal_cache_hits += 1
+            return 1
+        k += 1
+    return 0
+
+def seal_cache_put(msg: ptr[EdMsg]):
+    k = seal_cache.n % 8
+    i: u64 = 0
+    while i < 96:
+        seal_cache.m[k].b[i] = msg.b[i]
+        i += 1
+    seal_cache.n += 1
 
 def seal_fail(code: u64) -> u64:
     seal_why = code
@@ -184,45 +203,34 @@ def seal_fail(code: u64) -> u64:
     return 0
 
 @unsafe
-def image_verify(img: u64, len: u64) -> u64:
-# returns SEAL_OK | declared caps, or 0 (reason in seal_why)
+def image_verify(img: u64, len: u64, kind: u64) -> u64:
+# returns SEAL_OK | declared caps, or 0 (reason in seal_why); kind = SEAL_USER or SEAL_MODULE
     if len < SEAL_SIZE + 64:
         return seal_fail(1)
     t = ptr[Seal](img + len - SEAL_SIZE)
     if t.magic != SEAL_MAGIC:
         return seal_fail(1)
-    if t.version != 1:
+    if t.version != 2:
         return seal_fail(2)
     if t.elf_len != len - SEAL_SIZE:
         return seal_fail(3)
-    if seal_key_ok == 0:
-        k = ptr[Dig](uimg(4))
-        j: u64 = 0
-        while j < 32:
-            seal_key.b[j] = k.b[j]
-            j += 1
-        seal_key_ok = 1
+    # signed message = trailer[0:96]; public key embedded in the kernel image. A trailer whose
+    # signed bytes equal one already verified is authentic, so the Ed25519 step is skipped for it
+    # (the image hash below is still recomputed every time).
+    msg = ptr[EdMsg](t)
+    if seal_cache_hit(msg) == 0:
+        if ed25519_verify(addr(t.sig), ptr[B32](uimg(4)), msg, 96) == 0:
+            return seal_fail(4)
+        seal_cache_put(msg)
+    if t.rsvd != kind:
+        return seal_fail(7)
     ctx: Sha
     s = addr(ctx)
     inner: Dig
-    mac: Dig
-    sha_init(s)
-    hmac_pad(s, 0x36)
-    sha_mem(s, u64(t), 96)
-    sha_final(s, addr(inner))
-    sha_init(s)
-    hmac_pad(s, 0x5c)
-    i: u64 = 0
-    while i < 32:
-        sha_byte(s, u64(inner.b[i]))
-        i += 1
-    sha_final(s, addr(mac))
-    if seal_eq(addr(mac), t, 1) == 0:
-        return seal_fail(4)
     sha_init(s)
     sha_mem(s, img, len - SEAL_SIZE)
     sha_final(s, addr(inner))
-    if seal_eq(addr(inner), t, 0) == 0:
+    if seal_eq(addr(inner), t) == 0:
         return seal_fail(5)
     # 6.4: Linux-ABI images (EI_OSABI = 3) run only inside the explicit compat sandbox;
     # checked after the seal so a sealed Linux image is still refused
@@ -244,7 +252,7 @@ def seal_check(path: ptr[u8], want: u64) -> u64:
     buf = fs_read_file(path, addr(sz))
     if buf == 0:
         panic("seal test: image missing on the ESP")
-    r = image_verify(buf, sz)
+    r = image_verify(buf, sz, SEAL_USER)
     kfree(buf)
     if r != want:
         puts(path)
@@ -268,7 +276,7 @@ def seal_test():
         panic("Linux ABI image refused for the wrong reason")
     if seal_refused - n0 != 4:
         panic("seal refusals not counted")
-    puts("proof manifest: 3 sealed images accepted with their declared caps; unsealed, tampered and forged images refused; Linux ABI image confined to compat sandbox\n")
+    puts("proof manifest (Ed25519): 3 sealed images accepted with their declared caps; unsealed, tampered and forged images refused; Linux ABI image confined to compat sandbox\n")
 
 # ---- Phase 6.2: the kernel grants exactly the declared capabilities ----
 CAPB_FS = 1

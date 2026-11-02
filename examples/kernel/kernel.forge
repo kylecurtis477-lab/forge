@@ -24,6 +24,7 @@ include "module.fsi"
 include "drv.fsi"
 include "livepatch.fsi"
 include "kexec.fsi"
+include "ed25519.fsi"
 include "seal.fsi"
 include "../../std/vec.fsi"
 include "../../std/map.fsi"
@@ -679,7 +680,7 @@ asm(".section .rodata",
     "user_fault_elf: .incbin \"fault.elf\"",
     "user_fault_end:",
     ".balign 16",
-    "seal_key_bytes: .incbin \"seal.key\"",
+    "seal_pub_bytes: .incbin \"seal.pub\"",
     ".text")
 
 @naked
@@ -688,7 +689,7 @@ def uimg(i: u64) -> u64:
         "lea user_hello_end(%rip), %rax", "je 1f",
         "lea user_fault_elf(%rip), %rax", "cmp $3, %rdi", "jb 1f",
         "lea user_fault_end(%rip), %rax", "cmp $4, %rdi", "jb 1f",
-        "lea seal_key_bytes(%rip), %rax", "1: ret")
+        "lea seal_pub_bytes(%rip), %rax", "1: ret")
 
 wx_img: u8[512]
 
@@ -953,6 +954,15 @@ def module_test():
     b = mod_read("EFI/Forge/mod/newer.ko", addr(bsz))
     mod_expect_reject(b, bsz, "newer.ko")
     kfree(b)
+    b = mod_read("EFI/Forge/mod/unsealed.ko", addr(bsz))
+    mod_expect_reject(b, bsz, "unsealed.ko")
+    kfree(b)
+    b = mod_read("EFI/Forge/mod/tampered.ko", addr(bsz))
+    mod_expect_reject(b, bsz, "tampered.ko")
+    kfree(b)
+    b = mod_read("EFI/Forge/mod/userimg.ko", addr(bsz))
+    mod_expect_reject(b, bsz, "userimg.ko")
+    kfree(b)
     kfree(img)
     puts("module ABI OK: ")
     put_u64(mod_loads)
@@ -1155,8 +1165,8 @@ def livepatch_test():
 
 # ---- tty hot swap (Phase 2.4): a swapper thread alternates the line discipline v1 <-> v2 every
 # 2 ticks while the shell session types; queued input is carried over by save/restore under rq_lock ----
-tsw_img: u64[3]
-tsw_sz: u64[3]
+tsw_img: u64[4]
+tsw_sz: u64[4]
 tsw_mod: u64
 tsw_stop: u64
 tsw_swaps: u64
@@ -1173,7 +1183,10 @@ def tty_swap_to(v: u64) -> u64:
     if v != 0:
         m = u64(mod_load(tsw_img[v], tsw_sz[v]))
         if m == 0:
-            panic("tty module rejected")
+            puts("tty hot-swap refused: ")
+            puts(mod_err_str())
+            putc(10)
+            return 0
         rst = ptr[Module](m).restore
         fpush = mod_sym(ptr[Module](m), "tty_push")
         flines = mod_sym(ptr[Module](m), "tty_lines")
@@ -1224,8 +1237,14 @@ def shell_test():
     blkd_supervised_start(blkd_img, blkd_sz)
     tsw_img[1] = mod_read("EFI/Forge/mod/tty1.ko", addr(tsw_sz[1]))
     tsw_img[2] = mod_read("EFI/Forge/mod/tty2.ko", addr(tsw_sz[2]))
-    if tsw_img[1] == 0 or tsw_img[2] == 0:
+    tsw_img[3] = mod_read("EFI/Forge/mod/tty1u.ko", addr(tsw_sz[3]))
+    if tsw_img[1] == 0 or tsw_img[2] == 0 or tsw_img[3] == 0:
         panic("tty modules missing")
+    # hot swap to an unsealed line discipline: refused, the running one stays in place
+    fp0 = tty_fp_push
+    if tty_swap_to(3) != 0 or tty_fp_push != fp0:
+        panic("unsealed tty module was hot-swapped in")
+    puts("tty hot-swap: unsealed tty1u.ko refused, current line discipline kept\n")
     tsw_thread = u64(thread_spawn(u64(tty_swapper), 0))
     ktest_hooks = 1
     sz: u64 = 0
@@ -1266,6 +1285,7 @@ def shell_test():
     thread_reap(ptr[Thread](tsw_thread))
     kfree(tsw_img[1])
     kfree(tsw_img[2])
+    kfree(tsw_img[3])
     puts("tty: ")
     put_u64(tsw_swaps)
     puts(" hot swaps (")

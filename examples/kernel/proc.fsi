@@ -559,7 +559,7 @@ def proc_new(ppid: u64) -> ptr[Proc]:
 
 @unsafe
 def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> nptr[Thread]:
-    vc = image_verify(img, len)
+    vc = image_verify(img, len, SEAL_USER)
     if vc == 0:
         seal_log("kernel-supplied image")
         return 0
@@ -751,7 +751,7 @@ def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
     img = fs_read_file(addr(path[0]), addr(sz))
     if img == 0:
         return ENOENT
-    vc = image_verify(img, sz)
+    vc = image_verify(img, sz, SEAL_USER)
     if vc == 0:
         seal_log(addr(path[0]))
         kfree(img)

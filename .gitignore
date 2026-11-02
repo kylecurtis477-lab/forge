@@ -2,3 +2,5 @@ target/
 build/
 bench/out/
 *.o
+tests/ed25519/edtest.forge
+__pycache__/

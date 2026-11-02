@@ -43,6 +43,7 @@ tests/unsafe/run.sh || fail=1
 tests/own/run.sh || fail=1
 tests/defer/run.sh || fail=1
 tests/generic/run.sh || fail=1
+tests/ed25519/run.sh || fail=1
 tests/atomic/run.sh || fail=1
 tests/ast/selfpp.sh || fail=1
 build/forgec tests/tuples.forge build/t_ast.json --emit=ast-json && python3 -c 'import json;d=json.load(open("build/t_ast.json"));assert d["forge_ast"]==1 and d["root"]["k"]=="Module"' && echo "PASS ast-json-schema" || { echo "FAIL ast-json-schema"; fail=1; }

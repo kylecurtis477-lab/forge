@@ -149,6 +149,10 @@ def mod_sym(m: ptr[Module], name: ptr[u8]) -> u64:
 @unsafe
 def mod_load(img: u64, sz: u64) -> nptr[Module]:
     secaddr: u64[64]
+    # ---- seal (Phase 6 gap 2): only Ed25519-sealed kernel modules load, here and on hot swap ----
+    if image_verify(img, sz, SEAL_MODULE) == 0:
+        return mod_fail(seal_reason(seal_why))
+    sz = sz - SEAL_SIZE
     # ---- ELF header ----
     if sz < 64 or vload32(img) != 0x464C457F or vload8(img + 4) != 2 or vload8(img + 5) != 1:
         return mod_fail("not an ELF64 LSB image")
