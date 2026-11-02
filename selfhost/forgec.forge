@@ -8666,10 +8666,17 @@ def set_opt(v):
     global opt_on
     opt_on = v
 
+def dbg_tok(q):
+    if tk[q] == K_ID or tk[q] == K_OP:
+        return tv[q]
+    return concat("#", str(tk[q]))
+
 def o_fail(why):
     global irfail, irwhy
     if not irfail:
         irwhy = why
+        if ir_stats > 3 and ip >= 0 and ip < ntok and tk[ip] != K_NL:
+            irwhy = concat(concat(why, " @"), dbg_tok(ip))
     irfail = 1
 
 def o_fatal(why):
@@ -10208,7 +10215,12 @@ def s_stmt():
         return 0
     hyb_names(st, en)
     if ir_stats > 3:
-        eputs(concat("isl ", irwhy))
+        dq = st
+        dt = ""
+        while dq < en and dq < st + 12:
+            dt = concat(concat(dt, " "), dbg_tok(dq))
+            dq += 1
+        eputs(concat(concat(concat("isl ", irwhy), " |"), dt))
     fc_flush(st, en)
     k = iadd(O_TSTMT, -1, -1, -1)
     iimm[k] = st
