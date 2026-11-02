@@ -1,0 +1,12 @@
+test "list ops":
+    xs = [3, 1, 2]
+    xs.sort()
+    assert xs == [1, 2, 3]
+
+test "dict ops":
+    d = {"a": 1}
+    d["b"] = 2
+    assert len(d) == 2 and d["b"] == 2
+
+test "integer arithmetic":
+    assert 7 // 2 == 3 and 7 % 2 == 1

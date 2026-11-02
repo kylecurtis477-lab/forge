@@ -33,11 +33,14 @@ OP        + - * / // % @ ** << >> & | ^ ~ < > <= >= == != = += -= *= /= //= %= *
 
 ```
 module      = (NEWLINE | stmt)* EOF                                   (ast_parse)
-stmt        = decorated | if_stmt | while_stmt | for_stmt | try_stmt
+stmt        = decorated | test_block | if_stmt | while_stmt | for_stmt | try_stmt
             | with_stmt | simple_stmt                                 (a_stmt)
+test_block  = 'test' STRING ':' suite     (v1.1, soft keyword: only when followed by STRING ':';
+                                           code generation accepts it only at column 0, top level)
 decorated   = ('@' test NEWLINE)* (funcdef | externdef | classdef)
 funcdef     = 'def' NAME '(' params(typed) ')' ['->' test] block      (a_def)
 externdef   = 'extern' 'def' NAME '(' params(typed) ')' ['->' test] end
+suite       = block
 classdef    = 'class' NAME ['(' args ')'] block
             | 'struct' NAME block            (struct only when followed by NAME ':')
 if_stmt     = 'if' test block ('elif' test block)* ['else' block]     (a_if)

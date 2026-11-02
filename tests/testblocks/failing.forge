@@ -1,0 +1,6 @@
+test "passes":
+    assert 1 + 1 == 2
+
+test "fails \"quoted\"":
+    x = 2
+    assert x == 3

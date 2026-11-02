@@ -63,6 +63,14 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 - `--diagnostics=json`: one schema-v1 JSON object per error (file/line/col span, code, message, fix-its); goldens in `tests/diag`.
 
 
+### Test blocks, forge test, forge verify
+
+- `test "name":` + block at top level (column 0) is a unit test. forgec rewrites each header line to `def __forge_test_N():` before lexing (line count unchanged, so diagnostics keep their line numbers); without `--test` they are uncalled functions and the program is unchanged. Test blocks in imported modules are renamed the same way (global counter) and never run from the importer.
+- `forgec in out.s --test` appends a runner: `--forge-test-list` prints `--forge-tests--` then one name per line; `--forge-test-run N` runs test N; exit status is the result (a failed assert exits 1 with `error: line L: assertion failed`). The program's own top-level code runs first in both modes.
+- `forge test [files]` (tools/forge_test.sh; default tests/unit/*.forge) builds with `--test`, runs each test in its own process with a 10 s timeout and prints `{"forge_test":1,"files":[{"file","build":"ok|fail","tests":[{"name","status":"pass|fail","exit","message","ms"}]}],"passed":N,"failed":M}`; exit 1 on any failure.
+- `forge verify [files]` (tools/forge_verify.sh) runs, per file, parse (frozen grammar, ast-json), fmt --check, build (typecheck+codegen+as+ld) and test (if the file has test blocks), and prints `{"forge_verify":1,"files":[{"file","checks":{"parse","fmt","build","test":{"status":"ok|fail|skip"[,"message"]}}}],"ok":bool}`; exit 1 if any check fails.
+- Tests: tests/testblocks/run.sh (in run_tests.sh).
+
 ### forge fmt
 
 `forge fmt [--check] [files]` runs tools/fmt.forge (token-level, comment-preserving, AST- and line-number-preserving). `--check` exits 1 and prints `would reformat F` for any file not in canonical form. The CI file set is tools/fmt_files.sh; tests in tests/fmt/run.sh.
@@ -73,7 +81,7 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 
 ### AST export (`--emit=ast-json`, `--emit=pretty`)
 - Entry: `forge_main` sees the flag and calls `ast_main`, which lexes only the named file with `ast_raw=1` (`add_id` then skips std-module renaming), parses it with `ast_parse` into flat node arrays (`ak` kind, `av` value, `al` line, `acs`/`acn` child slice into `akid`), and writes JSON (`ast_json`) or source (`pp_s`/`pp_e`).
-- Schema v1: `{"forge_ast":1,"file","pragmas":[lines],"root"}`, nodes `{"k","l"[,"v"][,"c"]}`. Kinds: Module Block Expr Assign AugAssign(v=op) AnnAssign Pass Break Continue Return Raise Global Nonlocal Import ImportFrom Alias Assert Del Include Def(Decorators, Params, ret|Empty, Block) ExternDef Class/Struct(Decorators, Bases, Block) Decorator If(v="elif" in chains) While For Try Handler Else Finally With WithItem Param(v=[*|**]name; type, default) Params Empty Name Const Num Float Str BinOp BoolOp Not Unary Compare(v=comma-joined ops) IfExp Lambda Call Kw Star DStar Attr Sub Slice Tuple List Set Dict Pair ListComp SetComp GenExp DictComp CompFor CompIf Yield YieldFrom.
+- Schema v1: `{"forge_ast":1,"file","pragmas":[lines],"root"}`, nodes `{"k","l"[,"v"][,"c"]}`. Kinds: Module Block Expr Assign AugAssign(v=op) AnnAssign Pass Break Continue Return Raise Global Nonlocal Import ImportFrom Alias Assert Del Include Def(Decorators, Params, ret|Empty, Block) ExternDef Class/Struct(Decorators, Bases, Block) Decorator If(v="elif" in chains) While For Try Handler Else Finally With WithItem Param(v=[*|**]name; type, default) Params Empty Name Const Num Float Str BinOp BoolOp Not Unary Compare(v=comma-joined ops) IfExp Lambda Call Kw Star DStar Attr Sub Slice Tuple List Set Dict Pair ListComp SetComp GenExp DictComp CompFor CompIf Yield YieldFrom Test(v=name; Block).
 - Num values are decimal; values with 19+ digits print back as hex so the lexer reproduces the same 64-bit pattern. Parse errors in this mode use the normal diagnostic path (`expected ...` is code E0105).
 
 ## Dual boot

@@ -102,3 +102,6 @@ def gen():
     x += yield
 y = a[b][c](d)
 print(1); print(2)
+
+test "a test block":
+    assert 1 == 1

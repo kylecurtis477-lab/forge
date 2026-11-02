@@ -6166,6 +6166,8 @@ def load_mod(name, dir):
     if str_eq(name, "math") or std_mod(name):
         return 0
     ms = read_file(concat(concat(dir, name), ".forge"))
+    if ms:
+        ms = test_desugar(ms, 0)
     mi: int = ms
     if mi == 0:
         return 0
@@ -14237,6 +14239,12 @@ def a_stmt():
         a_push(a_mk("Bases", 0, line, n))
         a_push(a_block())
         return a_mk(kind, nm, line, 3)
+    if nd == 0 and a_kw("test") and tk[ap + 1] == K_STR and a_opat(ap + 2, ":"):
+        ap += 1
+        tname = tv[ap]
+        ap += 1
+        a_push(a_block())
+        return a_mk("Test", tname, line, 1)
     if nd > 0:
         a_fail("'def', 'class' or 'struct' after decorators")
     if a_kw("if"):
@@ -14768,6 +14776,9 @@ def pp_s(n, d):
             else:
                 pp_line(d, "else:")
                 pp_block(o, d + 1)
+    elif str_eq(k, "Test"):
+        pp_line(d, concat(concat("test ", a_strlit(av[n])), ":"))
+        pp_block(a_kid(n, 0), d + 1)
     elif str_eq(k, "While"):
         pp_line(d, concat(concat("while ", pp_e(a_kid(n, 0), 1)), ":"))
         pp_block(a_kid(n, 1), d + 1)
@@ -15107,8 +15118,82 @@ def diag_file_err(msg):
     else:
         eputs(concat("error: ", msg))
 
+test_mode = 0
+td_ctr = 0
+
+def td_istest(ln):
+# a column-0 `test "name":` header (optionally followed by a comment)
+    if len(ln) < 8 or not str_eq(substr(ln, 0, 6), "test \""):
+        return 0
+    j = 6
+    while j < len(ln) and char_at(ln, j) != 34:
+        if char_at(ln, j) == 92:
+            j += 1
+        j += 1
+    if j >= len(ln):
+        return 0
+    k = j + 1
+    while k < len(ln) and char_at(ln, k) == 32:
+        k += 1
+    if k >= len(ln) or char_at(ln, k) != 58:
+        return 0
+    k += 1
+    while k < len(ln) and char_at(ln, k) == 32:
+        k += 1
+    if k < len(ln) and char_at(ln, k) != 35:
+        return 0
+    return j + 1
+
+def test_desugar(src, runner):
+    global td_ctr
+# `test "name":` blocks become `def __forge_test_N():` (same line count, so diagnostics keep
+# their line numbers). In --test mode a runner is appended: `--forge-test-list` prints the
+# names, `--forge-test-run N` runs test N (exit status = result).
+    if not runner and not contains(src, "\ntest \"") and not (len(src) >= 6 and str_eq(substr(src, 0, 6), "test \"")):
+        return src
+    out = ""
+    names = list(256)
+    nn = 0
+    i = 0
+    n = len(src)
+    while i < n:
+        j = i
+        while j < n and char_at(src, j) != 10:
+            j += 1
+        ln = substr(src, i, j)
+        e = td_istest(ln)
+        if e > 0:
+            out = concat(concat(concat(out, "def __forge_test_"), str(td_ctr)), "():")
+            td_ctr += 1
+            if nn < 256:
+                names[nn] = substr(ln, 5, e)
+                nn += 1
+        else:
+            out = concat(out, ln)
+        if j < n:
+            out = concat(out, "\n")
+        i = j + 1
+    if nn == 0 and not runner:
+        return src
+    if runner:
+        if n > 0 and char_at(src, n - 1) != 10:
+            out = concat(out, "\n")
+        out = concat(out, "if argc() > 1 and str_eq(argv(1), \"--forge-test-list\"):\n")
+        out = concat(out, "    print(\"--forge-tests--\")\n")
+        k = 0
+        while k < nn:
+            out = concat(concat(concat(out, "    print("), names[k]), ")\n")
+            k += 1
+        out = concat(out, "    exit(0)\nif argc() > 2 and str_eq(argv(1), \"--forge-test-run\"):\n")
+        k = 0
+        while k < nn:
+            out = concat(concat(concat(concat(concat(out, "    if str_eq(argv(2), \""), str(k)), "\"):\n        __forge_test_"), str(k)), "()\n")
+            k += 1
+        out = concat(out, "    exit(0)\n")
+    return out
+
 def forge_main():
-    global diag_json, emit_mode, lex_fname, main_sid, PRETOK, PRE, passno, soft_line, ir_stats, no_hyb, hyb_on
+    global diag_json, emit_mode, test_mode, lex_fname, main_sid, PRETOK, PRE, passno, soft_line, ir_stats, no_hyb, hyb_on
     if argc() < 3:
         eputs("usage: forgec <input.forge> <output.s>")
         exit(2)
@@ -15135,6 +15220,8 @@ def forge_main():
             emit_mode = 1
         elif str_eq(argv(ai), "--emit=pretty"):
             emit_mode = 2
+        elif str_eq(argv(ai), "--test"):
+            test_mode = 1
         ai += 1
     if emit_mode:
         return ast_main()
@@ -15143,6 +15230,7 @@ def forge_main():
     if srci == 0:
         diag_file_err(concat("cannot read input file ", argv(1)))
         exit(1)
+    src = test_desugar(src, test_mode)
     fsm = contains(src, concat("# forge: ", "no-runtime"))
     ai = 3
     while ai < argc():

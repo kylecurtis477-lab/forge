@@ -1,0 +1,18 @@
+# Unit tests run by `forge test` (tests/testblocks/run.sh).
+import mathx
+
+
+def shout(s):
+    return s.upper() + "!"
+
+
+test "upper and concat":
+    assert shout("hi") == "HI!"
+
+test "split and join":
+    parts = "a,b,c".split(",")
+    assert len(parts) == 3
+    assert "-".join(parts) == "a-b-c"
+
+test "imported module test blocks are ignored":
+    assert mathx.sq(7) == 49

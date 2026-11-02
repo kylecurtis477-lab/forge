@@ -1,0 +1,6 @@
+def sq(x):
+    return x * x
+
+
+test "module-local test (only run when this file is the target)":
+    assert sq(3) == 9

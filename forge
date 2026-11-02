@@ -2,6 +2,9 @@
 # forge <file.forge> [-o out] : compile with the self-hosted compiler, then assemble+link (binutils as/ld)
 set -e
 D="$(cd "$(dirname "$0")" && pwd)"
+# forge test [files] / forge verify [files] : JSON reports (tools/forge_test.sh, tools/forge_verify.sh)
+[ "$1" = "test" ] && { shift; exec "$D/tools/forge_test.sh" "$@"; }
+[ "$1" = "verify" ] && { shift; exec "$D/tools/forge_verify.sh" "$@"; }
 # forge fmt [--check] [files...] : canonical formatter (tools/fmt.forge); no files = repo set
 if [ "$1" = "fmt" ]; then
   shift
