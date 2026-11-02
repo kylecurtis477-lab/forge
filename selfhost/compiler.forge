@@ -8742,7 +8742,7 @@ def fc_reload(a, b):
         j += 1
 
 def ibin(op, a, b, ovf):
-    if (op == O_ADD or op == O_SUB) and (oty(a) != T_INT or oty(b) != T_INT) and hyb and not inl_on and not fl(a) and not fl(b):
+    if (op == O_ADD or op == O_SUB or op == O_MUL or op == O_DIV or op == O_MOD) and (oty(a) != T_INT or oty(b) != T_INT) and hyb and not inl_on and not fl(a) and not fl(b):
         if op == O_ADD and oty(a) == T_STR and oty(b) == T_STR:
             return rt_call2(2, a, b, T_STR)
         if oty(a) == 0 or oty(a) == T_INT:
@@ -8751,6 +8751,10 @@ def ibin(op, a, b, ovf):
                 vtt[d] = 0
                 k = iadd(O_GBIN, d, a, b)
                 iimm[k] = op - O_ADD
+                if op == O_DIV:
+                    iimm[k] = 4
+                elif op == O_MOD:
+                    iimm[k] = 5
                 ix[k] = uline(tl[ip])
                 return d
     need_int(a)
@@ -12124,8 +12128,22 @@ def o_ins(k, fi, x_epi):
         e("jae 1f")
         if iimm[k] == 0:
             e("add %rcx, %rax")
-        else:
+        elif iimm[k] == 1:
             e("sub %rcx, %rax")
+        elif iimm[k] == 2:
+            e("mov %rax, %rdx")
+            e("imul %rcx, %rdx")
+            e("jo 1f")
+            e("cmp rt_dlov(%rip), %rdx")
+            e("jae 1f")
+            e("mov %rdx, %rax")
+        else:
+            e("test %rcx, %rcx")
+            e("jz 1f")
+            e("xor %edx, %edx")
+            e("div %rcx")
+            if iimm[k] == 5:
+                e("mov %rdx, %rax")
         e("jmp 2f")
         emit_raw("1:\n")
         e("push %rsi")

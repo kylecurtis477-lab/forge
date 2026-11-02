@@ -1,0 +1,19 @@
+def op(a, b):
+    r = [a * b]
+    if b != 0:
+        r.append(a // b)
+        r.append(a % b)
+    return r
+
+def main():
+    print(op(7, 2))
+    print(op(-7, 2))
+    print(op(7, -2))
+    print(op(2.5, 2))
+    print(op(3, 1.5))
+    print(op(1 << 40, 1 << 30))
+    print("ab" * len(op(1, 1)), [1] * 3)
+    print(op(0, 5))
+    print("%d-%s" % (3, "x"))
+
+main()
