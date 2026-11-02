@@ -73,5 +73,5 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
    - Debug info (DWARF line tables), so GDB works on QEMU's gdbstub.
 7. **Toolchain independence:** a built-in assembler and an ELF64/PE32+ writer and linker in Forge, which removes `as`/`ld`/`objcopy`, plus linker-script equivalents (section placement, entry, image base).
 8. **ARM64 target:** an AArch64 backend for fs mode, UEFI on ARM (AAVMF in QEMU `virt`), PL011 serial, GIC, and the generic timer.
-10. **Never reboot (BUILD_PLAN Phase 2):** 1 module ABI — done; 2 isolated driver services, 3 supervisor restart, 4 hot-swap, 5 live patching, 6 kexec handoff — open.
 9. **Secure Boot:** sign `forgex64.efi` (sbsign/MOK) or chain through shim so it coexists with distro and Windows Secure Boot setups.
+10. **Never reboot (BUILD_PLAN Phase 2):** 1 module ABI — done; 2 isolated driver services, 3 supervisor restart, 4 hot-swap, 5 live patching, 6 kexec handoff — open.
