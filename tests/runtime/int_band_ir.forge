@@ -1,0 +1,8 @@
+def f(n: int) -> int:
+    x = 4611686018427387900
+    i = 0
+    while i < n:
+        x += 1
+        i += 1
+    return x
+print(f(4))

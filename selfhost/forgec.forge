@@ -11698,7 +11698,41 @@ nact = 0
 rused = list(16)
 nspill = 0
 
+vband = list(IVMAX)
+
+def o_band():
+    # vregs whose value can leave pure int arithmetic need the bool/None band check
+    v = 0
+    while v < nvr:
+        vband[v] = hyb
+        v += 1
+    if hyb:
+        return 0
+    k = 0
+    while k < nir:
+        op = iop[k]
+        safe = op == O_ADD or op == O_SUB or op == O_MUL or op == O_AND or op == O_OR or op == O_XOR or op == O_SAR or op == O_DIV or op == O_MOD or op == O_NEG or op == O_NOT or op == O_CBR or op == O_MOV
+        if not safe:
+            n = u_n(k)
+            j = 0
+            while j < n:
+                o = u_get(k, j)
+                if o >= 0:
+                    vband[o] = 1
+                j += 1
+        k += 1
+    ch = 1
+    while ch:
+        ch = 0
+        k = 0
+        while k < nir:
+            if iop[k] == O_MOV and vband[idst[k]] and ia[k] >= 0 and not vband[ia[k]]:
+                vband[ia[k]] = 1
+                ch = 1
+            k += 1
+
 def o_intervals():
+    o_band()
     BIG = 1000000000
     v = 0
     while v < nvr:
@@ -11945,7 +11979,8 @@ def o_ovf_r(k, R):
         o_ovn[no_ov] = line
         no_ov += 1
     e2("jo ", lab(l))
-    band_chk(R, l)
+    if vband[idst[k]]:
+        band_chk(R, l)
 
 def add_cold(s):
     global ncold
