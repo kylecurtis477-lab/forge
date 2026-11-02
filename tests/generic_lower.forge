@@ -1,0 +1,64 @@
+# Generic (untyped) subscript / compare / truthiness lowered natively in hybrid code.
+G = [5, -3, "s", 2.5, None, [], [1, 2], "", 0, 0.0, True, False, {"k": 1}]
+D = {"a": 1, "b": "x", 3: [9, 8]}
+S = "hello"
+M = [[1, 2, 3], [4, 5, 6]]
+
+def count(n):
+    c = 0
+    i = 0
+    while i < n:
+        if G[i % 13]:
+            c += 1
+        if G[i % 13] == 5:
+            c += 100
+        if G[-1 - i % 13] != None:
+            c += 1000
+        if S[i % 5] == "l":
+            c += 10000
+        if M[i % 2][i % 3] > 3:
+            c += 100000
+        i += 1
+    return c
+
+def strs(n):
+    out = []
+    i = 0
+    while i < n:
+        w = "abc"
+        if i % 3 == 0:
+            w = "xyz"
+        if w == "abc":
+            out.append(1)
+        elif w != "q":
+            out.append(2)
+        if D["b"] == "x" and D[3][1] == 8:
+            out.append(3)
+        i += 1
+    return out
+
+def cmps(a, b):
+    r = 0
+    if a < b:
+        r += 1
+    if a <= b:
+        r += 2
+    if a > b:
+        r += 4
+    if a >= b:
+        r += 8
+    if a == b:
+        r += 16
+    if a != b:
+        r += 32
+    return r
+
+print(count(40))
+print(strs(7))
+vals = [0, 1, -1, 2.5, -0.5, 9000000000000, True, False]
+print([cmps(G[0], v) for v in vals], [cmps(v, G[3]) for v in vals])
+print(cmps("a", "b"), cmps("b", "a"), cmps(S, "hello"), cmps([1, 2], [1, 3]))
+try:
+    print(G[13])
+except IndexError:
+    print("IndexError")
