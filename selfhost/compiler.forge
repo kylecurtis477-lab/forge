@@ -11157,16 +11157,25 @@ lgen = list(1)
 lkill = list(1)
 lcur = list(IVMAX)
 
+lv_ep = 0
+lv_cap = 0
+
 def o_live():
-    global lin, lout, lgen, lkill
+    global lin, lout, lgen, lkill, lv_ep, lv_cap
     sz = nb * nvr
     if sz > 1500000:
         o_fail("too many blocks*vregs")
         return 0
-    lin = list(sz + 1)
-    lout = list(sz + 1)
-    lgen = list(sz + 1)
-    lkill = list(sz + 1)
+    if sz + 1 > lv_cap:
+        lv_cap = sz + 1
+        if lv_cap < 65536:
+            lv_cap = 65536
+        lin = list(lv_cap)
+        lout = list(lv_cap)
+        lgen = list(lv_cap)
+        lkill = list(lv_cap)
+    lv_ep += 1
+    ep = lv_ep
     b = 0
     while b < nb:
         base = b * nvr
@@ -11176,11 +11185,11 @@ def o_live():
             j = 0
             while j < n:
                 o = u_get(k, j)
-                if o >= 0 and not lkill[base + o]:
-                    lgen[base + o] = 1
+                if o >= 0 and lkill[base + o] != ep:
+                    lgen[base + o] = ep
                 j += 1
             if has_dst(k):
-                lkill[base + idst[k]] = 1
+                lkill[base + idst[k]] = ep
             k += 1
         b += 1
     ch = 1
@@ -11191,18 +11200,23 @@ def o_live():
             base = b * nvr
             s1 = bs1[b]
             s2 = bs2[b]
+            b1 = s1 * nvr
+            b2 = s2 * nvr
             v = 0
             while v < nvr:
                 o = 0
-                if s1 >= 0 and lin[s1 * nvr + v]:
+                if s1 >= 0 and lin[b1 + v] == ep:
                     o = 1
-                if s2 >= 0 and lin[s2 * nvr + v]:
+                elif s2 >= 0 and lin[b2 + v] == ep:
                     o = 1
                 lout[base + v] = o
-                i = lgen[base + v] or o and not lkill[base + v]
+                i = 0
+                if lgen[base + v] == ep or o and lkill[base + v] != ep:
+                    i = ep
                 if i != lin[base + v]:
+                    if i or lin[base + v] == ep:
+                        ch = 1
                     lin[base + v] = i
-                    ch = 1
                 v += 1
             b -= 1
     return 1
@@ -11610,7 +11624,7 @@ def o_intervals():
         base = b * nvr
         v = 0
         while v < nvr:
-            if lin[base + v] and bst[b] < vs[v]:
+            if lin[base + v] == lv_ep and bst[b] < vs[v]:
                 vs[v] = bst[b]
             if lout[base + v] and ben[b] > ve[v]:
                 ve[v] = ben[b]
@@ -11641,7 +11655,7 @@ def o_intervals():
     while v < nvr:
         if vdefst[v] and vs[v] < nir:
             p = vs[v]
-            if idst[p] != v or lin[iblk[p] * nvr + v]:
+            if idst[p] != v or lin[iblk[p] * nvr + v] == lv_ep:
                 vdefst[v] = 0
         v += 1
     c = 0
