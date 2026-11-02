@@ -21,6 +21,7 @@ include "proc.fsi"
 include "module.fsi"
 include "drv.fsi"
 include "livepatch.fsi"
+include "kexec.fsi"
 
 MB2_MAGIC = 0x36D76289
 
@@ -95,9 +96,14 @@ def kernel_start():
         puts("multiboot2 (BIOS)\n")
     elif bi.method == BOOT_MB2_UEFI:
         puts("multiboot2 (UEFI)\n")
+    elif bi.method == BOOT_KEXEC:
+        puts("kexec handoff from the previous kernel (generation ")
+        put_u64(bi.kx_gen)
+        puts(")\n")
     else:
         puts("Forge UEFI loader (ExitBootServices done)\n")
     kdelta = bi.kdelta
+    kx_gen = bi.kx_gen
     usable: u64 = 0
     i = 0
     while i < bi.nregions:
@@ -1062,6 +1068,34 @@ def shell_test():
         panic("interactive shell test failed")
     puts("processes + VFS + keyboard/serial input + sh OK\n")
 
+def kexec_test():
+    # a second shell session that replaces the kernel under itself (sh builtin `kexec`, syscall 409)
+    input_init()
+    ktest_hooks = 1
+    sz: u64 = 0
+    img = fs_read_file("/EFI/Forge/bin/sh", addr(sz))
+    t = proc_spawn(img, sz)
+    kfree(img)
+    code = proc_reap(t)
+    ktest_hooks = 0
+    input_off()
+    panic("kexec session ended without a handoff")
+
+def kexec_resume():
+    input_init()
+    t = kx_restore()
+    code = proc_reap(t)
+    orph = proc_reap_orphans()
+    input_off()
+    puts("sh exited with ")
+    put_u64(code)
+    puts(" after the handoff, orphans reaped ")
+    put_u64(orph)
+    putc(10)
+    if code != 0 or kx_restored == 0:
+        panic("kexec handoff test failed")
+    puts("kexec handoff OK\n")
+
 @export
 def after_overflow():
     puts("recovered from #DF on a fresh stack\n")
@@ -1108,7 +1142,11 @@ def after_overflow():
     module_test()
     drv_test()
     livepatch_test()
-    shell_test()
+    if bi.handoff != 0:
+        kexec_resume()
+    else:
+        shell_test()
+        kexec_test()
     cli()
     puts("KERNEL OK\n")
     # test harness: wait up to 5 s (LAPIC ticks) for 'q' on COM1 so it can take a screenshot first

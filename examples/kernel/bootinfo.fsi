@@ -4,12 +4,14 @@ BI_MAGIC = 0x4F464E49544F4F42
 BOOT_MB2_BIOS = 1
 BOOT_MB2_UEFI = 2
 BOOT_FORGE_UEFI = 3
+BOOT_KEXEC = 4
 MEM_USABLE = 1
 MEM_RESERVED = 2
 MEM_ACPI_RECLAIM = 3
 MEM_ACPI_NVS = 4
 MEM_LOADER = 5
 MEM_BAD = 6
+MEM_HANDOFF = 7
 MAX_REGIONS = 256
 FB_RGBX = 0
 FB_BGRX = 1
@@ -32,5 +34,7 @@ struct BootInfo:
     rsdp: u64
     info_base: u64
     info_len: u64
+    handoff: u64
+    kx_gen: u64
     nregions: u64
     regions: MemRegion[256]

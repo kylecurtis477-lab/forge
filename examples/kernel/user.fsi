@@ -70,6 +70,14 @@ asm(".text",
     "  mov %rdi, %rsp",
     "  xor %eax, %eax",
     "  jmp syscall_ret",
+    # a process handed over by kexec resumes here: the interrupted syscall returns 1
+    "kx_resume_entry:",
+    "  mov %rdi, %rsp",
+    "  mov $1, %eax",
+    "  jmp syscall_ret",
+    ".globl kx_resume_entry_addr",
+    "kx_resume_entry_addr: lea kx_resume_entry(%rip), %rax",
+    "  ret",
     ".globl fork_child_entry_addr",
     "fork_child_entry_addr: lea fork_child_entry(%rip), %rax",
     "  ret",
@@ -100,6 +108,7 @@ asm(".text",
 
 extern def enter_ring3(rip: u64, rsp: u64)
 extern def fork_child_entry_addr() -> u64
+extern def kx_resume_entry_addr() -> u64
 SF_SIZE = 80
 SF_RFLAGS = 7
 SF_RIP = 8

@@ -259,6 +259,8 @@ def tlb_local(cr3: u64, va: u64, n: u64):
         invlpg(va + i * PAGE)
         i += 1
 
+tlb_halt: u64        # kexec: parked CPUs halt for good (the successor restarts them with INIT-SIPI)
+
 def tlb_poll():
     # safe with interrupts off: called from spin loops so a CPU that waits on a lock still answers
     if atomic_load64(u64(addr(tlb_active))) == 0:
@@ -273,6 +275,8 @@ def tlb_poll():
             # stop-machine: stay parked (interrupts off) until the initiator ends round g, then serialise
             # so this CPU refetches any instruction bytes the initiator rewrote. Waiting on the round
             # number (not on 0) means a CPU that misses the brief 0 is not trapped into the next round.
+            while tlb_halt:
+                hlt()
             while atomic_load64(u64(addr(tlb_park))) == g:
                 cpu_relax()
             cpuid4(0, 0)

@@ -428,9 +428,7 @@ def pmm_reclaim(bi: ptr[BootInfo]):
         if r.typ == MEM_LOADER:
             reclaimed_loader += reclaim_range(r.base, r.len)
             r.typ = MEM_USABLE
-        elif r.typ == MEM_ACPI_RECLAIM:
-            reclaimed_acpi += reclaim_range(r.base, r.len)
-            r.typ = MEM_USABLE
+        # ACPI reclaimable tables stay: a kexec successor parses them again
         i += 1
     if bi.info_len != 0:
         reclaimed_loader += reclaim_range(bi.info_base, bi.info_len)

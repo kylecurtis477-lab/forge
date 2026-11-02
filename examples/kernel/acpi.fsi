@@ -51,6 +51,8 @@ def madt_parse(m: u64):
             lapic_phys = vload64(p + 4)
         p += n
 
+rsdp_save: u8[64]   # copy of the RSDP for a kexec successor (the original may be reclaimed)
+
 def acpi_init(rsdp_phys: u64) -> u64:
     i = 0
     while i < 16:
@@ -66,6 +68,7 @@ def acpi_init(rsdp_phys: u64) -> u64:
     if vload64(r) != 0x2052545020445352 or acpi_sum(r, 20) != 0:
         puts("ACPI: bad RSDP\n")
         return 0
+    memcpy(u64(addr(rsdp_save[0])), r, 36)
     rev = vload8(r + 15)
     sdt = u64(vload32(r + 16))
     esz = 4

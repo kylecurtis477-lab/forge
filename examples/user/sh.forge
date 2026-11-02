@@ -56,6 +56,7 @@ def do_ls(dir: ptr[u8]):
 def _start():
     out("Forge sh: builtins ls, exit; programs from /efi/forge/bin\n")
     flush()
+    ncmd: u64 = 0
     while 1:
         out("sh$ ")
         flush()
@@ -77,6 +78,25 @@ def _start():
             out("sh: bye\n")
             flush()
             sys_exit(0)
+        if streq(cmd, "kexec"):
+            out("sh: kexec after ")
+            out_u64(ncmd)
+            out(" commands, pid ")
+            out_u64(sys_getpid())
+            out("\n")
+            flush()
+            r = syscall3(409, 0, 0, 0)
+            if r == 1:
+                out("sh: survived kexec: ")
+                out_u64(ncmd)
+                out(" commands remembered, pid now ")
+                out_u64(sys_getpid())
+                out("\n")
+            else:
+                out("sh: kexec failed\n")
+            flush()
+            continue
+        ncmd += 1
         if streq(cmd, "ls"):
             if line[a] == 0:
                 do_ls("/efi/forge/bin")
