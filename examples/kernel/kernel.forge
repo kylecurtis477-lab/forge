@@ -24,6 +24,7 @@ include "module.fsi"
 include "drv.fsi"
 include "livepatch.fsi"
 include "kexec.fsi"
+include "seal.fsi"
 include "../../std/vec.fsi"
 include "../../std/map.fsi"
 
@@ -677,6 +678,8 @@ asm(".section .rodata",
     ".balign 16",
     "user_fault_elf: .incbin \"fault.elf\"",
     "user_fault_end:",
+    ".balign 16",
+    "seal_key_bytes: .incbin \"seal.key\"",
     ".text")
 
 @naked
@@ -684,7 +687,8 @@ def uimg(i: u64) -> u64:
     asm("lea user_hello_elf(%rip), %rax", "cmp $1, %rdi", "jb 1f",
         "lea user_hello_end(%rip), %rax", "je 1f",
         "lea user_fault_elf(%rip), %rax", "cmp $3, %rdi", "jb 1f",
-        "lea user_fault_end(%rip), %rax", "1: ret")
+        "lea user_fault_end(%rip), %rax", "cmp $4, %rdi", "jb 1f",
+        "lea seal_key_bytes(%rip), %rax", "1: ret")
 
 wx_img: u8[512]
 
@@ -715,17 +719,24 @@ def wx_seg(k: u64, fl: u64, va: u64):
     wx_put(o + 16, va, 8)
     wx_put(o + 40, 0x100, 8)
 
+def elf_try(img: u64, len: u64) -> u64:
+# load into a throwaway address space (the W^X test images are deliberately unsealed)
+    pml4 = as_new()
+    e = elf_load(pml4, img, len)
+    as_free(pml4)
+    return e
+
 def user_wx_test():
 # W^X for user ELF: a writable+executable segment, and RX/RW segments sharing a page, are refused
     r0 = elf_wx_rejects
     wx_hdr(1)
     wx_seg(0, 7, 0x400000)
-    if u64(proc_spawn(u64(addr(wx_img[0])), 512)) != 0:
+    if elf_try(u64(addr(wx_img[0])), 512) != 0:
         panic("ELF loader accepted an RWX segment")
     wx_hdr(2)
     wx_seg(0, 5, 0x400000)
     wx_seg(1, 6, 0x400100)
-    if u64(proc_spawn(u64(addr(wx_img[0])), 512)) != 0:
+    if elf_try(u64(addr(wx_img[0])), 512) != 0:
         panic("ELF loader accepted RX and RW in one page")
     if elf_wx_rejects - r0 != 2:
         panic("W^X rejects not counted")
@@ -820,6 +831,7 @@ def fs_test():
     putc(10)
     if code != (id & 0xFF):
         panic("init from disk failed")
+    seal_test()
     puts("PCI + virtio-blk + FAT32 (read-only) OK\n")
 
 def kabi_future_probe() -> u64:

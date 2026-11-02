@@ -226,40 +226,55 @@ def as_free(pml4: u64) -> u64:
     return n + 1
 
 # ---- ELF64 loader ----
-@unsafe
-def ld16(p: u64) -> u64:
-    return vload64(p) & 0xFFFF
-
-@unsafe
-def ld32(p: u64) -> u64:
-    return vload64(p) & 0xFFFFFFFF
-
 elf_end: u64
+
+# ELF64 header and program header viewed as u64 words (fields packed inside a word are masked out)
+struct Ehdr:
+    w0: u64
+    w1: u64
+    w2: u64
+    entry: u64
+    phoff: u64
+    shoff: u64
+    w6: u64
+    w7: u64
+
+struct Phdr:
+    w0: u64
+    off: u64
+    va: u64
+    pa: u64
+    fsz: u64
+    msz: u64
+    align: u64
 
 @unsafe
 def elf_load(pml4: u64, img: u64, len: u64) -> u64:
 # returns the entry point, or 0 if the image is rejected
-    if len < 64 or ld32(img) != 0x464C457F or (vload64(img + 4) & 0xFF) != 2 or ld16(img + 18) != 62:
+    if len < 64:
         return 0
-    if ld16(img + 16) != 2:
+    eh = ptr[Ehdr](img)
+    if (eh.w0 & 0xFFFFFFFFFF) != 0x02464C457F or ((eh.w2 >> 16) & 0xFFFF) != 62:
         return 0
-    entry = vload64(img + 24)
-    phoff = vload64(img + 32)
-    phent = ld16(img + 54)
-    phnum = ld16(img + 56)
-    if phent != 56 or phoff + phnum * 56 > len:
+    if (eh.w2 & 0xFFFF) != 2:
+        return 0
+    entry = eh.entry
+    phoff = eh.phoff
+    phent = (eh.w6 >> 48) & 0xFFFF
+    phnum = eh.w7 & 0xFFFF
+    if phent != 56 or phoff > len or phnum * 56 > len - phoff:
         return 0
     i = 0
     nload = 0
     elf_end = 0
     while i < phnum:
-        ph = img + phoff + i * 56
-        if ld32(ph) == 1:
-            fl = ld32(ph + 4)
-            off = vload64(ph + 8)
-            va = vload64(ph + 16)
-            fsz = vload64(ph + 32)
-            msz = vload64(ph + 40)
+        ph = ptr[Phdr](img + phoff + i * 56)
+        if (ph.w0 & 0xFFFFFFFF) == 1:
+            fl = (ph.w0 >> 32) & 0xFFFFFFFF
+            off = ph.off
+            va = ph.va
+            fsz = ph.fsz
+            msz = ph.msz
             if (fl & 3) == 3:
                 elf_wx_rejects += 1
                 return 0

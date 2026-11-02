@@ -1,4 +1,5 @@
 # forge: no-runtime
+# forge: caps(drv)
 # blkd: the virtio-blk driver as a ring-3 service. It owns the device through kernel-granted
 # capabilities only (port I/O in the device window, its MSI-X interrupt, one DMA region) and serves
 # block reads to the kernel over the driver IPC channel (recv / reply).

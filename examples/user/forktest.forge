@@ -1,5 +1,6 @@
 # forge: safe
 # forge: no-runtime
+# forge: caps(spawn)
 # fork/wait/exit, brk, mmap/munmap and exec, checked from user space.
 include "ulib.fsi"
 

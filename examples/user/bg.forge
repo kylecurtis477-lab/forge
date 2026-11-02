@@ -1,5 +1,6 @@
 # forge: safe
 # forge: no-runtime
+# forge: caps(fs)
 # bg GEN: a background process for the kexec test. Reads the first half of a file, then keeps yielding
 # until the kernel generation (syscall 410) reaches GEN, then reads the rest through the same fd (its
 # position must survive the handoff), re-reads the whole file through a fresh fd and checks both hashes,

@@ -1,5 +1,6 @@
 # forge: safe
 # forge: no-runtime
+# forge: caps(fs, spawn)
 # Phase 5.1: handles replace ambient authority. Rights are checked on every syscall, dup only narrows,
 # a forked child given only a read-only handle cannot write, and paths resolve only through a held
 # directory capability (no ".." escapes, no global lookup once the root capability is gone).

@@ -1,5 +1,6 @@
 # forge: safe
 # forge: no-runtime
+# forge: caps(fs, spawn, ipc)
 # Phase 5.2: IPC channels with wait queues. Ping-pong latency between a parent and a forked child,
 # a file handle moved over the channel (gone from the sender, usable read-only by the receiver),
 # XFER enforcement, and EOF once the peer's end is closed.

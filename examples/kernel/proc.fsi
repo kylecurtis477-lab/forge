@@ -558,6 +558,10 @@ def proc_new(ppid: u64) -> ptr[Proc]:
 
 @unsafe
 def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> nptr[Thread]:
+    vc = image_verify(img, len)
+    if vc == 0:
+        seal_log("kernel-supplied image")
+        return 0
     pml4 = as_new()
     entry = elf_load(pml4, img, len)
     if entry == 0:
@@ -744,6 +748,11 @@ def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
     img = fs_read_file(addr(path[0]), addr(sz))
     if img == 0:
         return ENOENT
+    vc = image_verify(img, sz)
+    if vc == 0:
+        seal_log(addr(path[0]))
+        kfree(img)
+        return ENOEXEC
     pml4 = as_new()
     entry = elf_load(pml4, img, sz)
     kfree(img)

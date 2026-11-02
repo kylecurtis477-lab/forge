@@ -1,5 +1,6 @@
 # forge: safe
 # forge: no-runtime
+# forge: caps(fs, spawn)
 # Phase 5.3: launched by `sh: run sbtest` through /efi/forge/apps/sbtest.mf. It holds exactly the
 # manifest's handles (fd 4 = /efi/forge/bin/hello read-only, fd 5 = /efi/forge/docs lookup) and
 # nothing else: no root capability, so any other path is denied (and the kernel logs it).

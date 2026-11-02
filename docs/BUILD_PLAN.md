@@ -128,6 +128,7 @@ A phase is done when every listed test passes in CI (`run_tests.sh`) on both -O2
 
 ## Phase 6 — Proven-safe programs only (signature feature 2)
 - The loader accepts only images produced by the Forge verifier: a signed proof manifest stating the safety level (no unchecked unsafe, or an audited unsafe list) and the declared capabilities.
+  - **6.1 status: done.** `tools/forgeseal.py` runs `forgec --unsafe-report` and seals only programs whose unsafe counts are zero or within `tests/unsafe/baseline.txt`; declared caps come from `# forge: caps(...)`. The 128-byte trailer holds level, unsafe ops, caps, the ELF SHA-256 and an HMAC-SHA256 under a per-build key (`build/user/seal.key`, embedded in the kernel). `image_verify` (seal.fsi) runs in `sys_exec` and `proc_spawn_args`; boot self-test: hello/cat/fault accepted with caps 0/fs/probe; unsealed, tampered and forged images refused for the right reason. Gap: shared-key MAC, not public-key; .ko modules not sealed.
 - The kernel grants exactly the declared capabilities and nothing else.
 - Test: an unverified or tampered ELF is refused. A verified program that tries an undeclared capability is denied at the syscall boundary.
 - The Linux ABI layer (Phase 11) runs only inside an explicit compatibility sandbox.

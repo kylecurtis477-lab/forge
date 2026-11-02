@@ -1,0 +1,262 @@
+# Phase 6.1: verifier-produced proof manifests. tools/forgeseal.py appends a 128-byte trailer to
+# every user ELF (see struct Seal) carrying the safety level, the unsafe-op count and the declared
+# capabilities, the SHA-256 of the ELF bytes, and an HMAC-SHA256 over the trailer under the build's
+# seal key (embedded in the kernel image, generated per build tree, never committed). The kernel
+# refuses to start a user image whose trailer is missing, malformed, or fails the hash or MAC.
+# Honest limit: a shared-key MAC, not a public-key signature: anyone holding the kernel image holds
+# the key. Loadable modules (.ko) are not sealed yet.
+SEAL_MAGIC = 0x4652504547524F46
+SEAL_SIZE = 128
+SEAL_OK = 0x8000000000000000
+
+struct Blk64:
+    b: u8[64]
+
+struct Dig:
+    b: u8[32]
+
+struct Seal:
+    magic: u64
+    version: u64
+    level: u64
+    unsafe_ops: u64
+    caps: u64
+    elf_len: u64
+    own_ops: u64
+    rsvd: u64
+    hash: u8[32]
+    mac: u8[32]
+
+struct Sha:
+    h: u64[8]
+    w: u64[64]
+    buf: u8[64]
+    nbuf: u64
+    total: u64
+
+sha_k: u64[64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0xfc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x6ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+
+def ror32(x: u64, n: u64) -> u64:
+    return ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF
+
+def sha_init(s: ptr[Sha]):
+    s.h[0] = 0x6a09e667
+    s.h[1] = 0xbb67ae85
+    s.h[2] = 0x3c6ef372
+    s.h[3] = 0xa54ff53a
+    s.h[4] = 0x510e527f
+    s.h[5] = 0x9b05688c
+    s.h[6] = 0x1f83d9ab
+    s.h[7] = 0x5be0cd19
+    s.nbuf = 0
+    s.total = 0
+
+def sha_compress(s: ptr[Sha]):
+    i: u64 = 0
+    while i < 16:
+        s.w[i] = (u64(s.buf[i * 4]) << 24) | (u64(s.buf[i * 4 + 1]) << 16) | (u64(s.buf[i * 4 + 2]) << 8) | u64(s.buf[i * 4 + 3])
+        i += 1
+    while i < 64:
+        x = s.w[i - 15]
+        y = s.w[i - 2]
+        s0 = ror32(x, 7) ^ ror32(x, 18) ^ (x >> 3)
+        s1 = ror32(y, 17) ^ ror32(y, 19) ^ (y >> 10)
+        s.w[i] = (s.w[i - 16] + s0 + s.w[i - 7] + s1) & 0xFFFFFFFF
+        i += 1
+    a = s.h[0]
+    b = s.h[1]
+    c = s.h[2]
+    d = s.h[3]
+    e = s.h[4]
+    f = s.h[5]
+    g = s.h[6]
+    h = s.h[7]
+    i = 0
+    while i < 64:
+        t1 = (h + (ror32(e, 6) ^ ror32(e, 11) ^ ror32(e, 25)) + ((e & f) ^ ((~e) & g)) + sha_k[i] + s.w[i]) & 0xFFFFFFFF
+        t2 = ((ror32(a, 2) ^ ror32(a, 13) ^ ror32(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) & 0xFFFFFFFF
+        h = g
+        g = f
+        f = e
+        e = (d + t1) & 0xFFFFFFFF
+        d = c
+        c = b
+        b = a
+        a = (t1 + t2) & 0xFFFFFFFF
+        i += 1
+    s.h[0] = (s.h[0] + a) & 0xFFFFFFFF
+    s.h[1] = (s.h[1] + b) & 0xFFFFFFFF
+    s.h[2] = (s.h[2] + c) & 0xFFFFFFFF
+    s.h[3] = (s.h[3] + d) & 0xFFFFFFFF
+    s.h[4] = (s.h[4] + e) & 0xFFFFFFFF
+    s.h[5] = (s.h[5] + f) & 0xFFFFFFFF
+    s.h[6] = (s.h[6] + g) & 0xFFFFFFFF
+    s.h[7] = (s.h[7] + h) & 0xFFFFFFFF
+
+def sha_byte(s: ptr[Sha], v: u64):
+    s.buf[s.nbuf & 63] = u8(v & 255)
+    s.nbuf += 1
+    s.total += 1
+    if s.nbuf == 64:
+        sha_compress(s)
+        s.nbuf = 0
+
+@unsafe
+def sha_mem(s: ptr[Sha], a: u64, n: u64):
+# hash n bytes at kernel address a, viewed 64 bytes at a time (only the first n are read)
+    o: u64 = 0
+    while o < n:
+        q = ptr[Blk64](a + o)
+        j: u64 = 0
+        while j < 64 and o + j < n:
+            sha_byte(s, u64(q.b[j]))
+            j += 1
+        o += 64
+
+def sha_final(s: ptr[Sha], out: ptr[Dig]):
+    bits = s.total * 8
+    sha_byte(s, 0x80)
+    while s.nbuf != 56:
+        sha_byte(s, 0)
+    i: u64 = 0
+    while i < 8:
+        sha_byte(s, (bits >> (56 - i * 8)) & 255)
+        i += 1
+    i = 0
+    while i < 32:
+        out.b[i] = u8((s.h[i / 4] >> (24 - (i % 4) * 8)) & 255)
+        i += 1
+
+def seal_eq(a: ptr[Dig], t: ptr[Seal], mac: u64) -> u64:
+# constant-time compare against the trailer's mac (mac=1) or image hash (mac=0)
+    d: u64 = 0
+    i: u64 = 0
+    while i < 32:
+        v = t.hash[i]
+        if mac:
+            v = t.mac[i]
+        d = d | (u64(a.b[i]) ^ u64(v))
+        i += 1
+    return d == 0
+
+seal_key: Dig
+seal_key_ok: u64
+seal_ok_count: u64
+seal_refused: u64
+seal_why: u64  # reason code of the last refusal
+
+def hmac_pad(s: ptr[Sha], pad: u64):
+    i: u64 = 0
+    while i < 64:
+        kb: u64 = 0
+        if i < 32:
+            kb = u64(seal_key.b[i])
+        sha_byte(s, kb ^ pad)
+        i += 1
+
+def seal_reason(code: u64) -> ptr[u8]:
+    if code == 1:
+        return "no proof manifest"
+    if code == 2:
+        return "unknown manifest version"
+    if code == 3:
+        return "manifest length mismatch"
+    if code == 4:
+        return "bad manifest signature"
+    if code == 5:
+        return "image hash mismatch"
+    return "?"
+
+def seal_fail(code: u64) -> u64:
+    seal_why = code
+    seal_refused += 1
+    return 0
+
+@unsafe
+def image_verify(img: u64, len: u64) -> u64:
+# returns SEAL_OK | declared caps, or 0 (reason in seal_why)
+    if len < SEAL_SIZE + 64:
+        return seal_fail(1)
+    t = ptr[Seal](img + len - SEAL_SIZE)
+    if t.magic != SEAL_MAGIC:
+        return seal_fail(1)
+    if t.version != 1:
+        return seal_fail(2)
+    if t.elf_len != len - SEAL_SIZE:
+        return seal_fail(3)
+    if seal_key_ok == 0:
+        k = ptr[Dig](uimg(4))
+        j: u64 = 0
+        while j < 32:
+            seal_key.b[j] = k.b[j]
+            j += 1
+        seal_key_ok = 1
+    ctx: Sha
+    s = addr(ctx)
+    inner: Dig
+    mac: Dig
+    sha_init(s)
+    hmac_pad(s, 0x36)
+    sha_mem(s, u64(t), 96)
+    sha_final(s, addr(inner))
+    sha_init(s)
+    hmac_pad(s, 0x5c)
+    i: u64 = 0
+    while i < 32:
+        sha_byte(s, u64(inner.b[i]))
+        i += 1
+    sha_final(s, addr(mac))
+    if seal_eq(addr(mac), t, 1) == 0:
+        return seal_fail(4)
+    sha_init(s)
+    sha_mem(s, img, len - SEAL_SIZE)
+    sha_final(s, addr(inner))
+    if seal_eq(addr(inner), t, 0) == 0:
+        return seal_fail(5)
+    seal_ok_count += 1
+    return SEAL_OK | (t.caps & 0xFFFFFFFF)
+
+def seal_log(what: ptr[u8]):
+    puts("verify: ")
+    puts(what)
+    puts(" refused: ")
+    puts(seal_reason(seal_why))
+    putc(10)
+
+def seal_check(path: ptr[u8], want: u64) -> u64:
+# Phase 6.1 self-test: verify an image read from the ESP; want = expected result (0 = refused)
+    sz: u64 = 0
+    buf = fs_read_file(path, addr(sz))
+    if buf == 0:
+        panic("seal test: image missing on the ESP")
+    r = image_verify(buf, sz)
+    kfree(buf)
+    if r != want:
+        puts(path)
+        panic(": unexpected verification result")
+    if r == 0:
+        return seal_why
+    return 0
+
+def seal_test():
+    n0 = seal_refused
+    seal_check("EFI/Forge/bin/hello", SEAL_OK)
+    seal_check("EFI/Forge/bin/cat", SEAL_OK | 1)
+    seal_check("EFI/Forge/bin/fault", SEAL_OK | 32)
+    if seal_check("EFI/Forge/bin/unsealed", 0) != 1:
+        panic("unsealed image refused for the wrong reason")
+    if seal_check("EFI/Forge/bin/tampered", 0) != 5:
+        panic("tampered image refused for the wrong reason")
+    if seal_check("EFI/Forge/bin/forged", 0) != 4:
+        panic("forged manifest refused for the wrong reason")
+    if seal_refused - n0 != 3:
+        panic("seal refusals not counted")
+    puts("proof manifest: 3 sealed images accepted with their declared caps; unsealed, tampered and forged images refused\n")

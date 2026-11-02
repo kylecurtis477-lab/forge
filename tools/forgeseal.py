@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Phase 6.1 proof manifest: seal a Forge user ELF with a verifier-produced trailer.
+
+usage: forgeseal.py SRC.forge IMAGE.elf KEYFILE BASELINE
+
+Runs `forgec --unsafe-report` on SRC (the verifier: type/unsafe checking happens there) and refuses
+to seal unless the unsafe counts are zero or within the audited entry in BASELINE. Declared
+capabilities come from a `# forge: caps(a, b, ...)` line in SRC. Appends a 128-byte trailer:
+  +0  "FORGEPRF"   +8 version (1)   +16 safety level   +24 unsafe ops (whole program)
+  +32 caps mask    +40 ELF length   +48 main-file unsafe ops   +56 reserved
+  +64 SHA-256(ELF bytes)            +96 HMAC-SHA256(key, trailer[0:96])
+Safety level: 2 = no unsafe code at all in the program's own file (only the audited ulib),
+1 = unsafe counts match the audited baseline. 0 is reserved for "no unsafe anywhere"."""
+import hashlib, hmac, os, re, struct, subprocess, sys
+
+CAPS = {'fs': 1, 'spawn': 2, 'ipc': 4, 'drv': 8, 'kexec': 16, 'probe': 32, 'ktest': 64}
+MAGIC = b'FORGEPRF'
+
+def main():
+    src, img, keyf, base = sys.argv[1:5]
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    fc = os.path.join(root, 'build/forgec')
+    d, f = os.path.dirname(os.path.abspath(src)), os.path.basename(src)
+    r = subprocess.run([fc, f, '/dev/null', '--unsafe-report'], cwd=d, capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f'forgeseal: {src}: verifier rejected the program:\n{r.stderr}')
+    lines = (r.stdout + r.stderr).splitlines()
+    m = [re.match(r'unsafe: (\d+) functions, (\d+) blocks, (\d+) ops, (\d+) top-level', l) for l in lines]
+    m = [x for x in m if x]
+    if not m:
+        sys.exit(f'forgeseal: {src}: no unsafe report')
+    cnt = tuple(int(x) for x in m[-1].groups())
+    own = sum(int(x.group(1)) for x in (re.match(rf'unsafe: \S*{re.escape(f)}:\d+ .*ops=(\d+)', l) for l in lines) if x)
+    rel = os.path.relpath(d, root)
+    audited = None
+    for l in open(base):
+        p = l.split()
+        if len(p) == 6 and p[0] == rel and p[1] == f:
+            audited = tuple(int(x) for x in p[2:])
+    if cnt == (0, 0, 0, 0):
+        level = 0
+    elif audited and all(a <= b for a, b in zip(cnt, audited)):
+        level = 2 if own == 0 else 1
+    else:
+        sys.exit(f'forgeseal: {src}: unsafe counts {cnt} are not in the audited baseline; refusing to seal')
+    caps = 0
+    for l in open(src):
+        mm = re.match(r'#\s*forge:\s*caps\((.*)\)', l)
+        if mm:
+            for c in filter(None, (x.strip() for x in mm.group(1).split(','))):
+                if c not in CAPS:
+                    sys.exit(f'forgeseal: {src}: unknown capability {c!r}')
+                caps |= CAPS[c]
+    elf = open(img, 'rb').read()
+    if elf[-128:-120] == MAGIC:
+        sys.exit(f'forgeseal: {img}: already sealed')
+    key = open(keyf, 'rb').read()
+    t = MAGIC + struct.pack('<7Q', 1, level, cnt[2], caps, len(elf), own, 0) + hashlib.sha256(elf).digest()
+    t += hmac.new(key, t, hashlib.sha256).digest()
+    assert len(t) == 128
+    open(img, 'wb').write(elf + t)
+    print(f'sealed {os.path.basename(img)}: level {level}, {cnt[2]} unsafe ops, caps 0x{caps:x}')
+
+main()

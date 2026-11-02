@@ -1,5 +1,6 @@
 # forge: safe
 # forge: no-runtime
+# forge: caps(fs)
 # sum FILE: read a file through the VFS and print its size and FNV-1a 64 hash (the boot test compares
 # it with the hash computed on the host).
 include "ulib.fsi"

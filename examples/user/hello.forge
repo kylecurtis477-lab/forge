@@ -1,5 +1,6 @@
 # forge: safe
 # forge: no-runtime
+# forge: caps()
 # A Forge user program: runs in ring 3 in its own address space, talks to the kernel only through syscalls.
 include "ulib.fsi"
 

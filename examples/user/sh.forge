@@ -1,5 +1,6 @@
 # forge: safe
 # forge: no-runtime
+# forge: caps(fs, spawn, ipc, drv, kexec, probe, ktest)
 # sh: the first interactive program. Reads lines from the console (keyboard or serial),
 # runs builtins (ls, exit) or fork+exec /efi/forge/bin/<cmd> and waits for it.
 include "ulib.fsi"
