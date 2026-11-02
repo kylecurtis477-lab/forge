@@ -315,3 +315,42 @@ def kfree(p: u64):
         return
     vstore64(p, slab_free[h])
     slab_free[h] = p
+
+# ---- reclaim boot-time memory ----
+# Called once ACPI has been parsed and the kernel runs on its own page tables: the loader's image, its page
+# tables and BootInfo (LoaderCode/LoaderData), ACPI reclaimable tables and the multiboot2 info block are
+# no longer referenced. The kernel image itself (also LoaderData under forgex64.efi) and the low 1 MiB stay.
+reclaimed_loader: u64
+reclaimed_acpi: u64
+
+def reclaim_range(base: u64, len: u64) -> u64:
+    kstart = ksym(6) + kdelta
+    kend = ksym(7) + kdelta
+    f = (base + PAGE - 1) / PAGE
+    end = (base + len) / PAGE
+    n: u64 = 0
+    while f < end and f < MAX_FRAMES:
+        pa = f * PAGE
+        if pa >= 0x100000 and (pa + PAGE <= kstart or pa >= kend) and frame_used(f):
+            frame_clr(f)
+            frames_free += 1
+            frames_total += 1
+            n += 1
+        f += 1
+    return n
+
+def pmm_reclaim(bi: ptr[BootInfo]):
+    i = 0
+    while i < bi.nregions:
+        r = addr(bi.regions[i])
+        if r.typ == MEM_LOADER:
+            reclaimed_loader += reclaim_range(r.base, r.len)
+            r.typ = MEM_USABLE
+        elif r.typ == MEM_ACPI_RECLAIM:
+            reclaimed_acpi += reclaim_range(r.base, r.len)
+            r.typ = MEM_USABLE
+        i += 1
+    if bi.info_len != 0:
+        reclaimed_loader += reclaim_range(bi.info_base, bi.info_len)
+        bi.info_len = 0
+    bi.rsdp = 0

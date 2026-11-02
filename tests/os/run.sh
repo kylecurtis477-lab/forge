@@ -15,7 +15,7 @@ examples/efi/build.sh >/dev/null || { echo "FAIL os/efi-build"; exit 0; }
 L=build/os; mkdir -p $L
 readelf -lW build/kernel/kernel.elf | grep -q "LOAD.* RWE " && echo "FAIL os/kernel-wx (RWX PT_LOAD)" || echo "PASS os/kernel-wx (no RWX PT_LOAD)"
 FB="Forge kernel: framebuffer console 1024x768"
-K="identity 0x0000000000100000 -> unmapped|stack guard 0xffffffffc002f000 -> unmapped|breakpoints handled: 2|live=0|demand paging: 3 faults|MADT: cpus=|#DF on IST1|recovered from #DF|LAPIC timer ticks: 20|PIT IRQ0 via IOAPIC gsi 2: 1|KERNEL OK"
+K="identity 0x0000000000100000 -> unmapped|stack guard 0xffffffffc002f000 -> unmapped|breakpoints handled: 2|live=0|demand paging: 3 faults|MADT: cpus=|memory reclaimed: |#DF on IST1|recovered from #DF|LAPIC timer ticks: 20|PIT IRQ0 via IOAPIC gsi 2: 1|KERNEL OK"
 B=tests/os/boot.py
 python3 $B kernel-bios $L/bios.log 60 "multiboot2 (BIOS)|$K" "$FB" -- $Q -cdrom build/kernel/forge.iso
 cp $OVMF_VARS $L/vars.fd

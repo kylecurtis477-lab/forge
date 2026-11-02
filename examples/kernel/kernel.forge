@@ -224,6 +224,19 @@ def kmain_high():
     demand_test()
     if acpi_init(bi.rsdp) == 0:
         panic("ACPI/MADT not found")
+    before = frames_free
+    pmm_reclaim(addr(bi))
+    puts("memory reclaimed: loader ")
+    put_u64(reclaimed_loader * 4)
+    puts(" KiB, ACPI ")
+    put_u64(reclaimed_acpi * 4)
+    puts(" KiB; frames free ")
+    put_u64(before)
+    puts(" -> ")
+    put_u64(frames_free)
+    putc(10)
+    if frames_free != before + reclaimed_loader + reclaimed_acpi:
+        panic("reclaim accounting")
     puts("stack overflow test: recursing into the guard page...\n")
     df_recover = u64(after_overflow)
     recurse(0)
