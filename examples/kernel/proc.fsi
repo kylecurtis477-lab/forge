@@ -221,18 +221,83 @@ tty_q: WaitQ
 kbd_irqs: u64
 com_irqs: u64
 
-def tty_push_l(c: u64):
-    # rq_lock held (interrupt context)
+# The line discipline is hot-swappable (Phase 2.4): v0 below is built in; tty1.ko / tty2.ko provide the
+# same three entry points. tty_fp_* are swapped together under rq_lock, and every call is made under
+# rq_lock, so no CPU can be inside the old code once the swap's critical section ends.
+tty_fp_push: u64
+tty_fp_lines: u64
+tty_fp_pop: u64
+tty_pushed: u64
+tty_popped: u64
+tty_erased: u64
+tty_dropped: u64
+
+def tty0_push(c: u64) -> u64:
     if c == 8 or c == 127:
         if tty_count > 0 and tty_buf[(tty_head + tty_count - 1) & 511] != 10:
             tty_count -= 1
-        return
-    if tty_count < 511:
-        tty_buf[(tty_head + tty_count) & 511] = u8(c)
-        tty_count += 1
-        if c == 10:
-            tty_lines += 1
-            wq_wake_all_l(addr(tty_q))
+        return 2
+    if tty_count >= 511:
+        return 4
+    tty_buf[(tty_head + tty_count) & 511] = u8(c)
+    tty_count += 1
+    if c == 10:
+        tty_lines += 1
+        return 1
+    return 0
+
+def tty0_lines() -> u64:
+    return tty_lines
+
+def tty0_pop() -> u64:
+    c = u64(tty_buf[tty_head])
+    tty_head = (tty_head + 1) & 511
+    tty_count -= 1
+    if c == 10:
+        tty_lines -= 1
+    return c
+
+def tty0_save(st: u64, cap: u64) -> u64:
+    if cap < 24 + tty_count:
+        return 0
+    vstore64(st, 0x54545931)
+    vstore64(st + 8, tty_count)
+    vstore64(st + 16, tty_lines)
+    i: u64 = 0
+    while i < tty_count:
+        vstore8(st + 24 + i, u64(tty_buf[(tty_head + i) & 511]))
+        i += 1
+    return 24 + tty_count
+
+def tty0_restore(st: u64, n: u64) -> u64:
+    if n < 24 or vload64(st) != 0x54545931:
+        return 0
+    k = vload64(st + 8)
+    if k > 511 or n != 24 + k:
+        return 0
+    tty_head = 0
+    tty_count = k
+    tty_lines = vload64(st + 16)
+    i: u64 = 0
+    while i < k:
+        tty_buf[i] = u8(vload8(st + 24 + i))
+        i += 1
+    return 1
+
+def tty_push_l(c: u64):
+    # rq_lock held (interrupt context)
+    tty_pushed += 1
+    if tty_fp_push == 0:
+        tty_fp_push = u64(tty0_push)
+        tty_fp_lines = u64(tty0_lines)
+        tty_fp_pop = u64(tty0_pop)
+    fl = call_ptr(tty_fp_push, c)
+    if fl & 2:
+        tty_erased += 1
+    if fl & 4:
+        tty_dropped += 1
+    if fl & 1:
+        wq_wake_all_l(addr(tty_q))
 
 def tty_input(c: u64):
     spin_lock(u64(addr(rq_lock)))
@@ -245,17 +310,19 @@ def tty_read(ubuf: u64, n: u64) -> u64:
         n = 256
     f = irq_save()
     spin_lock(u64(addr(rq_lock)))
-    while tty_lines == 0:
+    if tty_fp_push == 0:
+        tty_fp_push = u64(tty0_push)
+        tty_fp_lines = u64(tty0_lines)
+        tty_fp_pop = u64(tty0_pop)
+    while call_ptr(tty_fp_lines) == 0:
         wq_block_l(addr(tty_q))
     got: u64 = 0
-    while got < n and tty_count > 0:
-        c = tty_buf[tty_head]
-        tty_head = (tty_head + 1) & 511
-        tty_count -= 1
-        kb[got] = c
+    while got < n:
+        c = call_ptr(tty_fp_pop)
+        tty_popped += 1
+        kb[got] = u8(c)
         got += 1
         if c == 10:
-            tty_lines -= 1
             break
     spin_unlock(u64(addr(rq_lock)))
     irq_restore(f)

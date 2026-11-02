@@ -754,6 +754,8 @@ def drv_test():
     put_u64(drv_served)
     puts(" requests served\n")
     # a process without the capability is refused
+    if sys_drv(408, 5, 0, 0) != EPERM or blk_crash_after != 0:
+        panic("fault-injection hook usable while disarmed")
     if sys_drv(400, vb_io, 1, 0) != EPERM:
         panic("driver capability not enforced")
     # fault injection: the driver dies with a request in flight on the device
@@ -789,6 +791,65 @@ def drv_test():
         panic("driver service leaks memory")
     puts("isolated driver service OK\n")
 
+# ---- tty hot swap (Phase 2.4): a swapper thread alternates the line discipline v1 <-> v2 every
+# 2 ticks while the shell session types; queued input is carried over by save/restore under rq_lock ----
+tsw_img: u64[3]
+tsw_sz: u64[3]
+tsw_mod: u64
+tsw_stop: u64
+tsw_swaps: u64
+tsw_partial: u64
+tsw_thread: u64
+
+def tty_swap_to(v: u64) -> u64:
+    m: u64 = 0
+    rst = u64(tty0_restore)
+    fpush = u64(tty0_push)
+    flines = u64(tty0_lines)
+    fpop = u64(tty0_pop)
+    if v != 0:
+        m = u64(mod_load(tsw_img[v], tsw_sz[v]))
+        if m == 0:
+            panic("tty module rejected")
+        rst = ptr[Module](m).restore
+        fpush = mod_sym(ptr[Module](m), "tty_push")
+        flines = mod_sym(ptr[Module](m), "tty_lines")
+        fpop = mod_sym(ptr[Module](m), "tty_pop")
+    st = kmalloc(1100)
+    f = irq_save()
+    spin_lock(u64(addr(rq_lock)))
+    sv = u64(tty0_save)
+    if tsw_mod != 0:
+        sv = ptr[Module](tsw_mod).save
+    n = call_ptr(sv, st, 1100)
+    ok = call_ptr(rst, st, n)
+    if ok == 1:
+        tty_fp_push = fpush
+        tty_fp_lines = flines
+        tty_fp_pop = fpop
+    spin_unlock(u64(addr(rq_lock)))
+    irq_restore(f)
+    if ok == 1:
+        if n > 24 and vload8(st + n - 1) != 10:
+            tsw_partial += 1
+        if tsw_mod != 0:
+            mod_unload(ptr[Module](tsw_mod))
+        tsw_mod = m
+        tsw_swaps += 1
+    elif m != 0:
+        mod_unload(ptr[Module](m))
+    kfree(st)
+    return ok
+
+def tty_swapper(arg: u64):
+    v: u64 = 1
+    while tsw_stop == 0:
+        tty_swap_to(v)
+        v = 3 - v
+        sleep_ticks(2)
+    if tty_swap_to(0) != 1:
+        panic("tty swap back to v0 failed")
+
 def shell_test():
     # the interactive shell from \EFI\Forge\bin\sh; the boot test types its commands
     input_init()
@@ -796,6 +857,12 @@ def shell_test():
     f0 = frames_free
     h0 = heap_live
     blkd_supervised_start(blkd_img, blkd_sz)
+    tsw_img[1] = mod_read("EFI/Forge/mod/tty1.ko", addr(tsw_sz[1]))
+    tsw_img[2] = mod_read("EFI/Forge/mod/tty2.ko", addr(tsw_sz[2]))
+    if tsw_img[1] == 0 or tsw_img[2] == 0:
+        panic("tty modules missing")
+    tsw_thread = u64(thread_spawn(u64(tty_swapper), 0))
+    ktest_hooks = 1
     sz: u64 = 0
     img = fs_read_file("/EFI/Forge/bin/sh", addr(sz))
     if img == 0:
@@ -829,6 +896,28 @@ def shell_test():
     puts(" sleeps, ")
     put_u64(vb_polled)
     puts(" polled\n")
+    ktest_hooks = 0
+    tsw_stop = 1
+    thread_reap(ptr[Thread](tsw_thread))
+    kfree(tsw_img[1])
+    kfree(tsw_img[2])
+    puts("tty: ")
+    put_u64(tsw_swaps)
+    puts(" hot swaps (")
+    put_u64(tsw_partial)
+    puts(" with a partial line queued), pushed ")
+    put_u64(tty_pushed)
+    puts(", consumed ")
+    put_u64(tty_popped)
+    puts(", erased ")
+    put_u64(tty_erased)
+    puts(", lost ")
+    lost = tty_pushed - tty_popped - tty_erased - tty_dropped
+    put_u64(lost)
+    putc(10)
+    if lost != 0 or tty_dropped != 0 or tsw_swaps < 10 or tsw_partial == 0:
+        panic("tty hot swap lost input")
+    puts("tty hot-swap OK\n")
     blkd_supervised_stop()
     puts("shell session: frames leaked ")
     put_u64(f0 - frames_free)

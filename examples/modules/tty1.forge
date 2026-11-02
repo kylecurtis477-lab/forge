@@ -1,0 +1,82 @@
+# forge: no-runtime
+# tty line discipline v1 (hot-swappable module): 512-byte ring addressed by head + count.
+# Interface (all called with rq_lock held): tty_push(c) -> flags (1 line completed, 2 char erased,
+# 4 char dropped), tty_lines(), tty_pop() -> c. State format shared with v0 (kernel) and v2:
+# [magic "TTY1", count, lines, count bytes oldest first].
+buf: u8[512]
+head: u64
+count: u64
+lines: u64
+
+@export
+def mod_abi() -> u64:
+    return 0x10000
+
+@export
+def mod_init() -> u64:
+    return 0
+
+@export
+def mod_exit():
+    pass
+
+@export
+def tty_version() -> u64:
+    return 1
+
+@export
+def tty_push(c: u64) -> u64:
+    if c == 8 or c == 127:
+        if count > 0 and buf[(head + count - 1) & 511] != 10:
+            count -= 1
+        return 2
+    if count >= 511:
+        return 4
+    buf[(head + count) & 511] = u8(c)
+    count += 1
+    if c == 10:
+        lines += 1
+        return 1
+    return 0
+
+@export
+def tty_lines() -> u64:
+    return lines
+
+@export
+def tty_pop() -> u64:
+    c = u64(buf[head])
+    head = (head + 1) & 511
+    count -= 1
+    if c == 10:
+        lines -= 1
+    return c
+
+@export
+def mod_save_state(st: u64, cap: u64) -> u64:
+    if cap < 24 + count:
+        return 0
+    vstore64(st, 0x54545931)
+    vstore64(st + 8, count)
+    vstore64(st + 16, lines)
+    i: u64 = 0
+    while i < count:
+        vstore8(st + 24 + i, u64(buf[(head + i) & 511]))
+        i += 1
+    return 24 + count
+
+@export
+def mod_restore_state(st: u64, n: u64) -> u64:
+    if n < 24 or vload64(st) != 0x54545931:
+        return 0
+    k = vload64(st + 8)
+    if k > 511 or n != 24 + k:
+        return 0
+    head = 0
+    count = k
+    lines = vload64(st + 16)
+    i: u64 = 0
+    while i < k:
+        buf[i] = u8(vload8(st + 24 + i))
+        i += 1
+    return 1

@@ -102,7 +102,10 @@ def drv_port_ok(port: u64, w: u64) -> u64:
 def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
     p = cur_proc()
     if nr == 408:
-        # test hook (any process): make the block driver crash on the a-th next request
+        # fault-injection hook: make the block driver crash on the a-th next request. Disabled
+        # (EPERM) unless the kernel's own boot self-test armed it for its shell session.
+        if ktest_hooks == 0:
+            return EPERM
         blk_crash_after = a
         return 0
     if u64(p) == 0 or p.drv != DRV_BLK:
@@ -245,6 +248,7 @@ sup_stop: u64
 sup_restarts: u64
 sup_thread: u64
 blkd_thread: u64
+ktest_hooks: u64      # set only by the in-kernel boot self-test (shell_test)
 blk_crash_after: u64  # fault injection: crash on the n-th next request (0 = off)
 
 def blkd_spawn(args: ptr[u8]) -> ptr[Thread]:

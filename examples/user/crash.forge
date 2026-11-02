@@ -11,7 +11,10 @@ def _start():
     while av[i] >= 48 and av[i] <= 57:
         n = n * 10 + u64(av[i]) - 48
         i += 1
-    syscall3(408, n, 0, 0)
+    if syscall3(408, n, 0, 0) != 0:
+        out("crash: fault injection is disabled\n")
+        flush()
+        sys_exit(1)
     out("crash: block driver will die on request ")
     out_u64(n)
     out("\n")

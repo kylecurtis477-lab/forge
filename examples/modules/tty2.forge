@@ -1,0 +1,85 @@
+# forge: no-runtime
+# tty line discipline v2 (hot-swappable module): 1024-byte ring with free-running read/write indices,
+# line count recomputed from the data on restore. Same interface and state format as v1.
+ring: u8[1024]
+rd: u64
+wr: u64
+nl: u64
+
+@export
+def mod_abi() -> u64:
+    return 0x10000
+
+@export
+def mod_init() -> u64:
+    return 0
+
+@export
+def mod_exit():
+    pass
+
+@export
+def tty_version() -> u64:
+    return 2
+
+@export
+def tty_push(c: u64) -> u64:
+    if c == 8 or c == 127:
+        if wr != rd and ring[(wr - 1) & 1023] != 10:
+            wr -= 1
+        return 2
+    if wr - rd >= 1023:
+        return 4
+    ring[wr & 1023] = u8(c)
+    wr += 1
+    if c == 10:
+        nl += 1
+        return 1
+    return 0
+
+@export
+def tty_lines() -> u64:
+    return nl
+
+@export
+def tty_pop() -> u64:
+    c = u64(ring[rd & 1023])
+    rd += 1
+    if c == 10:
+        nl -= 1
+    return c
+
+@export
+def mod_save_state(st: u64, cap: u64) -> u64:
+    k = wr - rd
+    if cap < 24 + k:
+        return 0
+    vstore64(st, 0x54545931)
+    vstore64(st + 8, k)
+    vstore64(st + 16, nl)
+    i: u64 = 0
+    while i < k:
+        vstore8(st + 24 + i, u64(ring[(rd + i) & 1023]))
+        i += 1
+    return 24 + k
+
+@export
+def mod_restore_state(st: u64, n: u64) -> u64:
+    if n < 24 or vload64(st) != 0x54545931:
+        return 0
+    k = vload64(st + 8)
+    if k > 1023 or n != 24 + k:
+        return 0
+    rd = 0
+    wr = k
+    nl = 0
+    i: u64 = 0
+    while i < k:
+        c = vload8(st + 24 + i)
+        ring[i] = u8(c)
+        if c == 10:
+            nl += 1
+        i += 1
+    if nl != vload64(st + 16):
+        return 0
+    return 1
