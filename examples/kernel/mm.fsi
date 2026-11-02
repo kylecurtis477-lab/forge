@@ -262,6 +262,19 @@ def frame_alloc_nolock() -> u64:
     return pa
 
 @unsafe
+def frame_try_alloc() -> u64:
+# like frame_alloc, but returns 0 instead of panicking when memory is exhausted
+    f = irq_save()
+    spin_lock(addr(pmm_lock))
+    b = buddy_take_retry(0, frame_limit)
+    spin_unlock(addr(pmm_lock))
+    irq_restore(f)
+    if b == BNONE:
+        return 0
+    memset(p2v(b * PAGE), 0, PAGE)
+    return b * PAGE
+
+@unsafe
 def frame_alloc_contig(n: u64) -> u64:
 # n physically contiguous zeroed frames below 4 GiB (DMA rings), aligned to the next power of two; 0 if none
     if n == 0 or n > (u64(1) << BUDDY_MAX):

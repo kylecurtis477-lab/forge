@@ -47,6 +47,7 @@ struct Proc:
     drv: u64
     dma_pa: u64
     dma_n: u64
+    dma_va: u64
     caps: u64  # Phase 6.2: capabilities granted from the sealed manifest
 
 procs: u64[64]
@@ -813,9 +814,15 @@ def sys_wait(pid: u64, ustatus: u64) -> u64:
             c = ptr[Proc](found)
             cpid = c.pid
             code = c.exit_code
-            proc_destroy(c)
             if ustatus != 0 and (user_ptr_ok(ustatus, 8) == 0 or copy_user(ustatus, u64(addr(code)), 8) != 0):
+            # status not delivered: put the zombie back so a later wait can still reap it
+                f = irq_save()
+                spin_lock(addr(rq_lock))
+                procs[i] = found
+                spin_unlock(addr(rq_lock))
+                irq_restore(f)
                 return EFAULT
+            proc_destroy(c)
             return cpid
         if any == 0:
             spin_unlock(addr(rq_lock))
@@ -871,6 +878,9 @@ def sys_munmap(va: u64, len: u64) -> u64:
     p = cur_proc()
     if (va & (PAGE - 1)) != 0 or va < MMAP_BASE or va + len > MMAP_TOP or va + len < va:
         return EINVAL
+    # DMA pages stay pinned while the device may still use them (freed only with the process)
+    if p.dma_n != 0 and va < p.dma_va + p.dma_n * PAGE and va + len > p.dma_va:
+        return EPERM
     i: u64 = 0
     while i < len:
         user_unmap(p.pml4, va + i)

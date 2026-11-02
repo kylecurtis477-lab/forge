@@ -146,6 +146,7 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
             i += 1
         p.dma_pa = pa
         p.dma_n = a
+        p.dma_va = va
         return va
     if nr == 403:
         return p.dma_pa
@@ -176,6 +177,14 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
         spin_unlock(addr(rq_lock))
         irq_restore(f)
         if copy_user(a, u64(addr(m[0])), 32) != 0:
+        # undelivered: hand the request back so the next recv gets it
+            f = irq_save()
+            spin_lock(addr(rq_lock))
+            if rq_state == RQ_TAKEN and rq_seq == m[0]:
+                rq_state = RQ_POSTED
+                wq_wake_one_l(addr(rq_drvq))
+            spin_unlock(addr(rq_lock))
+            irq_restore(f)
             return EFAULT
         return 0
     if nr == 406:

@@ -924,8 +924,36 @@ def user_wx_test():
         panic("W^X rejects not counted")
     puts("user W^X: RWX segment refused, mixed RX/RW page refused\n")
 
+def elf_bad_try(off: u64, fsz: u64, va: u64, msz: u64) -> u64:
+# one RX PT_LOAD with the given fields; returns 1 when the loader refused it
+    wx_hdr(1)
+    wx_seg(0, 5, va)
+    wx_put(64 + 8, off, 8)
+    wx_put(64 + 32, fsz, 8)
+    wx_put(64 + 40, msz, 8)
+    if elf_try(u64(addr(wx_img[0])), 512) == 0:
+        return 1
+    return 0
+
+def user_elf_bounds_test():
+# malformed program headers (the bytes a sealed image reaches elf_load with) fail cleanly, no panic, no leak
+    f0 = frames_free
+    r0 = elf_bad_rejects
+    ok: u64 = 0
+    ok += elf_bad_try(0xFFFFFFFFFFFFF000, 0x2000, 0x400000, 0x2000)  # off + fsz wraps
+    ok += elf_bad_try(600, 0x100, 0x400000, 0x100)  # off past the image
+    ok += elf_bad_try(0, 0x100, 0x400000, 0xFFFFFFFFFFC00001)  # va + msz wraps
+    ok += elf_bad_try(0, 0x100, 0x7FFFFFFFF000, 0x2000)  # straddles USER_TOP
+    ok += elf_bad_try(0, 0x100, 0x400000, 0x40000000)  # 1 GiB p_memsz
+    if ok != 5 or elf_bad_rejects - r0 != 5:
+        panic("ELF loader accepted a malformed program header")
+    if frames_free != f0:
+        panic("ELF loader leaked frames on a rejected image")
+    puts("user ELF bounds: 5 malformed headers (wrapping off/fsz, va/msz, 1 GiB memsz) refused, frames leaked 0\n")
+
 def user_test():
     user_wx_test()
+    user_elf_bounds_test()
     f0 = frames_free
     h0 = heap_live
     hi = uimg(0)

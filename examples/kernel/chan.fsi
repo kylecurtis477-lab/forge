@@ -199,6 +199,11 @@ def sys_chan_recv(fd: u64, ubuf: u64, n: u64, uh: u64) -> u64:
         zi += 1
     if copy_user(uh, u64(addr(z)), 8) != 0 or (pre > 0 and copy_user(ubuf, u64(addr(kb[0])), pre) != 0):
         return EFAULT
+    # reserve an fd slot before dequeuing, so a message carrying a handle is never dropped for EMFILE
+    rf = fd_free(p)
+    if rf == NFD:
+        return EMFILE
+    p.fds[rf] = 1
     c = chan_of(fl)
     e = fl.pos
     f = irq_save()
@@ -207,6 +212,7 @@ def sys_chan_recv(fd: u64, ubuf: u64, n: u64, uh: u64) -> u64:
         if c.open[1 - e] == 0:
             spin_unlock(addr(rq_lock))
             irq_restore(f)
+            p.fds[rf] = 0
             return 0
         wq_block_l(chan_rq(c, e))
     s = e * CH_SLOTS + c.head[e]
@@ -224,12 +230,11 @@ def sys_chan_recv(fd: u64, ubuf: u64, n: u64, uh: u64) -> u64:
     irq_restore(f)
     hf = NO_HANDLE
     if h != 0:
-        hf = fd_free(p)
-        if hf == NFD:
-            file_put(h)
-            return EMFILE
+        hf = rf
         p.fds[hf] = h
         p.fdr[hf] = hr
+    else:
+        p.fds[rf] = 0
     if m > n:
         m = n
     if copy_user(ubuf, u64(addr(kb[0])), m) != 0 or copy_user(uh, u64(addr(hf)), 8) != 0:

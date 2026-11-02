@@ -299,3 +299,15 @@ and rolls back partial maps on ENOMEM; sys_chan_create drops both fds and the ch
 copy faults; sys_chan_recv touches the user buffer and handle slot (with zeros) before dequeuing.
 Boot self-test `uaccess_test` probes the helpers, sys_open and sys_stat with kernel pointers and
 expects EFAULT ("uaccess: 9 kernel-pointer probes -> EFAULT").
+
+## Security fix 2: ELF bounds, wait/recv/munmap error paths
+
+elf_load checks `off > len or fsz > len - off` and `va >= USER_TOP or msz > USER_TOP - va` (no
+wrapping sums), caps PT_LOAD memory at 64 MiB per image (ELF_MAX_MAP) and allocates with
+frame_try_alloc so exhaustion fails the load instead of panicking. sys_wait copies the status before
+proc_destroy and puts the zombie back on EFAULT. drv recv (405) returns a TAKEN request to POSTED when
+the copy faults. munmap refuses (EPERM) ranges overlapping the driver's DMA region, which stays pinned
+until the process exits. chan_recv reserves its fd slot before dequeuing. Boot test
+`user_elf_bounds_test` feeds 5 malformed headers and checks refusal, the reject counter and no frame leak.
+Not changed: drv 403 still returns the DMA physical address, because the user-mode virtio driver
+programs bus addresses directly and there is no IOMMU yet; an IOVA handle needs IOMMU support.

@@ -246,3 +246,5 @@ Each phase is finished, tested, and committed before the next one starts. The si
 
 - Security fix (between 8.8 and 8.9): user pointers validated inside copy_user/copy_str_user;
   mmap/chan_create/chan_recv error paths fixed; uaccess boot self-test. Done.
+- Security fix 2: wrap-safe ELF bounds, 64 MiB load cap with soft OOM, sys_wait/drv-recv/chan_recv
+  error paths, pinned DMA vs munmap; ELF-bounds boot test. Done. (drv 403 PA exposure: needs IOMMU.)

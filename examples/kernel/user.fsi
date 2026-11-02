@@ -228,6 +228,8 @@ def as_free(pml4: u64) -> u64:
 
 # ---- ELF64 loader ----
 elf_end: u64
+elf_bad_rejects: u64
+ELF_MAX_MAP = 0x4000000  # 64 MiB of PT_LOAD memory per image
 
 # ELF64 header and program header viewed as u64 words (fields packed inside a word are masked out)
 struct Ehdr:
@@ -268,6 +270,7 @@ def elf_load(pml4: u64, img: u64, len: u64) -> u64:
     i = 0
     nload = 0
     elf_end = 0
+    mapped: u64 = 0
     while i < phnum:
         ph = ptr[Phdr](img + phoff + i * 56)
         if (ph.w0 & 0xFFFFFFFF) == 1:
@@ -279,8 +282,15 @@ def elf_load(pml4: u64, img: u64, len: u64) -> u64:
             if (fl & 3) == 3:
                 elf_wx_rejects += 1
                 return 0
-            if fsz > msz or off + fsz > len or va >= USER_TOP or va + msz > USER_TOP or va < 0x10000:
+            # wrap-safe: off/fsz against the image, va/msz against USER_TOP
+            if fsz > msz or off > len or fsz > len - off or va < 0x10000 or va >= USER_TOP or msz > USER_TOP - va:
+                elf_bad_rejects += 1
                 return 0
+            # cap the total mapped size so a huge p_memsz cannot exhaust physical memory
+            if msz > ELF_MAX_MAP or mapped + msz > ELF_MAX_MAP:
+                elf_bad_rejects += 1
+                return 0
+            mapped += msz
             pf = PTE_P | PTE_U
             if fl & 2:
                 pf = pf | PTE_W
@@ -291,7 +301,12 @@ def elf_load(pml4: u64, img: u64, len: u64) -> u64:
                 e = user_pte(pml4, p)
                 v = vload64(e)
                 if (v & PTE_P) == 0:
-                    v = frame_alloc() | pf
+                    nf = frame_try_alloc()
+                    if nf == 0:
+                    # out of frames: fail soft; the caller frees the half-built address space
+                        elf_bad_rejects += 1
+                        return 0
+                    v = nf | pf
                     vstore64(e, v)
                 elif (v & (PTE_W | PTE_NX)) != (pf & (PTE_W | PTE_NX)):
                 # W^X per page: segments with different permissions may not share a page
