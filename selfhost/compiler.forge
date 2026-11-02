@@ -9766,7 +9766,7 @@ def o_store(i, idx, val):
     iimm[k] = not range_ok(i, idx)
 
 def fn_ok2(f, n):
-    if f < 0 or fmeth[f] != 0 or fkind[f] != 0 or fpar[f] > 0 or ncap[f] > 0 or fargs[f] != n or fshadow[f]:
+    if f < 0 or fmeth[f] == 1 or fkind[f] != 0 or fpar[f] > 0 or ncap[f] > 0 or fargs[f] != n or fshadow[f]:
         return 0
     return 1
 
