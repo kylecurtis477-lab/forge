@@ -1,0 +1,7 @@
+from greet import greet
+from strutil import boxed, cubes
+from mathx import square, mathx_version
+
+print(boxed(greet("pkg")))
+print(cubes(4))
+print(square(7), mathx_version())

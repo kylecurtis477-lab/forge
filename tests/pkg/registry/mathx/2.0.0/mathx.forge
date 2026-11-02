@@ -1,0 +1,5 @@
+def square(x, y):
+    return x * y
+
+def mathx_version():
+    return "2.0.0"

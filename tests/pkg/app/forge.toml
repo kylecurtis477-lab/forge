@@ -1,0 +1,9 @@
+[package]
+name = "app"
+version = "0.1.0"
+main = "app.forge"
+files = ["app.forge", "greet.forge"]
+
+[dependencies]
+strutil = "^1.0"
+mathx = "^1"

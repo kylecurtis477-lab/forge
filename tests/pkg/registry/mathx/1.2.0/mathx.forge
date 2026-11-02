@@ -1,0 +1,8 @@
+def square(x):
+    return x * x
+
+def cube(x):
+    return x * x * x
+
+def mathx_version():
+    return "1.2.0"

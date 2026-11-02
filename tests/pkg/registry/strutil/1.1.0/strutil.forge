@@ -1,0 +1,7 @@
+from mathx import cube
+
+def boxed(s):
+    return "[" + s + "]"
+
+def cubes(n):
+    return [cube(i) for i in range(n)]

@@ -1,0 +1,430 @@
+# forge pkg: package manager core. A project has a forge.toml:
+#     [package]
+#     name = "app"
+#     version = "0.1.0"
+#     main = "app.forge"            (the program entry; default <name>.forge)
+#     files = ["app.forge", ...]    (sources that belong to the package; default [main])
+#     [dependencies]
+#     strutil = "^1.0"              (exact "1.2.0", caret "^1.2" = >=1.2.0 <2.0.0, or "*")
+# A registry is a local directory: <reg>/<name>/versions lists the published versions, one per
+# line, and <reg>/<name>/<version>/ holds that version's forge.toml and files. A dependency is
+# used as `import <module>` where <module>.forge is one of its files.
+# usage:
+#   pkg lock REG          resolve forge.toml against REG and write forge.lock
+#   pkg stage REG DIR     check forge.lock (up to date, every package hash matches) and copy the
+#                         project and dependency sources into DIR (one flat module directory)
+#   pkg sha256 FILE...    print the SHA-256 of each (text) file
+# forge.lock records each package's version, its direct dependencies and a SHA-256 over its
+# files (name, length and bytes of each file in forge.toml order, and the forge.toml itself), plus
+# a root hash over all of that, so the same lock always stages the same bytes.
+
+import sys
+
+K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+M32 = 0xFFFFFFFF
+HEX = "0123456789abcdef"
+
+def rotr(x, n):
+    return ((x >> n) | (x << (32 - n))) & M32
+
+def sha256(s):
+    b = []
+    for c in s:
+        b.append(ord(c))
+    n = len(b)
+    b.append(0x80)
+    while len(b) % 64 != 56:
+        b.append(0)
+    bits = n * 8
+    i = 7
+    while i >= 0:
+        b.append((bits >> (i * 8)) & 255)
+        i -= 1
+    h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+    w = [0] * 64
+    off = 0
+    while off < len(b):
+        t = 0
+        while t < 16:
+            p = off + t * 4
+            w[t] = (b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]
+            t += 1
+        while t < 64:
+            s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >> 3)
+            s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >> 10)
+            w[t] = (w[t - 16] + s0 + w[t - 7] + s1) & M32
+            t += 1
+        a = h[0]
+        bb = h[1]
+        c = h[2]
+        d = h[3]
+        e = h[4]
+        f = h[5]
+        g = h[6]
+        hh = h[7]
+        t = 0
+        while t < 64:
+            S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+            ch = (e & f) ^ ((e ^ M32) & g)
+            t1 = (hh + S1 + ch + K[t] + w[t]) & M32
+            S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+            mj = (a & bb) ^ (a & c) ^ (bb & c)
+            t2 = (S0 + mj) & M32
+            hh = g
+            g = f
+            f = e
+            e = (d + t1) & M32
+            d = c
+            c = bb
+            bb = a
+            a = (t1 + t2) & M32
+            t += 1
+        h[0] = (h[0] + a) & M32
+        h[1] = (h[1] + bb) & M32
+        h[2] = (h[2] + c) & M32
+        h[3] = (h[3] + d) & M32
+        h[4] = (h[4] + e) & M32
+        h[5] = (h[5] + f) & M32
+        h[6] = (h[6] + g) & M32
+        h[7] = (h[7] + hh) & M32
+        off += 64
+    out = ""
+    for x in h:
+        i = 28
+        while i >= 0:
+            out += HEX[(x >> i) & 15]
+            i -= 4
+    return out
+
+def die(msg):
+    sys.stderr.write("forge pkg: " + msg + "\n")
+    sys.exit(1)
+
+def exists(path):
+    try:
+        open(path).close()
+        return True
+    except FileNotFoundError:
+        return False
+
+def readf(path):
+    if not exists(path):
+        die("missing file " + path)
+    return read_file(path)
+
+def unquote(v, where):
+    v = v.strip()
+    if len(v) < 2 or v[0] != "\"" or v[len(v) - 1] != "\"":
+        die(where + ": expected a quoted string, got " + v)
+    return v[1:len(v) - 1]
+
+def parse_toml(text, where):
+# the forge.toml subset: [section] headers, key = "string" and key = ["a", "b"]; # comments.
+# -> dict "section.key" -> str or list of str; dependency names keep their order in "deps".
+    d = {}
+    deps = []
+    sec = ""
+    ln = 0
+    for raw in text.split("\n"):
+        ln += 1
+        line = raw.strip()
+        if len(line) == 0 or line[0] == "#":
+            continue
+        loc = where + ":" + str(ln)
+        if line[0] == "[":
+            if line[len(line) - 1] != "]":
+                die(loc + ": bad section header")
+            sec = line[1:len(line) - 1].strip()
+            if sec != "package" and sec != "dependencies":
+                die(loc + ": unknown section [" + sec + "]")
+            continue
+        eq = line.find("=")
+        if eq <= 0 or sec == "":
+            die(loc + ": expected key = value inside a section")
+        key = line[:eq].strip()
+        val = line[eq + 1:].strip()
+        if val[0] == "[":
+            if val[len(val) - 1] != "]":
+                die(loc + ": unterminated list")
+            items = []
+            body = val[1:len(val) - 1].strip()
+            if len(body) > 0:
+                for it in body.split(","):
+                    if len(it.strip()) > 0:
+                        items.append(unquote(it, loc))
+            d[sec + "." + key] = items
+        else:
+            d[sec + "." + key] = unquote(val, loc)
+        if sec == "dependencies":
+            if key in deps:
+                die(loc + ": duplicate dependency " + key)
+            deps.append(key)
+    d["deps"] = deps
+    if not ("package.name" in d) or not ("package.version" in d):
+        die(where + ": [package] needs name and version")
+    if not ("package.main" in d):
+        d["package.main"] = d["package.name"] + ".forge"
+    if not ("package.files" in d):
+        d["package.files"] = [d["package.main"]]
+    return d
+
+def vparse(v):
+    parts = v.split(".")
+    if len(parts) != 3:
+        die("bad version " + v + " (want MAJOR.MINOR.PATCH)")
+    r = []
+    for p in parts:
+        if len(p) == 0 or not p.isdigit():
+            die("bad version " + v)
+        r.append(int(p))
+    return r
+
+def vless(a, b):
+    i = 0
+    while i < 3:
+        if a[i] != b[i]:
+            return a[i] < b[i]
+        i += 1
+    return False
+
+def vmatch(req, v):
+    x = vparse(v)
+    if req == "*":
+        return True
+    if req[0] == "^":
+        r = req[1:].split(".")
+        while len(r) < 3:
+            r.append("0")
+        lo = vparse(r[0] + "." + r[1] + "." + r[2])
+        return x[0] == lo[0] and not vless(x, lo)
+    vparse(req)
+    return v == req
+
+def versions(reg, name):
+    p = reg + "/" + name + "/versions"
+    if not exists(p):
+        die("package " + name + " is not in the registry " + reg)
+    r = []
+    for l in read_file(p).split("\n"):
+        if len(l.strip()) > 0:
+            vparse(l.strip())
+            r.append(l.strip())
+    return r
+
+def pkg_hash(dir, man):
+# sha256 over forge.toml then each file in order: name NUL length NUL bytes
+    toml = readf(dir + "/forge.toml")
+    s = "forge.toml\0" + str(len(toml)) + "\0" + toml
+    for f in man["package.files"]:
+        if "/" in f:
+            die(dir + ": file names must be plain module names: " + f)
+        t = readf(dir + "/" + f)
+        s += f + "\0" + str(len(t)) + "\0" + t
+    return sha256(s)
+
+FAILMSG = [""]
+
+def manifest(reg, mans, pn, v):
+    key = pn + "@" + v
+    if not (key in mans):
+        d = reg + "/" + pn + "/" + v
+        m = parse_toml(readf(d + "/forge.toml"), d + "/forge.toml")
+        if m["package.name"] != pn or m["package.version"] != v:
+            die(d + "/forge.toml does not declare " + pn + " " + v)
+        mans[key] = m
+    return mans[key]
+
+def requirements(root, sel, mans):
+# name -> list of [who, requirement] from the root and every selected package
+    reqs = {}
+    for dn in root["deps"]:
+        reqs[dn] = [["root", root["dependencies." + dn]]]
+    for pn in sorted(sel.keys()):
+        m = mans[pn + "@" + sel[pn]]
+        for dn in m["deps"]:
+            if not (dn in reqs):
+                reqs[dn] = []
+            reqs[dn].append([pn + " " + sel[pn], m["dependencies." + dn]])
+    return reqs
+
+def search(reg, root, sel, mans):
+# depth-first over the first unselected required package (by name), newest compatible version
+# first; a choice whose requirements break an earlier selection is skipped (backtracking).
+    reqs = requirements(root, sel, mans)
+    for pn in reqs:
+        if pn in sel:
+            for rq in reqs[pn]:
+                if not vmatch(rq[1], sel[pn]):
+                    return None
+    todo = ""
+    for pn in sorted(reqs.keys()):
+        if todo == "" and not (pn in sel):
+            todo = pn
+    if todo == "":
+        return sel
+    cands = []
+    for v in versions(reg, todo):
+        ok = True
+        for rq in reqs[todo]:
+            if not vmatch(rq[1], v):
+                ok = False
+        if ok:
+            cands.append(v)
+    if len(cands) == 0:
+        msg = "no version of " + todo + " satisfies"
+        for rq in reqs[todo]:
+            msg += " " + rq[1] + " (" + rq[0] + ")"
+        if FAILMSG[0] == "":
+            FAILMSG[0] = msg
+        return None
+    i = 0
+    while i < len(cands):
+        j = i + 1
+        while j < len(cands):
+            if vless(vparse(cands[i]), vparse(cands[j])):
+                t = cands[i]
+                cands[i] = cands[j]
+                cands[j] = t
+            j += 1
+        i += 1
+    for v in cands:
+        manifest(reg, mans, todo, v)
+        s2 = {}
+        for k in sel:
+            s2[k] = sel[k]
+        s2[todo] = v
+        r = search(reg, root, s2, mans)
+        if r != None:
+            return r
+    return None
+
+def resolve(reg, root):
+    mans = {}
+    sel = search(reg, root, {}, mans)
+    if sel == None:
+        if FAILMSG[0] == "":
+            die("no consistent set of versions")
+        die(FAILMSG[0])
+    return sel, mans
+
+def lock_text(reg, root, sel, mans):
+    out = "# forge.lock: generated by `forge pkg lock`; do not edit\nlock_version = \"1\"\n"
+    out += "root = \"" + root["package.name"] + " " + root["package.version"] + "\"\n"
+    ds = ""
+    for dn in sorted(root["deps"]):
+        ds += dn + " " + root["dependencies." + dn] + ";"
+    out += "requires = \"" + ds + "\"\n"
+    body = ""
+    for pn in sorted(sel.keys()):
+        v = sel[pn]
+        m = mans[pn + "@" + v]
+        body += "\n[[package]]\nname = \"" + pn + "\"\nversion = \"" + v + "\"\n"
+        body += "sha256 = \"" + pkg_hash(reg + "/" + pn + "/" + v, m) + "\"\n"
+        dl = ""
+        for dn in sorted(m["deps"]):
+            if len(dl) > 0:
+                dl += ", "
+            dl += "\"" + dn + "\""
+        body += "dependencies = [" + dl + "]\n"
+    return out + "content = \"" + sha256(body) + "\"\n" + body
+
+def read_lock(path):
+# -> (header dict, list of package dicts)
+    if not exists(path):
+        die("no forge.lock (run `forge pkg lock`)")
+    hdr = {}
+    pk = []
+    cur = hdr
+    for raw in read_file(path).split("\n"):
+        l = raw.strip()
+        if len(l) == 0 or l[0] == "#":
+            continue
+        if l == "[[package]]":
+            cur = {}
+            pk.append(cur)
+            continue
+        eq = l.find("=")
+        if eq <= 0:
+            die("forge.lock: bad line " + l)
+        v = l[eq + 1:].strip()
+        if v[0] != "[":
+            v = unquote(v, "forge.lock")
+        cur[l[:eq].strip()] = v
+    return hdr, pk
+
+def cmd_lock(reg):
+    root = parse_toml(readf("forge.toml"), "forge.toml")
+    sel, mans = resolve(reg, root)
+    t = lock_text(reg, root, sel, mans)
+    f = open("forge.lock", "w")
+    f.write(t)
+    f.close()
+    for pn in sorted(sel.keys()):
+        print("locked " + pn + " " + sel[pn])
+    hdr, pk = read_lock("forge.lock")
+    print("content " + hdr["content"])
+
+def cmd_stage(reg, out):
+    root = parse_toml(readf("forge.toml"), "forge.toml")
+    hdr, pk = read_lock("forge.lock")
+    ds = ""
+    for dn in sorted(root["deps"]):
+        ds += dn + " " + root["dependencies." + dn] + ";"
+    if hdr.get("requires", "") != ds or hdr.get("root", "") != root["package.name"] + " " + root["package.version"]:
+        die("forge.lock is out of date with forge.toml (run `forge pkg lock`)")
+    sel = {}
+    mans = {}
+    for p in pk:
+        sel[p["name"]] = p["version"]
+    for p in pk:
+        d = reg + "/" + p["name"] + "/" + p["version"]
+        m = parse_toml(readf(d + "/forge.toml"), d + "/forge.toml")
+        mans[p["name"] + "@" + p["version"]] = m
+        h = pkg_hash(d, m)
+        if h != p["sha256"]:
+            die("hash mismatch for " + p["name"] + " " + p["version"] + ": lock " + p["sha256"] + ", registry " + h)
+        for dn in m["deps"]:
+            if not (dn in sel) or not vmatch(m["dependencies." + dn], sel[dn]):
+                die("forge.lock does not satisfy " + p["name"] + " -> " + dn + " " + m["dependencies." + dn])
+    for dn in root["deps"]:
+        if not (dn in sel) or not vmatch(root["dependencies." + dn], sel[dn]):
+            die("forge.lock does not satisfy " + dn + " " + root["dependencies." + dn])
+    if lock_text(reg, root, sel, mans) != read_file("forge.lock"):
+        die("forge.lock was edited or is stale (run `forge pkg lock`)")
+    owner = {}
+    srcs = []
+    for f in root["package.files"]:
+        srcs.append([f, f, root["package.name"]])
+    for p in pk:
+        m = mans[p["name"] + "@" + p["version"]]
+        for f in m["package.files"]:
+            srcs.append([reg + "/" + p["name"] + "/" + p["version"] + "/" + f, f, p["name"]])
+    for s in srcs:
+        if s[1] in owner:
+            die("module " + s[1] + " is provided by both " + owner[s[1]] + " and " + s[2])
+        owner[s[1]] = s[2]
+        g = open(out + "/" + s[1], "w")
+        g.write(readf(s[0]))
+        g.close()
+    print(root["package.main"])
+
+def main():
+    a = sys.argv[1:]
+    if len(a) >= 2 and a[0] == "lock":
+        cmd_lock(a[1])
+    elif len(a) >= 3 and a[0] == "stage":
+        cmd_stage(a[1], a[2])
+    elif len(a) >= 2 and a[0] == "sha256":
+        for f in a[1:]:
+            print(sha256(readf(f)) + "  " + f)
+    else:
+        die("usage: pkg lock REG | pkg stage REG DIR | pkg sha256 FILE...")
+
+main()

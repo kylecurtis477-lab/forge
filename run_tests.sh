@@ -38,6 +38,7 @@ tests/grammar/run.sh || fail=1
 tests/fmt/run.sh || fail=1
 tests/fas/run.sh || fail=1
 tests/fld/run.sh || fail=1
+tests/pkg/run.sh || fail=1
 tests/testblocks/run.sh || fail=1
 tests/bounds/run.sh || fail=1
 tests/nonnull/run.sh || fail=1

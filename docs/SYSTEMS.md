@@ -254,6 +254,9 @@ A process holds exactly the capability bits its sealed manifest declares (fs=1, 
 ## Built-in assembler (Phase 7.1)
 `build/fas` (tools/fas.forge): `fas [-I dir] [-o out.o] in.s`. Byte-identical to GNU as on everything the toolchain emits (compiler output, kernel incl. asm blocks, krel stubs, EFI loader, modules, user programs); tested by tests/fas/run.sh. Layout rules it mirrors: file offsets aligned to min(sh_addralign, 8); NOBITS takes an aligned offset without advancing; no symtab/strtab when there are no symbols; locals relocated against section symbols; PLT32 for calls unless the target was a defined local when the call was assembled; GNU relax_segment jump relaxation with alignment regions. Unsupported directives/instructions fail with `fas: file:line: ...`.
 
+## Packages (Phase 7.4)
+`forge pkg lock` / `forge pkg build` in a directory with a forge.toml. Dependencies come from a local registry directory (`<name>/versions`, `<name>/<version>/forge.toml` and sources) and are pinned with SHA-256 content hashes in forge.lock; `build` verifies every hash before staging the sources into target/stage and compiling, so the same lock gives the same binary hash. See tests/pkg for a fixture registry and project.
+
 ## Debug info (Phase 7.3)
 `forgec -g` emits DWARF 4 line tables and subprogram DIEs for the kernel; `.Lfsd<n>` labels mark each statement and the line program uses `fixed_advance_pc` label differences, so fas and GNU as produce the same object. fld keeps `.debug_*` as non-alloc sections after the loaded segments. To debug: boot with `-gdb tcp::PORT`, read the slide from the `KASLR: kernel image at ... (slide 0x...)` serial line, then in gdb `symbol-file -o 0x<slide> build/dwarf/kernel.elf`, `target remote :PORT`, `hbreak schedule`. Line info only so far.
 

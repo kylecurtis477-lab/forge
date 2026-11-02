@@ -5,6 +5,29 @@ D="$(cd "$(dirname "$0")" && pwd)"
 # forge test [files] / forge verify [files] : JSON reports (tools/forge_test.sh, tools/forge_verify.sh)
 [ "$1" = "test" ] && { shift; exec "$D/tools/forge_test.sh" "$@"; }
 [ "$1" = "verify" ] && { shift; exec "$D/tools/forge_verify.sh" "$@"; }
+# forge pkg [--registry DIR] lock | build [-o OUT] | sha256 FILE... : package manager (tools/pkg.forge).
+# Run in a project directory (forge.toml). Registry: --registry, else $FORGE_REGISTRY, else ./registry.
+# build stages the locked sources into target/stage, compiles the main module to target/<main>
+# (or OUT) and prints its sha256.
+if [ "$1" = "pkg" ]; then
+  shift
+  [ "$D/build/pkg" -nt "$D/tools/pkg.forge" ] || "$0" "$D/tools/pkg.forge" -o "$D/build/pkg"
+  reg="${FORGE_REGISTRY:-registry}"
+  [ "$1" = "--registry" ] && { reg="$2"; shift 2; }
+  case "$1" in
+    lock) exec "$D/build/pkg" lock "$reg" ;;
+    sha256) shift; exec "$D/build/pkg" sha256 "$@" ;;
+    build)
+      rm -rf target/stage && mkdir -p target/stage
+      main=$("$D/build/pkg" stage "$reg" target/stage)
+      out="target/${main%.forge}"; [ "$2" = "-o" ] && out="$3"
+      (cd target/stage && "$D/build/forgec" "$main" main.s $FORGEC_FLAGS && "$D/build/fas" -o main.o main.s && "$D/build/fld" --base 0x100000000000 -o main main.o)
+      cp target/stage/main "$out"
+      echo "built $out sha256 $(sha256sum "$out" | cut -d' ' -f1)"
+      exit 0 ;;
+    *) echo "usage: forge pkg [--registry DIR] lock | build [-o OUT] | sha256 FILE..." >&2; exit 2 ;;
+  esac
+fi
 # forge fmt [--check] [files...] : canonical formatter (tools/fmt.forge); no files = repo set
 if [ "$1" = "fmt" ]; then
   shift

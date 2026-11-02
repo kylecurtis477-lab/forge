@@ -1,0 +1,4 @@
+import mathx
+
+def boxed(s):
+    return "[" + s + "]"
