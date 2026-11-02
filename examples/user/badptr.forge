@@ -1,0 +1,94 @@
+# forge: safe
+# forge: no-runtime
+# forge: caps(fs, spawn, ipc)
+# Phase 9 carry-over: ring-3 probe of every pointer-taking syscall with kernel (HHDM, kernel text),
+# straddling and length-overflowing pointers. Each must return EFAULT, and no state may be lost:
+# a zombie survives a failed wait, a queued message survives a failed recv.
+include "ulib.fsi"
+
+EF = 0xFFFFFFFFFFFFFFF2
+probes: u64
+bad: u64
+
+def chk(nr: u64, r: u64):
+    probes += 1
+    if r != EF:
+        bad += 1
+        out("badptr: syscall ")
+        out_u64(nr)
+        out(" did not return EFAULT\n")
+        flush()
+
+def each(nr: u64, a: u64, pos: u64, c: u64, d: u64):
+# run syscall nr with the pointer argument at position pos replaced by each bad pointer
+    bp: u64[4]
+    bp[0] = 0xFFFF800000001000  # HHDM
+    bp[1] = 0xFFFFFFFF80000000  # kernel text
+    bp[2] = 0x00007FFFFFFFF000  # straddles USER_TOP
+    bp[3] = 0x0000800000000000  # USER_TOP itself
+    i: u64 = 0
+    while i < 4:
+        x = bp[i]
+        if pos == 1:
+            chk(nr, syscall4(nr, x, a, c, d))
+        elif pos == 2:
+            chk(nr, syscall4(nr, a, x, c, d))
+        elif pos == 3:
+            chk(nr, syscall4(nr, a, c, x, d))
+        else:
+            chk(nr, syscall4(nr, a, c, d, x))
+        i += 1
+
+@export
+def _start():
+    buf: u64[64]
+    st: u64[2]
+    ch: u64[2]
+    h: u64 = 0
+    b = u64(addr(buf[0]))
+    fd = sys_open("/efi/forge/docs/big.bin")
+    dir = sys_open("/efi/forge")
+    each(SYS_READ, fd, 2, 512, 0)
+    chk(SYS_READ, syscall3(SYS_READ, fd, b + 8, 0xFFFFFFFFFFFFFFF0))  # length wraps
+    each(SYS_WRITE, 1, 2, 16, 0)
+    each(SYS_OPEN, 0, 1, 0, 0)
+    each(SYS_STAT, u64(addr(st[0])), 1, 0, 0)
+    chk(SYS_STAT, syscall3(SYS_STAT, u64("/efi/forge/docs/big.bin"), 0xFFFF800000001000, 0))
+    each(SYS_GETDENTS, dir, 2, 512, 0)
+    each(SYS_GETARGS, 64, 1, 0, 0)
+    each(SYS_EXEC, 0, 1, 0, 0)
+    chk(SYS_EXEC, syscall3(SYS_EXEC, u64("/efi/forge/bin/hello"), 0xFFFF800000001000, 0))
+    each(SYS_OPENAT, dir, 2, 0, 0)
+    each(SYS_EXEC_SB, 0, 1, 0, 0)
+    each(SYS_CHAN, 0, 1, 0, 0)
+    # recv: a queued message survives a faulting recv (bad buffer, then bad handle slot)
+    sys_chan(addr(ch[0]))
+    buf[0] = 0x1234
+    each(SYS_SEND, ch[0], 2, 8, NO_HANDLE)
+    sys_send(ch[0], b, 8, NO_HANDLE)
+    each(SYS_RECV, ch[1], 2, 64, u64(addr(h)))
+    chk(SYS_RECV, syscall4(SYS_RECV, ch[1], b, 64, 0xFFFF800000001000))
+    buf[0] = 0
+    kept = sys_recv(ch[1], b, 64, addr(h)) == 8 and buf[0] == 0x1234
+    # wait: a zombie survives a faulting wait and is reaped by the next good one
+    pid = sys_fork()
+    if pid == 0:
+        sys_exit(42)
+    each(SYS_WAIT, pid, 2, 0, 0)
+    code: u64 = 0
+    reaped = sys_wait(pid, addr(code)) == pid and code == 42
+    out("badptr: ")
+    out_u64(probes)
+    out(" bad-pointer probes, ")
+    out_u64(probes - bad)
+    out(" EFAULT; message kept ")
+    out_u64(u64(kept))
+    out(", zombie reaped after EFAULT ")
+    out_u64(u64(reaped))
+    out("\n")
+    flush()
+    if bad == 0 and kept and reaped:
+        out("badptr: PASS\n")
+        flush()
+        sys_exit(0)
+    sys_exit(1)

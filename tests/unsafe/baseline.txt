@@ -23,3 +23,4 @@ examples/user wxtest.forge 11 0 16 0
 examples/user captest.forge 10 0 13 0
 examples/user chantest.forge 10 0 13 0
 examples/user capdeny.forge 10 0 13 0
+examples/user badptr.forge 10 0 13 0

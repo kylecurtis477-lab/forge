@@ -133,8 +133,10 @@ def sys_chan_send(fd: u64, ubuf: u64, n: u64, hfd: u64) -> u64:
         return EINVAL
     if (p.fdr[fd] & CAP_WRITE) == 0:
         return EPERM
-    if n == 0 or n > CH_MSG or user_ptr_ok(ubuf, n) == 0:
+    if n == 0 or n > CH_MSG:
         return EINVAL
+    if user_ptr_ok(ubuf, n) == 0:
+        return EFAULT
     if copy_user(u64(addr(kb[0])), ubuf, n) != 0:
         return EFAULT
     if hfd != NO_HANDLE:

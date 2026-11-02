@@ -54,7 +54,7 @@ def decode_row(path, n, row=0):
 # PS/2 keyboard through the QEMU monitor (sendkey), 's' lines arrive on COM1 (serial RX interrupt).
 SCRIPT = [('k', 'ls'), ('s', 'cat /efi/forge/docs/Long File Name Notes.txt'), ('k', 'forktest'),
           ('s', 'hello a b'), ('k', 'nosuch'), ('k', 'ls /EFI/Forge'), ('s', 'crash 40'),
-          ('s', 'sum /efi/forge/docs/big.bin'), ('s', 'captest'), ('s', 'chantest'), ('s', 'run sbtest'), ('s', 'wxtest'), ('s', 'unsealed'), ('s', 'tampered'), ('s', 'forged'), ('s', 'linuxabi'), ('s', 'capdeny'), ('s', 'exit'),
+          ('s', 'sum /efi/forge/docs/big.bin'), ('s', 'captest'), ('s', 'chantest'), ('s', 'run sbtest'), ('s', 'wxtest'), ('s', 'unsealed'), ('s', 'tampered'), ('s', 'forged'), ('s', 'linuxabi'), ('s', 'capdeny'), ('s', 'badptr'), ('s', 'exit'),
           ('s', 'hello x'), ('s', 'bg 1 &'), ('s', 'hello z &'), ('s', 'kexec next'),
           ('k', 'hello after kexec'), ('s', 'wait'), ('s', 'exit')]
 KEYS = {' ': 'spc', '/': 'slash', '-': 'minus', '.': 'dot', '\n': 'ret'}

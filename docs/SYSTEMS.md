@@ -313,3 +313,5 @@ Not changed: drv 403 still returns the DMA physical address, because the user-mo
 programs bus addresses directly and there is no IOMMU yet; an IOVA handle needs IOMMU support.
 ## Forge FS (Phase 8)
 The only writable filesystem. It exists only on a GPT partition with the Forge type GUID, created explicitly with `tools/forge-part.py ... --yes-add-forge-partition`. The kernel validates the GPT, claims only that LBA range on NVMe, and every write outside it is refused. Tested by `tests/os/forgefs.sh`: no partition means no writes; with one, files persist across reboots and every byte outside the partition stays identical.
+
+**Syscall pointer validation (9.0):** every syscall taking a user pointer returns EFAULT for pointers outside [0, USER_TOP) or straddling USER_TOP, without consuming state (messages, zombies). `chan_send` returns EINVAL for n==0 or n>CH_MSG and EFAULT for a bad buffer. Covered by `badptr` in tests/os.

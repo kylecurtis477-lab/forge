@@ -249,3 +249,7 @@ Each phase is finished, tested, and committed before the next one starts. The si
   mmap/chan_create/chan_recv error paths fixed; uaccess boot self-test. Done.
 - Security fix 2: wrap-safe ELF bounds, 64 MiB load cap with soft OOM, sys_wait/drv-recv/chan_recv
   error paths, pinned DMA vs munmap; ELF-bounds boot test. Done. (drv 403 PA exposure: needs IOMMU.)
+
+### 9.0 carry-overs (done)
+- UEFI OS-test load timeout raised 180s -> 360s (tests/os/run.sh).
+- New ring-3 `examples/user/badptr.forge`: probes every pointer-taking syscall with 4 bad pointers (HHDM, kernel text, USER_TOP-straddling, USER_TOP); 56 probes, all EFAULT; verifies queued message survives failed recv and zombie survives failed wait. Found and fixed: `sys_chan_send` returned EINVAL for a bad buffer, now EFAULT.
