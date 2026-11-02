@@ -14270,35 +14270,46 @@ def fs_intrin(nm):
         return 1
     if str_eq(nm, "call_ptr") or str_eq(nm, "call_efi"):
         efi = str_eq(nm, "call_efi")
-        mx = 7
         if efi:
-            mx = 5
-        n = fs_args(mx, -1)
-        regs = FS_AREG
-        if efi:
-            regs = FS_WREG
-        i = n - 1
-        while i >= 1:
-            fs_pop(regs[i - 1])
-            i -= 1
-        fs_pop("%r11")
-        if efi:
-            odd = fs_dep % 2
-            if odd:
-                e("sub $40,%rsp")
-            else:
-                e("sub $32,%rsp")
-            e("call *%r11")
-            if odd:
-                e("add $40,%rsp")
-            else:
-                e("add $32,%rsp")
+            fs_efi_call()
         else:
+            n = fs_args(7, -1)
+            i = n - 1
+            while i >= 1:
+                fs_pop(FS_AREG[i - 1])
+                i -= 1
+            fs_pop("%r11")
             fs_callsite("*%r11")
         fs_ety = FT_U64
         fs_mode = 0
         return 1
     return 0
+
+def fs_efi_call():
+    # Microsoft x64: args 1-4 in rcx/rdx/r8/r9, 5+ on the stack above 32 bytes of shadow space
+    global fs_dep
+    n = fs_args(10, -1)
+    na = n - 1
+    k = 0
+    if na > 4:
+        k = na - 4
+    i = 1
+    while i <= na and i <= 4:
+        e(c3(c3("mov ", str(8 * (n - 1 - i)), "(%rsp),"), FS_WREG[i - 1], ""))
+        i += 1
+    e(c3("mov ", str(8 * (n - 1)), "(%rsp),%r11"))
+    sz = 32 + 8 * k
+    if (fs_dep + k) % 2:
+        sz += 8
+    e(c3("sub $", str(sz), ",%rsp"))
+    j = 0
+    while j < k:
+        e(c3("mov ", str(8 * (n - 1 - (5 + j)) + sz), "(%rsp),%rax"))
+        e(c3("mov %rax,", str(32 + 8 * j), "(%rsp)"))
+        j += 1
+    e("call *%r11")
+    e(c3("add $", str(sz + 8 * n), ",%rsp"))
+    fs_dep -= n
 
 def fs_primary():
     global fp, fs_ety, fs_mode, fs_moff, fs_mlab
@@ -15247,6 +15258,10 @@ def fs_wrapper(f, nm, body):
         e("mov %rdx,%rsi")
         e("mov %r8,%rdx")
         e("mov %r9,%rcx")
+        if fsf_np[f] > 4:
+            e("mov 64(%rsp),%r8")
+        if fsf_np[f] > 5:
+            e("mov 72(%rsp),%r9")
         e(concat("call ", body))
         e("add $8,%rsp")
         e("pop %rsi")
@@ -15405,8 +15420,13 @@ def fs_include(src, dir, depth):
                 q = 9
                 while q < len(ln) and char_at(ln, q) != 34:
                     q += 1
-                f = concat(dir, substr(ln, 9, q))
+                f = substr(ln, 9, q)
+                if char_at(f, 0) != 47:
+                    f = concat(dir, f)
                 sub = read_file(f)
+                if sub == None:
+                    eputs(concat("error: cannot read include file ", f))
+                    exit(1)
                 sl = len(f) - 1
                 while sl >= 0 and char_at(f, sl) != 47:
                     sl -= 1

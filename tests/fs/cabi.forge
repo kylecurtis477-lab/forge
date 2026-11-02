@@ -6,6 +6,8 @@ extern def c_add6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64
 extern def c_trunc(v: u64) -> u8
 extern def c_calls_forge() -> i64
 extern def c_struct_sum(s: ptr[S]) -> u32
+extern def c_ms6() -> i64
+extern def c_calls_ms() -> i64
 
 struct S:
     a: u8
@@ -15,6 +17,11 @@ struct S:
 @export
 def forge_mix(a: i64, b: u8, c: i16, d: u32, e: i64, f: i64) -> i64:
     return a + i64(b) + c + i64(d) + e + f
+
+@efiapi
+@export
+def forge_ms6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64:
+    return a * 100000 + b * 10000 + c * 1000 + d * 100 + e * 10 + f
 
 def twice(x: i64) -> i64:
     return x * 2
@@ -36,5 +43,11 @@ def main() -> i64:
     put_u64(call_ptr(fp, 21))
     nl()
     put_u64(call_ptr(c_add6, 1, 1, 1, 1, 1, 1))
+    nl()
+    put_u64(call_efi(c_ms6, 1, 1, 1, 1, 1, 1))
+    nl()
+    put_u64(call_efi(c_ms6, 0, 0, 0, 0, 0, 2))
+    nl()
+    put_i64(c_calls_ms())
     nl()
     return 0
