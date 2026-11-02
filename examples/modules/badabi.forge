@@ -1,0 +1,11 @@
+# forge: no-runtime
+# Test module built against a future major ABI: the loader must refuse it.
+@export
+def mod_abi() -> u64:
+    return 0x20000
+@export
+def mod_init() -> u64:
+    return 0
+@export
+def mod_exit():
+    pass

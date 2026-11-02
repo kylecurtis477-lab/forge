@@ -1,0 +1,12 @@
+# forge: no-runtime
+# Test module importing a symbol the kernel does not export: the loader must refuse it.
+extern def kernel_secret_internal(x: u64) -> u64
+@export
+def mod_abi() -> u64:
+    return 0x10000
+@export
+def mod_init() -> u64:
+    return kernel_secret_internal(1)
+@export
+def mod_exit():
+    pass

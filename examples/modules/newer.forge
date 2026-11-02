@@ -1,0 +1,12 @@
+# forge: no-runtime
+# Test module built for ABI 1.0 that imports a symbol exported only since ABI 1.1: must be refused.
+extern def kabi_future_probe() -> u64
+@export
+def mod_abi() -> u64:
+    return 0x10000
+@export
+def mod_init() -> u64:
+    return kabi_future_probe()
+@export
+def mod_exit():
+    pass

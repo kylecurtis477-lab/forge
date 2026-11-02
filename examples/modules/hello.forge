@@ -1,0 +1,56 @@
+# forge: no-runtime
+# Test kernel module: built by forgec + as into an ET_REL object, loaded by the kernel's module loader.
+# Exercises text, rodata (string + const table), data, bss, calls into kernel exports and state transfer.
+extern def puts(s: ptr[u8])
+extern def put_u64(v: u64)
+extern def kmalloc(n: u64) -> u64
+extern def kfree(p: u64)
+
+scale: u64 = 3
+tbl: u64[4] = [10, 20, 30, 40]
+calls: u64
+scratch: u64
+
+@export
+def mod_abi() -> u64:
+    return 0x10000
+
+@export
+def mod_init() -> u64:
+    if calls != 0 or scale != 3:
+        return 1
+    scratch = kmalloc(256)
+    if scratch == 0:
+        return 2
+    return 0
+
+@export
+def mod_exit():
+    kfree(scratch)
+    scratch = 0
+
+@export
+def mod_call(x: u64) -> u64:
+    calls += 1
+    return x * scale + tbl[x & 3] + calls
+
+@export
+def mod_hello():
+    puts("hello from a loaded module, calls=")
+    put_u64(calls)
+    puts("\n")
+
+@export
+def mod_save_state(buf: u64, cap: u64) -> u64:
+    if cap < 16:
+        return 0
+    vstore64(buf, 0x48454C4F)
+    vstore64(buf + 8, calls)
+    return 16
+
+@export
+def mod_restore_state(buf: u64, n: u64) -> u64:
+    if n != 16 or vload64(buf) != 0x48454C4F:
+        return 0
+    calls = vload64(buf + 8)
+    return 1

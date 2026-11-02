@@ -18,6 +18,7 @@ include "pci.fsi"
 include "virtio.fsi"
 include "fat.fsi"
 include "proc.fsi"
+include "module.fsi"
 
 MB2_MAGIC = 0x36D76289
 
@@ -597,6 +598,128 @@ def fs_test():
         panic("init from disk failed")
     puts("PCI + virtio-blk + FAT32 (read-only) OK\n")
 
+def kabi_future_probe() -> u64:
+    return 0
+
+def kexports_init():
+    kexport("puts", u64(puts), 0)
+    kexport("putc", u64(putc), 0)
+    kexport("put_u64", u64(put_u64), 0)
+    kexport("put_hex", u64(put_hex), 0)
+    kexport("panic", u64(panic), 0)
+    kexport("kmalloc", u64(kmalloc), 0)
+    kexport("kfree", u64(kfree), 0)
+    kexport("frame_alloc", u64(frame_alloc), 0)
+    kexport("frame_free", u64(frame_free), 0)
+    kexport("sleep_ticks", u64(sleep_ticks), 0)
+    kexport("kabi_future_probe", u64(kabi_future_probe), 1)
+
+def mod_read(name: ptr[u8], sz: ptr[u64]) -> u64:
+    b = fs_read_file(name, sz)
+    if b == 0:
+        puts(name)
+        panic(": module missing from the ESP")
+    return b
+
+def mod_expect_reject(img: u64, sz: u64, what: ptr[u8]):
+    m = mod_load(img, sz)
+    if u64(m) != 0:
+        puts(what)
+        panic(": bad module was accepted")
+    puts("  rejected ")
+    puts(what)
+    puts(": ")
+    puts(mod_err)
+    if u64(mod_err_sym) != 0:
+        puts(" (")
+        puts(mod_err_sym)
+        putc(41)
+        mod_err_sym = ptr[u8](0)
+    putc(10)
+
+def module_test():
+    kexports_init()
+    mod_area_init()
+    sz: u64 = 0
+    img = mod_read("EFI/Forge/mod/hello.ko", addr(sz))
+    m = mod_load(img, sz)
+    if u64(m) == 0:
+        puts(mod_err)
+        panic(": hello.ko rejected")
+    puts("module hello.ko: ")
+    put_u64(m.npages)
+    puts(" pages at ")
+    put_hex(m.base)
+    puts(", ABI ")
+    put_u64(m.abi >> 16)
+    putc(46)
+    put_u64(m.abi & 0xFFFF)
+    puts(", ")
+    put_u64(m.nsyms)
+    puts(" symbols\n")
+    fcall = mod_sym(m, "mod_call")
+    if call_ptr(fcall, 5) != 5 * 3 + 20 + 1 or call_ptr(fcall, 2) != 2 * 3 + 30 + 2:
+        panic("module call returned a wrong value")
+    call_ptr(mod_sym(m, "mod_hello"))
+    # W^X inside the module: text not writable, data not executable
+    te = vload64(pte_addr(kernel_pml4, mod_sym(m, "mod_call"), 0))
+    if (te & PTE_W) != 0 or (te & PTE_NX) != 0:
+        panic("module text mapped writable or NX")
+    # state transfer across an unload/load
+    st = kmalloc(64)
+    n = call_ptr(m.save, st, 64)
+    base0 = m.base
+    mod_unload(m)
+    if virt_to_phys(kernel_pml4, base0) != 1:
+        panic("module still mapped after unload")
+    m = mod_load(img, sz)
+    if call_ptr(m.restore, st, n) != 1 or call_ptr(mod_sym(m, "mod_call"), 0) != 10 + 3:
+        panic("module state not restored")
+    kfree(st)
+    mod_unload(m)
+    puts("  state saved, module unloaded + reloaded, state restored\n")
+    # leak check over 1000 load / call / unload cycles
+    ff = frames_free
+    hl = heap_live
+    t0 = lapic_ticks
+    i: u64 = 0
+    while i < 1000:
+        m = mod_load(img, sz)
+        if u64(m) == 0:
+            panic("module load failed in the cycle test")
+        if call_ptr(mod_sym(m, "mod_call"), i) != i * 3 + (10 + 10 * (i & 3)) + 1:
+            panic("module call wrong in the cycle test")
+        mod_unload(m)
+        i += 1
+    puts("  1000 load/call/unload cycles in ")
+    put_u64((lapic_ticks - t0) * 10)
+    puts(" ms, frames leaked ")
+    put_u64(ff - frames_free)
+    puts(", heap bytes leaked ")
+    put_u64(hl - heap_live)
+    putc(10)
+    if frames_free != ff or heap_live != hl:
+        panic("module load/unload leaks memory")
+    mod_expect_reject(img, sz / 2, "truncated hello.ko")
+    bsz: u64 = 0
+    b = mod_read("EFI/Forge/mod/badabi.ko", addr(bsz))
+    mod_expect_reject(b, bsz, "badabi.ko")
+    kfree(b)
+    b = mod_read("EFI/Forge/mod/unresolved.ko", addr(bsz))
+    mod_expect_reject(b, bsz, "unresolved.ko")
+    kfree(b)
+    b = mod_read("EFI/Forge/mod/newer.ko", addr(bsz))
+    mod_expect_reject(b, bsz, "newer.ko")
+    kfree(b)
+    kfree(img)
+    puts("module ABI OK: ")
+    put_u64(mod_loads)
+    puts(" loads, ")
+    put_u64(mod_unloads)
+    puts(" unloads, ")
+    put_u64(mod_rejects)
+    puts(" rejected\n")
+
 def shell_test():
     # the interactive shell from \EFI\Forge\bin\sh; the boot test types its commands
     input_init()
@@ -691,6 +814,7 @@ def after_overflow():
     sync_test()
     user_test()
     fs_test()
+    module_test()
     shell_test()
     cli()
     puts("KERNEL OK\n")
