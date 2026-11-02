@@ -2233,6 +2233,8 @@ def __pow(a, b):
                 return __ipow(ia, ib)
             return __bigpow(ia, ib)
         return __itof(1) / __ipow(ia, 0 - ib)
+    if b == 2:
+        return a * a
     if a == 0:
         if b < 0:
             __err(0, "0.0 cannot be raised to a negative power")

@@ -1,0 +1,17 @@
+def f(a: float, b: float):
+    q = a // b
+    r = a % b
+    s = a ** 2
+    t = -a ** 2
+    return q + r * 10.0 + s + t * 0.5
+
+def g():
+    x = 7.5
+    y = -2.0
+    print(x // y, x % y, (-x) % 3.0, x ** 2, 3 % 2.0, 7.0 // 2)
+    print(f(7.25, 0.5), f(-3.5, 2.0))
+    try:
+        print(x % 0.0)
+    except ZeroDivisionError:
+        print("zd")
+g()

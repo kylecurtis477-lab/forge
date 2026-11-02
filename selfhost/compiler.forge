@@ -1390,8 +1390,8 @@ def jump_false(l):
     e("test %rax, %rax")
     e2("jz ", lab(l))
     e("mov %rax, %rdx")
-    e("shr $44, %rdx")
-    e2("jz ", lab(t))
+    e("cmp rt_dlov(%rip), %rdx")
+    e2("jb ", lab(t))
     e("call rtp_truth")
     u_truth = 1
     e("test %rdx, %rdx")
@@ -1407,8 +1407,8 @@ def jump_true(l):
     e("test %rax, %rax")
     e2("jz ", lab(f))
     e("mov %rax, %rdx")
-    e("shr $44, %rdx")
-    e2("jz ", lab(l))
+    e("cmp rt_dlov(%rip), %rdx")
+    e2("jb ", lab(l))
     e("call rtp_truth")
     u_truth = 1
     e("test %rdx, %rdx")
@@ -2238,8 +2238,8 @@ def cmp_one(op, start, mark, lt, rt, line):
     if not (lt == T_FLOAT or rt == T_FLOAT):
         e("mov %rax, %rdx")
         e("or %rcx, %rdx")
-        e("shr $44, %rdx")
-        e("jnz 1f")
+        e("cmp rt_dlov(%rip), %rdx")
+        e("jae 1f")
         e("cmp %rcx, %rax")
         e2(concat("set", setcc(op)), " %al")
         e("movzbq %al, %rax")
@@ -2260,8 +2260,8 @@ def bitop(ins, code, start, mark, lt, rt):
     lr(start, mark)
     e("mov %rax, %rdx")
     e("or %rcx, %rdx")
-    e("shr $44, %rdx")
-    e("jnz 1f")
+    e("cmp rt_dlov(%rip), %rdx")
+    e("jae 1f")
     e2(ins, " %rcx, %rax")
     e("jmp 2f")
     emit_raw("1:\n")
@@ -2500,8 +2500,8 @@ def arith(op, start, mark, lt, rt, line):
     if code != 3:
         e("mov %rax, %rdx")
         e("or %rcx, %rdx")
-        e("shr $44, %rdx")
-        e("jnz 1f")
+        e("cmp rt_dlov(%rip), %rdx")
+        e("jae 1f")
         if code == 0:
             e("add %rcx, %rax")
         elif code == 1:
@@ -8696,8 +8696,7 @@ def fc_init():
                 fcN[nfc] = hn
                 fcV[nfc] = v
                 nfc += 1
-                if vkind == 1:
-                    fc_load(nfc - 1)
+                fc_load(nfc - 1)
         i += 1
 
 def fc_load(j):
@@ -9182,12 +9181,19 @@ def x_term() -> int:
             else:
                 o_fail("/")
                 return v
-        elif tok_is_op(ip, "//"):
+        elif tok_is_op(ip, "//") or tok_is_op(ip, "%"):
+            p = ip
             ip += 1
-            v = ibin(O_DIV, v, x_unary(), 0)
-        elif tok_is_op(ip, "%"):
-            ip += 1
-            v = ibin(O_MOD, v, x_unary(), 0)
+            r = x_unary()
+            if fl(v) or fl(r):
+                if tok_is_op(p, "//"):
+                    v = fbin(4, v, r, p)
+                else:
+                    v = fbin(5, v, r, p)
+            elif tok_is_op(p, "//"):
+                v = ibin(O_DIV, v, r, 0)
+            else:
+                v = ibin(O_MOD, v, r, 0)
         else:
             o_fail("/")
             return v
@@ -9224,6 +9230,10 @@ def x_unary() -> int:
         return d
     v = x_post()
     if tok_is_op(ip, "**"):
+        if fl(v) and tk[ip + 1] == K_NUM and tv[ip + 1] == 2 and not tok_is_op(ip + 2, "**") and not tok_is_op(ip + 2, "(") and not tok_is_op(ip + 2, "["):
+            p = ip
+            ip += 2
+            return fbin(2, v, v, p)
         o_fail("**")
     return v
 
@@ -10343,7 +10353,7 @@ def is_pure(k):
     if op >= O_I2D and op <= O_FCST:
         return 1
     if op == O_FOP:
-        return iimm[k] != 3
+        return iimm[k] < 3
     if op == O_ADD or op == O_SUB or op == O_MUL or op == O_NEG:
         return not iovf[k]
     if op == O_LOAD:
@@ -11605,7 +11615,12 @@ def em_flt(k):
                 e("jp 1f")
                 e3("mov $", str(uline(ix[k])), ", %edx")
                 e("call rt_fdivzero")
-                e("1:  divsd %xmm1, %xmm0")
+                if c == 5:
+                    e("1:  call rt_fmod_r")
+                else:
+                    e("1:  divsd %xmm1, %xmm0")
+                if c == 4:
+                    e("call rt_floor_r")
             if em_fxd(k):
                 return 0
         else:

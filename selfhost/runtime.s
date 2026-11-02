@@ -1771,6 +1771,8 @@ rt_excval:
     ret
 .data
 .p2align 3
+rt_dlov: .quad rt_dlo
+.p2align 3
 rt_exc_top: .quad 0
 rt_exc_val: .quad 0
 rt_exc_line: .quad 0
