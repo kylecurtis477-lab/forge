@@ -1,0 +1,40 @@
+def mk(n):
+    parts = list(n + 1)
+    k = 0
+    while k <= n:
+        parts[k] = k * k
+        k += 1
+    return parts
+
+def fill(xs, v):
+    ys = list(len(xs))
+    i = 0
+    while i < len(xs):
+        ys[i] = xs[i] + v
+        i += 1
+    return ys
+
+def oob():
+    a = list(2)
+    try:
+        a[5] = 1
+    except IndexError:
+        return "idx"
+    return "no"
+
+class Box:
+    def __init__(self):
+        self.v = 0
+
+def setter(b, n):
+    i = 0
+    while i < n:
+        b.v = b.v + i
+        i += 1
+    return b.v
+
+print(mk(5))
+print(fill([1, 2, 3], 10))
+print(fill(["a", "b"], "!"))
+print(oob())
+print(setter(Box(), 10))

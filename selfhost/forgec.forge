@@ -8573,6 +8573,7 @@ O_MKB = 42
 O_FLD = 43
 O_FST = 44
 O_GBIN = 41
+O_GST = 45
 EXT_RT = ["rt_char_at", "rt_itos", "rt_len", "rt_list"]
 GCMP_RT = [10, 11, 12, 14, 13, 15]
 GCMP_CC = ["e", "ne", "l", "le", "g", "ge"]
@@ -10038,6 +10039,17 @@ def x_call() -> int:
             return cst(0)
         ip = rp + 1
         return to_d(a)
+    if (f < 0 or fpre[f]) and str_eq(name, "list") and n == 1 and hyb and not inl_on and xfind("list") < 0:
+        ip = lp + 1
+        a = x_expr()
+        if ip != rp or oty(a) != T_INT:
+            o_fail("list()")
+            return cst(0)
+        ip = rp + 1
+        ob = new_vr(1)
+        iadd(O_LNEW, ob, a, -1)
+        vtt[ob] = T_LIST
+        return ob
     if (f < 0 or fpre[f]) and str_eq(name, "abs") and n == 1:
         ip = lp + 1
         a = x_expr()
@@ -10766,9 +10778,6 @@ def s_simple():
             if find_top_eq(q + 1) >= 0:
                 o_fail("chained =")
                 return 0
-            if hyb and h_home(name) and tok_is_id(q + 1, "list") and tok_is_op(q + 2, "("):
-                o_fail("home list")
-                return 0
             if tok_is_id(q + 1, "list") and tok_is_op(q + 2, "(") and xfind("list") < 0 and not (hyb and h_home(name)):
                 rp = match_close(q + 2)
                 if rp > q + 3 and line_end_tok(rp + 1) and (fn_lookup("list", 1) < 0 or fpre[fn_lookup("list", 1)]):
@@ -10842,6 +10851,21 @@ def s_simple():
         if tok_is_op(q, "["):
             rb = match_close(q)
             i = xfind(name)
+            if rb > 0 and i >= 0 and xk[i] == 1 and hyb and not inl_on and tok_is_op(rb + 1, "=") and oty(xv[i]) == T_LIST:
+                ip = rb + 2
+                x = xbox(x_expr())
+                ee = ip
+                ip = q + 1
+                idx = xbox(x_expr())
+                if ip != rb:
+                    o_fail("store index")
+                    return 0
+                kk = iadd(O_GST, -1, xv[i], idx)
+                ic[kk] = x
+                iimm[kk] = tl[q]
+                ip = ee
+                end_line()
+                return 0
             if rb > 0 and i >= 0 and xk[i] == 2 and (tok_is_op(rb + 1, "=") or is_aug(rb + 1)):
                 if is_aug(rb + 1):
                     ip = q + 1
@@ -10907,6 +10931,8 @@ def u_n(k):
         if iimm[k]:
             return 5
         return 3
+    if op == O_GST:
+        return 3
     if op == O_CALL:
         return ib[k]
     return 0
@@ -10944,7 +10970,7 @@ def u_set(k, j, v):
 
 def has_dst(k):
     op = iop[k]
-    if op == O_LABEL or op == O_BR or op == O_CBR or op == O_STORE or op == O_RET or op == O_NOP or op >= O_TSTMT and op <= O_TSET and op != O_VLD and op != O_TEXPR:
+    if op == O_LABEL or op == O_BR or op == O_CBR or op == O_STORE or op == O_GST or op == O_RET or op == O_NOP or op >= O_TSTMT and op <= O_TSET and op != O_VLD and op != O_TEXPR:
         return 0
     return idst[k] >= 0
 
@@ -12525,7 +12551,7 @@ def mark_loops():
         j += 1
 
 def o_ins(k, fi, x_epi):
-    global pos, pstop
+    global pos, pstop, u_setidx
     n = fargs[fi]
     op = iop[k]
     if k == 0:
@@ -12653,6 +12679,26 @@ def o_ins(k, fi, x_epi):
         emit_raw("2:\n")
         if idst[k] >= 0:
             e2("mov %rax, ", vl(idst[k]))
+    elif op == O_GST:
+        mv_to(ia[k], "%rdx", 0)
+        mv_to(ib[k], "%rcx", 0)
+        mv_to(ic[k], "%rax", 0)
+        e("cmpb $0, -1(%rdx)")
+        e("jne 1f")
+        e("cmp (%rdx), %rcx")
+        e("jae 1f")
+        e("mov 16(%rdx), %rdx")
+        e("mov %rax, (%rdx,%rcx,8)")
+        e("jmp 2f")
+        emit_raw("1:\n")
+        e("push %rsi")
+        e("push %rdi")
+        e3("mov $", str(uline(iimm[k])), ", %rsi")
+        e("call rtp_setidx")
+        u_setidx = 1
+        e("pop %rdi")
+        e("pop %rsi")
+        emit_raw("2:\n")
     elif op == O_FST:
         mv_to(ia[k], "%rax", 0)
         mv_to(ib[k], "%rcx", 0)
