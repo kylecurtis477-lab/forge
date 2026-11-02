@@ -19,6 +19,7 @@ for t in tests/typeerrors/*.forge; do
   build/forgec "$t" build/t_err.s > build/t_err.txt 2>&1 && { echo "FAIL $t (no error)"; fail=1; } || { diff -q build/t_err.txt "${t%.forge}.expected" >/dev/null && echo "PASS $t: $(head -1 build/t_err.txt)" || { echo "FAIL $t"; fail=1; }; }
 done
 for t in tests/fs/*.forge; do
-  build/forgec "$t" build/t_fs.s && as -o build/t_fs.o build/t_fs.s && ld -o build/t_fs build/t_fs.o && build/t_fs | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS $t" || { echo "FAIL $t"; fail=1; }
+  c=""; [ -f "${t%.forge}.c" ] && gcc -O1 -ffreestanding -fno-pic -fno-stack-protector -c -o build/t_fsc.o "${t%.forge}.c" && c=build/t_fsc.o
+  build/forgec "$t" build/t_fs.s && as -o build/t_fs.o build/t_fs.s && ld -o build/t_fs build/t_fs.o $c && build/t_fs | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS $t" || { echo "FAIL $t"; fail=1; }
 done
 exit $fail

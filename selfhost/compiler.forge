@@ -14290,6 +14290,8 @@ def fs_primary():
             i -= 1
         fs_callsite(nm)
         fs_ety = fsf_ret[f]
+        # SysV leaves upper bits of narrow return values unspecified
+        fs_norm(fs_ety)
         fs_mode = 0
         return 0
     if str_eq(nm, "ptr") and fs_isop("["):
@@ -15144,7 +15146,10 @@ def fs_function(f):
     i = 0
     while i < fsf_np[f]:
         l = fs_newlocal(fsp_n[fsf_p0[f] + i], fsp_t[fsf_p0[f] + i])
-        e(c4("mov ", FS_AREG[i], ",", concat(str(fsl_o[l]), "(%rbp)")))
+        # SysV leaves upper bits of narrow args unspecified: normalize on entry
+        e(c3("mov ", FS_AREG[i], ",%rax"))
+        fs_norm(fsp_t[fsf_p0[f] + i])
+        e(c3("mov %rax,", str(fsl_o[l]), "(%rbp)"))
         i += 1
     fp = fsf_pos[f]
     fs_suite()

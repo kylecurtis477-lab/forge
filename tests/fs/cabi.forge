@@ -1,0 +1,40 @@
+# forge: no-runtime
+# C ABI interop: extern C functions, exported Forge functions called from C, function pointers
+include "linux.fsi"
+
+extern def c_add6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64
+extern def c_trunc(v: u64) -> u8
+extern def c_calls_forge() -> i64
+extern def c_struct_sum(s: ptr[S]) -> u32
+
+struct S:
+    a: u8
+    b: u32
+    c: u16
+
+@export
+def forge_mix(a: i64, b: u8, c: i16, d: u32, e: i64, f: i64) -> i64:
+    return a + i64(b) + c + i64(d) + e + f
+
+def twice(x: i64) -> i64:
+    return x * 2
+
+def main() -> i64:
+    put_i64(c_add6(1, 2, 3, 4, 5, 6))
+    nl()
+    put_u64(c_trunc(0x1234))
+    nl()
+    put_i64(c_calls_forge())
+    nl()
+    s: S
+    s.a = 1
+    s.b = 1000
+    s.c = 65535
+    put_u64(c_struct_sum(addr(s)))
+    nl()
+    fp = twice
+    put_u64(call_ptr(fp, 21))
+    nl()
+    put_u64(call_ptr(c_add6, 1, 1, 1, 1, 1, 1))
+    nl()
+    return 0
