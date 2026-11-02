@@ -14178,6 +14178,53 @@ def fs_intrin(nm):
         e(c3("mov %rax,%cr", substr(nm, 8, 9), ""))
         fs_ety = FT_VOID
         return 1
+    # atomics (x86-64 is TSO: plain loads are acquire; xchg/lock ops are full barriers)
+    an = ["atomic_load32", "atomic_load64", "atomic_store32", "atomic_store64", "atomic_xchg32", "atomic_xchg64", "atomic_add32", "atomic_add64", "atomic_cas32", "atomic_cas64", "atomic_or32", "atomic_or64", "atomic_and32", "atomic_and64"]
+    k = find(an, 14, nm)
+    if k >= 0:
+        w = k % 2
+        rr = "%ecx"
+        if w:
+            rr = "%rcx"
+        op = k // 2
+        if op == 0:
+            fs_args(1, -1)
+            fs_pop("%rax")
+            if w:
+                e("mov (%rax),%rax")
+            else:
+                e("movl (%rax),%eax")
+        elif op == 4:
+            fs_args(3, -1)
+            fs_pop("%rcx")
+            fs_pop("%rax")
+            fs_pop("%rdx")
+            e(c3("lock cmpxchg ", rr, ",(%rdx)"))
+            if not w:
+                e("movl %eax,%eax")
+        else:
+            fs_args(2, -1)
+            fs_pop("%rcx")
+            fs_pop("%rdx")
+            if op == 1 or op == 2:
+                e(c3("xchg ", rr, ",(%rdx)"))
+            elif op == 3:
+                e(c3("lock xadd ", rr, ",(%rdx)"))
+            elif op == 5:
+                e(c3("lock or ", rr, ",(%rdx)"))
+            else:
+                e(c3("lock and ", rr, ",(%rdx)"))
+            if w:
+                e("mov %rcx,%rax")
+            else:
+                e("movl %ecx,%eax")
+        fs_ety = FT_U64
+        if not w:
+            fs_ety = FT_U32
+        if op == 1 or op == 5 or op == 6:
+            fs_ety = FT_VOID
+        fs_mode = 0
+        return 1
     if str_eq(nm, "rdtsc"):
         fs_args(0, -1)
         e("rdtsc")

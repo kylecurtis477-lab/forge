@@ -1,0 +1,74 @@
+# forge: no-runtime
+# atomics: lock xadd / cmpxchg / xchg under real contention (4 clone() threads sharing memory)
+include "linux.fsi"
+
+N = 200000
+NT = 4
+
+counter: u64
+plain: u64
+lock: u32
+done: u64
+flags: u32
+stacks: u8[65536]
+
+@naked
+def spawn(fnp: u64, stack_top: u64) -> i64:
+    # clone(CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM, stack); child pops fn, calls it, exits the thread
+    asm("sub $16,%rsi", "mov %rdi,(%rsi)", "mov $0x50F00,%edi", "xor %edx,%edx", "xor %r10d,%r10d", "xor %r8d,%r8d",
+        "mov $56,%eax", "syscall", "test %rax,%rax", "jnz 1f",
+        "pop %rax", "call *%rax", "mov $60,%eax", "xor %edi,%edi", "syscall",
+        "1: ret")
+
+def spin_lock(l: ptr[u32]):
+    while atomic_cas32(u64(l), 0, 1) != 0:
+        while atomic_load32(u64(l)) != 0:
+            pause()
+
+def spin_unlock(l: ptr[u32]):
+    atomic_store32(u64(l), 0)
+
+def worker():
+    i = 0
+    while i < N:
+        atomic_add64(u64(addr(counter)), 1)
+        spin_lock(addr(lock))
+        plain += 1
+        spin_unlock(addr(lock))
+        i += 1
+    atomic_or32(u64(addr(flags)), 1)
+    atomic_add64(u64(addr(done)), 1)
+
+def main() -> i64:
+    x: u64 = 5
+    put_u64(atomic_cas64(u64(addr(x)), 4, 9))
+    puts(" ")
+    put_u64(x)
+    puts(" ")
+    put_u64(atomic_cas64(u64(addr(x)), 5, 9))
+    puts(" ")
+    put_u64(x)
+    puts(" ")
+    put_u64(atomic_xchg64(u64(addr(x)), 1))
+    puts(" ")
+    put_u64(atomic_add64(u64(addr(x)), 10))
+    puts(" ")
+    put_u64(atomic_load64(u64(addr(x))))
+    nl()
+    f: u32 = 0xF0
+    atomic_and32(u64(addr(f)), 0x3C)
+    put_u64(f)
+    nl()
+    t = 0
+    while t < NT:
+        spawn(u64(worker), u64(addr(stacks[0])) + u64(t + 1) * 16384)
+        t += 1
+    while atomic_load64(u64(addr(done))) < NT:
+        pause()
+    put_u64(counter)
+    puts(" ")
+    put_u64(plain)
+    puts(" ")
+    put_u64(flags)
+    nl()
+    return 0
