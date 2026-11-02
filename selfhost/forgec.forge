@@ -15468,6 +15468,8 @@ fs_term = 0
 fs_lbm = list(256)
 fs_lb0 = list(256)
 fs_safe = 0
+fs_sp = 0  # `# forge: stack-protector`: canary below rbp in every function with an array/struct local
+fs_spn = 0  # functions protected
 # Phase 4.5 defer: `with defer:` blocks at a function's top level run (LIFO) before every return
 # Phase 4.5 generics: @generic(T, ...) on a def or struct; instantiated (monomorphized) per type tuple
 fsgen_n = list(512)
@@ -18650,7 +18652,7 @@ def fs_function1(f):
     fs_genv_pop(old)
 
 def fs_function2(f):
-    global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop, nfsdf, fs_sdep, fs_term
+    global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop, nfsdf, fs_sdep, fs_term, fs_spn
     at = fsf_at[f]
     nm = fsf_n[f]
     sec = fsf_sec[f]
@@ -18680,6 +18682,8 @@ def fs_function2(f):
     e("sub $0,%rsp")
     nfsl = 0
     fs_frame = 0
+    if fs_sp:
+        fs_frame = 8
     fs_dep = 0
     nfsloop = 0
     fs_ret = fs_newlab()
@@ -18711,6 +18715,14 @@ def fs_function2(f):
         fp = fp1
     e("xor %eax,%eax")
     emit_raw(concat(fs_ret, ":\n"))
+    guard = fs_sp and not str_eq(nm, "stack_smashed") and fs_hasbuf()
+    if guard:
+        ok = fs_newlab()
+        e("mov -8(%rbp),%r11")
+        e("xor stack_canary(%rip),%r11")
+        e(concat("jz ", ok))
+        e("call stack_smashed")
+        emit_raw(concat(ok, ":\n"))
     e("leave")
     e("ret")
     while fs_frame % 16 != 0:
@@ -18719,6 +18731,18 @@ def fs_function2(f):
         out[pidx] = ""
     else:
         out[pidx] = c3("    sub $", str(fs_frame), ",%rsp\n")
+    if guard:
+        fs_spn += 1
+        out[pidx] = concat(out[pidx], "    mov stack_canary(%rip),%r11\n    mov %r11,-8(%rbp)\n")
+
+def fs_hasbuf():
+# a local or parameter wider than a word (array, struct) is what a stray write overflows
+    i = 0
+    while i < nfsl:
+        if ftsz[fsl_t[i]] > 8:
+            return 1
+        i += 1
+    return 0
 
 FS_SAVE = ["%rax", "%rcx", "%rdx", "%rsi", "%rdi", "%r8", "%r9", "%r10", "%r11"]
 
@@ -18765,13 +18789,15 @@ def fs_wrapper(f, nm, body):
     e("iretq")
 
 def fs_main(src):
-    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_ufix, fs_ubare, fs_safe
+    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_ufix, fs_ubare, fs_safe, fs_sp
     if contains(src, concat("# forge: ", "checked-ints")):
         fs_chk = 1
     if contains(src, concat("# forge: ", "no-bounds-checks")):
         fs_bchk = 0
     if contains(src, concat("# forge: ", "safe\n")):
         fs_safe = 1
+    if contains(src, concat("# forge: ", "stack-protector")):
+        fs_sp = 1
     ai = 3
     while ai < argc():
         if str_eq(argv(ai), "--no-bounds"):

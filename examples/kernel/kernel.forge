@@ -1,4 +1,5 @@
 # forge: no-runtime
+# forge: stack-protector
 # Forge x86-64 kernel: higher half, own 4-level page tables, frame allocator, heap, GOP/VBE framebuffer
 # console, TSS/IST, ACPI MADT, LAPIC timer, IOAPIC. Boots via GRUB multiboot2 (BIOS or UEFI) or via the
 # native Forge UEFI loader (examples/efi/loader.forge) after ExitBootServices.
@@ -266,6 +267,7 @@ def recurse(n: u64) -> u64:
 @export
 def kmain_high():
 # now on the guarded kernel stack, identity map gone, physical memory via HHDM
+    canary_init()
     if bi.fb_addr != 0:
         fb_attach(p2v(bi.fb_addr), bi.fb_width, bi.fb_height, bi.fb_pitch)
         puts("Forge kernel: framebuffer console ")
@@ -567,6 +569,48 @@ def sched_test():
 def deep(arg: u64):
     recurse(0)
 
+stack_canary: u64  # read by every protected prologue/epilogue (`# forge: stack-protector`)
+smash_armed: u64
+smash_kills: u64
+smash_pat: u8[256]
+
+def canary_init():
+# no buffer locals here, so this frame carries no canary of its own; nothing protected is live yet
+    t = rdtsc()
+    v = (t ^ (t << 29) ^ u64(addr(bi))) * 0x9E3779B97F4A7C15
+    stack_canary = (v ^ (v >> 31)) & ~u64(255)  # low byte 0 stops string over-reads too
+
+@export
+def stack_smashed():
+    if smash_armed != 0:
+        smash_armed = 0
+        smash_kills += 1
+        puts("stack canary: kernel thread ")
+        put_u64(cur_thread().id)
+        puts(" smashed its frame, caught before return: killed\n")
+        thread_exit()
+    panic("stack canary: smashed stack frame")
+
+def smasher(arg: u64):
+    buf: u64[16]
+    buf[0] = arg
+    # a raw copy 32 bytes past the buffer: over the canary and saved rbp, toward the return address
+    copy_user(u64(addr(buf[0])), u64(addr(smash_pat[0])), 160)
+
+def canary_test():
+    i: u64 = 0
+    while i < 256:
+        smash_pat[i] = 0x41
+        i += 1
+    smash_armed = 1
+    t = thread_spawn(u64(smasher), 0)
+    while atomic_load(addr(t.state), acquire) != T_DEAD:
+        yield_cpu()
+    thread_free(t)
+    if smash_kills != 1 or stack_canary == 0:
+        panic("stack canary test failed")
+    puts("stack canaries: overflow past a local buffer detected, thread killed, kernel carries on\n")
+
 def guard_test():
 # a kernel thread recursing without bound must hit its own guard page and die alone
     f0 = frames_free
@@ -578,6 +622,7 @@ def guard_test():
     if kstack_guard_faults != g0 + 1 or frames_free != f0:
         panic("kernel stack guard test failed")
     puts("kernel stack guard pages: overflowing thread killed, stack frames returned\n")
+    canary_test()
 
 asm(".section .rodata",
     ".balign 16",

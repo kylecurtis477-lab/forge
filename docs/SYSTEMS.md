@@ -215,3 +215,8 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
 - `kstack_alloc(np)` / `kstack_free` (mm.fsi) map np pages at `KSTACKS_BASE` + bump offset with one never-mapped page below; VA is never reused, so a stale pointer into a freed stack faults too. The range shares the big heap's PML4 slot, so every user address space already sees it.
 - Overflow: push into the guard page -> #PF cannot deliver -> #DF on IST1. `thread_guard_hit(cr2)` (sched.fsi) matches the current thread's guard page; the handler iretqs to `thread_overflow_exit` with rsp = the thread's stack top, and the thread exits. Any other #DF without a recovery point still panics.
 - Test: `guard_test` (kernel.forge) after the scheduler test.
+
+## Stack canaries (Phase 5.4c)
+- Compiler (selfhost/compiler.forge, freestanding backend): pragma `# forge: stack-protector` sets `fs_sp`; each frame reserves -8(%rbp). Functions with a buffer local (`fs_hasbuf`) get `mov stack_canary(%rip),%r11; mov %r11,-8(%rbp)` after the frame setup and `mov -8(%rbp),%r11; xor stack_canary(%rip),%r11; jz ok; call stack_smashed` at the single return label. `stack_smashed` itself is never instrumented. Programs without the pragma compile byte-for-byte as before (FIXPOINT unaffected).
+- Kernel: `stack_canary` global, `canary_init` (no buffer locals, so it is not instrumented) seeds it first thing in `kmain_high`; `stack_smashed` panics, except in the armed self-test, where it kills the thread.
+- Not covered: user programs and modules (no pragma yet); the canary is per boot, not per thread.
