@@ -36,4 +36,12 @@ python3 $B efi-loader-gpt $L/efi.log 180 "hello from PE32+|signature OK|GOP 1024
 if [ "$(sha256sum < build/efi/disk.img)" = "$DH0" ]; then echo "PASS os/kexec-no-disk-write"; else echo "FAIL os/kexec-no-disk-write"; fi
 # KASLR: every boot (3 first-generation kernels + 3 kexec'd ones) picks its own heap/stack bases
 NK=$(grep -ah '^KASLR: big heap at' $L/bios.log $L/uefi.log $L/efi.log | sort -u | wc -l)
-if [ "$NK" -ge 5 ]; then echo "PASS os/kaslr ($NK distinct layouts in 6 boots)"; else echo "FAIL os/kaslr ($NK distinct layouts)"; fi
+# image KASLR: each of the 6 kernels relocated itself to its own slide and unmapped the link-address alias;
+# the UEFI loader and kexec both checked the image carries its relocation table
+NI=$(grep -ah '^KASLR: kernel image at .*link-address alias unmapped' $L/bios.log $L/uefi.log $L/efi.log | sort -u | wc -l)
+NU=$(grep -ah 'unslid .text 0x.* -> unmapped' $L/bios.log $L/uefi.log $L/efi.log | wc -l)
+NL=$(grep -ah '^kernel relocatable: [1-9]' $L/efi.log | wc -l)
+NX=$(grep -ah '^kexec: new kernel relocatable, [1-9]' $L/bios.log $L/uefi.log $L/efi.log | wc -l)
+if [ "$NK" -ge 5 ] && [ "$NI" -ge 5 ] && [ "$NU" -eq 6 ] && [ "$NL" -eq 1 ] && [ "$NX" -eq 3 ]; then
+    echo "PASS os/kaslr ($NK heap/stack layouts, $NI image bases in 6 boots)"
+else echo "FAIL os/kaslr (layouts $NK, image bases $NI, unslid unmapped $NU, loader $NL, kexec $NX)"; fi

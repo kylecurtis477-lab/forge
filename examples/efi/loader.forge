@@ -55,6 +55,15 @@ wbuf: u16[256]
 con: nptr[u64]
 bs: nptr[u64]
 
+# FORGEKRN header (boot.fsi): 8-byte aligned in the first loadable segment
+struct KrnHdr:
+    magic: u64
+    entry: u64
+    phys_start: u64
+    phys_end: u64
+    krel_start: u64
+    krel_end: u64
+
 @unsafe
 def bsfn(i: u64) -> u64:
 # boot-services table entry i (0 before efi_main has stored the table)
@@ -355,14 +364,23 @@ def efi_main(image: u64, st: ptr[SystemTable]) -> u64:
             memset(dst + load64(ph + 32), 0, load64(ph + 40) - load64(ph + 32))
         i += 1
     entry: u64 = 0
+    nrel: u64 = 0
     off: u64 = 0
-    while off + 16 <= fsize:
-        if load64(file + off) == 0x4E524B4547524F46:
-            entry = load64(file + off + 8)
+    while off + 48 <= fsize:
+        h = ptr[KrnHdr](file + off)
+        if h.magic == 0x4E524B4547524F46:
+            entry = h.entry
+            nrel = (h.krel_end - h.krel_start) / 8
             break
         off += 8
     if entry == 0:
         return fail("FORGEKRN header not found", 0)
+    # image KASLR: the kernel relocates itself to a random slide; it needs its relocation table
+    if nrel == 0 or nrel > 0x100000:
+        return fail("kernel has no relocation table (not relocatable)", 0)
+    print("kernel relocatable: ")
+    print_u64(nrel)
+    print(" relocations\r\n")
     print("kernel loaded at ")
     print_hex(kdelta + lo)
     print(", entry ")

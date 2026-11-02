@@ -25,7 +25,7 @@ MAX_FRAMES = 4194304
 asm(
     ".section .rodata",
     ".p2align 3",
-    "ksyms: .quad __text_start, __text_end, __rodata_start, __rodata_end, __data_start, __data_end, __kernel_phys_start, __kernel_phys_end",
+    "ksyms: .quad __text_start, __text_end, __rodata_start, __rodata_end, __data_start, __data_end, __kernel_phys_start, __kernel_phys_end, __krel_start, __krel_end",
     ".text"
 )
 
@@ -40,6 +40,8 @@ frame_hint: u64
 frame_limit: u64
 phys_top: u64
 kdelta: u64
+kslide: u64
+krel_count: u64
 p2v_base: u64
 kernel_pml4: u64
 demand_faults: u64
@@ -48,6 +50,10 @@ def p2v(pa: u64) -> u64:
     return pa + p2v_base
 
 def kv2p(va: u64) -> u64:
+# both image aliases (KBASE while booting, KBASE + kslide after self-relocation) map to the same frames;
+# kslide >= 2 MiB exceeds the image, so the two never overlap
+    if kslide != 0 and va >= KBASE + kslide + 0x100000:
+        return va - KBASE - kslide + kdelta
     return va - KBASE + kdelta
 
 def frame_set(f: u64):
@@ -247,9 +253,12 @@ def virt_to_phys(pml4: u64, va: u64) -> u64:
     return 1
 
 def map_kernel_range(pml4: u64, start: u64, end: u64, flags: u64):
+# the image at its link address and, for KASLR, again at link address + kslide (same frames)
     va = start
     while va < end:
         map_page(pml4, va, kv2p(va), flags | PTE_G)
+        if kslide != 0:
+            map_page(pml4, va + kslide, kv2p(va), flags | PTE_G)
         va += PAGE
 
 def map_stack(pml4: u64, top: u64, pages: u64):
@@ -288,6 +297,7 @@ def paging_init(fb_phys: u64, fb_len: u64) -> u64:
     map_kernel_range(pml4, ksym(0), ksym(1), 0)
     map_kernel_range(pml4, ksym(2), ksym(3), PTE_NX)
     map_kernel_range(pml4, ksym(4), ksym(5), PTE_W | PTE_NX)
+    map_kernel_range(pml4, ksym(8), ksym(9), PTE_NX)
     map_stack(pml4, KSTACK_TOP, KSTACK_PAGES)
     map_stack(pml4, IST1_TOP, IST_PAGES)
     map_stack(pml4, IST2_TOP, IST_PAGES)

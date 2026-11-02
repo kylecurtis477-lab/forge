@@ -223,4 +223,9 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
 
 ## KASLR, partial (Phase 5.4d)
 - `canary_init` (kernel.forge) also sets `heap_big_next` = HEAP_BIG_BASE + rand16 * 2 MiB and `kstack_next` = KSTACKS_BASE + rand16 * 2 MiB, before the first big allocation or thread. Both stay in PML4 slot 384, so user address spaces created later share them. Logged as `KASLR: big heap at ..., thread stacks at ...`.
-- Fixed: the kernel image (KBASE), KSTACK_TOP/IST stacks, the HHDM, DEMAND_BASE. Entropy is the TSC (no RDRAND yet).
+- Fixed: KSTACK_TOP/IST stacks, the HHDM, DEMAND_BASE. Entropy is the TSC (no RDRAND yet).
+## Image KASLR (Phase 5.4e)
+- Build (examples/kernel/build.sh `klink`): `ld -q` pass, `tools/krel.py` writes `.krel` (u64 entries `offset_from_KBASE | kind << 56`; kind 1 u64 += s, 2 u32 += s, 3 i32 -= s), second link with the table as the last PT_LOAD (R), a `-q` check link must reproduce the identical table, the shipped ELF has no .rela sections. Currently 15 entries (ksyms, the boot stub's high jump target, rodata function tables).
+- Boot (kernel_start): `kaslr_pick` -> `paging_init` (both aliases, same frames; `kv2p` subtracts kslide for slid addresses) -> `paging_activate` -> `krel_apply(HHDM + kdelta, kslide)` (asm in boot.fsi) -> `switch_stack(KSTACK_TOP, kmain_high + kslide)` -> `kaslr_unmap` in kmain_high. `check_mapping("unslid .text")` must report unmapped.
+- FORGEKRN header: entry, phys start, phys end, krel start, krel end. The Forge UEFI loader and kexec refuse a kernel whose table is empty; kexec'd kernels pick a fresh slide.
+- Limits: slide granularity 2 MiB, about 9 bits of entropy; the low boot stub at 1 MiB (phys) is not randomized; physical placement (kdelta) only varies under kexec.

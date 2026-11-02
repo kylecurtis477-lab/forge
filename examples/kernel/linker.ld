@@ -9,6 +9,7 @@ PHDRS
     text   PT_LOAD FLAGS(5);
     rodata PT_LOAD FLAGS(4);
     data   PT_LOAD FLAGS(6);
+    krel   PT_LOAD FLAGS(4);
 }
 SECTIONS
 {
@@ -36,6 +37,11 @@ SECTIONS
     .bss : AT(ADDR(.bss) - KBASE) { *(.bss .bss.*) *(COMMON) } :data
     . = ALIGN(4K);
     __data_end = .;
+    /* self-relocation table (tools/krel.py); last, so filling it never moves anything above */
+    __krel_start = .;
+    .krel : AT(ADDR(.krel) - KBASE) { KEEP(*(.krel)) } :krel
+    __krel_end = .;
+    . = ALIGN(4K);
     __kernel_phys_end = . - KBASE;
     /DISCARD/ : { *(.note.GNU-stack) *(.comment) }
 }

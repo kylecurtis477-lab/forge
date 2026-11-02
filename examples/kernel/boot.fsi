@@ -25,6 +25,8 @@ asm(
     ".quad kentry64",
     ".quad __kernel_phys_start",
     ".quad __kernel_phys_end",
+    # image KASLR: the self-relocation table (high-half VAs); loaders check it is there
+    ".quad __krel_start, __krel_end",
     ".section .bss.boot,\"aw\",@nobits",
     ".p2align 12",
     "boot_pml4: .skip 4096",
@@ -83,9 +85,36 @@ asm(
     "xor %ebp, %ebp",
     "call *%rsi",
     "4: cli", "hlt", "jmp 4b",
+    # krel_apply(base, slide): image KASLR self-relocation over the tools/krel.py table; base is a writable
+    # alias of KBASE (the HHDM view of the image), entries are offset | kind << 56
+    ".globl krel_apply",
+    "krel_apply:",
+    "lea __krel_start(%rip), %rax",
+    "lea __krel_end(%rip), %rcx",
+    "movabs $0xFFFFFFFFFFFFFF, %r9",
+    "5: cmp %rcx, %rax",
+    "jae 9f",
+    "mov (%rax), %rdx",
+    "mov %rdx, %r8",
+    "shr $56, %r8",
+    "and %r9, %rdx",
+    "add %rdi, %rdx",
+    "cmp $1, %r8",
+    "jne 6f",
+    "add %rsi, (%rdx)",
+    "jmp 8f",
+    "6: cmp $2, %r8",
+    "jne 7f",
+    "add %esi, (%rdx)",
+    "jmp 8f",
+    "7: sub %esi, (%rdx)",
+    "8: add $8, %rax",
+    "jmp 5b",
+    "9: ret",
     ".section .bss",
     ".p2align 12",
     "boot_stack: .skip 32768",
     "boot_stack_top:"
 )
 extern def switch_stack(top: u64, fn: u64)
+extern def krel_apply(base: u64, slide: u64)

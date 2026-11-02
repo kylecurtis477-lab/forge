@@ -32,6 +32,15 @@ kx_gen: u64  # how many handoffs this kernel descends from (BootInfo.kx_gen)
 kx_restored: u64
 kx_freed: u64
 
+# FORGEKRN header (boot.fsi): 8-byte aligned in the first loadable segment
+struct KrnHdr:
+    magic: u64
+    entry: u64
+    phys_start: u64
+    phys_end: u64
+    krel_start: u64
+    krel_end: u64
+
 def kx_grab(n: u64, align: u64, offs: u64) -> u64:
 # n free contiguous frames whose start is = offs (mod align); 0 if none
     fl = irq_save()
@@ -229,14 +238,23 @@ def sys_kexec(frame: u64, which: u64) -> u64:
     if lo != 0x100000:
         return kx_fail("unexpected kernel load address", img)
     entry: u64 = 0
+    nrel: u64 = 0
     off: u64 = 0
-    while off + 16 <= sz:
-        if vload64(img + off) == 0x4E524B4547524F46:
-            entry = vload64(img + off + 8)
+    while off + 48 <= sz:
+        kh = ptr[KrnHdr](img + off)
+        if kh.magic == 0x4E524B4547524F46:
+            entry = kh.entry
+            nrel = (kh.krel_end - kh.krel_start) / 8
             break
         off += 8
     if entry == 0:
         return kx_fail("FORGEKRN header not found", img)
+    # the next kernel picks its own slide and relocates itself: it must carry its relocation table
+    if nrel == 0 or nrel > 0x100000:
+        return kx_fail("new kernel has no relocation table (not relocatable)", img)
+    puts("kexec: new kernel relocatable, ")
+    put_u64(nrel)
+    puts(" relocations\n")
     # new kernel image: physical P with kdelta = P - 1 MiB 2 MiB aligned (the -2 GiB window uses 2 MiB pages)
     kpages = (hi - lo + PAGE - 1) / PAGE
     kp = kx_grab(kpages, 0x200000, 0x100000)

@@ -183,6 +183,7 @@ def kernel_start():
     put_hex(ksym(6) + kdelta)
     putc(10)
     fb_len = bi.fb_pitch * bi.fb_height
+    kaslr_pick()
     pml4 = paging_init(bi.fb_addr, fb_len)
     puts("page tables built: pml4 at ")
     put_hex(pml4)
@@ -190,7 +191,38 @@ def kernel_start():
     put_u64(frames_total - frames_free)
     putc(10)
     paging_activate(pml4)
-    switch_stack(KSTACK_TOP, u64(kmain_high))
+    # image KASLR: patch the absolute addresses through the HHDM view, then continue in the slid alias
+    krel_apply(HHDM + kdelta, kslide)
+    switch_stack(KSTACK_TOP, u64(kmain_high) + kslide)
+
+def kaslr_pick():
+# image slide: a random 2 MiB multiple, at least the image size, keeping the image below the fixed
+# kernel stacks at -1 GiB and inside the top 2 GiB (R_X86_64_32S)
+    krel_count = (ksym(9) - ksym(8)) / 8
+    img = ksym(5) - ksym(0) + 0x100000
+    kmin = img / 0x200000 + 1
+    slots = (0x3FE00000 - img) / 0x200000 - kmin
+    t = rdtsc()
+    v = (t ^ (t >> 17) ^ kdelta) * 0x9E3779B97F4A7C15
+    kslide = (kmin + (v >> 40) % slots) * 0x200000
+    if krel_count == 0:
+        kslide = 0
+
+def kaslr_unmap():
+# drop the boot-time alias at the link address: from here only the slid image is mapped
+    if kslide == 0:
+        return
+    va = ksym(0) - kslide
+    while va < ksym(9) - kslide:
+        unmap_page(kernel_pml4, va)
+        va += PAGE
+    puts("KASLR: kernel image at ")
+    put_hex(ksym(0))
+    puts(" (slide ")
+    put_hex(kslide)
+    puts(", ")
+    put_u64(krel_count)
+    puts(" relocations applied), link-address alias unmapped\n")
 
 def check_mapping(name: ptr[u8], va: u64, expect_mapped: u64):
     pa = virt_to_phys(kernel_pml4, va)
@@ -268,6 +300,7 @@ def recurse(n: u64) -> u64:
 def kmain_high():
 # now on the guarded kernel stack, identity map gone, physical memory via HHDM
     canary_init()
+    kaslr_unmap()
     if bi.fb_addr != 0:
         fb_attach(p2v(bi.fb_addr), bi.fb_width, bi.fb_height, bi.fb_pitch)
         puts("Forge kernel: framebuffer console ")
@@ -285,6 +318,7 @@ def kmain_high():
     check_mapping("identity", 0x100000, 0)
     check_mapping("hhdm", HHDM + 0x100000, 1)
     check_mapping("kernel .text", ksym(0), 1)
+    check_mapping("unslid .text", ksym(0) - kslide, u64(kslide == 0))
     check_mapping("stack guard", KSTACK_TOP - (KSTACK_PAGES + 1) * PAGE, 0)
     gdt_init()
     idt_init()
