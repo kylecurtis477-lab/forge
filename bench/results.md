@@ -1,4 +1,4 @@
-# Benchmarks (best of 5, 2026-11-01 20:15 CST)
+# Benchmarks (best of 5, 2026-11-01 20:05 CST)
 
 ## Default (-O), after the int-band fix (commit 447b1d7)
 | bench | Forge run | Rust -O3 run | CPython run | Forge compile | Rust compile | Forge bin | Rust bin | output |
