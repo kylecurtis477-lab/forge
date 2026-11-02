@@ -313,7 +313,7 @@ def sys_kexec(frame: u64, which: u64) -> u64:
             j = 0
             while j < NFD:
                 if q.fds[j] != 0:
-                    vstore64(r + 128 + j * 8, kx_file_index(q.fds[j]) + 1)
+                    vstore64(r + 128 + j * 8, (kx_file_index(q.fds[j]) + 1) | (q.fdr[j] << 32))
                 j += 1
             memcpy(r + 256, u64(addr(q.args[0])), 128)
             if u64(q) == u64(p):
@@ -548,7 +548,8 @@ def kx_restore() -> nptr[Thread]:
         while j < NFD:
             fi = vload64(r + 128 + j * 8)
             if fi != 0:
-                c.fds[j] = file_get(kx_files[fi - 1])
+                c.fds[j] = file_get(kx_files[(fi & 0xFFFFFFFF) - 1])
+                c.fdr[j] = fi >> 32
             j += 1
         isc = vload64(r + 56)
         if isc:

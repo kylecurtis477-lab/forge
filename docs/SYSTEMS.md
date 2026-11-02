@@ -155,6 +155,17 @@ Generic defs/structs are recorded at prescan and skipped; an instance is created
 - Schema v1: `{"forge_ast":1,"file","pragmas":[lines],"root"}`, nodes `{"k","l"[,"v"][,"c"]}`. Kinds: Module Block Expr Assign AugAssign(v=op) AnnAssign Pass Break Continue Return Raise Global Nonlocal Import ImportFrom Alias Assert Del Include Def(Decorators, Params, ret|Empty, Block) ExternDef Class/Struct(Decorators, Bases, Block) Decorator If(v="elif" in chains) While For Try Handler Else Finally With WithItem Param(v=[*|**]name; type, default) Params Empty Name Const Num Float Str BinOp BoolOp Not Unary Compare(v=comma-joined ops) IfExp Lambda Call Kw Star DStar Attr Sub Slice Tuple List Set Dict Pair ListComp SetComp GenExp DictComp CompFor CompIf Yield YieldFrom Test(v=name; Block).
 - Num values are decimal; values with 19+ digits print back as hex so the lexer reproduces the same 64-bit pattern. Parse errors in this mode use the normal diagnostic path (`expected ...` is code E0105).
 
+## Capabilities (Phase 5.1)
+- File descriptors are handles with rights: `fdr[16]` in `Proc`, next to `fds`. The bits are CAP_READ 1, CAP_WRITE 2, CAP_LOOKUP 4, CAP_DUP 8 and CAP_XFER 16, and CAP_ALL is 31.
+- Spawned processes get console fds 0–2 with CAP_ALL. When the FAT is mounted, non-driver processes also get a root-directory handle at fd 3 (CAP_ROOT_FD). Driver processes get no root capability.
+- Checks:
+  - read and getdents need READ, and write needs WRITE (EPERM otherwise).
+  - open, stat and exec work only if fd 3 is a directory handle on `fs_root` with LOOKUP. If not, they return EACCES and `cap_deny` logs `cap: pid N denied open|stat|exec (no root capability)`.
+  - `path_ok` (safe, slice-based) rejects `.` and `..` components on every path.
+- Syscalls: 420 `dup(fd, rights)` needs DUP, and rights must be a subset of the old ones. 421 `openat(dirfd, path)` is a relative lookup from the directory's cluster through `fs_lookup_at`; it needs LOOKUP, takes no absolute paths, and the new handle gets the directory's rights minus WRITE. 422 `rights(fd)`.
+- fork copies the rights, and close and exit clear them. kexec stores `(file index + 1) | rights << 32` in each fd slot of the v2 handoff record.
+- Test: `examples/user/captest.forge` (safe mode) checks a read-only dup, widening, DUP-less dup, relative and escaping openat, and a no-LOOKUP directory. It also forks a child that closes every handle except a read-only one; that child's write, open, openat(3) and exec are all denied.
+
 ## Dual boot
 - The loader and kernel install into their own vendor directory on an existing ESP: `\EFI\Forge\forgex64.efi` and `\EFI\Forge\kernel.elf`. Add a firmware boot entry, e.g. `efibootmgr -c -d /dev/sdX -p N -L Forge -l '\EFI\Forge\forgex64.efi'`, or `bcdedit /copy {bootmgr}` + `/set {id} path \EFI\Forge\forgex64.efi` on Windows.
 - Nothing else is touched: not `\EFI\Microsoft`, not `\EFI\<distro>`, not the MBR, and no repartitioning. The loader only reads its own kernel file. The kernel's disk access is read-only: it reads only GPT headers and files under `\\EFI\\Forge\\` on the ESP and never writes. `\EFI\BOOT\BOOTX64.EFI` is used only on the throwaway test disk.

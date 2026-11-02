@@ -21,6 +21,14 @@ EISDIR = 0xFFFFFFFFFFFFFFEB
 EINVAL = 0xFFFFFFFFFFFFFFEA
 EROFS = 0xFFFFFFFFFFFFFFE2
 ENOSYS = 0xFFFFFFFFFFFFFFDA
+EACCES = 0xFFFFFFFFFFFFFFF3
+CAP_READ = 1
+CAP_WRITE = 2
+CAP_LOOKUP = 4
+CAP_DUP = 8
+CAP_XFER = 16
+CAP_ALL = 31
+CAP_ROOT_FD = 3
 
 struct Proc:
     pid: u64
@@ -33,6 +41,7 @@ struct Proc:
     brk: u64
     mmap_next: u64
     fds: u64[16]
+    fdr: u64[16]  # rights of each handle (CAP_*)
     args: u8[128]
     childq: WaitQ
     drv: u64
@@ -146,16 +155,19 @@ def fd_get(p: ptr[Proc], fd: u64) -> nptr[File]:
     return ptr[File](p.fds[fd])
 
 def vfs_open(path: ptr[u8]) -> u64:
+    return vfs_open_at(fs_root, path)
+
+def vfs_open_at(c: u64, path: ptr[u8]) -> u64:
     ent: u8[32]
     e = u64(addr(ent[0]))
     mutex_lock(addr(fs_m))
-    r = fs_lookup(path, e)
+    r = fs_lookup_at(c, path, e)
     mutex_unlock(addr(fs_m))
     if r == 0:
         return 0
     if r == 2:
         fl = file_new(F_DIR)
-        fl.clu = fs_root
+        fl.clu = c
         return u64(fl)
     if ent[11] & 0x10:
         fl = file_new(F_DIR)
@@ -551,6 +563,14 @@ def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> nptr[Thread]:
     p.fds[0] = console()
     p.fds[1] = console()
     p.fds[2] = console()
+    p.fdr[0] = CAP_ALL
+    p.fdr[1] = CAP_ALL
+    p.fdr[2] = CAP_ALL
+    if spawn_drv == 0 and fs_root != 0:
+        rt = file_new(F_DIR)
+        rt.clu = fs_root
+        p.fds[CAP_ROOT_FD] = u64(rt)
+        p.fdr[CAP_ROOT_FD] = CAP_ALL
     i: u64 = 0
     while i < 127 and args[i] != 0:
         p.args[i] = args[i]
@@ -608,6 +628,7 @@ def proc_exit(code: u64):
     while i < NFD:
         file_put(p.fds[i])
         p.fds[i] = 0
+        p.fdr[i] = 0
         i += 1
     cli()
     spin_lock(addr(rq_lock))
@@ -661,6 +682,7 @@ def sys_fork(frame: u64) -> u64:
     i = 0
     while i < NFD:
         c.fds[i] = file_get(p.fds[i])
+        c.fdr[i] = p.fdr[i]
         i += 1
     ct = thread_new(fork_child_entry_addr(), 0)
     # the child's kernel stack: its own copy of the syscall frame at the top, the switch frame below it
@@ -702,6 +724,11 @@ def sys_exec(frame: u64, upath: u64, uargs: u64) -> u64:
     args[0] = 0
     if uargs != 0 and copy_str_user(u64(addr(args[0])), uargs, 128) > 127:
         return EFAULT
+    if root_cap(cur_proc()) == 0:
+        cap_deny(cur_proc(), "exec")
+        return EACCES
+    if path_ok(path[:]) == 0:
+        return EACCES
     sz: u64 = 0
     img = fs_read_file(addr(path[0]), addr(sz))
     if img == 0:
@@ -824,16 +851,12 @@ def sys_open(upath: u64) -> u64:
     if copy_str_user(u64(addr(path[0])), upath, 256) > 255:
         return EFAULT
     p = cur_proc()
-    fd: u64 = 0
-    while fd < NFD and p.fds[fd] != 0:
-        fd += 1
-    if fd == NFD:
-        return EMFILE
-    fl = vfs_open(addr(path[0]))
-    if fl == 0:
-        return ENOENT
-    p.fds[fd] = fl
-    return fd
+    if root_cap(p) == 0:
+        cap_deny(p, "open")
+        return EACCES
+    if path_ok(path[:]) == 0:
+        return EACCES
+    return open_install(p, fs_root, addr(path[0]), p.fdr[CAP_ROOT_FD])
 
 @unsafe
 def sys_stat(upath: u64, ubuf: u64) -> u64:
@@ -841,6 +864,11 @@ def sys_stat(upath: u64, ubuf: u64) -> u64:
     path: u8[256]
     if copy_str_user(u64(addr(path[0])), upath, 256) > 255:
         return EFAULT
+    if root_cap(cur_proc()) == 0:
+        cap_deny(cur_proc(), "stat")
+        return EACCES
+    if path_ok(path[:]) == 0:
+        return EACCES
     fl = vfs_open(addr(path[0]))
     if fl == 0:
         return ENOENT
@@ -857,6 +885,8 @@ def sys_read(fd: u64, ubuf: u64, n: u64) -> u64:
     fl = fd_get(cur_proc(), fd)
     if u64(fl) == 0:
         return EBADF
+    if (cur_proc().fdr[fd] & CAP_READ) == 0:
+        return EPERM
     if fl.type == F_CONSOLE:
         return tty_read(ubuf, n)
     if fl.type == F_FILE:
@@ -869,6 +899,8 @@ def sys_write(fd: u64, ubuf: u64, n: u64) -> u64:
     fl = fd_get(cur_proc(), fd)
     if u64(fl) == 0:
         return EBADF
+    if (cur_proc().fdr[fd] & CAP_WRITE) == 0:
+        return EPERM
     if fl.type == F_CONSOLE:
         return con_write_user(ubuf, n)
     return EROFS
@@ -879,6 +911,8 @@ def sys_getdents(fd: u64, ubuf: u64, n: u64) -> u64:
     fl = fd_get(cur_proc(), fd)
     if u64(fl) == 0:
         return EBADF
+    if (cur_proc().fdr[fd] & CAP_READ) == 0:
+        return EPERM
     if fl.type != F_DIR:
         return ENOTDIR
     return dir_read(fl, ubuf, n)
@@ -889,7 +923,99 @@ def sys_close(fd: u64) -> u64:
         return EBADF
     file_put(p.fds[fd])
     p.fds[fd] = 0
+    p.fdr[fd] = 0
     return 0
+
+# ---- capabilities (Phase 5.1): every fd is a handle with rights; no ambient path authority ----
+def fd_free(p: ptr[Proc]) -> u64:
+    fd: u64 = 0
+    while fd < NFD and p.fds[fd] != 0:
+        fd += 1
+    return fd
+
+def root_cap(p: ptr[Proc]) -> u64:
+# absolute paths resolve only through a held root-directory capability (fd 3 with LOOKUP)
+    fl = fd_get(p, CAP_ROOT_FD)
+    if u64(fl) == 0:
+        return 0
+    if fl.type != F_DIR or fl.clu != fs_root or (p.fdr[CAP_ROOT_FD] & CAP_LOOKUP) == 0:
+        return 0
+    return 1
+
+def path_ok(s: slice[u8]) -> u64:
+# no "." or ".." components: a directory capability cannot be escaped upward
+    n = len(s)
+    i: u64 = 0
+    while i < n and s[i] != 0:
+        while i < n and s[i] == 47:
+            i += 1
+        j = i
+        while j < n and s[j] != 0 and s[j] != 47:
+            j += 1
+        if j - i == 1 and s[i] == 46:
+            return 0
+        if j - i == 2 and s[i] == 46 and s[i + 1] == 46:
+            return 0
+        i = j
+    return 1
+
+cap_denials: u64
+
+def cap_deny(p: ptr[Proc], what: ptr[u8]):
+    cap_denials += 1
+    puts("cap: pid ")
+    put_u64(p.pid)
+    puts(" denied ")
+    puts(what)
+    puts(" (no root capability)\n")
+
+def open_install(p: ptr[Proc], c: u64, path: ptr[u8], r: u64) -> u64:
+    fd = fd_free(p)
+    if fd == NFD:
+        return EMFILE
+    fl = vfs_open_at(c, path)
+    if fl == 0:
+        return ENOENT
+    p.fds[fd] = fl
+    p.fdr[fd] = r & (CAP_READ | CAP_LOOKUP | CAP_DUP | CAP_XFER)
+    return fd
+
+def sys_openat(dirfd: u64, upath: u64) -> u64:
+    path: u8[256]
+    if copy_str_user(u64(addr(path[0])), upath, 256) > 255:
+        return EFAULT
+    p = cur_proc()
+    d = fd_get(p, dirfd)
+    if u64(d) == 0:
+        return EBADF
+    if d.type != F_DIR:
+        return ENOTDIR
+    if (p.fdr[dirfd] & CAP_LOOKUP) == 0:
+        return EPERM
+    if path[0] == 47 or path_ok(path[:]) == 0:
+        return EACCES
+    return open_install(p, d.clu, addr(path[0]), p.fdr[dirfd])
+
+def sys_dup(fd: u64, rights: u64) -> u64:
+# a new handle to the same object with a subset of the rights: dup can only narrow
+    p = cur_proc()
+    if fd >= NFD or p.fds[fd] == 0:
+        return EBADF
+    old = p.fdr[fd]
+    if (old & CAP_DUP) == 0 or (rights & (~old)) != 0:
+        return EPERM
+    n = fd_free(p)
+    if n == NFD:
+        return EMFILE
+    p.fds[n] = file_get(p.fds[fd])
+    p.fdr[n] = rights
+    return n
+
+def sys_rights(fd: u64) -> u64:
+    p = cur_proc()
+    if fd >= NFD or p.fds[fd] == 0:
+        return EBADF
+    return p.fdr[fd]
 
 def user_ptr_ok(va: u64, len: u64) -> u64:
 # only the range check: the copy itself survives unmapped pages through the #PF fixup
@@ -956,6 +1082,12 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         proc_exit(a & 0xFF)
     if nr == 61:
         return sys_wait(a, b)
+    if nr == 420:
+        return sys_dup(a, b)
+    if nr == 421:
+        return sys_openat(a, b)
+    if nr == 422:
+        return sys_rights(a)
     if nr == 78:
         return sys_getdents(a, b, c)
     if nr == 96:

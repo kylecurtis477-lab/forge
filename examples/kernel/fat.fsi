@@ -203,10 +203,13 @@ def ent_cluster(ent: u64) -> u64:
 
 # walks a path like "/EFI/Forge/bin/Read Me.txt" (case-insensitive, long names); returns 1 with the
 # entry in ent. The root itself ("" or "/") returns 2 (no entry).
-@unsafe
 def fs_lookup(path: ptr[u8], ent: u64) -> u64:
+    return fs_lookup_at(fs_root, path, ent)
+
+# resolve path starting at directory cluster c (leading slashes are skipped); 2 = c itself
+@unsafe
+def fs_lookup_at(c: u64, path: ptr[u8], ent: u64) -> u64:
     nm: u8[256]
-    c = fs_root
     i: u64 = 0
     while path[i] == 47:
         i += 1

@@ -1,0 +1,81 @@
+# forge: safe
+# forge: no-runtime
+# Phase 5.1: handles replace ambient authority. Rights are checked on every syscall, dup only narrows,
+# a forked child given only a read-only handle cannot write, and paths resolve only through a held
+# directory capability (no ".." escapes, no global lookup once the root capability is gone).
+include "ulib.fsi"
+
+EPERM = 0xFFFFFFFFFFFFFFFF
+EACCES = 0xFFFFFFFFFFFFFFF3
+
+buf: u8[64]
+
+def fail(s: ptr[u8]):
+    out("captest FAIL: ")
+    out(s)
+    out("\n")
+    flush()
+    sys_exit(1)
+
+def ok(s: ptr[u8]):
+    out("captest: ")
+    out(s)
+    out("\n")
+    flush()
+
+@export
+def _start():
+    if sys_rights(1) != 31 or sys_rights(3) != 31:
+        fail("initial rights")
+    # a read-only handle to the console cannot write; it cannot be widened back
+    ro = sys_dup(1, CAP_READ | CAP_DUP)
+    if is_err(ro):
+        fail("dup")
+    if sys_writefd(ro, u64(addr(buf[0])), 1) != EPERM:
+        fail("write through read-only handle")
+    if sys_dup(ro, CAP_READ | CAP_WRITE) != EPERM:
+        fail("widen")
+    nd = sys_dup(ro, 0)
+    if is_err(nd) or sys_dup(nd, 0) != EPERM:
+        fail("dup without DUP right")
+    ok("read-only handle: write denied, widening denied")
+    # directory capabilities: lookup is relative to the handle, needs LOOKUP, and cannot climb out
+    forge = sys_openat(3, "efi/forge")
+    if is_err(forge) or (sys_rights(forge) & CAP_LOOKUP) == 0:
+        fail("openat dir")
+    f = sys_openat(forge, "docs/big.bin")
+    if is_err(f) or is_err(sys_read(f, u64(addr(buf[0])), 64)):
+        fail("openat file")
+    if sys_writefd(f, u64(addr(buf[0])), 1) != EPERM:
+        fail("file handle has no WRITE")
+    sys_close(f)
+    if sys_openat(forge, "../forge/docs/big.bin") != EACCES or sys_openat(forge, "/efi") != EACCES:
+        fail("dir escape")
+    nl = sys_dup(forge, CAP_READ)
+    if sys_openat(nl, "docs") != EPERM:
+        fail("lookup without LOOKUP right")
+    ok("dir capability: relative lookup ok, .. and absolute escapes denied, no-LOOKUP denied")
+    # a child that keeps only a read-only handle: no write, no global path lookup
+    pid = sys_fork()
+    if pid == 0:
+        k: u64 = 0
+        while k < 16:
+            if k != ro:
+                sys_close(k)
+            k += 1
+        r = 0
+        if sys_writefd(ro, u64(addr(buf[0])), 1) != EPERM:
+            r = 2
+        if sys_open("/efi/forge/docs/big.bin") != EACCES:
+            r = 3
+        if sys_openat(3, "efi") != 0xFFFFFFFFFFFFFFF7:
+            r = 4
+        if sys_exec("/efi/forge/bin/hello", "x") != EACCES:
+            r = 5
+        sys_exit(r)
+    st: u64 = 9
+    if sys_wait(pid, addr(st)) != pid or st != 0:
+        fail("child confinement")
+    ok("child with only a read-only handle: write denied, no ambient path lookup")
+    ok("PASS")
+    sys_exit(0)

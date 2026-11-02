@@ -151,6 +151,28 @@ def sys_getdents(fd: u64, p: u64, n: u64) -> u64:
 def sys_getargs(p: u64, n: u64) -> u64:
     return syscall3(SYS_GETARGS, p, n, 0)
 
+# Phase 5.1 capabilities: handles carry rights; dup only narrows; paths resolve through a dir handle
+CAP_READ = 1
+CAP_WRITE = 2
+CAP_LOOKUP = 4
+CAP_DUP = 8
+CAP_XFER = 16
+SYS_DUP = 420
+SYS_OPENAT = 421
+SYS_RIGHTS = 422
+
+def sys_writefd(fd: u64, p: u64, n: u64) -> u64:
+    return syscall3(SYS_WRITE, fd, p, n)
+
+def sys_dup(fd: u64, rights: u64) -> u64:
+    return syscall3(SYS_DUP, fd, rights, 0)
+
+def sys_openat(dirfd: u64, path: ptr[u8]) -> u64:
+    return syscall3(SYS_OPENAT, dirfd, u64(path), 0)
+
+def sys_rights(fd: u64) -> u64:
+    return syscall3(SYS_RIGHTS, fd, 0, 0)
+
 def is_err(v: u64) -> u64:
     return v > 0xFFFFFFFFFFFFF000
 
