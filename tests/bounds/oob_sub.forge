@@ -1,0 +1,9 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+
+def main() -> i64:
+    a: u8[5]
+    n: u64 = 6
+    s = a[2:n]
+    put_u64(len(s))
+    return 0

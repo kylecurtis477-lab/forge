@@ -15433,6 +15433,24 @@ fs_dal = 0
 fs_dsec = ""
 fs_dexp = 0
 fs_datt = 0
+fs_bchk = 1
+fs_bstats = 0
+fs_nbc = 0
+fs_nbe = 0
+fs_lastnm = ""
+fsb_v = list(256)
+fsb_x = list(256)
+fsb_c = list(256)
+nfsb = 0
+# expanded-line -> (file, line) map built by fs_include, for precise runtime diagnostics
+FSXMAX = 262144
+fsx_f = list(FSXMAX)
+fsx_l = list(FSXMAX)
+fsx_n = 0
+fsx_fn = list(512)
+fsx_lb = list(512)
+fsx_nf = 0
+fsx_cur = 0
 
 def c3(a, b, c):
     return concat(concat(a, b), c)
@@ -15522,11 +15540,20 @@ def ft_arr(t, n):
         i += 1
     return ft_add(3, t, ftsz[t] * n, ftal[t], 0, n, "array")
 
+def ft_slice(t):
+# slice[T]: 16-byte (ptr, len) header
+    i = 0
+    while i < nft:
+        if fsk[i] == 5 and ftel[i] == t:
+            return i
+        i += 1
+    return ft_add(5, t, 16, 8, 0, 0, "slice")
+
 def ft_isint(t):
     return fsk[t] == 0
 
 def ft_agg(t):
-    return fsk[t] == 2 or fsk[t] == 3
+    return fsk[t] == 2 or fsk[t] == 3 or fsk[t] == 5
 
 def ft_prim(nm):
     if str_eq(nm, "int") or str_eq(nm, "isize"):
@@ -15562,6 +15589,11 @@ def fs_type():
             t = ft_ptr(el)
         else:
             t = ft_ptr(FT_U8)
+    elif str_eq(nm, "slice"):
+        fs_expect("[")
+        el = fs_type()
+        fs_expect("]")
+        t = ft_slice(el)
     elif t < 0:
         t = ft_struct(nm)
         if t < 0:
@@ -15576,7 +15608,7 @@ def fs_type():
 def fs_istype(p):
     if tk[p] != K_ID:
         return 0
-    if ft_prim(tv[p]) >= 0 or str_eq(tv[p], "ptr"):
+    if ft_prim(tv[p]) >= 0 or str_eq(tv[p], "ptr") or (str_eq(tv[p], "slice") and tk[p + 1] == K_OP and str_eq(tv[p + 1], "[")):
         return 1
     return ft_struct(tv[p]) >= 0
 
@@ -15842,8 +15874,28 @@ def fs_load(t):
     fs_mode = 0
     return 0
 
+def fs_m8(m):
+# memory operand 8 bytes past m
+    if str_eq(m, "(%rcx)"):
+        return "8(%rcx)"
+    if contains(m, "(%rbp)"):
+        return concat(str(fs_parse_int(substr(m, 0, len(m) - 6)) + 8), "(%rbp)")
+    return concat(substr(m, 0, len(m) - 6), "+8(%rip)")
+
+def fs_parse_int(s):
+    if char_at(s, 0) == 45:
+        return 0 - fs_parse_dec(substr(s, 1, len(s)))
+    return fs_parse_dec(s)
+
 def fs_store(t, m):
 # value in rax -> memory operand m; m == "(%rcx)" or slot/label
+    if fsk[t] == 5:
+    # slice header copy: rax = address of the source header
+        e("mov (%rax),%rdx")
+        e(concat("mov %rdx,", m))
+        e("mov 8(%rax),%rdx")
+        e(concat("mov %rdx,", fs_m8(m)))
+        return 0
     if ft_agg(t):
         fs_die("cannot assign a whole struct/array (use memcpy)")
     sz = ftsz[t]
@@ -15865,6 +15917,8 @@ def fs_rv():
 def fs_conv(to):
 # convert rax (type fs_ety) for assignment/passing to type to
     global fs_ety
+    if (fsk[to] == 5 or fsk[fs_ety] == 5) and fs_ety != to:
+        fs_die("slice type mismatch (slices convert only to the same slice[T])")
     if fsk[to] == 0 and fs_ety != to:
         if not (fsk[fs_ety] == 0 and ftsz[fs_ety] <= ftsz[to] and ft_sg(fs_ety) == ftsg[to] and fs_ety != FT_LIT and to != FT_BOOL):
             fs_norm(to)
@@ -15902,15 +15956,30 @@ def fs_args(maxn, ptys):
     global fp
     fs_expect("(")
     n = 0
+    pi = 0
     while not fs_isop(")"):
         fs_rexpr()
-        if ptys >= 0 and n < fsf_np[ptys]:
-            fs_conv(fsp_t[fsf_p0[ptys] + n])
-        fs_push()
-        n += 1
+        sl = 0
+        if ptys >= 0 and pi < fsf_np[ptys]:
+            fs_conv(fsp_t[fsf_p0[ptys] + pi])
+            sl = fsk[fsp_t[fsf_p0[ptys] + pi]] == 5
+        if sl:
+        # a slice argument travels in two registers: ptr, len
+            e("mov 8(%rax),%rcx")
+            e("mov (%rax),%rax")
+            fs_push()
+            e("mov %rcx,%rax")
+            fs_push()
+            n += 2
+        else:
+            fs_push()
+            n += 1
+        pi += 1
         if fs_isop(","):
             fp += 1
     fp += 1
+    if ptys >= 0 and pi != fsf_np[ptys]:
+        fs_die(concat("wrong argument count for ", fsf_n[ptys]))
     if n > maxn:
         fs_die("too many arguments (max 6 register args)")
     return n
@@ -15929,7 +15998,7 @@ def fs_callsite(target):
 
 def fs_intrin(nm):
 # returns 1 if nm( ... ) was compiled as an intrinsic
-    global fp, fs_ety, fs_mode
+    global fp, fs_ety, fs_mode, fs_moff, fs_lab
     one = ["cli", "sti", "hlt", "pause", "int3", "mfence", "lfence", "sfence", "wbinvd", "ud2", "cpu_relax"]
     k = find(one, 11, nm)
     if k >= 0:
@@ -15941,6 +16010,44 @@ def fs_intrin(nm):
         e("xor %eax,%eax")
         fs_ety = FT_VOID
         fs_mode = 0
+        return 1
+    if str_eq(nm, "len") and fs_func("len") < 0:
+        fp += 1
+        fs_postfix()
+        t = fs_ety
+        if fsk[t] == 3:
+            fs_imm(ftn[t])
+            fs_ety = FT_U64
+        elif fsk[t] == 5:
+            if fs_mode == 0:
+                fs_die("len() of a slice needs an lvalue")
+            fs_mat()
+            e("mov 8(%rax),%rax")
+            fs_ety = FT_U64
+        else:
+            fs_die("len() needs an array or a slice")
+        fs_mode = 0
+        fs_expect(")")
+        return 1
+    if str_eq(nm, "slice") and fs_func("slice") < 0:
+    # slice(p, n): a slice[T] over n elements at ptr[T] p (the caller vouches for p..p+n)
+        fp += 1
+        fs_rexpr()
+        if fsk[fs_ety] != 1:
+            fs_die("slice(p, n) needs a ptr[T] first argument")
+        st = ft_slice(ftel[fs_ety])
+        fs_push()
+        fs_expect(",")
+        fs_rexpr()
+        fs_expect(")")
+        l = fs_newlocal(concat(" sl", str(fs_lab)), st)
+        fs_lab += 1
+        e(c3("mov %rax,", str(fsl_o[l] + 8), "(%rbp)"))
+        fs_pop("%rax")
+        e(c3("mov %rax,", str(fsl_o[l]), "(%rbp)"))
+        fs_mode = 2
+        fs_moff = fsl_o[l]
+        fs_ety = st
         return 1
     if str_eq(nm, "asm"):
         fp += 1
@@ -16206,8 +16313,6 @@ def fs_primary():
         if f < 0:
             fs_die(concat("unknown function ", nm))
         n = fs_args(6, f)
-        if n != fsf_np[f]:
-            fs_die(concat("wrong argument count for ", nm))
         i = n - 1
         while i >= 0:
             fs_pop(FS_AREG[i])
@@ -16252,31 +16357,179 @@ def fs_primary():
     fp -= 1
     fs_die(concat("unknown name ", nm))
 
+def fs_bfail(lenop):
+# bounds-check failure path: index in rcx, length operand lenop; never returns
+    global nfsrod
+    if fs_func("forge_bounds_fail") >= 0:
+        ln = tl[fp]
+        fi = 0
+        if ln >= 1 and ln <= fsx_n:
+            fi = fsx_f[ln - 1]
+            ln = fsx_l[ln - 1]
+        if len(fsx_lb[fi]) == 0:
+            fsx_lb[fi] = concat(".LFB", str(nfsrod))
+            nm = fsx_fn[fi]
+            b = ""
+            i = 0
+            while i < len(nm):
+                b = c3(b, str(char_at(nm, i)), ",")
+                i += 1
+            fs_rod[nfsrod] = c4(fsx_lb[fi], ": .byte ", b, "0\n")
+            nfsrod += 1
+        e(c3("mov ", lenop, ",%rdx"))
+        e("mov %rcx,%rsi")
+        e(c3("mov $", str(ln), ",%edi"))
+        e(c3("lea ", fsx_lb[fi], "(%rip),%rcx"))
+        fs_callsite("forge_bounds_fail")
+    e("ud2")
+
+def fs_bcheck(lenop):
+# trap unless rcx < lenop (unsigned: negative indices fail too)
+    global fs_nbc
+    fs_nbc += 1
+    l = fs_newlab()
+    e(c3("cmp ", lenop, ",%rcx"))
+    e(concat("jb ", l))
+    fs_bfail(lenop)
+    emit_raw(concat(l, ":\n"))
+
+def fs_bsafe(base, t):
+# 1 if the index at fp+1 (a bare loop variable) is proven in range for base (name) of type t
+    if len(base) == 0 or tk[fp + 1] != K_ID or tk[fp + 2] != K_OP or not str_eq(tv[fp + 2], "]"):
+        return 0
+    v = tv[fp + 1]
+    i = nfsb - 1
+    while i >= 0:
+        if str_eq(fsb_v[i], v):
+            if str_eq(fsb_x[i], base):
+                return 1
+            if fsk[t] == 3 and fsb_c[i] >= 0 and fsb_c[i] <= ftn[t]:
+                return 1
+            return 0
+        i -= 1
+    return 0
+
+def fs_rngfact():
+# at the first range() argument: recognise range(len(X)), range(K), range(C, len(X)), range(C, K)
+# with literal C >= 0.  Stores a candidate fact in slot 255 and returns 255, or -1.
+    p = fp
+    if tk[p] == K_NUM and fs_isop2(p + 1, ","):
+        if tv[p] < 0:
+            return -1
+        p += 2
+    elif tk[p] != K_NUM and fs_isop2(p + 1, ","):
+        return -1
+    q = -1
+    x = " "
+    c = -1
+    if tk[p] == K_ID and str_eq(tv[p], "len") and fs_isop2(p + 1, "(") and tk[p + 2] == K_ID and fs_isop2(p + 3, ")"):
+        nm = tv[p + 2]
+        l = fs_local(nm)
+        if l >= 0 and fsk[fsl_t[l]] == 5:
+            x = nm
+        elif l >= 0 and fsk[fsl_t[l]] == 3:
+            c = ftn[fsl_t[l]]
+        elif l < 0 and fs_glob(nm) >= 0 and fsk[fsg_t[fs_glob(nm)]] == 3:
+            c = ftn[fsg_t[fs_glob(nm)]]
+        else:
+            return -1
+        q = p + 4
+    elif tk[p] == K_NUM:
+        c = tv[p]
+        q = p + 1
+    elif tk[p] == K_ID and fs_local(tv[p]) < 0 and fs_const(tv[p]) >= 0:
+        c = fsc_v[fs_const(tv[p])]
+        q = p + 1
+    if q < 0 or not fs_isop2(q, ")") and not fs_isop2(q, ","):
+        return -1
+    fsb_x[255] = x
+    fsb_c[255] = c
+    return 255
+
+def fs_bodyok(vn, x):
+# the loop body (from the ':' after range(...)) never assigns or takes addr() of vn or x
+    p = fp
+    while tk[p] != K_EOF and not fs_isop2(p, ":"):
+        p += 1
+    p += 1
+    d = 0
+    if tk[p] == K_NL:
+        p += 1
+        if tk[p] != K_IND:
+            return 1
+    while tk[p] != K_EOF:
+        if tk[p] == K_IND:
+            d += 1
+        elif tk[p] == K_DED:
+            d -= 1
+            if d <= 0:
+                return 1
+        elif tk[p] == K_NL and d == 0:
+            return 1
+        elif tk[p] == K_ID and (str_eq(tv[p], vn) or str_eq(tv[p], x)):
+            if tk[p + 1] == K_OP and fs_asgop(tv[p + 1]):
+                return 0
+            if tk[p - 1] == K_ID and str_eq(tv[p - 1], "for"):
+                return 0
+            if fs_isop2(p - 1, "(") and tk[p - 2] == K_ID and str_eq(tv[p - 2], "addr"):
+                return 0
+        p += 1
+    return 1
+
+def fs_asgop(o):
+    return str_eq(o, "=") or str_eq(o, "+=") or str_eq(o, "-=") or str_eq(o, "*=") or str_eq(o, "//=") or str_eq(o, "%=") or str_eq(o, "|=") or str_eq(o, "^=") or str_eq(o, "<<=") or str_eq(o, ">>=") or str_eq(o, "/=") or str_eq(o, ":") or str_eq(o, "&=")
+
 def fs_postfix():
-    global fp, fs_ety, fs_mode
+    global fp, fs_ety, fs_mode, fs_nbe, fs_lastnm
+    base = ""
+    if tk[fp] == K_ID:
+        base = tv[fp]
     fs_primary()
+    if fs_mode != 2 and fs_mode != 3:
+        base = ""
     while 1:
         if fs_isop("["):
-            fp += 1
             t = fs_ety
-            if fsk[t] == 3 and fs_mode != 0:
+            if (fsk[t] == 3 or fsk[t] == 5) and fs_mode != 0:
                 fs_mat()
             elif fsk[t] == 1:
                 fs_rv()
             else:
-                fs_die("indexing needs a pointer or array")
+                fs_die("indexing needs a pointer, array or slice")
             el = ftel[t]
+            chk = fs_bchk and fsk[t] != 1
+            if chk and fsk[t] == 3 and tk[fp + 1] == K_NUM and fs_isop2(fp + 2, "]"):
+                if tv[fp + 1] >= ftn[t] or tv[fp + 1] < 0:
+                    fs_die(c4("index ", str(tv[fp + 1]), " is out of bounds for an array of length ", str(ftn[t])))
+                chk = 0
+                fs_nbe += 1
+            elif chk and fs_bsafe(base, t):
+                chk = 0
+                fs_nbe += 1
+            fp += 1
             fs_push()
+            if fsk[t] != 1 and (fs_isop(":") or fs_subsl()):
+                fs_subslice(t, el)
+                base = ""
+                continue
             fs_expr()
             fs_rv()
-            if ftsz[el] != 1:
-                e(c3("imul $", str(ftsz[el]), ",%rax,%rax"))
             e("mov %rax,%rcx")
             fs_pop("%rax")
+            if chk:
+                if fsk[t] == 5:
+                    fs_bcheck("8(%rax)")
+                else:
+                    fs_bcheck(concat("$", str(ftn[t])))
+            if fsk[t] == 5:
+                e("mov (%rax),%rax")
+            if ftsz[el] != 1:
+                e(c3("imul $", str(ftsz[el]), ",%rcx,%rcx"))
             e("add %rcx,%rax")
             fs_expect("]")
             fs_mode = 1
             fs_ety = el
+            base = ""
         elif fs_isop("."):
             fp += 1
             t = fs_ety
@@ -16292,8 +16545,81 @@ def fs_postfix():
                 e(c3("add $", str(ffo[k]), ",%rax"))
             fs_mode = 1
             fs_ety = fft[k]
+            base = ""
         else:
             return 0
+
+def fs_subsl():
+# is there a depth-0 ':' before the closing ']' (subslice x[a:b])?
+    p = fp
+    d = 0
+    while tk[p] != K_NL and tk[p] != K_EOF:
+        if tk[p] == K_OP:
+            if str_eq(tv[p], "(") or str_eq(tv[p], "["):
+                d += 1
+            elif str_eq(tv[p], ")") or str_eq(tv[p], "]"):
+                if d == 0:
+                    return 0
+                d -= 1
+            elif d == 0 and str_eq(tv[p], ":"):
+                return 1
+        p += 1
+    return 0
+
+def fs_subslice(t, el):
+# x[a:b] on an array or slice (base address pushed): bounds-checked 0 <= a <= b <= len -> new slice temp
+    global fp, fs_ety, fs_mode, fs_moff, fs_nbc
+    if fs_isop(":"):
+        e("xor %eax,%eax")
+    else:
+        fs_expr()
+        fs_rv()
+    fs_push()
+    fs_expect(":")
+    if fs_isop("]"):
+        e("mov $-1,%rax")
+    else:
+        fs_expr()
+        fs_rv()
+    fs_expect("]")
+    e("mov %rax,%rcx")
+    fs_pop("%rdx")
+    fs_pop("%rax")
+    # rax = base addr, rdx = lo, rcx = hi (-1 = len)
+    if fsk[t] == 5:
+        e("mov 8(%rax),%rsi")
+        e("mov (%rax),%rax")
+    else:
+        e(c3("mov $", str(ftn[t]), ",%rsi"))
+    l0 = fs_newlab()
+    e("cmp $-1,%rcx")
+    e(concat("jne ", l0))
+    e("mov %rsi,%rcx")
+    emit_raw(concat(l0, ":\n"))
+    if fs_bchk:
+        fs_nbc += 1
+        lok = fs_newlab()
+        lbad = fs_newlab()
+        e("cmp %rsi,%rcx")
+        e(concat("ja ", lbad))
+        e("cmp %rcx,%rdx")
+        e(concat("jbe ", lok))
+        emit_raw(concat(lbad, ":\n"))
+        fs_bfail("%rsi")
+        emit_raw(concat(lok, ":\n"))
+    if ftsz[el] != 1:
+        e(c3("imul $", str(ftsz[el]), ",%rdx,%rdi"))
+    else:
+        e("mov %rdx,%rdi")
+    e("add %rdi,%rax")
+    e("sub %rdx,%rcx")
+    st = ft_slice(el)
+    tl2 = fs_newlocal(concat(" sl", str(fs_lab)), st)
+    e(c3("mov %rax,", str(fsl_o[tl2]), "(%rbp)"))
+    e(c3("mov %rcx,", str(fsl_o[tl2] + 8), "(%rbp)"))
+    fs_mode = 2
+    fs_moff = fsl_o[tl2]
+    fs_ety = st
 
 def fs_unary():
     global fp, fs_ety
@@ -16579,10 +16905,10 @@ def fs_lhs_store(vt):
         t = vt
         if t == FT_LIT:
             t = FT_I64
-        if t == FT_VOID or ft_agg(t):
+        if t == FT_VOID or (ft_agg(t) and fsk[t] != 5):
             fs_die("cannot copy a void/struct/array value into a new local")
         l = fs_newlocal(tv[fp], t)
-        e(c3("mov %rax,", str(fsl_o[l]), "(%rbp)"))
+        fs_store(t, concat(str(fsl_o[l]), "(%rbp)"))
         fp += 1
         return 0
     fs_ety = vt
@@ -16602,7 +16928,7 @@ def fs_lhs_store(vt):
     fs_store(t, m)
 
 def fs_stmt():
-    global fp, nfsloop, fs_ety, fs_mode, fs_dep
+    global fp, nfsloop, fs_ety, fs_mode, fs_dep, nfsb
     if tk[fp] == K_NL:
         fp += 1
         return 0
@@ -16669,6 +16995,7 @@ def fs_stmt():
             fs_die("freestanding for supports only range()")
         fp += 2
         fs_expect("(")
+        fx = fs_rngfact()
         fs_rexpr()
         ty = fs_ety
         st = 1
@@ -16712,7 +17039,25 @@ def fs_stmt():
         fs_brk[nfsloop] = lb
         fs_cnt[nfsloop] = lc
         nfsloop += 1
+        nb0 = nfsb
+        if fx >= 0 and st > 0 and fs_bodyok(vn, fsb_x[fx]):
+            fsb_v[nfsb] = vn
+            fsb_x[nfsb] = fsb_x[fx]
+            fsb_c[nfsb] = fsb_c[fx]
+            nfsb += 1
+        elif fx < 0 or st <= 0:
+        # a loop variable shadows any outer fact for the same name
+            fsb_v[nfsb] = vn
+            fsb_x[nfsb] = " "
+            fsb_c[nfsb] = -1
+            nfsb += 1
+        else:
+            fsb_v[nfsb] = vn
+            fsb_x[nfsb] = " "
+            fsb_c[nfsb] = -1
+            nfsb += 1
         fs_suite()
+        nfsb = nb0
         nfsloop -= 1
         emit_raw(concat(lc, ":\n"))
         e(c4("addq $", str(st), ",", concat(str(fsl_o[l]), "(%rbp)")))
@@ -16888,8 +17233,15 @@ def fs_sig(ext):
             fp += 1
     fp += 1
     fsf_np[f] = n
-    if n > 6:
-        fs_die("more than 6 parameters are not supported yet")
+    nr = 0
+    i = 0
+    while i < n:
+        nr += 1
+        if fsk[fsp_t[fsf_p0[f] + i]] == 5:
+            nr += 1
+        i += 1
+    if nr > 6:
+        fs_die("more than 6 parameter registers are not supported yet (a slice uses 2)")
     fsf_ret[f] = FT_VOID
     if fs_isop("->"):
         fp += 1
@@ -16897,6 +17249,8 @@ def fs_sig(ext):
             fp += 1
         else:
             fsf_ret[f] = fs_type()
+            if ft_agg(fsf_ret[f]):
+                fs_die("functions cannot return a struct, array or slice yet (pass a pointer or slice out-parameter)")
     fsf_pos[f] = fp
     if ext:
         fsf_pos[f] = -1
@@ -17073,12 +17427,19 @@ def fs_function(f):
     fs_ret = fs_newlab()
     fs_rty = fsf_ret[f]
     i = 0
+    r = 0
     while i < fsf_np[f]:
         l = fs_newlocal(fsp_n[fsf_p0[f] + i], fsp_t[fsf_p0[f] + i])
+        if fsk[fsp_t[fsf_p0[f] + i]] == 5:
+            e(c4("mov ", FS_AREG[r], ",", concat(str(fsl_o[l]), "(%rbp)")))
+            e(c4("mov ", FS_AREG[r + 1], ",", concat(str(fsl_o[l] + 8), "(%rbp)")))
+            r += 2
+        else:
         # SysV leaves upper bits of narrow args unspecified: normalize on entry
-        e(c3("mov ", FS_AREG[i], ",%rax"))
-        fs_norm(fsp_t[fsf_p0[f] + i])
-        e(c3("mov %rax,", str(fsl_o[l]), "(%rbp)"))
+            e(c3("mov ", FS_AREG[r], ",%rax"))
+            fs_norm(fsp_t[fsf_p0[f] + i])
+            e(c3("mov %rax,", str(fsl_o[l]), "(%rbp)"))
+            r += 1
         i += 1
     fp = fsf_pos[f]
     fs_suite()
@@ -17138,9 +17499,18 @@ def fs_wrapper(f, nm, body):
     e("iretq")
 
 def fs_main(src):
-    global fp, fs_chk
+    global fp, fs_chk, fs_bchk, fs_bstats
     if contains(src, concat("# forge: ", "checked-ints")):
         fs_chk = 1
+    if contains(src, concat("# forge: ", "no-bounds-checks")):
+        fs_bchk = 0
+    ai = 3
+    while ai < argc():
+        if str_eq(argv(ai), "--no-bounds"):
+            fs_bchk = 0
+        if str_eq(argv(ai), "--bounds-stats"):
+            fs_bstats = 1
+        ai += 1
     ft_init()
     fs_prescan()
     emit_raw("# generated by forgec --freestanding\n")
@@ -17179,6 +17549,8 @@ def fs_main(src):
         emit_raw(fs_rod[i])
         i += 1
     emit_raw(".section .note.GNU-stack,\"\",@progbits\n")
+    if fs_bstats:
+        eputs(c4("bounds: ", str(fs_nbc + fs_nbe), c3(" sites, ", str(fs_nbc), " checked, "), concat(str(fs_nbe), " elided")))
     write_file(argv(2), join(out, nout))
 
 FS_MIN = -9223372036854775807 - 1
@@ -17258,6 +17630,14 @@ def fs_include(src, dir, depth):
     if depth > 16:
         diag_file_err("include nesting too deep")
         exit(1)
+    global fsx_n, fsx_nf, fsx_cur
+    if depth == 0:
+        fsx_fn[0] = argv(1)
+        fsx_lb[0] = ""
+        fsx_nf = 1
+        fsx_cur = 0
+    me = fsx_cur
+    k = 0
     parts = list(4096)
     np = 0
     n = len(src)
@@ -17281,13 +17661,24 @@ def fs_include(src, dir, depth):
                 sl = len(f) - 1
                 while sl >= 0 and char_at(f, sl) != 47:
                     sl -= 1
+                if fsx_nf < 511:
+                    fsx_fn[fsx_nf] = f
+                    fsx_lb[fsx_nf] = ""
+                    fsx_cur = fsx_nf
+                    fsx_nf += 1
                 parts[np] = fs_include(sub, substr(f, 0, sl + 1), depth + 1)
+                fsx_cur = me
                 np += 1
                 parts[np] = "\n"
                 np += 1
             else:
                 parts[np] = concat(ln, "\n")
                 np += 1
+            k += 1
+            if fsx_n < FSXMAX:
+                fsx_f[fsx_n] = me
+                fsx_l[fsx_n] = k
+                fsx_n += 1
             if np > 4090:
                 parts[0] = join(parts, np)
                 np = 1

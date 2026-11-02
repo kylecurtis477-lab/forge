@@ -133,6 +133,10 @@ def ioapic_mask(irq: u64):
     gsi = u64(irq_gsi[irq]) - ioapic_gsi_base
     ioapic_wr(u32(0x10 + gsi * 2), 0x10000)
 
+def ioapic_mask_pin(pin: u64):
+# mask one IOAPIC redirection entry by pin number (not an ISA IRQ: irq_gsi only covers IRQs 0-15)
+    ioapic_wr(u32(0x10 + pin * 2), 0x10000)
+
 def ioapic_init():
     ioapic = p2v(ioapic_phys)
     ver = ioapic_rd(1)

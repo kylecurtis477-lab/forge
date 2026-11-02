@@ -1,0 +1,13 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+
+def get(s: slice[u64], i: u64) -> u64:
+    return s[i]
+
+def main() -> i64:
+    a: u64[4]
+    put_u64(get(a[1:], 2))
+    nl()
+    put_u64(get(a[1:], 3))
+    nl()
+    return 0

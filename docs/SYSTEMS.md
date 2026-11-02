@@ -63,6 +63,12 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 - `--diagnostics=json`: one schema-v1 JSON object per error (file/line/col span, code, message, fix-its); goldens in `tests/diag`.
 
 
+### Slices and bounds checks (Phase 4.1)
+
+- `slice[T]` (freestanding backend) is a 16-byte (ptr, len) header. Make one with `slice(p, n)` or `x[a:b]` (bounds optional) on an array or slice; `len(x)` reads it (arrays give their constant length). Slice params take two argument registers (ptr, len); slices copy on assignment.
+- Array and slice indexing is bounds-checked: `cmp len,%rcx; jb ok`, else `forge_bounds_fail(line, idx, len, file)` if the program defines it, then `ud2`. The line and file are the original source position, even through `include`. Constant out-of-range array indices are compile errors. `ptr[T]` indexing is unchecked.
+- Checks are elided for `x[v]` inside `for v in range(len(x))`, `range(C, len(x))` or `range(K)` with K ≤ the array length, when the body never assigns v or x or takes their `addr()`. `forgec … --bounds-stats` prints the counts on stderr; `--no-bounds` or `# forge: no-bounds-checks` disables checks.
+
 ### Test blocks, forge test, forge verify
 
 - `test "name":` + block at top level (column 0) is a unit test. forgec rewrites each header line to `def __forge_test_N():` before lexing (line count unchanged, so diagnostics keep their line numbers); without `--test` they are uncalled functions and the program is unchanged. Test blocks in imported modules are renamed the same way (global counter) and never run from the importer.

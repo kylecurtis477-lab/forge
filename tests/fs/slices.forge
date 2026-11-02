@@ -1,0 +1,59 @@
+# forge: no-runtime
+# slices: slice[T] = (ptr, len), slice(p, n), x[a:b], len(), slice params, bounds-checked indexing
+include "linux.fsi"
+
+G: u64[8]
+
+def sum(s: slice[u64]) -> u64:
+    t: u64 = 0
+    for i in range(len(s)):
+        t += s[i]
+    return t
+
+def fill(s: slice[u64], v: u64):
+    for i in range(len(s)):
+        s[i] = v + i
+
+def count(c: u8, s: slice[u8]) -> u64:
+    n: u64 = 0
+    for i in range(len(s)):
+        if s[i] == c:
+            n += 1
+    return n
+
+def main() -> i64:
+    a: u64[10]
+    for i in range(10):
+        a[i] = i * i
+    whole = a[:]
+    put_u64(len(whole))
+    nl()
+    put_u64(sum(whole))
+    nl()
+    mid = a[2:5]
+    put_u64(len(mid))
+    puts(" ")
+    put_u64(sum(mid))
+    nl()
+    sub = mid[1:]
+    put_u64(sub[0])
+    puts(" ")
+    put_u64(sub[1])
+    nl()
+    fill(G[4:], 100)
+    put_u64(sum(G[:]))
+    nl()
+    msg = "hello, slices"
+    s = slice(msg, strlen(msg))
+    put_u64(count(108, s))
+    nl()
+    e = s[5:5]
+    put_u64(len(e))
+    nl()
+    k: slice[u64] = a[7:]
+    put_u64(k[len(k) - 1])
+    nl()
+    j: u64 = 3
+    put_u64(a[j])
+    nl()
+    return 0

@@ -148,6 +148,20 @@ def panic(msg: ptr[u8]):
     putc(10)
     qemu_exit(0x11)
 
+def forge_bounds_fail(line: u64, idx: u64, n: u64, file: ptr[u8]):
+# bounds-checked indexing failed (Phase 4.1): report the source position, then panic
+    cli()
+    puts("PANIC: bounds check failed: ")
+    puts(file)
+    putc(58)
+    put_u64(line)
+    puts(": index ")
+    put_u64(idx)
+    puts(" out of range for length ")
+    put_u64(n)
+    putc(10)
+    qemu_exit(0x11)
+
 def put_hexn(v: u64, digits: u64):
     i = digits
     while i > 0:

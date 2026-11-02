@@ -1,0 +1,7 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+
+def main() -> i64:
+    a: u8[5]
+    s: slice[u64] = a[:]
+    return 0

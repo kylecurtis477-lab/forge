@@ -1,0 +1,47 @@
+# forge: no-runtime
+# bounds-check overhead bench: sieve, histogram, prefix sums over slices (run checked vs --no-bounds)
+include "../fs/linux.fsi"
+
+N = 1000000
+SV: u8[1000000]
+H: u64[256]
+P: u64[1000000]
+
+def sieve(s: slice[u8]) -> u64:
+    n = len(s)
+    for k in range(n):
+        s[k] = 1
+    c: u64 = 0
+    i: u64 = 2
+    while i < n:
+        if s[i] != 0:
+            c += 1
+            j = i * i
+            while j < n:
+                s[j] = 0
+                j += i
+        i += 1
+    return c
+
+def hist(s: slice[u8], h: slice[u64]):
+    for i in range(len(s)):
+        h[s[i] % 256] += 1
+
+def prefix(p: slice[u64]) -> u64:
+    for i in range(1, len(p)):
+        p[i] = p[i - 1] + i % 7
+    return p[len(p) - 1]
+
+def main() -> i64:
+    t: u64 = 0
+    for r in range(20):
+        t += sieve(SV[:])
+        for i in range(N):
+            SV[i] = u8(i * 7 + r)
+        hist(SV[:], H[:])
+        t += prefix(P[:])
+    put_u64(t)
+    nl()
+    put_u64(H[3])
+    nl()
+    return 0

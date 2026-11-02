@@ -1,0 +1,19 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+
+def main() -> i64:
+    a: u64[16]
+    for i in range(16):
+        a[i] = i
+    for i in range(len(a)):
+        a[i] += 1
+    s = a[:]
+    t: u64 = 0
+    for i in range(2, len(s)):
+        t += s[i]
+    for i in range(len(s)):
+        i += 1
+        t += s[i - 1]
+    put_u64(t)
+    nl()
+    return 0

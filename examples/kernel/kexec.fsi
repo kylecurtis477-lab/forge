@@ -437,7 +437,7 @@ def sys_kexec(frame: u64, which: u64) -> u64:
     outb(u16(vb_io + VIO_STATUS), 0)
     i = 0
     while i < 24:
-        ioapic_mask(i)
+        ioapic_mask_pin(i)
         i += 1
     tlb_halt = 1
     stop_machine_begin()

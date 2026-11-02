@@ -41,3 +41,16 @@ def put_i64(v: i64):
 
 def nl():
     puts("\n")
+
+def forge_bounds_fail(line: u64, idx: u64, n: u64, file: ptr[u8]):
+# called by bounds-checked indexing before it traps: precise diagnostic, exit 134
+    puts("bounds check failed: ")
+    puts(file)
+    puts(":")
+    put_u64(line)
+    puts(": index ")
+    put_u64(idx)
+    puts(" out of range for length ")
+    put_u64(n)
+    nl()
+    sys3(SYS_EXIT, 134, 0, 0)
