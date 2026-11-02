@@ -8399,6 +8399,7 @@ def rewrite_tokens():
 # ======================================================================
 opt_on = 0
 IRMAX = 40000
+opt_gvn = 3
 IVMAX = 20000
 O_MOV = 1
 O_PARAM = 2
@@ -10795,6 +10796,321 @@ def o_dce():
         b += 1
     return ch
 
+# ---------------- dominators, GVN, LICM ----------------
+gpo = list(IRMAX)
+gord = list(IRMAX)
+gidom = list(IRMAX)
+gstk = list(IRMAX)
+gsti = list(IRMAX)
+gpc = list(IRMAX)
+gpb = list(IRMAX)
+gpl = list(IRMAX + IRMAX)
+gnr = 0
+GVH = 4096
+gvhead = list(GVH)
+gvnext = list(IRMAX)
+hzh = list(IRMAX)
+hzm = list(IRMAX)
+ptmp = list(IRMAX)
+pperm = list(IRMAX)
+
+def o_preds():
+    b = 0
+    while b < nb:
+        gpc[b] = 0
+        b += 1
+    b = 0
+    while b < nb:
+        if bs1[b] >= 0:
+            gpc[bs1[b]] = gpc[bs1[b]] + 1
+        if bs2[b] >= 0 and bs2[b] != bs1[b]:
+            gpc[bs2[b]] = gpc[bs2[b]] + 1
+        b += 1
+    s = 0
+    b = 0
+    while b < nb:
+        gpb[b] = s
+        gsti[b] = s
+        s += gpc[b]
+        b += 1
+    b = 0
+    while b < nb:
+        x = bs1[b]
+        if x >= 0:
+            gpl[gsti[x]] = b
+            gsti[x] = gsti[x] + 1
+        x = bs2[b]
+        if x >= 0 and x != bs1[b]:
+            gpl[gsti[x]] = b
+            gsti[x] = gsti[x] + 1
+        b += 1
+
+def g_inter(a, b):
+    while a != b:
+        while gpo[a] < gpo[b]:
+            a = gidom[a]
+        while gpo[b] < gpo[a]:
+            b = gidom[b]
+    return a
+
+def o_dom():
+    global gnr
+    b = 0
+    while b < nb:
+        gpo[b] = -1
+        gidom[b] = -1
+        b += 1
+    if nb == 0:
+        gnr = 0
+        return 0
+    sp = 0
+    gstk[0] = 0
+    gsti[0] = 0
+    gpo[0] = -2
+    n = 0
+    while sp >= 0:
+        x = gstk[sp]
+        st = gsti[sp]
+        if st < 2:
+            gsti[sp] = st + 1
+            s = bs1[x]
+            if st == 1:
+                s = bs2[x]
+            if s >= 0 and gpo[s] == -1:
+                gpo[s] = -2
+                sp += 1
+                gstk[sp] = s
+                gsti[sp] = 0
+        else:
+            gpo[x] = n
+            n += 1
+            sp -= 1
+    gnr = n
+    b = 0
+    while b < nb:
+        if gpo[b] >= 0:
+            gord[n - 1 - gpo[b]] = b
+        b += 1
+    gidom[0] = 0
+    ch = 1
+    while ch:
+        ch = 0
+        i = 1
+        while i < n:
+            b = gord[i]
+            nw = -1
+            j = gpb[b]
+            while j < gpb[b] + gpc[b]:
+                p = gpl[j]
+                if gpo[p] >= 0 and gidom[p] != -1:
+                    if nw < 0:
+                        nw = p
+                    else:
+                        nw = g_inter(p, nw)
+                j += 1
+            if nw != gidom[b]:
+                gidom[b] = nw
+                ch = 1
+            i += 1
+
+def g_doms(a, b):
+    while b != a and b != 0 and b >= 0:
+        b = gidom[b]
+    return b == a
+
+def gv_kind(k):
+    op = iop[k]
+    if op >= O_ADD and op <= O_NOT:
+        if (op == O_DIV or op == O_MOD) and not is_pure(k):
+            return 0
+        return 1
+    if op == O_LDATA or op == O_I2D or op == O_FNEG:
+        return 1
+    if op == O_FOP and iimm[k] < 3:
+        return 1
+    return 0
+
+def gv_opok(o):
+    return o < 0 or ndef[o] == 1
+
+def gv_key(k):
+    h = iop[k] * 7919 + iimm[k] * 31
+    a = ia[k]
+    bb = ib[k]
+    if is_c(a):
+        a = cval(a) * 13
+    if is_c(bb):
+        bb = cval(bb) * 13
+    if is_comm(iop[k]):
+        h = h + a * 17 + bb * 17
+    else:
+        h = h + a * 17 + bb * 101
+    h = h % GVH
+    if h < 0:
+        h += GVH
+    return h
+
+def o_gvn():
+    build_defs()
+    o_preds()
+    o_dom()
+    h = 0
+    while h < GVH:
+        gvhead[h] = -1
+        h += 1
+    ch = 0
+    i = 0
+    while i < gnr:
+        b = gord[i]
+        k = bst[b]
+        while k < ben[b]:
+            if has_dst(k) and ndef[idst[k]] == 1 and gv_kind(k) and gv_opok(ia[k]) and gv_opok(ib[k]):
+                op = iop[k]
+                h = gv_key(k)
+                j = gvhead[h]
+                hit = -1
+                while j >= 0 and hit < 0:
+                    if iop[j] == op and iimm[j] == iimm[k] and (opnd_eq(ia[j], ia[k]) and opnd_eq(ib[j], ib[k]) or is_comm(op) and opnd_eq(ia[j], ib[k]) and opnd_eq(ib[j], ia[k])):
+                        if iblk[j] == b or g_doms(iblk[j], b):
+                            hit = idst[j]
+                    j = gvnext[j]
+                if hit >= 0:
+                    iop[k] = O_MOV
+                    ia[k] = hit
+                    ib[k] = -1
+                    iovf[k] = 0
+                    ch = 1
+                else:
+                    gvnext[k] = gvhead[h]
+                    gvhead[h] = k
+            k += 1
+        i += 1
+    return ch
+
+def lh_ok(k):
+    op = iop[k]
+    if not has_dst(k) or ndef[idst[k]] != 1:
+        return 0
+    if op >= O_ADD and op <= O_NOT:
+        return is_pure(k)
+    if op == O_I2D or op == O_FNEG or op == O_FCST:
+        return 1
+    if op == O_FOP:
+        return iimm[k] < 3
+    return 0
+
+def lh_inv(o, h, t):
+    if o < 0:
+        return 1
+    if ndef[o] != 1:
+        return 0
+    d = defat[o]
+    if hzm[d] == h + 1:
+        return 1
+    bd = iblk[d]
+    return bd < h or bd > t
+
+def o_licm():
+    build_defs()
+    o_preds()
+    k = 0
+    while k < nir:
+        hzm[k] = 0
+        k += 1
+    b = 0
+    while b < nb:
+        hzh[b] = 0
+        b += 1
+    hany = 0
+    h = 1
+    while h < nb:
+        t = -1
+        j = gpb[h]
+        lnout = 0
+        while j < gpb[h] + gpc[h]:
+            p = gpl[j]
+            if p >= h:
+                if p > t:
+                    t = p
+            else:
+                lnout += 1
+            j += 1
+        ok = t >= h and lnout == 1 and iop[bst[h]] == O_LABEL
+        if ok:
+            pv = h - 1
+            lo = iop[ben[pv] - 1]
+            ok = bs2[pv] == h or bs1[pv] == h and lo != O_BR and lo != O_CBR and lo != O_TCOND
+        if ok:
+            j = gpb[h]
+            while j < gpb[h] + gpc[h]:
+                if gpl[j] < h and gpl[j] != h - 1:
+                    ok = 0
+                j += 1
+        q = h + 1
+        while ok and q <= t:
+            j = gpb[q]
+            while j < gpb[q] + gpc[q]:
+                if gpl[j] < h or gpl[j] > t:
+                    ok = 0
+                j += 1
+            q += 1
+        if ok:
+            ch = 1
+            while ch:
+                ch = 0
+                k = bst[h]
+                while k < ben[t]:
+                    if hzm[k] == 0 and lh_ok(k) and lh_inv(ia[k], h, t) and (iop[k] == O_FCST or lh_inv(ib[k], h, t)):
+                        hzm[k] = h + 1
+                        ch = 1
+                        hany = 1
+                        hzh[h] = 1
+                    k += 1
+        h += 1
+    if not hany:
+        return 0
+    # permutation: hoisted instructions go right before their header's first instruction
+    n = 0
+    b = 0
+    while b < nb:
+        k = bst[b]
+        while k < ben[b]:
+            if k == bst[b] and b > 0 and hzh[b]:
+                q = bst[b]
+                z = ben[nb - 1]
+                kk = bst[b]
+                while kk < z:
+                    if hzm[kk] == b + 1:
+                        pperm[n] = kk
+                        n += 1
+                    kk += 1
+            if hzm[k] == 0:
+                pperm[n] = k
+                n += 1
+            k += 1
+        b += 1
+    l_apply(iop, n)
+    l_apply(idst, n)
+    l_apply(ia, n)
+    l_apply(ib, n)
+    l_apply(ic, n)
+    l_apply(ie, n)
+    l_apply(ix, n)
+    l_apply(iimm, n)
+    l_apply(iline, n)
+    l_apply(iovf, n)
+    return 1
+
+def l_apply(arr, n):
+    k = 0
+    while k < n:
+        ptmp[k] = arr[pperm[k]]
+        k += 1
+    k = 0
+    while k < n:
+        arr[k] = ptmp[k]
+        k += 1
+
 def o_optimize():
     r = 0
     while r < 6 and not irfail:
@@ -10807,6 +11123,12 @@ def o_optimize():
         o_compact()
         o_cfg()
         o_cse()
+        if opt_gvn == 1 or opt_gvn == 3:
+            ch = o_gvn() or ch
+        if opt_gvn >= 2:
+            if o_licm():
+                ch = 1
+                o_cfg()
         o_prop()
         o_compact()
         o_cfg()
