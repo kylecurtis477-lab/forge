@@ -1515,6 +1515,23 @@ def after_overflow():
         hlt()
     cli()
     ioapic_mask(0)
+    if tsc_deadline_on:
+        puts("TSC-deadline timer: ")
+        put_u64(deadline_arms)
+        puts(" deadlines armed\n")
+        if deadline_arms < 20:
+            panic("TSC-deadline timer was not re-armed")
+    else:
+        puts("TSC-deadline timer: not offered, LAPIC periodic\n")
+    if hpet_fs != 0:
+    # under emulation a loaded host skews the polled PIT window, so a disagreement is reported, not fatal;
+    # lapic_init uses the HPET value
+        if hpet_tsc_10ms * 4 < pit_tsc_10ms * 3 or hpet_tsc_10ms * 3 > pit_tsc_10ms * 4:
+            puts("HPET: PIT calibration off by more than 25%, using HPET\n")
+        else:
+            puts("HPET: agrees with PIT calibration\n")
+    else:
+        puts("HPET: none\n")
     puts("LAPIC timer ticks: ")
     put_u64(lapic_ticks)
     puts(", PIT IRQ0 via IOAPIC gsi ")

@@ -223,14 +223,14 @@ def sys_kexec(frame: u64, which: u64) -> u64:
     hi: u64 = 0
     i: u64 = 0
     while i < phn:
-        ph = img + phoff + i * phsz
-        if vload32(ph) == 1:
-            if (vload32(ph + 4) & 3) == 3:
+        ph = ptr[Phdr](img + phoff + i * phsz)
+        if (ph.w0 & 0xFFFFFFFF) == 1:
+            if ((ph.w0 >> 32) & 3) == 3:
                 return kx_fail("kernel image has a W+X segment", img)
-            if vload64(ph + 24) < lo:
-                lo = vload64(ph + 24)
-            if vload64(ph + 24) + vload64(ph + 40) > hi:
-                hi = vload64(ph + 24) + vload64(ph + 40)
+            if ph.pa < lo:
+                lo = ph.pa
+            if ph.pa + ph.msz > hi:
+                hi = ph.pa + ph.msz
         i += 1
     if chan_live != 0:
         return kx_fail("IPC channels are open (not handed over)", img)
@@ -264,11 +264,11 @@ def sys_kexec(frame: u64, which: u64) -> u64:
     kd = kp - 0x100000
     i = 0
     while i < phn:
-        ph = img + phoff + i * phsz
-        if vload32(ph) == 1:
-            dst = p2v(kd + vload64(ph + 24))
-            memcpy(dst, img + vload64(ph + 8), vload64(ph + 32))
-            memset(dst + vload64(ph + 32), 0, vload64(ph + 40) - vload64(ph + 32))
+        ph = ptr[Phdr](img + phoff + i * phsz)
+        if (ph.w0 & 0xFFFFFFFF) == 1:
+            dst = p2v(kd + ph.pa)
+            memcpy(dst, img + ph.off, ph.fsz)
+            memset(dst + ph.fsz, 0, ph.msz - ph.fsz)
         i += 1
     kfree(img)
     # collect every other user process at a syscall boundary

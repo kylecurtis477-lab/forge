@@ -1,7 +1,9 @@
 # ACPI: RSDP -> XSDT/RSDT -> MADT (LAPIC address, IOAPICs, interrupt source overrides, CPU count).
 SIG_APIC = 0x43495041
+SIG_HPET = 0x54455048
 
 lapic_phys: u64
+hpet_phys: u64  # Phase 8: HPET block from the ACPI HPET table (0 = none)
 ioapic_phys: u64
 ioapic_gsi_base: u64
 ncpus: u64
@@ -104,6 +106,8 @@ def acpi_init(rsdp_phys: u64) -> u64:
         if sig == SIG_APIC and acpi_sum(t, vload32(t + 4)) == 0:
             madt_parse(t)
             found = 1
+        if sig == SIG_HPET and acpi_sum(t, vload32(t + 4)) == 0:
+            hpet_phys = vload64(t + 44)  # base address (Generic Address Structure at offset 40, address at +4)
         i += 1
     putc(10)
     if found:
