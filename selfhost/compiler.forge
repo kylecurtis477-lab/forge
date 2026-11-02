@@ -951,6 +951,8 @@ def new_local(name, t, fixed):
 def want_reg(name):
     if nused >= NREGS or hyb_noreg:
         return 0
+    if hyb_rf and find(hR, nR, name) < 0:
+        return 0
     rl = fregn[curf]
     if not rl:
         return 1
@@ -8672,7 +8674,7 @@ ir_pv = list(64)
 NCC = ["e", "ne", "l", "le", "g", "ge"]
 CC_NEG = [1, 0, 5, 4, 3, 2]
 CC_SWP = [0, 1, 4, 5, 2, 3]
-RN = ["%rsi", "%rdi", "%r8", "%r9", "%r10", "%rbx", "%r12", "%r13", "%r14", "%r15"]
+RN = ["%rsi", "%rdi", "%r8", "%r9", "%r10", "%rbx", "%r12", "%r13", "%r14", "%r15", "%xmm2", "%xmm3", "%xmm4", "%xmm5", "%xmm6", "%xmm7", "%xmm8", "%xmm9", "%xmm10", "%xmm11", "%xmm12", "%xmm13", "%xmm14", "%xmm15"]
 n_ir_ok = 0
 n_ir_fn = 0
 
@@ -11788,6 +11790,8 @@ ve = list(IVMAX)
 vloc = list(IVMAX)
 vdefst = list(IVMAX)
 cpre = list(IRMAX)
+xpre = list(IRMAX)
+xmm_on = 1
 bhead = list(IRMAX)
 bnext = list(IVMAX)
 act = list(64)
@@ -11957,6 +11961,34 @@ def o_intervals():
             c += 1
         k += 1
     cpre[nir] = c
+    c = 0
+    k = 0
+    while k < nir:
+        xpre[k] = c
+        if not x_safe(k):
+            c += 1
+        k += 1
+    xpre[nir] = c
+
+def x_safe(k):
+    # instructions that never call out on their normal (non-raising) path
+    op = iop[k]
+    if op == O_MOV or op == O_PARAM or op >= O_ADD and op <= O_MOD or op == O_LABEL or op == O_BR or op == O_CBR:
+        return 1
+    if op == O_LDATA or op == O_LOAD or op == O_STORE or op == O_NOP or op == O_RET or op == O_FCMP or op == O_FNEG or op == O_FCST or op == O_I2D or op == O_FLD or op == O_FST or op == O_MKB:
+        return 1
+    if op == O_FOP:
+        return iimm[k] < 3
+    return 0
+
+def xcrosses(v):
+    a = vs[v] + 1
+    z = ve[v]
+    if z > nir:
+        z = nir
+    if a >= z:
+        return 0
+    return xpre[z] - xpre[a] > 0
 
 def crosses(v):
     a = vs[v] + 1
@@ -11988,6 +12020,15 @@ def reg_free(r):
 
 def alloc_one(v, p):
     global nact, nspill
+    if xmm_on and vtt[v] == T_DBL and not xcrosses(v):
+        q = 10
+        while q < 24:
+            if reg_free(q):
+                vloc[v] = q
+                act[nact] = v
+                nact += 1
+                return 0
+            q += 1
     cr = crosses(v)
     lo = 0
     if cr:
@@ -12104,6 +12145,10 @@ def src_of(o, scratch):
     return vl(o)
 
 def mv_to(o, D, dmem):
+    if is_c(o) and starts(D, "%xmm"):
+        e3("mov $", str(cval(o)), ", %rax")
+        e2("movq %rax, ", D)
+        return 0
     if is_c(o):
         k = cval(o)
         if k == 0 and not dmem:
@@ -12118,6 +12163,9 @@ def mv_to(o, D, dmem):
         return 0
     S = vl(o)
     if str_eq(S, D):
+        return 0
+    if starts(S, "%xmm") or starts(D, "%xmm"):
+        e2(concat(concat("movq ", S), ", "), D)
         return 0
     if in_mem(o) and dmem:
         e3("mov ", S, ", %rax")
@@ -12795,7 +12843,11 @@ def o_ins(k, fi, x_epi):
         mv_to(ia[k], hr, not starts(hr, "%"))
 
 def em_fst(k):
-    e2("mov %rax, ", vl(idst[k]))
+    D = vl(idst[k])
+    if starts(D, "%xmm"):
+        e2("movq %rax, ", D)
+    else:
+        e2("mov %rax, ", D)
 
 def em_fx(o, X):
     if in_reg(o):
@@ -12814,9 +12866,12 @@ def em_fxd(k):
 def em_flt(k):
     op = iop[k]
     if op == O_FCST and idst[k] >= 0 and in_reg(idst[k]):
-        e3("mov ", emit_flt(tv[iimm[k]]), concat("(%rip), ", vl(idst[k])))
+        if vloc[idst[k]] >= 10:
+            e3("movsd ", emit_flt(tv[iimm[k]]), concat("(%rip), ", vl(idst[k])))
+        else:
+            e3("mov ", emit_flt(tv[iimm[k]]), concat("(%rip), ", vl(idst[k])))
         return 0
-    if op == O_FNEG and idst[k] >= 0 and in_reg(idst[k]):
+    if op == O_FNEG and idst[k] >= 0 and in_reg(idst[k]) and vloc[idst[k]] < 10:
         mv_to(ia[k], vl(idst[k]), 0)
         e2("btc $63, ", vl(idst[k]))
         return 0
@@ -12839,6 +12894,31 @@ def em_flt(k):
         mv_to(ia[k], "%rax", 0)
         e("movq %rax, %xmm0")
         e("call rt_fbox_r")
+    elif op == O_FOP and iimm[k] < 3 and idst[k] >= 0 and vloc[idst[k]] >= 10 and vloc[idst[k]] < 24 and not (in_reg(ib[k]) and vloc[ib[k]] == vloc[idst[k]] and not (in_reg(ia[k]) and vloc[ia[k]] == vloc[idst[k]]) and iimm[k] == 1):
+        D = vl(idst[k])
+        xa = ia[k]
+        xb = ib[k]
+        if in_reg(xb) and vloc[xb] == vloc[idst[k]] and not (in_reg(xa) and vloc[xa] == vloc[idst[k]]):
+            xa = ib[k]
+            xb = ia[k]
+        B = "%xmm1"
+        if in_reg(xb) and vloc[xb] >= 10:
+            B = vl(xb)
+        else:
+            em_fx(xb, "%xmm1")
+        if not (in_reg(xa) and vloc[xa] == vloc[idst[k]]):
+            if in_reg(xa) and vloc[xa] >= 10:
+                e3("movapd ", vl(xa), concat(", ", D))
+            else:
+                em_fx(xa, D)
+        c = iimm[k]
+        if c == 0:
+            e3("addsd ", B, concat(", ", D))
+        elif c == 1:
+            e3("subsd ", B, concat(", ", D))
+        else:
+            e3("mulsd ", B, concat(", ", D))
+        return 0
     else:
         em_fx(ia[k], "%xmm0")
         em_fx(ib[k], "%xmm1")
@@ -13070,8 +13150,35 @@ def hyb_reset(fi, p, endp):
             iimm[k] = i
         i += 1
 
+hyb_rf = 0
+hR = list(1000)
+nR = 0
+
+def hyb_wasted():
+    i = 0
+    while i < nlocs:
+        if lreg[i] and find(hH, nH, locs[i]) < 0:
+            return 1
+        i += 1
+    i = 0
+    while i < nparams:
+        if preg[i] and find(hH, nH, params[i]) < 0:
+            return 1
+        i += 1
+    return 0
+
+def hyb_selfc():
+    # no instruction touches the token frame's register locals
+    k = 0
+    while k < nir:
+        op = iop[k]
+        if op >= O_TSTMT and op <= O_TSET:
+            return 0
+        k += 1
+    return 1
+
 def hyb_compile(fi, p, endp):
-    global tx_id, hyb_fe, hy_its, hyb, nH, hgrow, ip, pos, nout, nlabel, curf, ir_cslo, ir_sb, nslots, hyb_pro, hyb_epi, hyb_noreg, ncs, ncold, no_ov, nspill, irfail
+    global hyb_rf, nR, tx_id, hyb_fe, hy_its, hyb, nH, hgrow, ip, pos, nout, nlabel, curf, ir_cslo, ir_sb, nslots, hyb_pro, hyb_epi, hyb_noreg, ncs, ncold, no_ov, nspill, irfail
     if not hyb_on or not hyb_ok(fi):
         return 0
     if tco_scan(fi, p, endp) > 0:
@@ -13121,8 +13228,24 @@ def hyb_compile(fi, p, endp):
         nlabel = hs_lab
         curf = -1
         return 0
+    if not hyb_rf and nused > 0 and hyb_wasted():
+        i = 0
+        while i < nH:
+            hR[i] = hH[i]
+            i += 1
+        nR = nH
+        hyb = 0
+        nout = hs_out
+        nlabel = hs_lab
+        curf = -1
+        hyb_rf = 1
+        r = hyb_compile(fi, p, endp)
+        hyb_rf = 0
+        return r
     o_intervals()
     ir_cslo = 5 + nused
+    if hyb_selfc():
+        ir_cslo = 5
     o_regalloc()
     ir_cslo = 5
     # emission inside the token compiler's frame

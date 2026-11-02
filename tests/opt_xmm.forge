@@ -1,0 +1,40 @@
+def h(x):
+    return x * 0.5 + 1.0
+
+def mix(n):
+    a = 1.5
+    b = -2.25
+    s = 0.0
+    i = 0
+    while i < n:
+        c = a * b - s
+        s = s + c / 7.0
+        d = h(c)
+        s = s - d + a
+        e = s % 3.0
+        f = -e
+        s = s + f * 0.001 + float(i)
+        a = a + 0.125
+        b = b - a * 0.5
+        i += 1
+    return s
+
+def cmpf(n):
+    x = 0.0
+    k = 0
+    while x < n:
+        x = x + 0.75
+        if x > 2.0 and x <= 5.25:
+            k += 1
+    return k, x
+
+def boxy(xs):
+    t = 0.0
+    for v in xs:
+        t = t + v * v
+    return t
+
+print(mix(50))
+print(cmpf(10.0))
+print(boxy([1.5, 2.5, -3.0]))
+print(7.5 // 2.0, -7.5 % 2.0)
