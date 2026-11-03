@@ -8,7 +8,7 @@
 # Checks: the System V process-start stack (argc, argv, envp, auxv incl. AT_PAGESZ/AT_ENTRY/AT_RANDOM),
 # write, brk grow/shrink, mmap/munmap and its W^X and MAP_FIXED refusals, ioctl TCGETS/TIOCGWINSZ
 # (and ENOTTY/EBADF), getpid/getppid/gettid, set_tid_address, register preservation across
-# syscall, writev (3 iovecs; EINVAL, EFAULT), uname, getcwd, Forge syscall 409 being unreachable (ENOSYS), and exit_group.
+# syscall, writev (3 iovecs; EINVAL, EFAULT), uname, getcwd, nanosleep, Forge syscall 409 being unreachable (ENOSYS), and exit_group.
 
 ENOSYS = 0xFFFFFFFFFFFFFFDA
 EACCES = 0xFFFFFFFFFFFFFFF3
@@ -219,6 +219,15 @@ def lx_main(sp: u64):
     check(lsys(79, u64(addr(uts[0])), 64, 0, 0, 0) == 2 and uts[0] == 47 and uts[1] == 0, "getcwd")
     check(lsys(79, u64(addr(uts[0])), 1, 0, 0, 0) == ERANGE and lsys(79, 0x10, 64, 0, 0, 0) == EFAULT, "getcwd ERANGE / EFAULT")
     put("lxtest: getcwd / (ERANGE, EFAULT ok)\n")
+    flush()
+    # nanosleep: 30 ms -> at least 3 scheduler ticks; bad tv_nsec -> EINVAL, bad pointer -> EFAULT
+    tsl: u64[2]
+    tsl[0] = 0
+    tsl[1] = 30000000
+    check(lsys(35, u64(addr(tsl[0])), 0, 0, 0, 0) == 0, "nanosleep 30 ms")
+    tsl[1] = 1000000000
+    check(lsys(35, u64(addr(tsl[0])), 0, 0, 0, 0) == EINVAL and lsys(35, 0x10, 0, 0, 0, 0) == EFAULT, "nanosleep EINVAL / EFAULT")
+    put("lxtest: nanosleep 30 ms ok (EINVAL, EFAULT ok)\n")
     flush()
     pid = lsys(39, 0, 0, 0, 0, 0)
     check(pid != 0 and lsys(186, 0, 0, 0, 0, 0) == pid and lsys(218, 0, 0, 0, 0, 0) == pid, "getpid/gettid/set_tid_address")

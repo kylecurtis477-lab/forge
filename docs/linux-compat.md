@@ -25,7 +25,7 @@ Inside the personality a process reaches **only** the Linux table. No Forge sysc
 including the driver (400+), kexec/ktest (408/409, still also gated by `ktest_hooks`) and grant
 syscalls: they return -ENOSYS like any unknown number.
 
-## Syscalls (11.1a to 11.1e; 34 in all)
+## Syscalls (11.1a to 11.1e; 35 in all)
 
 | nr | name | notes |
 |----|------|-------|
@@ -34,6 +34,7 @@ syscalls: they return -ENOSYS like any unknown number.
 | 2 | open | (11.1e part 4) no cwd, so the path must be absolute and name a held directory handle's label exactly (-> a dup of that handle, sharing its position) or lie under it (-> openat(handle, rest)); relative, `..`, outside every handle, or a mere label prefix -> EACCES; write flags -> EROFS; O_DIRECTORY / O_CLOEXEC as for openat |
 | 3 | close | |
 | 20 | writev | (11.1e part 2) iovecs copied in one at a time, each through write (same fd checks); iovcnt > 1024 -> EINVAL, bad iov -> EFAULT; a later fault or short write returns the bytes so far |
+| 35 | nanosleep | (11.1e part 9) sleeps whole 10 ms scheduler ticks (100 Hz), rounded up, capped at one day; not interrupted by signals yet, so rem is never written; tv_nsec >= 1e9 or negative tv_sec -> EINVAL, bad pointer -> EFAULT |
 | 63 | uname | (11.1e part 3) sysname `Linux`, nodename `forge`, release `0.2.6-forge`, version `#1 Forge Linux compat sandbox`, machine `x86_64`, domainname `(none)`; bad pointer -> EFAULT |
 | 72 | fcntl | (11.1e part 7) F_DUPFD 0 / F_DUPFD_CLOEXEC 1030 (dup's rules, lowest free fd >= arg; arg >= 16 -> EINVAL), F_GETFD 1 / F_SETFD 2 (FD_CLOEXEC), F_GETFL 3 (console O_RDWR, everything else O_RDONLY), F_SETFL 4 only when it changes nothing (O_NONBLOCK etc. -> EINVAL); bad fd -> EBADF, other commands -> EINVAL |
 | 79 | getcwd | (11.1e part 8) always "/" (returns 2, the length with the NUL): there is no working directory, relative paths stay EACCES; size < 2 -> ERANGE, bad pointer -> EFAULT |
@@ -246,4 +247,4 @@ BusyBox is built from source only; no prebuilt third-party binary is used.
 - Image: static EXEC at 0x400000, EI_OSABI set to 3, sealed `forgeseal.py --foreign` (level 3, unsafe 0, caps 0). `image_verify` refuses a level-3 seal on anything but a capability-free Linux image (reason 8); the 6.4 gate still refuses it outside the compat sandbox.
 - Manifest `examples/apps/busybox.mf`: one `dir /efi/forge/docs` grant.
 
-Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). open 2 (11.1e part 4: absolute paths under a grant; wc, sha256sum and cat of granted files work, a file outside is EACCES). stat 4 (11.1e part 5; `ls` of a directory outside the grant -> Permission denied). lstat 6 (11.1e part 6; same as stat, no symlinks). fcntl 72 (11.1e part 7; `ls` of the granted directory and `printf` work). getcwd 79 (11.1e part 8; `pwd` prints /). Still missing: nanosleep 35. They will be added one per commit.
+Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). open 2 (11.1e part 4: absolute paths under a grant; wc, sha256sum and cat of granted files work, a file outside is EACCES). stat 4 (11.1e part 5; `ls` of a directory outside the grant -> Permission denied). lstat 6 (11.1e part 6; same as stat, no symlinks). fcntl 72 (11.1e part 7; `ls` of the granted directory and `printf` work). getcwd 79 (11.1e part 8; `pwd` prints /). nanosleep 35 (11.1e part 9; `sleep 1` works). They will be added one per commit.

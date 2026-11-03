@@ -40,9 +40,10 @@
 # 11.1e: fcntl 72 -- F_DUPFD / F_DUPFD_CLOEXEC (dup's rules), F_GETFD / F_SETFD (FD_CLOEXEC), F_GETFL,
 # F_SETFL only when it changes nothing (no status flag is settable); other commands EINVAL.
 # 11.1e: getcwd 79 -- always "/": there is no working directory, so relative paths stay EACCES.
+# 11.1e: nanosleep 35 -- whole 10 ms scheduler ticks, rounded up (at most a day); not interruptible by signals yet.
 # Not yet: real-time signals (32..64), sigaltstack, signals to other processes.
 LX_ABI = 1
-LX_NSYS = 34  # syscalls in the table above
+LX_NSYS = 35  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ERANGE = 0xFFFFFFFFFFFFFFDE
@@ -576,6 +577,25 @@ def lx_getcwd(ubuf: u64, size: u64) -> u64:
     if r != 0:
         return r
     return 2
+
+def lx_nanosleep(ureq: u64, urem: u64) -> u64:
+# nanosleep(req, rem): sleeps on the 100 Hz scheduler tick, rounded up to whole 10 ms ticks; signals
+# do not interrupt it yet, so rem is never written; tv_nsec outside 0..999999999 -> EINVAL
+    ts: u64[2]
+    if user_ptr_ok(ureq, 16) == 0:
+        return EFAULT
+    r = copy_user(u64(addr(ts[0])), ureq, 16)
+    if r != 0:
+        return r
+    if ts[1] >= 1000000000 or (ts[0] >> 63) != 0:
+        return EINVAL
+    sec = ts[0]
+    if sec > 86400:
+        sec = 86400
+    t = sec * 100 + (ts[1] + 9999999) / 10000000
+    if t != 0:
+        sleep_ticks(t)
+    return 0
 
 def lx_cx(fd: u64, on: u64):
     p = cur_proc()
@@ -1273,6 +1293,8 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
         return sys_getpid()
     if nr == 63:
         return lx_uname(a)
+    if nr == 35:
+        return lx_nanosleep(a, b)
     if nr == 79:
         return lx_getcwd(a, b)
     if nr == 110:
