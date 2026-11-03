@@ -1,0 +1,2 @@
+# lxfs (Phase 11.1c): Linux-ABI file test; may look up and list files inside /efi/forge/docs
+dir /efi/forge/docs

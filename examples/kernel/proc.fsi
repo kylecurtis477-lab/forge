@@ -52,6 +52,7 @@ struct Proc:
     abi: u64  # 11.1: 0 Forge syscalls, LX_ABI = the Linux personality (linux.fsi)
     lx_calls: u64  # Linux syscalls made
     lx_unsup: u64  # ... of which answered ENOSYS
+    lx_dino: u64  # 11.1c: synthetic d_ino counter for getdents64
     # 11.1b: Linux threads (linux.fsi). `thread` is the main thread and always the last to die; the
     # clone()d threads share pml4, fds and brk/mmap state and are pinned to the main thread's CPU
     nxthr: u64  # clone()d threads still alive
@@ -244,7 +245,8 @@ def file_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
     return done
 
 @unsafe
-def dir_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
+def dir_read(fl: ptr[File], ubuf: u64, n: u64, kern: u64) -> u64:
+# kern = 1: ubuf is a kernel buffer (the Linux getdents64 converter), copied with memcpy
 # getdents records: u64 size, u8 is_dir, name, NUL (only whole records are returned)
     ent: u8[32]
     nm: u8[256]
@@ -267,7 +269,9 @@ def dir_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
         vstore64(u64(addr(rec[0])), le32(u64(addr(ent[28]))))
         rec[8] = u8((ent[11] >> 4) & 1)
         memcpy(u64(addr(rec[9])), u64(addr(nm[0])), l + 1)
-        if copy_user(ubuf + done, u64(addr(rec[0])), rl) != 0:
+        if kern != 0:
+            memcpy(ubuf + done, u64(addr(rec[0])), rl)
+        elif copy_user(ubuf + done, u64(addr(rec[0])), rl) != 0:
             mutex_unlock(addr(fs_m))
             return EFAULT
         done += rl
@@ -385,7 +389,8 @@ def odir_next(ts: u64) -> u64:
         o = obj_type_next(o)
     return OB_ERR
 
-def odir_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
+def odir_read(fl: ptr[File], ubuf: u64, n: u64, kern: u64, kb: slice[u8]) -> u64:
+# kern = 1: records go into the kernel buffer kb (the Linux getdents64 converter), ubuf unused
 # same getdents records as dir_read: u64 size, u8 is_dir (0), name, NUL
     rec: u8[48]
     done: u64 = 0
@@ -410,7 +415,14 @@ def odir_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
             rec[k] = u8((sz >> (k * 8)) & 255)
             k += 1
         rec[8] = 0
-        if copy_user(ubuf + done, u64(addr(rec[0])), rl) != 0:
+        if kern != 0:
+            if done + rl > len(kb):
+                break
+            q: u64 = 0
+            while q < rl:
+                kb[done + q] = rec[q]
+                q += 1
+        elif copy_user(ubuf + done, u64(addr(rec[0])), rl) != 0:
             mutex_unlock(addr(ofs_m))
             return EFAULT
         done += rl
@@ -1209,10 +1221,11 @@ def sys_getdents(fd: u64, ubuf: u64, n: u64) -> u64:
     if (cur_proc().fdr[fd] & CAP_READ) == 0:
         return EPERM
     if fl.type == F_ODIR:
-        return odir_read(fl, ubuf, n)
+        z: u8[1]
+        return odir_read(fl, ubuf, n, 0, z[:])
     if fl.type != F_DIR:
         return ENOTDIR
-    return dir_read(fl, ubuf, n)
+    return dir_read(fl, ubuf, n, 0)
 
 def sys_close(fd: u64) -> u64:
     p = cur_proc()

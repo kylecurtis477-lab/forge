@@ -25,13 +25,16 @@ Inside the personality a process reaches **only** the Linux table. No Forge sysc
 including the driver (400+), kexec/ktest (408/409, still also gated by `ktest_hooks`) and grant
 syscalls: they return -ENOSYS like any unknown number.
 
-## Syscalls (11.1a, 11.1b; 17 in all)
+## Syscalls (11.1a, 11.1b, 11.1c; 20 in all)
 
 | nr | name | notes |
 |----|------|-------|
 | 0 | read | Forge read on the fd (grants and rights checked) |
 | 1 | write | Forge write |
 | 3 | close | |
+| 5 | fstat | (11.1c) 144-byte struct stat: st_dev 0xF0, st_ino = first cluster + 1, st_mode S_IFREG 0444 / S_IFDIR 0555 / S_IFCHR 0620 (console, st_rdev 0x401) / S_IFIFO 0600, st_size, st_blksize 4096, st_blocks; bad fd -> EBADF, bad pointer -> EFAULT, revoked grant -> EACCES |
+| 217 | getdents64 | (11.1c) linux_dirent64 records (d_ino synthetic, d_off = directory position, d_type DT_DIR / DT_REG, 8-byte aligned); buffer must be >= 768 bytes (else EINVAL); non-directory -> ENOTDIR, no read right -> EPERM, revoked grant -> EACCES |
+| 257 | openat | (11.1c) only relative to a directory handle the sandbox holds (Forge `openat` rules: no absolute paths, no `..`); AT_FDCWD -> EACCES (there is no ambient cwd), write/create/truncate/append flags -> EROFS, O_DIRECTORY on a file -> ENOTDIR; O_CLOEXEC / O_NONBLOCK / O_NOFOLLOW / O_LARGEFILE accepted |
 | 9 | mmap | anonymous + private only; PROT_EXEC -> EACCES (W^X: no new code), MAP_FIXED -> EINVAL, file mappings -> ENODEV; r8/r9 come from the saved frame |
 | 11 | munmap | |
 | 12 | brk | Linux semantics: returns the current break on failure |
@@ -120,10 +123,31 @@ compiles it with forgec/fas/fld, sets EI_OSABI = 3, then seals it. tests/os/run.
   preemptions, plus the EPERM/EFAULT/EINVAL refusals), Forge syscall 409 -> ENOSYS, then
   `lxtest: PASS (25 checks)` and `[lxtest exited 0 (sandboxed)]`.
 
+## Files (11.1c)
+
+A sandboxed Linux binary has no root capability and no cwd: it reaches files only through the
+handles its manifest grants (from fd 4 on). `openat(dirfd, path, flags)` maps to Forge `openat` on
+that handle, so the grant ledger, the audit log and revocation all apply unchanged (an `openat`
+appears in `audit` as a use of the grant). Everything is read-only: write-ish flags get EROFS before
+any lookup. `getdents64` converts Forge directory records into linux_dirent64 in a kernel buffer
+(the directory is asked for at most rem*11/28 bytes so converted records always fit), which is why
+it needs a buffer of at least 768 bytes (glibc and musl use 32 KiB). `fstat` synthesizes a stat
+from the handle's type, size and first cluster.
+
+## Test: lxfs
+
+`run lxfs` (manifest `examples/apps/lxfs.mf`: `dir /efi/forge/docs`, fd 4) fstats the console
+(S_IFCHR) and the dir (S_IFDIR), lists it with getdents64 (2 records: `Long File Name Notes.txt`,
+`big.bin`, both DT_REG; a second call returns 0), opens `big.bin` with openat + O_CLOEXEC, fstats it
+(S_IFREG, 98304 bytes) and reads 4096 bytes, then checks the refusals: AT_FDCWD, absolute and `..`
+paths -> EACCES, O_WRONLY -> EROFS, O_DIRECTORY on a file -> ENOTDIR, a missing name -> ENOENT,
+fstat of a bad fd -> EBADF, getdents64 on the console -> ENOTDIR and with a 100-byte buffer ->
+EINVAL. 14 checks; it exits with the failure count.
+
 ## Not yet
 
 - Timed futex waits, FUTEX_REQUEUE/WAKE_OP, threads running in parallel on several CPUs.
-- 11.1c: openat, fstat, getdents64 over the sandbox's granted handles.
+- stat / lstat / newfstatat by path, readlink, getcwd, writable files.
 - execve, signals, /proc, sockets, file-backed mmap.
 - Busybox (the Phase 11.1 acceptance test) needs a third-party static binary; it will be added only
   after the owner approves downloading one, and it will run under the same gate (sealed + sandboxed).

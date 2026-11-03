@@ -22,10 +22,11 @@
 # splitmix64: unpredictable enough for stack canaries in a test program, not a CSPRNG.
 # 11.1b part 2: clone 56 (threads only), futex 202 (WAIT, WAKE), set_tid_address clears and wakes
 # the tid word at thread exit (see the threads section below).
-# Not yet: openat/fstat/getdents64 (11.1c), execve,
-# signals.
+# 11.1c: fstat 5, getdents64 217, openat 257 -- only relative to a directory handle the process
+# holds (no AT_FDCWD, no absolute paths, read-only opens), with the grant ledger counting each use.
+# Not yet: execve, signals.
 LX_ABI = 1
-LX_NSYS = 17  # syscalls in the table above
+LX_NSYS = 20  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ENOTTY = 0xFFFFFFFFFFFFFFE7
@@ -438,17 +439,151 @@ def lx_proc_done(p: ptr[Proc]):
     puts("\n")
     gr_pend(f)
 
+# ---- 11.1c: openat, fstat, getdents64 over the handles the sandbox granted ----
+AT_FDCWD = 0xFFFFFFFFFFFFFF9C
+O_ACCMODE = 3
+O_WRITEISH = 0x640  # O_CREAT | O_TRUNC | O_APPEND
+O_DIRECTORY = 0x10000
+LX_DENT_MIN = 768  # getdents64 needs room for the largest record (documented)
+
+def lx_openat(dirfd: u64, upath: u64, flags: u64) -> u64:
+# no current directory, so no ambient lookup: AT_FDCWD and absolute paths are refused; a relative
+# path resolves under a held directory handle with LOOKUP (sys_openat: rights, grants, no "..")
+    if dirfd == AT_FDCWD:
+        return EACCES
+    if (flags & O_ACCMODE) != 0 or (flags & O_WRITEISH) != 0:
+        return EROFS  # the mounted file systems are read-only to applications
+    fd = sys_openat(dirfd & 0xFFFFFFFF, upath)
+    if fd >= NFD or (flags & O_DIRECTORY) == 0:
+        return fd
+    fl = fd_get(cur_proc(), fd)
+    if u64(fl) == 0 or (fl.type != F_DIR and fl.type != F_ODIR):
+        sys_close(fd)
+        return ENOTDIR
+    return fd
+
+def lx_fstat(fd: u64, ubuf: u64) -> u64:
+# struct stat (x86-64, 144 bytes); uid/gid 0, times 0, st_ino the object's first cluster or id
+    st: u64[18]
+    i: u64 = 0
+    while i < 18:
+        st[i] = 0
+        i += 1
+    if user_ptr_ok(ubuf, 144) == 0:
+        return EFAULT
+    fl = fd_get(cur_proc(), fd)
+    if u64(fl) == 0:
+        return EBADF
+    if gr_use(fl.gid, "fstat") != 0:
+        return EACCES
+    mode: u64 = 0x8124  # S_IFREG | 0444
+    st[2] = 1
+    if fl.type == F_DIR or fl.type == F_ODIR:
+        mode = 0x416D  # S_IFDIR | 0555
+        st[2] = 2
+    elif fl.type == F_CONSOLE:
+        mode = 0x2190  # S_IFCHR | 0620
+        st[5] = 0x401  # rdev: tty1 (4, 1)
+    elif fl.type == F_CHAN:
+        mode = 0x1180  # S_IFIFO | 0600
+    st[0] = 0xF0  # st_dev: one device number for the Forge VFS
+    st[1] = fl.clu + 1
+    st[3] = mode
+    if fl.type == F_FILE or fl.type == F_OBJ:
+        st[6] = fl.size
+    st[7] = 4096
+    st[8] = (st[6] + 511) / 512
+    if copy_user(ubuf, u64(addr(st[0])), 144) != 0:
+        return EFAULT
+    return 0
+
+def lx_getdents64(fd: u64, ubuf: u64, n: u64) -> u64:
+# Forge getdents records (u64 size, u8 is_dir, name, NUL) converted to linux_dirent64
+# (u64 ino, u64 off, u16 reclen, u8 type, name, NUL, 8-byte aligned). A Forge record of r bytes
+# (r >= 11) becomes at most r + 17 <= r * 28 / 11 bytes, so asking the directory for rem * 11 / 28
+# bytes always fits; d_ino is synthetic (index + 1), d_off the directory position after the entry.
+    kb: u8[512]
+    rec: u8[288]
+    if user_ptr_ok(ubuf, n) == 0:
+        return EFAULT
+    p = cur_proc()
+    fl = fd_get(p, fd)
+    if u64(fl) == 0:
+        return EBADF
+    if fl.type != F_DIR and fl.type != F_ODIR:
+        return ENOTDIR
+    if (p.fdr[fd] & CAP_READ) == 0:
+        return EPERM
+    if gr_use(fl.gid, "getdents") != 0:
+        return EACCES
+    if n < LX_DENT_MIN:
+        return EINVAL
+    done: u64 = 0
+    while (n - done) * 11 / 28 >= 266:
+        fb = (n - done) * 11 / 28
+        if fb > 512:
+            fb = 512
+        k: u64 = 0
+        if fl.type == F_ODIR:
+            k = odir_read(fl, 0, fb, 1, kb[:])
+        else:
+            k = dir_read(fl, u64(addr(kb[0])), fb, 1)
+        if k > 0xFFFFFFFFFFFFF000:
+            if done == 0:
+                return k
+            return done
+        if k == 0:
+            break
+        j: u64 = 0
+        while j + 10 <= k:
+            l: u64 = 0
+            while kb[j + 9 + l] != 0:
+                l += 1
+            rl = (19 + l + 1 + 7) & ~u64(7)
+            i: u64 = 0
+            while i < rl:
+                rec[i] = 0
+                i += 1
+            p.lx_dino += 1
+            lx_le(rec[:], 0, p.lx_dino, 8)
+            lx_le(rec[:], 8, fl.pos, 8)
+            lx_le(rec[:], 16, rl, 2)
+            rec[18] = 8
+            if kb[j + 8] != 0:
+                rec[18] = 4
+            i = 0
+            while i < l:
+                rec[19 + i] = kb[j + 9 + i]
+                i += 1
+            if copy_user(ubuf + done, u64(addr(rec[0])), rl) != 0:
+                return EFAULT
+            done += rl
+            j += 9 + l + 1
+    return done
+
+def lx_le(b: slice[u8], off: u64, v: u64, n: u64):
+    i: u64 = 0
+    while i < n:
+        b[off + i] = u8((v >> (i * 8)) & 255)
+        i += 1
+
 def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
 # mmap (9, six arguments) is routed by syscall_dispatch, which reads r8/r9 from the frame
     p = cur_proc()
     p.lx_calls += 1
-    if nr == 0 or nr == 1 or nr == 16:
+    if nr == 0 or nr == 1 or nr == 16 or nr == 5 or nr == 217 or nr == 257:
         atomic_fetch_add(addr(p.fdbusy), 1, acq_rel)
         r: u64 = 0
         if nr == 0:
             r = sys_read(a, b, c)
         elif nr == 1:
             r = sys_write(a, b, c)
+        elif nr == 5:
+            r = lx_fstat(a, b)
+        elif nr == 217:
+            r = lx_getdents64(a, b, c)
+        elif nr == 257:
+            r = lx_openat(a, b, c)
         else:
             r = lx_ioctl(a, b, c)
         atomic_fetch_add(addr(p.fdbusy), 0xFFFFFFFFFFFFFFFF, acq_rel)

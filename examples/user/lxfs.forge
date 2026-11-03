@@ -1,0 +1,159 @@
+# forge: no-runtime
+# forge: caps()
+# Phase 11.1c Linux-ABI file test (docs/linux-compat.md). Built and sealed like lxtest (EI_OSABI = 3,
+# runs only through `run lxfs`); its manifest grants one handle, fd 4 = /efi/forge/docs (dir).
+# Raw Linux syscalls only: fstat on the console and the directory, getdents64 of the granted
+# directory (linux_dirent64 records), openat of a file under it + fstat + read, and the refusals:
+# AT_FDCWD, absolute and ".." paths (no ambient authority), write opens (EROFS), O_DIRECTORY on a
+# file (ENOTDIR), ENOENT, EBADF, getdents64 on a non-directory and with a too-small buffer.
+
+EACCES = 0xFFFFFFFFFFFFFFF3
+EROFS = 0xFFFFFFFFFFFFFFE2
+ENOTDIR = 0xFFFFFFFFFFFFFFEC
+ENOENT = 0xFFFFFFFFFFFFFFFE
+EBADF = 0xFFFFFFFFFFFFFFF7
+EINVAL = 0xFFFFFFFFFFFFFFEA
+AT_FDCWD = 0xFFFFFFFFFFFFFF9C
+DOCS = 4
+
+fails: u64
+checks: u64
+buf: u8[256]
+blen: u64
+st: u64[18]
+dents: u8[4096]
+fbuf: u8[4096]
+
+@naked
+def lsys(n: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64:
+    asm("mov %rdi,%rax", "mov %rsi,%rdi", "mov %rdx,%rsi", "mov %rcx,%rdx", "mov %r8,%r10",
+        "mov %r9,%r8", "xor %r9d,%r9d", "syscall", "ret")
+
+# the u64 at %fs:off (TLS through the FS base set by arch_prctl)
+@naked
+def fs_read(off: u64) -> u64:
+    asm("mov %fs:(%rdi), %rax", "ret")
+
+@unsafe
+def peek(a: u64) -> u64:
+    return ptr[u64](a)[0]
+
+@unsafe
+def poke(a: u64, v: u64):
+    ptr[u64](a)[0] = v
+
+@unsafe
+def peek8(a: u64) -> u64:
+    return u64(ptr[u8](a)[0])
+
+def flush():
+    lsys(1, 1, u64(addr(buf[0])), blen, 0, 0)
+    blen = 0
+
+def put(s: ptr[u8]):
+    putz(u64(s))
+
+def putn(v: u64):
+    d: u8[20]
+    n: u64 = 0
+    while n == 0 or v != 0:
+        d[n] = u8(48 + v % 10)
+        v = v / 10
+        n += 1
+    while n > 0 and blen < 255:
+        n -= 1
+        buf[blen] = d[n]
+        blen += 1
+
+def putz(p: u64):
+    i: u64 = 0
+    while peek8(p + i) != 0 and blen < 255 and i < 200:
+        buf[blen] = u8(peek8(p + i))
+        blen += 1
+        i += 1
+
+def check(ok: u64, what: ptr[u8]):
+    checks += 1
+    if ok == 0:
+        fails += 1
+        put("lxfs: FAIL ")
+        put(what)
+        put("\n")
+        flush()
+
+def mode() -> u64:
+    return st[3] & 0xFFFFFFFF
+
+@unsafe
+def peek16(a: u64) -> u64:
+    return u64(ptr[u16](a)[0])
+
+def lx_main(sp: u64):
+    check(lsys(5, 1, u64(addr(st[0])), 0, 0, 0) == 0 and (mode() & 0xF000) == 0x2000, "fstat(1): console is S_IFCHR")
+    check(lsys(5, DOCS, u64(addr(st[0])), 0, 0, 0) == 0 and (mode() & 0xF000) == 0x4000, "fstat(docs): S_IFDIR")
+    n = lsys(217, DOCS, u64(addr(dents[0])), 4096, 0, 0)
+    put("lxfs: getdents64(docs) ")
+    putn(n)
+    put(" bytes:")
+    cnt: u64 = 0
+    big: u64 = 0
+    algn: u64 = 1
+    o: u64 = 0
+    while n < 4096 and o < n:
+        rl = peek16(u64(addr(dents[o + 16])))
+        if rl == 0 or (rl & 7) != 0 or peek(u64(addr(dents[o]))) == 0:
+            algn = 0
+            break
+        put(" ")
+        putz(u64(addr(dents[o + 19])))
+        if dents[o + 18] == 8:
+            put("(f)")
+        elif dents[o + 18] == 4:
+            put("(d)")
+        nm = u64(addr(dents[o + 19]))
+        if peek8(nm) == 98 and peek8(nm + 1) == 105 and peek8(nm + 2) == 103 and peek8(nm + 3) == 46 and dents[o + 18] == 8:
+            big = 1
+        cnt += 1
+        o += rl
+    put("\n")
+    flush()
+    check(n < 4096 and cnt == 2 and algn == 1 and big == 1, "getdents64: 2 linux_dirent64 records, big.bin a regular file")
+    check(lsys(217, DOCS, u64(addr(dents[0])), 4096, 0, 0) == 0, "getdents64 at the end -> 0")
+    fd = lsys(257, DOCS, u64("big.bin"), 0x80000, 0, 0)  # O_RDONLY | O_CLOEXEC
+    ok: u64 = 0
+    rd: u64 = 0
+    if fd < 64:
+        if lsys(5, fd, u64(addr(st[0])), 0, 0, 0) == 0 and (mode() & 0xF000) == 0x8000 and st[6] == 98304:
+            ok = 1
+        rd = lsys(0, fd, u64(addr(fbuf[0])), 4096, 0, 0)
+        lsys(3, fd, 0, 0, 0, 0)
+    check(ok == 1 and rd == 4096, "openat(docs, big.bin) + fstat size 98304 + read")
+    put("lxfs: openat(docs, \"big.bin\") fd ")
+    putn(fd)
+    put(", fstat S_IFREG size ")
+    putn(st[6])
+    put(", read ")
+    putn(rd)
+    put("\n")
+    flush()
+    check(lsys(257, AT_FDCWD, u64("big.bin"), 0, 0, 0) == EACCES, "openat(AT_FDCWD) -> EACCES")
+    check(lsys(257, DOCS, u64("/efi/forge/bin/cat"), 0, 0, 0) == EACCES, "openat absolute -> EACCES")
+    check(lsys(257, DOCS, u64("../bin/cat"), 0, 0, 0) == EACCES, "openat .. -> EACCES")
+    check(lsys(257, DOCS, u64("big.bin"), 1, 0, 0) == EROFS, "openat O_WRONLY -> EROFS")
+    check(lsys(257, DOCS, u64("big.bin"), 0x10000, 0, 0) == ENOTDIR, "openat O_DIRECTORY on a file -> ENOTDIR")
+    check(lsys(257, DOCS, u64("nosuch"), 0, 0, 0) == ENOENT, "openat missing -> ENOENT")
+    check(lsys(5, 99, u64(addr(st[0])), 0, 0, 0) == EBADF, "fstat bad fd -> EBADF")
+    check(lsys(217, 1, u64(addr(dents[0])), 4096, 0, 0) == ENOTDIR, "getdents64 console -> ENOTDIR")
+    check(lsys(217, DOCS, u64(addr(dents[0])), 100, 0, 0) == EINVAL, "getdents64 small buffer -> EINVAL")
+    put("lxfs: AT_FDCWD/absolute/.. -> EACCES, O_WRONLY -> EROFS, O_DIRECTORY -> ENOTDIR, ENOENT, EBADF, EINVAL ok\n")
+    if fails == 0:
+        put("lxfs: PASS (")
+        putn(checks)
+        put(" checks)\n")
+    flush()
+    lsys(231, fails, 0, 0, 0, 0)
+
+@naked
+@export
+def _start():
+    asm("mov %rsp, %rdi", "and $-16, %rsp", "call lx_main", "ud2")

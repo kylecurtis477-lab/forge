@@ -36,3 +36,9 @@ python3 ../../tools/forgeseal.py lxtest.forge $B/lxtest.elf $K ../../tests/unsaf
 ../../build/fld -o $B/lxthreads.raw $B/lxthreads.o
 python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" $B/lxthreads.raw $B/lxthreads.elf
 python3 ../../tools/forgeseal.py lxthreads.forge $B/lxthreads.elf $K ../../tests/unsafe/baseline.txt >/dev/null
+# 11.1c: lxfs (openat, fstat, getdents64), built and tagged the same way
+../../build/forgec lxfs.forge $B/lxfs.s $FORGEC_FLAGS
+../../build/fas -o $B/lxfs.o $B/lxfs.s
+../../build/fld -o $B/lxfs.raw $B/lxfs.o
+python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" $B/lxfs.raw $B/lxfs.elf
+python3 ../../tools/forgeseal.py lxfs.forge $B/lxfs.elf $K ../../tests/unsafe/baseline.txt >/dev/null

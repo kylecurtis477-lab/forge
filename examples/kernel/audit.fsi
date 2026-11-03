@@ -29,8 +29,10 @@ au_bytes: u64[256]
 au_tick: u64[256]
 
 def au_opcode(what: ptr[u8]) -> u64:
-# read 1, write 2, getdents 3, openat 4, dup 5, poll 6
+# read 1, write 2, getdents 3, openat 4, dup 5, poll 6, fstat 7 (11.1c)
     c = what[0]
+    if c == 102:
+        return 7
     if c == 114:
         return 1
     if c == 119:
@@ -56,6 +58,8 @@ def au_opname(o: u64) -> ptr[u8]:
         return "dup"
     if o == 6:
         return "poll"
+    if o == 7:
+        return "fstat"
     return "-"
 
 def au_rec(kind: u64, g: u64, pid: u64, op: u64):
