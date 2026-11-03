@@ -23,3 +23,10 @@ python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[-160+32]=0
 # 6.4: hello re-tagged as a Linux ABI binary (EI_OSABI = 3) and properly sealed: still refused
 python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" $B/hello.raw $B/linuxabi.elf
 python3 ../../tools/forgeseal.py hello.forge $B/linuxabi.elf $K ../../tests/unsafe/baseline.txt >/dev/null
+# 11.1: lxtest, a raw-syscall Linux x86-64 program: tagged EI_OSABI = 3 *before* sealing, so its seal
+# covers the tag; the kernel runs it only through a sandboxed launch (sh `run lxtest`, docs/linux-compat.md)
+../../build/forgec lxtest.forge $B/lxtest.s $FORGEC_FLAGS
+../../build/fas -o $B/lxtest.o $B/lxtest.s
+../../build/fld -o $B/lxtest.raw $B/lxtest.o
+python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" $B/lxtest.raw $B/lxtest.elf
+python3 ../../tools/forgeseal.py lxtest.forge $B/lxtest.elf $K ../../tests/unsafe/baseline.txt >/dev/null

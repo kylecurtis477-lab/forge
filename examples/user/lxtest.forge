@@ -1,0 +1,206 @@
+# forge: no-runtime
+# forge: caps()
+# Phase 11.1 Linux-ABI test program (docs/linux-compat.md). Built like every Forge user program
+# (forgec -> fas -> fld), then tagged EI_OSABI = 3 and sealed (examples/user/build.sh), so the kernel
+# runs it under the Linux syscall personality -- and only when sh launches it in the compat sandbox
+# (`run lxtest`). It uses no Forge runtime and no Forge syscall: everything below is a raw Linux
+# x86-64 syscall (rax = number; rdi, rsi, rdx, r10, r8, r9; -errno in rax).
+# Checks: the System V process-start stack (argc, argv, envp, auxv incl. AT_PAGESZ/AT_ENTRY/AT_RANDOM),
+# write, brk grow/shrink, mmap/munmap and its W^X and MAP_FIXED refusals, ioctl TCGETS/TIOCGWINSZ
+# (and ENOTTY/EBADF), getpid/getppid/gettid, set_tid_address, register preservation across
+# syscall, Forge syscall 409 being unreachable (ENOSYS), and exit_group.
+
+ENOSYS = 0xFFFFFFFFFFFFFFDA
+EACCES = 0xFFFFFFFFFFFFFFF3
+EINVAL = 0xFFFFFFFFFFFFFFEA
+EBADF = 0xFFFFFFFFFFFFFFF7
+ENOTTY = 0xFFFFFFFFFFFFFFE7
+
+fails: u64
+checks: u64
+buf: u8[256]
+blen: u64
+tio: u64[8]
+
+# rax = n; rdi, rsi, rdx, r10, r8 = a..e; r9 = 0
+@naked
+def lsys(n: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64:
+    asm("mov %rdi,%rax", "mov %rsi,%rdi", "mov %rdx,%rsi", "mov %rcx,%rdx", "mov %r8,%r10",
+        "mov %r9,%r8", "xor %r9d,%r9d", "syscall", "ret")
+
+# fill every argument register and callee-saved register with known values, make getpid (39), and
+# count how many of rdi, rsi, rdx, r10, r8, r9, rbx, rbp, r12-r15 changed (Linux preserves them all)
+@naked
+def regs_kept() -> u64:
+    asm("push %rbx", "push %rbp", "push %r12", "push %r13", "push %r14", "push %r15",
+        "mov $0x1111, %rdi", "mov $0x2222, %rsi", "mov $0x3333, %rdx", "mov $0x4444, %r10",
+        "mov $0x5555, %r8", "mov $0x6666, %r9", "mov $0x7777, %rbx", "mov $0x8888, %rbp",
+        "mov $0x9999, %r12", "mov $0xAAAA, %r13", "mov $0xBBBB, %r14", "mov $0xCCCC, %r15",
+        "mov $39, %eax", "syscall",
+        "xor %eax, %eax",
+        "cmp $0x1111, %rdi", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
+        "cmp $0x2222, %rsi", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
+        "cmp $0x3333, %rdx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
+        "cmp $0x4444, %r10", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
+        "cmp $0x5555, %r8", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
+        "cmp $0x6666, %r9", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
+        "cmp $0x7777, %rbx", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
+        "cmp $0x8888, %rbp", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
+        "cmp $0x9999, %r12", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
+        "cmp $0xAAAA, %r13", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
+        "cmp $0xBBBB, %r14", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
+        "cmp $0xCCCC, %r15", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
+        "pop %r15", "pop %r14", "pop %r13", "pop %r12", "pop %rbp", "pop %rbx", "ret")
+
+@unsafe
+def peek(a: u64) -> u64:
+    return ptr[u64](a)[0]
+
+@unsafe
+def poke(a: u64, v: u64):
+    ptr[u64](a)[0] = v
+
+@unsafe
+def peek8(a: u64) -> u64:
+    return u64(ptr[u8](a)[0])
+
+def flush():
+    lsys(1, 1, u64(addr(buf[0])), blen, 0, 0)
+    blen = 0
+
+def put(s: ptr[u8]):
+    putz(u64(s))
+
+def putn(v: u64):
+    d: u8[20]
+    n: u64 = 0
+    while n == 0 or v != 0:
+        d[n] = u8(48 + v % 10)
+        v = v / 10
+        n += 1
+    while n > 0 and blen < 255:
+        n -= 1
+        buf[blen] = d[n]
+        blen += 1
+
+def putz(p: u64):
+    i: u64 = 0
+    while peek8(p + i) != 0 and blen < 255 and i < 200:
+        buf[blen] = u8(peek8(p + i))
+        blen += 1
+        i += 1
+
+def check(ok: u64, what: ptr[u8]):
+    checks += 1
+    if ok == 0:
+        fails += 1
+        put("lxtest: FAIL ")
+        put(what)
+        put("\n")
+        flush()
+
+def lx_main(sp: u64):
+    argc = peek(sp)
+    put("lxtest: argc ")
+    putn(argc)
+    put(", argv[0] ")
+    putz(peek(sp + 8))
+    i: u64 = 1
+    while i < argc:
+        put(", argv[")
+        putn(i)
+        put("] ")
+        putz(peek(sp + 8 + i * 8))
+        i += 1
+    put("\n")
+    flush()
+    check(argc >= 1 and peek(sp + 8 + argc * 8) == 0, "argv NULL terminator")
+    envp = sp + 16 + argc * 8
+    while peek(envp) != 0:
+        envp += 8
+    av = envp + 8
+    pagesz: u64 = 0
+    entry: u64 = 0
+    rnd: u64 = 0
+    secure: u64 = 99
+    naux: u64 = 0
+    while peek(av) != 0 and naux < 64:
+        t = peek(av)
+        if t == 6:
+            pagesz = peek(av + 8)
+        if t == 9:
+            entry = peek(av + 8)
+        if t == 25:
+            rnd = peek(av + 8)
+        if t == 23:
+            secure = peek(av + 8)
+        av += 16
+        naux += 1
+    put("lxtest: auxv ")
+    putn(naux)
+    put(" entries, AT_PAGESZ ")
+    putn(pagesz)
+    put(", AT_ENTRY ok ")
+    putn(u64(entry == u64(_start)))
+    put(", AT_SECURE ")
+    putn(secure)
+    put(", AT_RANDOM 16 bytes ")
+    putn(u64(rnd != 0 and (peek(rnd) | peek(rnd + 8)) != 0))
+    put("\n")
+    flush()
+    check(pagesz == 4096 and entry == u64(_start) and secure == 0, "auxv")
+    check(rnd != 0 and (peek(rnd) | peek(rnd + 8)) != 0, "AT_RANDOM")
+    # brk: query, grow by 3 pages and touch them, shrink back
+    b0 = lsys(12, 0, 0, 0, 0, 0)
+    b1 = lsys(12, b0 + 3 * 4096, 0, 0, 0, 0)
+    check(b1 == b0 + 3 * 4096, "brk grow")
+    poke(b0 + 2 * 4096 + 8, 0x1234)
+    check(peek(b0 + 2 * 4096 + 8) == 0x1234, "brk memory")
+    check(lsys(12, b0, 0, 0, 0, 0) == b0, "brk shrink")
+    # mmap: anonymous private read/write (PROT 3, MAP_PRIVATE|MAP_ANONYMOUS = 0x22, fd -1)
+    m = lsys(9, 0, 8192, 3, 0x22, 0xFFFFFFFFFFFFFFFF)
+    check(m < 0xFFFFFFFFFFFFF000 and (m & 4095) == 0 and peek(m + 4096) == 0, "mmap anon")
+    poke(m + 4096, 77)
+    check(peek(m + 4096) == 77, "mmap memory")
+    check(lsys(11, m, 8192, 0, 0, 0) == 0, "munmap")
+    check(lsys(9, 0, 4096, 7, 0x22, 0xFFFFFFFFFFFFFFFF) == EACCES, "mmap PROT_EXEC refused (W^X)")
+    check(lsys(9, 0x10000000, 4096, 3, 0x32, 0xFFFFFFFFFFFFFFFF) == EINVAL, "mmap MAP_FIXED refused")
+    put("lxtest: brk +12288 ok, mmap 8192 ok, PROT_EXEC -> EACCES, MAP_FIXED -> EINVAL\n")
+    flush()
+    # ioctl on the console: TCGETS fills a termios (ICANON|ECHO set), TIOCGWINSZ a window size
+    r = lsys(16, 1, 0x5401, u64(addr(tio[0])), 0, 0)
+    check(r == 0 and ((tio[1] >> 32) & 0xA) == 0xA, "ioctl TCGETS")
+    r2 = lsys(16, 1, 0x5413, u64(addr(tio[4])), 0, 0)
+    rows = tio[4] & 0xFFFF
+    cols = (tio[4] >> 16) & 0xFFFF
+    check(r2 == 0 and rows != 0 and cols != 0, "ioctl TIOCGWINSZ")
+    check(lsys(16, 1, 0x1234, 0, 0, 0) == ENOTTY, "ioctl unknown -> ENOTTY")
+    check(lsys(16, 9, 0x5401, u64(addr(tio[0])), 0, 0) == EBADF, "ioctl bad fd -> EBADF")
+    put("lxtest: isatty(1) ")
+    putn(u64(r == 0))
+    put(", winsize ")
+    putn(rows)
+    put("x")
+    putn(cols)
+    put("\n")
+    flush()
+    pid = lsys(39, 0, 0, 0, 0, 0)
+    check(pid != 0 and lsys(186, 0, 0, 0, 0, 0) == pid and lsys(218, 0, 0, 0, 0, 0) == pid, "getpid/gettid/set_tid_address")
+    check(lsys(110, 0, 0, 0, 0, 0) != 0, "getppid")
+    check(regs_kept() == 0, "registers preserved across syscall")
+    # Forge-only syscalls are not visible from the Linux personality
+    check(lsys(409, 0, 0, 0, 0, 0) == ENOSYS and lsys(39 + 1000, 0, 0, 0, 0, 0) == ENOSYS, "Forge syscalls unreachable")
+    put("lxtest: pid ")
+    putn(pid)
+    put(", registers preserved, syscall 409 -> ENOSYS\n")
+    if fails == 0:
+        put("lxtest: PASS (")
+        putn(checks)
+        put(" checks)\n")
+    flush()
+    lsys(231, fails, 0, 0, 0, 0)
+
+@naked
+@export
+def _start():
+    asm("mov %rsp, %rdi", "and $-16, %rsp", "call lx_main", "ud2")

@@ -51,6 +51,7 @@ include "livepatch.fsi"
 include "kexec.fsi"
 include "ed25519.fsi"
 include "seal.fsi"
+include "linux.fsi"
 include "../../std/vec.fsi"
 include "../../std/map.fsi"
 
@@ -1061,6 +1062,7 @@ def fs_test():
     if code != (id & 0xFF):
         panic("init from disk failed")
     seal_test()
+    lx_init()
     cap_test()
     puts("PCI + virtio-blk + FAT32 (read-only) OK\n")
 

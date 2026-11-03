@@ -49,6 +49,9 @@ struct Proc:
     dma_n: u64
     dma_va: u64
     caps: u64  # Phase 6.2: capabilities granted from the sealed manifest
+    abi: u64  # 11.1: 0 Forge syscalls, LX_ABI = the Linux personality (linux.fsi)
+    lx_calls: u64  # Linux syscalls made
+    lx_unsup: u64  # ... of which answered ENOSYS
 
 procs: u64[64]
 kx_freeze: u64  # a kexec handoff is collecting every user process at a syscall boundary
@@ -872,6 +875,7 @@ def sys_fork(frame: u64) -> u64:
     c.brk = p.brk
     c.mmap_next = p.mmap_next
     c.caps = p.caps
+    c.abi = p.abi
     memcpy(u64(addr(c.args[0])), u64(addr(p.args[0])), 128)
     i = 0
     while i < NFD:
@@ -928,11 +932,18 @@ def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
     img = fs_read_file(addr(path[0]), addr(sz))
     if img == 0:
         return ENOENT
-    vc = image_verify(img, sz, SEAL_USER)
+    # 11.1: only a sandboxed launch (sh `run app`) may verify a Linux-ABI image (SEAL_COMPAT)
+    vk = SEAL_USER
+    if sb:
+        vk = SEAL_USER | SEAL_COMPAT
+    vc = image_verify(img, sz, vk)
     if vc == 0:
         seal_log(addr(path[0]))
         kfree(img)
         return ENOEXEC
+    abi: u64 = 0
+    if ((vload64(img) >> 56) & 0xFF) == 3:
+        abi = LX_ABI  # verified above with SEAL_COMPAT, so this is a sandboxed launch
     pml4 = as_new()
     iend: u64 = 0
     entry = elf_load(pml4, img, sz, u64(addr(iend)))
@@ -955,10 +966,18 @@ def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
     p.mmap_next = MMAP_BASE
     p.caps = p.caps & vc & CAPB_ALL  # never more than the parent held
     memcpy(u64(addr(p.args[0])), u64(addr(args[0])), 128)
+    p.abi = abi
+    p.lx_calls = 0
+    p.lx_unsup = 0
+    usp = USTACK_TOP - 8
+    if abi == LX_ABI:
+        usp = lx_stack(p, entry, path[:], args[:])
+        if usp == 0:
+            proc_exit(127)
     # fresh registers: rip = entry, rsp = top of the new stack, everything else zero
     memset(frame, 0, SF_SIZE)
     vstore64(frame + SF_RIP * 8, entry)
-    vstore64(frame + SF_RSP * 8, USTACK_TOP - 8)
+    vstore64(frame + SF_RSP * 8, usp)
     vstore64(frame + SF_RFLAGS * 8, 0x202)
     fpu_restore(fpu_template)
     nexecs += 1
@@ -1426,6 +1445,11 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
     st.sc[4] = d
     if kx_should_park():
         kx_park()
+    if cur_proc().abi == LX_ABI:
+    # 11.1: a Linux-personality process reaches only the Linux table; no Forge syscall is visible
+        if nr == 9:
+            return lx_mmap(a, b, c, d, vload64(frame + SF_R8 * 8), vload64(frame + SF_R9 * 8))
+        return lx_dispatch(nr, a, b, c, d)
     need = sys_need(nr)
     if need != 0:
         sp = cur_proc()

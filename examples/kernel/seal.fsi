@@ -9,6 +9,7 @@ SEAL_SIZE = 160
 SEAL_OK = 0x8000000000000000
 SEAL_USER = 0
 SEAL_MODULE = 1  # trailer word +56: what the image is for (forgeseal.py --module)
+SEAL_COMPAT = 0x100  # 11.1: OR-ed into the kind by a sandboxed launch; only then may a Linux image pass
 
 struct Blk64:
     b: u8[64]
@@ -147,7 +148,7 @@ def seal_eq(a: ptr[Dig], t: ptr[Seal]) -> u64:
 
 seal_ok_count: u64
 seal_refused: u64
-compat_sandbox_ready: u64  # 6.4: set by the Phase 11 Linux ABI layer; 0 = no compat sandbox
+compat_sandbox_ready: u64  # 6.4: set by lx_init (linux.fsi, 11.1) once the Linux ABI layer is up
 seal_why: u64  # reason code of the last refusal
 
 def seal_reason(code: u64) -> ptr[u8]:
@@ -164,7 +165,7 @@ def seal_reason(code: u64) -> ptr[u8]:
     if code == 7:
         return "wrong image kind (user program vs kernel module)"
     if code == 6:
-        return "Linux ABI image needs the compatibility sandbox (Phase 11, not built)"
+        return "Linux ABI image needs the compatibility sandbox (a sandboxed launch: sh run app)"
     return "?"
 
 # cache of signed trailer contents that passed Ed25519 verification (round robin)
@@ -222,7 +223,7 @@ def image_verify(img: u64, len: u64, kind: u64) -> u64:
         if ed25519_verify(addr(t.sig), ptr[B32](uimg(4)), msg, 96) == 0:
             return seal_fail(4)
         seal_cache_put(msg)
-    if t.rsvd != kind:
+    if t.rsvd != (kind & 0xFF):
         return seal_fail(7)
     ctx: Sha
     s = addr(ctx)
@@ -232,9 +233,10 @@ def image_verify(img: u64, len: u64, kind: u64) -> u64:
     sha_final(s, addr(inner))
     if seal_eq(addr(inner), t) == 0:
         return seal_fail(5)
-    # 6.4: Linux-ABI images (EI_OSABI = 3) run only inside the explicit compat sandbox;
-    # checked after the seal so a sealed Linux image is still refused
-    if compat_sandbox_ready == 0 and ((ptr[Ehdr](img).w0 >> 56) & 0xFF) == 3:
+    # 6.4: Linux-ABI images (EI_OSABI = 3) run only inside the explicit compat sandbox: the Linux
+    # layer must be up (compat_sandbox_ready, linux.fsi) and the caller must be a sandboxed launch
+    # (SEAL_COMPAT). Checked after the seal, so an unsealed or tampered Linux image is refused first.
+    if (compat_sandbox_ready == 0 or (kind & SEAL_COMPAT) == 0) and ((ptr[Ehdr](img).w0 >> 56) & 0xFF) == 3:
         return seal_fail(6)
     seal_ok_count += 1
     return SEAL_OK | (t.caps & 0xFFFFFFFF)

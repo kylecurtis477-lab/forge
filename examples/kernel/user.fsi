@@ -27,9 +27,18 @@ asm(".text",
     "  swapgs",
     "  mov %rsp, %gs:8",
     "  mov %gs:0, %rsp",
+    # 11.1: the argument registers are saved too (and restored on return): the Linux ABI says a
+    # syscall preserves every register but rax, rcx and r11, and Linux mmap/futex take r8/r9
+    "  push %r9",
+    "  push %r8",
+    "  push %r10",
+    "  push %rdx",
+    "  push %rsi",
+    "  push %rdi",
     "  pushq %gs:8",
     "  swapgs",
-    # frame (80 bytes, see SF_* below): pad, r15, r14, r13, r12, rbp, rbx, r11 (rflags), rcx (rip), user rsp
+    # frame (128 bytes, see SF_* below): pad, r15, r14, r13, r12, rbp, rbx, r11 (rflags), rcx (rip),
+    # user rsp, rdi, rsi, rdx, r10, r8, r9
     "  push %rcx",
     "  push %r11",
     "  push %rbx",
@@ -57,13 +66,14 @@ asm(".text",
     "  pop %rbx",
     "  pop %r11",
     "  pop %rcx",
+    # the user's own argument registers come back (never kernel values: exec and a fresh frame zero them)
+    "  mov 8(%rsp), %rdi",
+    "  mov 16(%rsp), %rsi",
+    "  mov 24(%rsp), %rdx",
+    "  mov 32(%rsp), %r10",
+    "  mov 40(%rsp), %r8",
+    "  mov 48(%rsp), %r9",
     "  pop %rsp",
-    "  xor %esi, %esi",
-    "  xor %edi, %edi",
-    "  xor %edx, %edx",
-    "  xor %r8d, %r8d",
-    "  xor %r9d, %r9d",
-    "  xor %r10d, %r10d",
     "  sysretq",
     # a forked child starts here (rdi = its copy of the parent's syscall frame) and returns 0 to user mode
     "fork_child_entry:",
@@ -125,10 +135,13 @@ extern def enter_ring3(rip: u64, rsp: u64)
 extern def fork_child_entry_addr() -> u64
 extern def kx_resume_entry_addr() -> u64
 extern def kx_restart_entry_addr() -> u64
-SF_SIZE = 80
+SF_SIZE = 128
 SF_RFLAGS = 7
 SF_RIP = 8
 SF_RSP = 9
+SF_RDI = 10  # 10..15: rdi, rsi, rdx, r10, r8, r9 (the six syscall argument registers)
+SF_R8 = 14
+SF_R9 = 15
 
 @naked
 def syscall_entry_addr() -> u64:
