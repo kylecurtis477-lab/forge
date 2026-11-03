@@ -1,0 +1,9 @@
+records: 113
+full replay same: 1
+cuts tried: 1
+cuts inconsistent: 0
+cuts all lose the tail: 1
+corruptions inconsistent: 0
+corruptions all detected: 1
+write after recovery survives: 1
+old history intact: 1

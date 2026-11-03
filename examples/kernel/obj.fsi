@@ -30,6 +30,18 @@ ob_clock: u64
 ob_dedup: u64
 ob_in: u64[64]  # payload staged for obj_write
 ob_out: u64[64]  # payload produced by obj_read / obj_read_at
+# 9.2 write-ahead log: every mutation appends one self-checking record (tag, fields, FNV of the record);
+# records only refer to earlier ones (a version follows its blob and object), so any prefix of the log
+# is a consistent store, and replay stops at the first torn or corrupt record.
+OB_NL = 65536
+OB_RT = 0x4F42540000000001  # type: t, nfields
+OB_RO = 0x4F424F0000000002  # object: id, type
+OB_RB = 0x4F42420000000003  # blob: n, words...
+OB_RV = 0x4F42560000000004  # version: obj, blob, ts
+ob_log: u64[65536]
+ob_lp: u64
+ob_lr: u64  # 1 while replaying (do not log)
+ob_lfull: u64
 
 def ob_reset():
     ob_nobj = 0
@@ -38,13 +50,57 @@ def ob_reset():
     ob_used = 0
     ob_clock = 0
     ob_dedup = 0
+    ob_lfull = 0
     i: u64 = 0
     while i < OB_NT:
         ob_tf[i] = 0
         i += 1
 
+def ob_lsum(a: u64, n: u64) -> u64:
+    h: u64 = 0xcbf29ce484222325
+    i: u64 = 0
+    while i < n:
+        h = (h ^ ob_log[a + i]) * 0x100000001b3
+        i += 1
+    return h
+
+def ob_lrec(tag: u64, a: u64, b: u64, c: u64, nw: u64) -> u64:
+# append tag, a, b, c (blob records: tag, n, then the n staged words) and the checksum
+    if ob_lr == 1:
+        return 0
+    n: u64 = 4
+    if tag == OB_RB:
+        n = 2 + nw
+    elif tag != OB_RV:
+        n = 3
+    if ob_lp + n + 1 > OB_NL:
+        ob_lfull = 1
+        return OB_ERR
+    p = ob_lp
+    ob_log[p] = tag
+    if tag == OB_RB:
+        ob_log[p + 1] = nw
+        i: u64 = 0
+        while i < nw:
+            ob_log[p + 2 + i] = ob_in[i]
+            i += 1
+    else:
+        ob_log[p + 1] = a
+        ob_log[p + 2] = b
+        if tag == OB_RV:
+            ob_log[p + 3] = c
+    ob_log[p + n] = ob_lsum(p, n)
+    ob_lp = p + n + 1
+    return 0
+
+def ob_log_clear():
+    ob_lp = 0
+    ob_lr = 0
+
 def ob_type_def(t: u64, nfields: u64) -> u64:
     if t == 0 or t >= OB_NT or nfields == 0 or nfields > OB_MAXW:
+        return OB_ERR
+    if ob_lrec(OB_RT, t, nfields, 0, 0) == OB_ERR:
         return OB_ERR
     ob_tf[t] = nfields
     return 0
@@ -79,6 +135,8 @@ def ob_blob_put(n: u64) -> u64:
         b += 1
     if ob_nblob >= OB_NB or ob_used + n > OB_NW:
         return OB_ERR
+    if ob_lrec(OB_RB, 0, 0, 0, n) == OB_ERR:
+        return OB_ERR
     b = ob_nblob
     ob_bh[b] = h
     ob_bo[b] = ob_used
@@ -95,6 +153,8 @@ def obj_new(t: u64) -> u64:
     if t == 0 or t >= OB_NT or ob_tf[t] == 0 or ob_nobj >= OB_NO:
         return OB_ERR
     o = ob_nobj
+    if ob_lrec(OB_RO, o, t, 0, 0) == OB_ERR:
+        return OB_ERR
     ob_otype[o] = t
     ob_ohead[o] = 0
     ob_nobj += 1
@@ -104,6 +164,8 @@ def ob_add_ver(o: u64, b: u64) -> u64:
     if ob_nver >= OB_NV:
         return OB_ERR
     v = ob_nver
+    if ob_lrec(OB_RV, o, b, ob_clock + 1, 0) == OB_ERR:
+        return OB_ERR
     ob_clock += 1
     ov_obj[v] = o
     ov_blob[v] = b
@@ -212,3 +274,46 @@ def obj_find(t: u64, f: u64, val: u64, start: u64) -> u64:
                 return o
         o += 1
     return OB_ERR
+
+def ob_replay(ln: u64) -> u64:
+# rebuild the store from ob_log[0:ln]; stops at the first torn/corrupt/out-of-order record and
+# truncates the log there. Returns the number of records applied.
+    ob_reset()
+    ob_lr = 1
+    p: u64 = 0
+    c: u64 = 0
+    while p < ln:
+        tag = ob_log[p]
+        n: u64 = 3
+        if tag == OB_RV:
+            n = 4
+        elif tag == OB_RB:
+            if p + 1 >= ln or ob_log[p + 1] == 0 or ob_log[p + 1] > OB_MAXW:
+                break
+            n = 2 + ob_log[p + 1]
+        elif tag != OB_RT and tag != OB_RO:
+            break
+        if p + n >= ln or ob_lsum(p, n) != ob_log[p + n]:
+            break
+        a = ob_log[p + 1]
+        b = ob_log[p + 2]
+        ok: u64 = 1
+        if tag == OB_RT:
+            ok = u64(ob_type_def(a, b) == 0)
+        elif tag == OB_RO:
+            ok = u64(a == ob_nobj and obj_new(b) == a)
+        elif tag == OB_RB:
+            i: u64 = 0
+            while i < a:
+                ob_in[i] = ob_log[p + 2 + i]
+                i += 1
+            ok = u64(ob_blob_put(a) == ob_nblob - 1)
+        else:
+            ok = u64(a < ob_nobj and b < ob_nblob and ob_log[p + 3] == ob_clock + 1 and ob_add_ver(a, b) != OB_ERR)
+        if ok == 0:
+            break
+        p += n + 1
+        c += 1
+    ob_lp = p
+    ob_lr = 0
+    return c
