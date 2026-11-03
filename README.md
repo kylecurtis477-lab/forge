@@ -3,13 +3,13 @@
 Forge is a small language with Python-like syntax. It is compiled ahead of time to x86-64 Linux assembly (GNU `as`, AT&T syntax) and linked with `ld`. It has no libc and no runtime dependencies. The compiler, `selfhost/forgec.forge`, is written in Forge and compiles itself to a fixpoint.
 
 ## Status
-- **Self-hosting works.** The Rust bootstrap compiles forgec into stage1. Then stage1 builds stage2, stage2 builds stage3, and stage3 builds stage4. `stage2.s == stage3.s == stage4.s` byte for byte. Once stage1 exists, Rust is no longer needed: forgec emits its own runtime asm. Only binutils `as`/`ld` is still required.
+- **Self-hosting works.** A checked-in seed compiler (`seed/forgec-seed`, sha256 pinned) builds stage2; stage2 builds stage3, and stage3 builds stage4. `stage2.s == stage3.s == stage4.s` byte for byte. Rust is not needed: the old Rust bootstrap (src/main.rs) is only an optional cross-check (`FORGE_RUST_CHECK=1 ./build.sh`). `tools/reseed.sh` refreshes the seed from a green build.
 - **Tests:** `./run_tests.sh` runs 36 tests: 23 program tests, 6 runtime-error tests and 7 compile-error tests. All pass. Except for `gc`/`gc_retention` (which use `mark()`/`release()`), the program `.expected` files are CPython output.
 - **Recovery:** the source transcript cut every `main.rs` write off at 4101 chars. The lexer and the edit fragments were recovered (see `recovered/`). The parser, codegen and runtime in `src/` were rewritten. `selfhost_start.forge` is the transcript's latest fragment, taken verbatim; it compiles and prints `scan loop fixed`.
 
 ## Build
 ```sh
-./build.sh                 # cargo build bootstrap -> stage1..stage4, checks fixpoint, installs build/forgec
+./build.sh                 # seed compiler -> stage2..stage4, checks fixpoint, installs build/forgec
 ./forge prog.forge -o prog # compile with self-hosted forgec + as + ld
 ./run_tests.sh
 bench/run_bench.py         # Forge vs Rust vs CPython

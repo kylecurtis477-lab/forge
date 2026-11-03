@@ -36,6 +36,9 @@ tests/ast/roundtrip.sh selfhost/compiler.forge selfhost/prelude.forge tools/*.fo
 tests/ast/semantic.sh || fail=1
 tests/grammar/run.sh || fail=1
 tests/fmt/run.sh || fail=1
+# tests/fas and tests/fld check every OS artifact (user programs, modules, EFI loader, kernel); build them
+# first so a clean tree (e.g. straight from the seed) runs the same checks instead of skipping them
+{ examples/kernel/build.sh && examples/efi/build.sh; } >/dev/null 2>&1 || { echo "FAIL os-artifacts-build (fas/fld artifact checks would be skipped)"; fail=1; }
 tests/fas/run.sh || fail=1
 tests/fld/run.sh || fail=1
 tests/pkg/run.sh || fail=1
