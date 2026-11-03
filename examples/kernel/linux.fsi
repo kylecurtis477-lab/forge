@@ -36,9 +36,10 @@
 # names a held directory handle's label ("<label>" itself -> a dup of that handle, sharing its
 # position) or lies under it ("<label>/<rest>" -> openat(handle, rest)) opens; anything else is EACCES.
 # 11.1e: stat 4 -- open's path rules, then fstat of that handle, then close.
+# 11.1e: lstat 6 -- the same as stat: the FAT32 ESP has no symbolic links, so there is nothing to not follow.
 # Not yet: real-time signals (32..64), sigaltstack, signals to other processes.
 LX_ABI = 1
-LX_NSYS = 31  # syscalls in the table above
+LX_NSYS = 32  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ENOTTY = 0xFFFFFFFFFFFFFFE7
@@ -1163,7 +1164,7 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
 # mmap (9, six arguments) is routed by syscall_dispatch, which reads r8/r9 from the frame
     p = cur_proc()
     p.lx_calls += 1
-    if nr == 0 or nr == 1 or nr == 2 or nr == 4 or nr == 20 or nr == 16 or nr == 5 or nr == 217 or nr == 257:
+    if nr == 0 or nr == 1 or nr == 2 or nr == 4 or nr == 6 or nr == 20 or nr == 16 or nr == 5 or nr == 217 or nr == 257:
         atomic_fetch_add(addr(p.fdbusy), 1, acq_rel)
         r: u64 = 0
         if nr == 0:
@@ -1174,7 +1175,7 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
             r = lx_writev(a, b, c)
         elif nr == 2:
             r = lx_openat(AT_FDCWD, a, b)
-        elif nr == 4:
+        elif nr == 4 or nr == 6:
             r = lx_stat(a, b)
         elif nr == 5:
             r = lx_fstat(a, b)

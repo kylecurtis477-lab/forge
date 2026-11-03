@@ -225,6 +225,7 @@ Each driver gets its own boot test, and none of them writes to disks it does not
    - **11.1e part 3 status: done (uname).** Linux `uname` (63): struct utsname packed from constants (sysname Linux, nodename forge, release 0.2.6-forge, version `#1 Forge Linux compat sandbox`, machine x86_64, domainname (none)); bad pointer -> EFAULT. 29 Linux syscalls. Tests: lxtest (30 checks), `run busybox uname -s -m` -> `Linux x86_64`.
    - **11.1e part 4 status: done (open).** Linux `open` (2) and `openat(AT_FDCWD, absolute)`: still no cwd; an absolute path naming a held dir handle's label (dup) or under it (openat of the rest) opens, everything else EACCES. 30 Linux syscalls. Tests: lxfs (18 checks), `run busybox wc -c` / `sha256sum` of big.bin (hash checked against the host), `cat /efi/forge/bin/cat` -> Permission denied.
    - **11.1e part 5 status: done (stat).** Linux `stat` (4): open's path rules, fstat, close. 31 Linux syscalls. Tests: lxfs (22 checks: file, granted dir, outside -> EACCES, missing -> ENOENT, bad buffer -> EFAULT), `run busybox ls /efi/forge/bin` -> Permission denied. `ls` of the granted dir next needs lstat (6) and fcntl (72).
+   - **11.1e part 6 status: done (lstat).** Linux `lstat` (6) = stat (no symlinks on FAT32). 32 Linux syscalls. Tests: lxfs (23 checks: lstat file, outside -> EACCES).
 2. C FFI with the SysV ABI (`extern "C"`, struct layout). Test: link against a C object file and call both ways.
 3. Python FFI: embed or extend CPython (hosted mode). Test: call a Forge function from Python and back.
 
