@@ -1,0 +1,2 @@
+# busybox (Phase 11.1e): BusyBox from verified source, sealed --foreign; may read files inside /efi/forge/docs
+dir /efi/forge/docs

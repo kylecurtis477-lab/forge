@@ -225,3 +225,18 @@ default action and exits 143.
   after the owner approves downloading one, and it will run under the same gate (sealed + sandboxed).
 - OSABI 0 Linux binaries (most static musl builds) are not detected as Linux; they are refused today
   only because they are unsealed.
+
+## BusyBox acceptance (11.1e)
+
+BusyBox is built from source only; no prebuilt third-party binary is used.
+
+- Sources (fetched into `$BB_SRC`, default /workspace/bb, outside the repo), pinned in `tools/busybox/build.sh`:
+  - busybox-1.38.0.tar.bz2, sha256 matches busybox.net's .sha256; GPG signature GOOD (Denys Vlasenko, C9E9416F76E610DBD09D040F47B70C55ACC9965B).
+  - musl-1.2.5.tar.gz: Rich Felker's key (56BCDB593020450F) could not be fetched, so it is verified by the SHA-256 pin only, which also matches Alpine's published sha512. Caveat until the key is obtained.
+  - make-4.4.1.tar.gz (host had no make): GPG signature made in 2023 by a key that has since expired (EXPKEYSIG, accepted with a note).
+- Host compiler: Debian gcc 14.2.0, used to build make and musl; BusyBox is compiled with `musl-gcc --static`. bzip2 decompression uses Python's bz2 (`tools/busybox/bzip2` shim).
+- Config: `tools/busybox/busybox.config` (allnoconfig + a small applet set).
+- Image: static EXEC at 0x400000, EI_OSABI set to 3, sealed `forgeseal.py --foreign` (level 3, unsafe 0, caps 0). `image_verify` refuses a level-3 seal on anything but a capability-free Linux image (reason 8); the 6.4 gate still refuses it outside the compat sandbox.
+- Manifest `examples/apps/busybox.mf`: one `dir /efi/forge/docs` grant.
+
+Status: echo, true, false, basename, env work. Missing syscalls seen at first run: writev 20 (stdio of seq, yes, expr), uname 63, open 2 and stat 4 (cat, ls, wc, sha256sum, head), getcwd 79, nanosleep 35, fcntl 72 (printf). They will be added one per commit.

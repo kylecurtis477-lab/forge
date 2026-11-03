@@ -1,0 +1,6 @@
+#!/usr/bin/python3
+# Forge build shim: bzip2 filter (stdin -> stdout) via Python's bz2; only what BusyBox's build needs
+import sys, bz2
+d = sys.stdin.buffer.read()
+if '-d' in sys.argv: sys.stdout.buffer.write(bz2.decompress(d))
+else: sys.stdout.buffer.write(bz2.compress(d, 9))

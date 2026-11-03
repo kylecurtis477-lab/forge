@@ -54,3 +54,7 @@ python3 ../../tools/forgeseal.py lxexec.forge $B/lxexec.elf $K ../../tests/unsaf
 ../../build/fld -o $B/lxsig.raw $B/lxsig.o
 python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" $B/lxsig.raw $B/lxsig.elf
 python3 ../../tools/forgeseal.py lxsig.forge $B/lxsig.elf $K ../../tests/unsafe/baseline.txt >/dev/null
+# 11.1e: BusyBox from verified source (tools/busybox), only when the source tarballs are on the box
+if [ -f ${BB_SRC:-/workspace/bb}/busybox-1.38.0.tar.bz2 ]; then
+    sh ../../tools/busybox/build.sh $B/busybox.elf $K
+fi

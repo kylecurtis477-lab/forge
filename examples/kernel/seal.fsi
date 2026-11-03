@@ -9,6 +9,7 @@ SEAL_SIZE = 160
 SEAL_OK = 0x8000000000000000
 SEAL_USER = 0
 SEAL_MODULE = 1  # trailer word +56: what the image is for (forgeseal.py --module)
+SEAL_FOREIGN = 3  # 11.1e: trailer level of a foreign (non-Forge) program, forgeseal.py --foreign
 SEAL_COMPAT = 0x100  # 11.1: OR-ed into the kind by a sandboxed launch; only then may a Linux image pass
 
 struct Blk64:
@@ -164,6 +165,8 @@ def seal_reason(code: u64) -> ptr[u8]:
         return "image hash mismatch"
     if code == 7:
         return "wrong image kind (user program vs kernel module)"
+    if code == 8:
+        return "foreign image must be a Linux ABI image with no capabilities"
     if code == 6:
         return "Linux ABI image needs the compatibility sandbox (a sandboxed launch: sh run app)"
     return "?"
@@ -236,8 +239,14 @@ def image_verify(img: u64, len: u64, kind: u64) -> u64:
     # 6.4: Linux-ABI images (EI_OSABI = 3) run only inside the explicit compat sandbox: the Linux
     # layer must be up (compat_sandbox_ready, linux.fsi) and the caller must be a sandboxed launch
     # (SEAL_COMPAT). Checked after the seal, so an unsealed or tampered Linux image is refused first.
-    if (compat_sandbox_ready == 0 or (kind & SEAL_COMPAT) == 0) and ((ptr[Ehdr](img).w0 >> 56) & 0xFF) == 3:
+    osabi = (ptr[Ehdr](img).w0 >> 56) & 0xFF
+    if (compat_sandbox_ready == 0 or (kind & SEAL_COMPAT) == 0) and osabi == 3:
         return seal_fail(6)
+    # 11.1e: level 3 = a foreign program (BusyBox built from verified source by tools/busybox), not
+    # checked by the Forge verifier: only as a Linux ABI image (so only in the compat sandbox) and
+    # declaring no capabilities.
+    if t.level == SEAL_FOREIGN and (osabi != 3 or t.caps != 0):
+        return seal_fail(8)
     seal_ok_count += 1
     return SEAL_OK | (t.caps & 0xFFFFFFFF)
 
