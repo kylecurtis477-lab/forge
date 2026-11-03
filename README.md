@@ -3,7 +3,7 @@
 Forge is a small language with Python-like syntax. It is compiled ahead of time to x86-64 Linux assembly (GNU `as`, AT&T syntax) and linked with `ld`. It has no libc and no runtime dependencies. The compiler, `selfhost/forgec.forge`, is written in Forge and compiles itself to a fixpoint.
 
 ## Status
-- **Self-hosting works.** A checked-in seed compiler (`seed/forgec-seed`, sha256 pinned) builds stage2; stage2 builds stage3, and stage3 builds stage4. `stage2.s == stage3.s == stage4.s` byte for byte. Rust is not needed: the old Rust bootstrap (src/main.rs) is only an optional cross-check (`FORGE_RUST_CHECK=1 ./build.sh`). `tools/reseed.sh` refreshes the seed from a green build.
+- **Self-hosting works.** A checked-in seed compiler (`seed/forgec-seed`), with the seed assembler and linker (`seed/fas-seed`, `seed/fld-seed`; all sha256 pinned in `seed/seed.sha256`), builds stage2 with no GNU as/ld; stage2 builds stage3, and stage3 builds stage4. `stage2.s == stage3.s == stage4.s` byte for byte. Rust is not needed: the old Rust bootstrap (src/main.rs) is only an optional cross-check (`FORGE_RUST_CHECK=1 ./build.sh`). `tools/reseed.sh` refreshes the seed from a green build.
 - **Tests:** `./run_tests.sh` runs 36 tests: 23 program tests, 6 runtime-error tests and 7 compile-error tests. All pass. Except for `gc`/`gc_retention` (which use `mark()`/`release()`), the program `.expected` files are CPython output.
 - **Recovery:** the source transcript cut every `main.rs` write off at 4101 chars. The lexer and the edit fragments were recovered (see `recovered/`). The parser, codegen and runtime in `src/` were rewritten. `selfhost_start.forge` is the transcript's latest fragment, taken verbatim; it compiles and prints `scan loop fixed`.
 
