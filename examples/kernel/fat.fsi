@@ -285,8 +285,17 @@ def fs_read_file(path: ptr[u8], size: ptr[u64]) -> u64:
         mutex_unlock(addr(fs_m))
         return 0
     sz = le32(e + 28)
+    mutex_unlock(addr(fs_m))
+    buf = fs_read_clu(ent_cluster(e), sz)
+    if buf != 0:
+        size[0] = sz
+    return buf
+
+def fs_read_clu(c: u64, sz: u64) -> u64:
+# a whole file's cluster chain into a fresh kernel buffer (sz + 512 bytes); 0 on a bad chain or I/O error
+# (11.1d: also used by the Linux execve path, which reaches the file through a handle, not a path)
     buf = kmalloc(sz + 512)
-    c = ent_cluster(e)
+    mutex_lock(addr(fs_m))
     got: u64 = 0
     while got < sz:
         if c < 2 or c >= 0x0FFFFFF8:
@@ -303,5 +312,4 @@ def fs_read_file(path: ptr[u8], size: ptr[u64]) -> u64:
             s += 1
         c = fat_next(c)
     mutex_unlock(addr(fs_m))
-    size[0] = sz
     return buf

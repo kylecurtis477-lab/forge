@@ -25,7 +25,7 @@ Inside the personality a process reaches **only** the Linux table. No Forge sysc
 including the driver (400+), kexec/ktest (408/409, still also gated by `ktest_hooks`) and grant
 syscalls: they return -ENOSYS like any unknown number.
 
-## Syscalls (11.1a, 11.1b, 11.1c; 20 in all)
+## Syscalls (11.1a, 11.1b, 11.1c, 11.1d; 22 in all)
 
 | nr | name | notes |
 |----|------|-------|
@@ -34,6 +34,7 @@ syscalls: they return -ENOSYS like any unknown number.
 | 3 | close | |
 | 5 | fstat | (11.1c) 144-byte struct stat: st_dev 0xF0, st_ino = first cluster + 1, st_mode S_IFREG 0444 / S_IFDIR 0555 / S_IFCHR 0620 (console, st_rdev 0x401) / S_IFIFO 0600, st_size, st_blksize 4096, st_blocks; bad fd -> EBADF, bad pointer -> EFAULT, revoked grant -> EACCES |
 | 217 | getdents64 | (11.1c) linux_dirent64 records (d_ino synthetic, d_off = directory position, d_type DT_DIR / DT_REG, 8-byte aligned); buffer must be >= 768 bytes (else EINVAL); non-directory -> ENOTDIR, no read right -> EPERM, revoked grant -> EACCES |
+| 59 / 322 | execve / execveat | (11.1d) sealed Linux images only, reached through a held handle (see Exec below); Forge, unsealed or tampered images -> ENOEXEC, no cwd (relative path, AT_FDCWD) or outside every handle -> EACCES, live clone()d threads -> EBUSY, bad pointers -> EFAULT, argv over 16 entries / 127 bytes -> E2BIG, an argument with a space -> EINVAL, unknown flags -> EINVAL |
 | 257 | openat | (11.1c) only relative to a directory handle the sandbox holds (Forge `openat` rules: no absolute paths, no `..`); AT_FDCWD -> EACCES (there is no ambient cwd), write/create/truncate/append flags -> EROFS, O_DIRECTORY on a file -> ENOTDIR; O_CLOEXEC / O_NONBLOCK / O_NOFOLLOW / O_LARGEFILE accepted |
 | 9 | mmap | anonymous + private only; PROT_EXEC -> EACCES (W^X: no new code), MAP_FIXED -> EINVAL, file mappings -> ENODEV; r8/r9 come from the saved frame |
 | 11 | munmap | |
@@ -144,11 +145,43 @@ paths -> EACCES, O_WRONLY -> EROFS, O_DIRECTORY on a file -> ENOTDIR, a missing 
 fstat of a bad fd -> EBADF, getdents64 on the console -> ENOTDIR and with a 100-byte buffer ->
 EINVAL. 14 checks; it exits with the failure count.
 
+## Exec (11.1d)
+
+The process stays in the compat sandbox across execve: same pid, same sandbox name, no root
+capability (it was dropped at `run` and nothing gives it back). The image is reached only through a
+handle the process already holds:
+
+- `execve("/abs/path", argv, envp)`: the path must start with the label of one of its directory
+  handles with LOOKUP (a manifest `dir` grant is labelled with its path), and the rest is opened
+  relative to that handle exactly like `openat` (no `..`, grant ledger and revocation apply).
+- `execveat(dirfd, name, argv, envp, 0)`: `name` relative to `dirfd`; AT_FDCWD -> EACCES.
+- `execveat(fd, "", argv, envp, AT_EMPTY_PATH)`: the file handle itself (fexecve).
+
+The file needs READ on its handle, is charged to its grant as an `exec` use in `audit`, and is
+verified with SEAL_USER | SEAL_COMPAT: an unsealed or tampered image fails the seal, and a sealed
+Forge image (OSABI 0) is refused because a Linux process may only become another Linux process. After
+the checks, handles opened with O_CLOEXEC are closed; all others (including the manifest grants) are
+kept, and `caps &= new seal's caps` -- carried or narrowed, never widened. argv[1..] are passed
+(space-joined, at most 16 / 127 bytes), envp is not (the new image starts with an empty
+environment, as at `run`). execve while clone()d threads live -> EBUSY (Linux would kill them; not
+yet).
+
+## Test: lxexec
+
+`run lxexec` (manifest `examples/apps/lxexec.mf`: `dir /efi/forge/bin`, fd 4) runs three images in
+one process. Stage 1 checks the refusals (Forge `cat`, `unsealed`, `tampered` -> ENOEXEC;
+`/efi/forge/docs/big.bin`, a relative path, `..`, AT_FDCWD -> EACCES; bad path / argv pointers ->
+EFAULT; an argument with a space -> EINVAL), opens `hello` twice (once O_CLOEXEC) and execve()s
+`/efi/forge/bin/lxexec stage2 ...`. Stage 2 checks the same pid, the O_CLOEXEC fd gone (EBADF), the
+plain fd and fd 4 still there, AT_FDCWD still refused, then `execveat(4, "lxexec")` -> stage 3, which
+checks fexecve (AT_EMPTY_PATH) of the held Forge `hello` -> ENOEXEC and an unknown flag -> EINVAL.
+21 checks across the three images.
+
 ## Not yet
 
 - Timed futex waits, FUTEX_REQUEUE/WAKE_OP, threads running in parallel on several CPUs.
 - stat / lstat / newfstatat by path, readlink, getcwd, writable files.
-- execve, signals, /proc, sockets, file-backed mmap.
+- signals, /proc, sockets, file-backed mmap.
 - Busybox (the Phase 11.1 acceptance test) needs a third-party static binary; it will be added only
   after the owner approves downloading one, and it will run under the same gate (sealed + sandboxed).
 - OSABI 0 Linux binaries (most static musl builds) are not detected as Linux; they are refused today

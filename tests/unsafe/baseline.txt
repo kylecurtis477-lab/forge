@@ -1,5 +1,5 @@
 # dir file functions blocks ops top-level-asm (counts may shrink, never grow)
-examples/kernel kernel.forge 171 0 719 7
+examples/kernel kernel.forge 170 0 716 7
 examples/efi loader.forge 12 0 81 0
 examples/user bg.forge 10 0 13 0
 examples/user blkd.forge 12 0 24 0
@@ -33,3 +33,4 @@ examples/user nvmed2.forge 10 0 13 0
 examples/user lxtest.forge 7 0 7 0
 examples/user lxthreads.forge 12 0 12 0
 examples/user lxfs.forge 7 0 7 0
+examples/user lxexec.forge 6 0 6 0

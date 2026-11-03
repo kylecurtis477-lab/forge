@@ -24,9 +24,11 @@
 # the tid word at thread exit (see the threads section below).
 # 11.1c: fstat 5, getdents64 217, openat 257 -- only relative to a directory handle the process
 # holds (no AT_FDCWD, no absolute paths, read-only opens), with the grant ledger counting each use.
-# Not yet: execve, signals.
+# 11.1d: execve 59, execveat 322 -- sealed Linux images reached through a held handle only; the
+# sandbox, its handles (minus O_CLOEXEC) and its narrowed capabilities carry over (section below).
+# Not yet: signals.
 LX_ABI = 1
-LX_NSYS = 20  # syscalls in the table above
+LX_NSYS = 22  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ENOTTY = 0xFFFFFFFFFFFFFFE7
@@ -46,7 +48,7 @@ def lx_mix(x: u64) -> u64:
     z = (z ^ (z >> 27)) * 0x94D049BB133111EB
     return z ^ (z >> 31)
 
-def lx_stack(p: ptr[Proc], entry: u64, path: slice[u8], args: slice[u8]) -> u64:
+def lx_stack(p: ptr[Proc], entry: u64, pa: slice[u8]) -> u64:
 # build the initial Linux stack in the (current, fresh) address space; returns rsp or 0.
 # 1 KiB at USTACK_TOP - 1024: words 0..63 are argc/argv/envp/auxv (16-byte aligned, as the ABI
 # requires), bytes 512.. hold the strings (path at +0, args at +128) and AT_RANDOM (+256)
@@ -63,14 +65,14 @@ def lx_stack(p: ptr[Proc], entry: u64, path: slice[u8], args: slice[u8]) -> u64:
     sbase = USTACK_TOP - 512
     nm: u64 = 0
     k = 0
-    while k < 127 and k < len(path) and path[k] != 0:
-        st[k] = path[k]
-        if path[k] == 47:
+    while k < 127 and pa[k] != 0:  # pa = exec_pack(path, args)
+        st[k] = pa[k]
+        if pa[k] == 47:
             nm = k + 1  # argv[0] is the last path component
         k += 1
     k = 0
-    while k < 127 and k < len(args) and args[k] != 0:
-        st[128 + k] = args[k]
+    while k < 127 and pa[128 + k] != 0:
+        st[128 + k] = pa[128 + k]
         k += 1
     r = lx_mix(rdtsc() ^ (p.pid << 32))
     r2 = lx_mix(r ^ rdtsc())
@@ -110,7 +112,7 @@ def lx_stack(p: ptr[Proc], entry: u64, path: slice[u8], args: slice[u8]) -> u64:
     puts("linux: pid ")
     put_u64(p.pid)
     puts(" runs ")
-    puts(addr(path[0]))
+    puts(addr(st[0]))
     puts(" under the Linux ABI personality (compat sandbox), argc ")
     put_u64(v[0])
     puts("\n")
@@ -454,13 +456,19 @@ def lx_openat(dirfd: u64, upath: u64, flags: u64) -> u64:
     if (flags & O_ACCMODE) != 0 or (flags & O_WRITEISH) != 0:
         return EROFS  # the mounted file systems are read-only to applications
     fd = sys_openat(dirfd & 0xFFFFFFFF, upath)
-    if fd >= NFD or (flags & O_DIRECTORY) == 0:
+    if fd >= NFD:
         return fd
-    fl = fd_get(cur_proc(), fd)
-    if u64(fl) == 0 or (fl.type != F_DIR and fl.type != F_ODIR):
-        sys_close(fd)
-        return ENOTDIR
+    if (flags & O_DIRECTORY) != 0:
+        fl = fd_get(cur_proc(), fd)
+        if u64(fl) == 0 or (fl.type != F_DIR and fl.type != F_ODIR):
+            sys_close(fd)
+            return ENOTDIR
+    lx_cx(fd, (flags >> 19) & 1)  # 11.1d: O_CLOEXEC (0x80000) is honoured by execve
     return fd
+
+def lx_cx(fd: u64, on: u64):
+    p = cur_proc()
+    p.lx_cloexec = (p.lx_cloexec & ~(u64(1) << fd)) | (on << fd)
 
 def lx_fstat(fd: u64, ubuf: u64) -> u64:
 # struct stat (x86-64, 144 bytes); uid/gid 0, times 0, st_ino the object's first cluster or id
@@ -561,6 +569,177 @@ def lx_getdents64(fd: u64, ubuf: u64, n: u64) -> u64:
             j += 9 + l + 1
     return done
 
+# ---- 11.1d: execve / execveat ----
+# A sandboxed Linux process has no root capability and no cwd, so an image is reachable only through
+# a handle it already holds: execve(path) needs an absolute path that lies under one of its directory
+# handles (matched by the handle's label, then opened relative to it like openat); execveat(dirfd,
+# name) opens name relative to dirfd, or with AT_EMPTY_PATH runs the file handle itself (fexecve).
+# The image must be sealed AND tagged Linux (OSABI 3); it is verified with SEAL_COMPAT because the
+# caller is already inside the compat sandbox. The new image keeps the sandbox (no root capability
+# comes back), keeps its handles except O_CLOEXEC ones, and its capabilities are AND-ed with the new
+# seal's: grants are carried or narrowed, never widened. argv[1..] become the space-separated args
+# (at most 16, 127 bytes; an argument containing a space -> EINVAL); envp is not passed (empty env).
+LX_NODIR = 0xFFFFFFFFFFFFFFFF
+AT_EMPTY_PATH = 0x1000
+E2BIG = 0xFFFFFFFFFFFFFFF9
+EIO = 0xFFFFFFFFFFFFFFFB
+lx_execs: u64
+lx_exec_refused: u64
+
+def lx_argv(uargv: u64, args: slice[u8]) -> u64:
+# argv[1..] -> "a b c" in args (128 bytes); argv may be NULL
+    w: u64 = 0
+    args[0] = 0
+    if uargv == 0:
+        return 0
+    s: u8[128]
+    i: u64 = 1
+    while i < 17:
+        pv: u64 = 0
+        if user_ptr_ok(uargv + i * 8, 8) == 0 or copy_user(u64(addr(pv)), uargv + i * 8, 8) != 0:
+            return EFAULT
+        if pv == 0:
+            return 0
+        n = copy_str_user(u64(addr(s[0])), pv, 128)
+        if n > 127:
+            return EFAULT
+        k: u64 = 0
+        while s[k] != 0:
+            if s[k] == 32:
+                return EINVAL
+            k += 1
+        if w + k + 1 > 127:
+            return E2BIG
+        if w != 0:
+            args[w] = 32
+            w += 1
+        j: u64 = 0
+        while j < k:
+            args[w + j] = s[j]
+            j += 1
+        w += k
+        args[w] = 0
+        i += 1
+    return E2BIG
+
+def lx_under(fl: nptr[File], path: slice[u8]) -> u64:
+# length of fl's label when path is "<label>/<rest>", else 0
+    if u64(fl) == 0:
+        return 0
+    k: u64 = 0
+    while k < 31 and fl.lab[k] != 0:
+        if path[k] != fl.lab[k]:
+            return 0
+        k += 1
+    if k == 0 or k >= 31 or path[k] != 47 or path[k + 1] == 0:
+        return 0
+    return k
+
+def lx_exec_refuse(p: ptr[Proc], path: slice[u8], why: ptr[u8], e: u64) -> u64:
+    lx_exec_refused += 1
+    f = gr_pbegin()
+    puts("linux: pid ")
+    put_u64(p.pid)
+    puts(" execve ")
+    puts(addr(path[0]))
+    puts(" refused: ")
+    puts(why)
+    puts("\n")
+    gr_pend(f)
+    return e
+
+def lx_execve(frame: u64, dirfd: u64, upath: u64, uargv: u64, flags: u64) -> u64:
+# execve(path, argv, envp) is dirfd = LX_NODIR; execveat(dirfd, path, argv, envp, flags) otherwise
+    path: u8[128]
+    args: u8[128]
+    if copy_str_user(u64(addr(path[0])), upath, 128) > 127:
+        return EFAULT
+    p = cur_proc()
+    if sb_slot(p.pid) == MAX_PROCS:
+        return EACCES  # the Linux personality exists only inside the compat sandbox
+    if (flags & ~AT_EMPTY_PATH) != 0:
+        return EINVAL
+    if dirfd == AT_FDCWD:
+        return lx_exec_refuse(p, path[:], "AT_FDCWD (no cwd)", EACCES)
+    ar = lx_argv(uargv, args[:])
+    if ar != 0:
+        return ar
+    if p.nxthr != 0:
+        return EBUSY  # documented limit: no execve while clone()d threads are alive
+    fd: u64 = 0
+    tmp: u64 = 1
+    if dirfd == LX_NODIR:
+        if path[0] != 47:
+            return lx_exec_refuse(p, path[:], "no cwd; an absolute path under a held handle is needed", EACCES)
+        if path_ok(path[:]) == 0:
+            return lx_exec_refuse(p, path[:], "no .. or empty components", EACCES)
+        i: u64 = 0
+        l: u64 = 0
+        while i < NFD:
+            d = fd_get(p, i)
+            if u64(d) != 0 and d.type == F_DIR and (p.fdr[i] & CAP_LOOKUP) != 0:
+                l = lx_under(d, path[:])
+                if l != 0:
+                    break
+            i += 1
+        if i == NFD:
+            return lx_exec_refuse(p, path[:], "not under a handle the sandbox holds", EACCES)
+        fd = sys_openat(i, upath + l + 1)
+    elif (flags & AT_EMPTY_PATH) != 0 and path[0] == 0:
+        fd = dirfd & 0xFFFFFFFF
+        tmp = 0
+    else:
+        fd = sys_openat(dirfd & 0xFFFFFFFF, upath)
+    if fd > 0xFFFFFFFFFFFFF000:
+        return fd
+    fl = fd_get(p, fd)
+    if u64(fl) == 0:
+        return EBADF
+    if path[0] == 0:
+        k: u64 = 0
+        while k < 31 and fl.lab[k] != 0:
+            path[k] = fl.lab[k]  # fexecve: name the image by its handle's label
+            k += 1
+        path[k] = 0
+    e: u64 = 0
+    if fl.type != F_FILE:
+        e = EACCES
+    elif (p.fdr[fd] & CAP_READ) == 0:
+        e = EACCES
+    elif gr_use(fl.gid, "exec") != 0:
+        e = EACCES
+    img: u64 = 0
+    sz = fl.size
+    if e == 0:
+        img = fs_read_clu(fl.clu, sz)
+        if img == 0:
+            e = EIO
+    if tmp != 0:
+        sys_close(fd)
+    if e != 0:
+        return e
+    vc = image_verify(img, sz, SEAL_USER | SEAL_COMPAT)
+    if vc == 0:
+        seal_log(addr(path[0]))
+        kfree(img)
+        return ENOEXEC
+    if lx_osabi(img) != 3:
+        kfree(img)
+        return lx_exec_refuse(p, path[:], "not a Linux image (Forge images run only through Forge exec)", ENOEXEC)
+    # past every check: drop O_CLOEXEC handles, then replace the image
+    i2: u64 = 0
+    while i2 < NFD:
+        if ((p.lx_cloexec >> i2) & 1) != 0:
+            sys_close(i2)
+        i2 += 1
+    lx_execs += 1
+    pa: u8[256]
+    exec_pack(pa[:], path[:], args[:])
+    return exec_image(frame, img, sz, vc, pa[:])
+
+def lx_osabi(img: u64) -> u64:
+    return (le32(img + 4) >> 24) & 0xFF  # e_ident[EI_OSABI]
+
 def lx_le(b: slice[u8], off: u64, v: u64, n: u64):
     i: u64 = 0
     while i < n:
@@ -591,6 +770,8 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
     if nr == 3:
         if p.nxthr != 0 and atomic_load(addr(p.fdbusy), acquire) != 0:
             return EBUSY  # 11.1b: another thread is using a (shared) fd
+        if a < NFD:
+            lx_cx(a, 0)
         return sys_close(a)
     if nr == 11 or nr == 12:
         f = irq_save()  # threads share mm state (and one CPU): irqs off serialises it

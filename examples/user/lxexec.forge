@@ -1,0 +1,212 @@
+# forge: no-runtime
+# forge: caps()
+# Phase 11.1d Linux-ABI execve test (docs/linux-compat.md). Built and sealed like lxtest (EI_OSABI = 3,
+# runs only through `run lxexec`); its manifest grants fd 4 = /efi/forge/bin (dir: lookup + read).
+# One process, three images, chosen by argv[1]:
+#   stage 1: the refusals (a Forge image, unsealed and tampered images, a path outside every held handle,
+#            a relative or ".." path, bad pointers), then opens hello twice (one O_CLOEXEC) and
+#            execve()s itself by absolute path under fd 4 with argv "stage2 <cloexec fd> <fd> <pid> <checks>"
+#   stage 2: same pid, the O_CLOEXEC handle is gone, the other handle and the grant are still there, no
+#            ambient authority came back; then execveat(4, "lxexec") with argv "stage3 <checks>"
+#   stage 3: fexecve-style execveat(AT_EMPTY_PATH) of a held Forge image -> ENOEXEC, then PASS.
+
+EACCES = 0xFFFFFFFFFFFFFFF3
+ENOEXEC = 0xFFFFFFFFFFFFFFF8
+EFAULT = 0xFFFFFFFFFFFFFFF2
+EBADF = 0xFFFFFFFFFFFFFFF7
+EINVAL = 0xFFFFFFFFFFFFFFEA
+AT_FDCWD = 0xFFFFFFFFFFFFFF9C
+BIN = 4
+
+fails: u64
+checks: u64
+buf: u8[256]
+blen: u64
+st: u64[18]
+nb: u8[96]
+av: u64[8]
+
+@naked
+def lsys(n: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64:
+    asm("mov %rdi,%rax", "mov %rsi,%rdi", "mov %rdx,%rsi", "mov %rcx,%rdx", "mov %r8,%r10",
+        "mov %r9,%r8", "xor %r9d,%r9d", "syscall", "ret")
+
+# the u64 at %fs:off (TLS through the FS base set by arch_prctl)
+@naked
+def fs_read(off: u64) -> u64:
+    asm("mov %fs:(%rdi), %rax", "ret")
+
+@unsafe
+def peek(a: u64) -> u64:
+    return ptr[u64](a)[0]
+
+@unsafe
+def poke(a: u64, v: u64):
+    ptr[u64](a)[0] = v
+
+@unsafe
+def peek8(a: u64) -> u64:
+    return u64(ptr[u8](a)[0])
+
+def flush():
+    lsys(1, 1, u64(addr(buf[0])), blen, 0, 0)
+    blen = 0
+
+def put(s: ptr[u8]):
+    putz(u64(s))
+
+def putn(v: u64):
+    d: u8[20]
+    n: u64 = 0
+    while n == 0 or v != 0:
+        d[n] = u8(48 + v % 10)
+        v = v / 10
+        n += 1
+    while n > 0 and blen < 255:
+        n -= 1
+        buf[blen] = d[n]
+        blen += 1
+
+def putz(p: u64):
+    i: u64 = 0
+    while peek8(p + i) != 0 and blen < 255 and i < 200:
+        buf[blen] = u8(peek8(p + i))
+        blen += 1
+        i += 1
+
+def check(ok: u64, what: ptr[u8]):
+    checks += 1
+    if ok == 0:
+        fails += 1
+        put("lxexec: FAIL ")
+        put(what)
+        put("\n")
+        flush()
+
+def mode() -> u64:
+    return st[3] & 0xFFFFFFFF
+
+def num(slot: u64, v: u64) -> u64:
+# v as decimal in nb[slot * 16 ..]; returns its address
+    d: u8[20]
+    n: u64 = 0
+    while n == 0 or v != 0:
+        d[n] = u8(48 + v % 10)
+        v = v / 10
+        n += 1
+    k: u64 = 0
+    while n > 0:
+        n -= 1
+        nb[slot * 16 + k] = d[n]
+        k += 1
+    nb[slot * 16 + k] = 0
+    return u64(addr(nb[slot * 16]))
+
+def atoi(p: u64) -> u64:
+    v: u64 = 0
+    while peek8(p) >= 48 and peek8(p) <= 57:
+        v = v * 10 + peek8(p) - 48
+        p += 1
+    return v
+
+def arg(sp: u64, i: u64) -> u64:
+    if i >= peek(sp):
+        return 0
+    return peek(sp + 8 + i * 8)
+
+def execve(path: ptr[u8]) -> u64:
+    return lsys(59, u64(path), u64(addr(av[0])), 0, 0, 0)
+
+def stage1(sp: u64):
+    av[0] = u64("lxexec")
+    av[1] = 0
+    check(execve("/efi/forge/bin/cat") == ENOEXEC, "execve of a Forge image -> ENOEXEC")
+    check(execve("/efi/forge/bin/unsealed") == ENOEXEC, "execve of an unsealed image -> ENOEXEC")
+    check(execve("/efi/forge/bin/tampered") == ENOEXEC, "execve of a tampered image -> ENOEXEC")
+    check(execve("/efi/forge/docs/big.bin") == EACCES, "execve outside the held handles -> EACCES")
+    check(execve("lxexec") == EACCES, "relative execve (no cwd) -> EACCES")
+    check(execve("/efi/forge/bin/../bin/lxexec") == EACCES, "execve with .. -> EACCES")
+    check(lsys(59, 8, u64(addr(av[0])), 0, 0, 0) == EFAULT, "execve bad path pointer -> EFAULT")
+    av[1] = 16
+    av[2] = 0
+    check(execve("/efi/forge/bin/lxexec") == EFAULT, "execve bad argv[1] -> EFAULT")
+    av[1] = u64("two words")
+    check(execve("/efi/forge/bin/lxexec") == EINVAL, "execve argv with a space -> EINVAL")
+    check(lsys(322, AT_FDCWD, u64("lxexec"), u64(addr(av[0])), 0, 0) == EACCES, "execveat(AT_FDCWD) -> EACCES")
+    a = lsys(257, BIN, u64("hello"), 0x80000, 0, 0)  # O_CLOEXEC
+    b = lsys(257, BIN, u64("hello"), 0, 0, 0)
+    check(a < 16 and b < 16, "openat hello twice (one O_CLOEXEC)")
+    put("lxexec: stage 1 pid ")
+    putn(lsys(39, 0, 0, 0, 0, 0))
+    put(": Forge, unsealed, tampered images -> ENOEXEC; outside handles, relative, .. -> EACCES; bad pointers -> EFAULT\n")
+    put("lxexec: stage 1 execve /efi/forge/bin/lxexec (O_CLOEXEC fd ")
+    putn(a)
+    put(", plain fd ")
+    putn(b)
+    put(")\n")
+    flush()
+    if fails != 0:
+        lsys(231, fails, 0, 0, 0, 0)
+    av[1] = u64("stage2")
+    av[2] = num(0, a)
+    av[3] = num(1, b)
+    av[4] = num(2, lsys(39, 0, 0, 0, 0, 0))
+    av[5] = num(3, checks + 1)
+    av[6] = 0
+    r = execve("/efi/forge/bin/lxexec")
+    check(0, "execve returned")
+    putn(0 - r)
+    flush()
+    lsys(231, 1, 0, 0, 0, 0)
+
+def stage2(sp: u64):
+    checks = atoi(arg(sp, 5))
+    check(peek(sp) == 6, "stage 2 argc 6")
+    check(lsys(39, 0, 0, 0, 0, 0) == atoi(arg(sp, 4)), "same pid after execve")
+    check(lsys(5, atoi(arg(sp, 2)), u64(addr(st[0])), 0, 0, 0) == EBADF, "O_CLOEXEC handle closed by execve")
+    check(lsys(5, atoi(arg(sp, 3)), u64(addr(st[0])), 0, 0, 0) == 0 and (mode() & 0xF000) == 0x8000, "plain handle carried")
+    check(lsys(5, BIN, u64(addr(st[0])), 0, 0, 0) == 0 and (mode() & 0xF000) == 0x4000, "grant fd 4 carried")
+    check(lsys(257, AT_FDCWD, u64("lxexec"), 0, 0, 0) == EACCES, "still no ambient authority")
+    put("lxexec: stage 2 pid ")
+    putn(lsys(39, 0, 0, 0, 0, 0))
+    put(": O_CLOEXEC fd closed, plain fd and grant fd 4 carried, no ambient authority; execveat(4, lxexec)\n")
+    flush()
+    if fails != 0:
+        lsys(231, fails, 0, 0, 0, 0)
+    av[0] = u64("lxexec")
+    av[1] = u64("stage3")
+    av[2] = num(0, atoi(arg(sp, 3)))
+    av[3] = num(1, checks + 1)
+    av[4] = 0
+    lsys(322, BIN, u64("lxexec"), u64(addr(av[0])), 0, 0)
+    check(0, "execveat returned")
+    lsys(231, 1, 0, 0, 0, 0)
+
+def stage3(sp: u64):
+    checks = atoi(arg(sp, 3))
+    av[0] = u64("hello")
+    av[1] = 0
+    check(lsys(322, atoi(arg(sp, 2)), u64(""), u64(addr(av[0])), 0, 0x1000) == ENOEXEC, "execveat(AT_EMPTY_PATH) of a Forge image -> ENOEXEC")
+    check(lsys(322, BIN, u64("lxexec"), u64(addr(av[0])), 0, 0x40) == EINVAL, "execveat unknown flag -> EINVAL")
+    put("lxexec: stage 3 pid ")
+    putn(lsys(39, 0, 0, 0, 0, 0))
+    put(": fexecve of a held Forge image -> ENOEXEC\n")
+    if fails == 0:
+        put("lxexec: PASS (3 images, ")
+        putn(checks)
+        put(" checks)\n")
+    flush()
+    lsys(231, fails, 0, 0, 0, 0)
+
+def lx_main(sp: u64):
+    s = arg(sp, 1)
+    if s != 0 and peek8(s + 5) == 50:
+        stage2(sp)
+    if s != 0 and peek8(s + 5) == 51:
+        stage3(sp)
+    stage1(sp)
+
+@naked
+@export
+def _start():
+    asm("mov %rsp, %rdi", "and $-16, %rsp", "call lx_main", "ud2")

@@ -1,0 +1,2 @@
+# lxexec (Phase 11.1d): Linux-ABI execve test; may look up and read (so execve) images in /efi/forge/bin
+dir /efi/forge/bin

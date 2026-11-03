@@ -42,3 +42,9 @@ python3 ../../tools/forgeseal.py lxthreads.forge $B/lxthreads.elf $K ../../tests
 ../../build/fld -o $B/lxfs.raw $B/lxfs.o
 python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" $B/lxfs.raw $B/lxfs.elf
 python3 ../../tools/forgeseal.py lxfs.forge $B/lxfs.elf $K ../../tests/unsafe/baseline.txt >/dev/null
+# 11.1d: lxexec (execve, execveat), built and tagged the same way
+../../build/forgec lxexec.forge $B/lxexec.s $FORGEC_FLAGS
+../../build/fas -o $B/lxexec.o $B/lxexec.s
+../../build/fld -o $B/lxexec.raw $B/lxexec.o
+python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" $B/lxexec.raw $B/lxexec.elf
+python3 ../../tools/forgeseal.py lxexec.forge $B/lxexec.elf $K ../../tests/unsafe/baseline.txt >/dev/null

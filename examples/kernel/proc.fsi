@@ -53,6 +53,7 @@ struct Proc:
     lx_calls: u64  # Linux syscalls made
     lx_unsup: u64  # ... of which answered ENOSYS
     lx_dino: u64  # 11.1c: synthetic d_ino counter for getdents64
+    lx_cloexec: u64  # 11.1d: bit fd set = opened with O_CLOEXEC (closed by execve)
     # 11.1b: Linux threads (linux.fsi). `thread` is the main thread and always the last to die; the
     # clone()d threads share pml4, fds and brk/mmap state and are pinned to the main thread's CPU
     nxthr: u64  # clone()d threads still alive
@@ -950,7 +951,6 @@ def thread_free_new(t: ptr[Thread]):
     t.state = T_DEAD
     thread_free(t)
 
-@unsafe
 def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
     path: u8[128]
     args: u8[128]
@@ -977,8 +977,28 @@ def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
         seal_log(addr(path[0]))
         kfree(img)
         return ENOEXEC
+    pa: u8[256]
+    exec_pack(pa[:], path[:], args[:])
+    r = exec_image(frame, img, sz, vc, pa[:])
+    if r == 0 and sb:
+        sandbox_enter(cur_proc(), path[:])
+    return r
+
+def exec_pack(pa: slice[u8], path: slice[u8], args: slice[u8]):
+# pa[0..128) = path, pa[128..256) = args (both NUL-terminated): exec_image's one argument buffer
+    k: u64 = 0
+    while k < 128:
+        pa[k] = path[k]
+        pa[128 + k] = args[k]
+        k += 1
+
+@unsafe
+def exec_image(frame: u64, img: u64, sz: u64, vc: u64, pa: slice[u8]) -> u64:
+# replace the calling process's image with a verified one (vc = its sealed capabilities); frees img.
+# Shared by sys_exec and (11.1d) the Linux execve. Capabilities only narrow: caps &= vc.
+# pa = exec_pack(path, args) (kernel memory).
     abi: u64 = 0
-    if ((vload64(img) >> 56) & 0xFF) == 3:
+    if lx_osabi(img) == 3:
         abi = LX_ABI  # verified above with SEAL_COMPAT, so this is a sandboxed launch
     pml4 = as_new()
     iend: u64 = 0
@@ -1001,13 +1021,17 @@ def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
     p.brk = p.brk_base
     p.mmap_next = MMAP_BASE
     p.caps = p.caps & vc & CAPB_ALL  # never more than the parent held
-    memcpy(u64(addr(p.args[0])), u64(addr(args[0])), 128)
+    k: u64 = 0
+    while k < 128:
+        p.args[k] = pa[128 + k]
+        k += 1
     p.abi = abi
     p.lx_calls = 0
     p.lx_unsup = 0
+    p.lx_cloexec = 0
     usp = USTACK_TOP - 8
     if abi == LX_ABI:
-        usp = lx_stack(p, entry, path[:], args[:])
+        usp = lx_stack(p, entry, pa)
         if usp == 0:
             proc_exit(127)
     # fresh registers: rip = entry, rsp = top of the new stack, everything else zero
@@ -1019,8 +1043,6 @@ def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
     cur_thread().fsbase = 0  # 11.1b: a new image starts without TLS
     wrmsr(MSR_FS_BASE, 0)
     nexecs += 1
-    if sb:
-        sandbox_enter(p, path[:])
     return 0
 
 @unsafe
@@ -1487,13 +1509,18 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
     if cur_proc().abi == LX_ABI:
     # 11.1: a Linux-personality process reaches only the Linux table; no Forge syscall is visible
         lx_exit_check()  # 11.1b: a pending group exit ends this thread here
+        r8 = vload64(frame + SF_R8 * 8)  # 5th argument (mmap, clone, execveat)
         if nr == 9:
             f = irq_save()  # 11.1b: the process's threads share one CPU; irqs off serialises mm state
-            r = lx_mmap(a, b, c, d, vload64(frame + SF_R8 * 8), vload64(frame + SF_R9 * 8))
+            r = lx_mmap(a, b, c, d, r8, vload64(frame + SF_R9 * 8))
             irq_restore(f)
             return r
         if nr == 56:
-            return lx_clone(frame, a, b, c, d, vload64(frame + SF_R8 * 8))
+            return lx_clone(frame, a, b, c, d, r8)
+        if nr == 59:
+            return lx_execve(frame, LX_NODIR, a, b, 0)  # 11.1d
+        if nr == 322:
+            return lx_execve(frame, a, b, c, r8)
         if nr == 158:
         # 11.1b: arch_prctl may change this thread's FS base; load it now (sched.fsi reloads on switches)
             r = lx_arch_prctl(a, b)
