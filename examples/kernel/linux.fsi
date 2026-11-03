@@ -39,11 +39,13 @@
 # 11.1e: lstat 6 -- the same as stat: the FAT32 ESP has no symbolic links, so there is nothing to not follow.
 # 11.1e: fcntl 72 -- F_DUPFD / F_DUPFD_CLOEXEC (dup's rules), F_GETFD / F_SETFD (FD_CLOEXEC), F_GETFL,
 # F_SETFL only when it changes nothing (no status flag is settable); other commands EINVAL.
+# 11.1e: getcwd 79 -- always "/": there is no working directory, so relative paths stay EACCES.
 # Not yet: real-time signals (32..64), sigaltstack, signals to other processes.
 LX_ABI = 1
-LX_NSYS = 33  # syscalls in the table above
+LX_NSYS = 34  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
+ERANGE = 0xFFFFFFFFFFFFFFDE
 ENOTTY = 0xFFFFFFFFFFFFFFE7
 ENODEV = 0xFFFFFFFFFFFFFFED
 lx_procs: u64  # Linux-personality execs
@@ -559,6 +561,21 @@ def lx_fcntl(fd: u64, cmd: u64, arg: u64) -> u64:
             return 0
         return EINVAL
     return EINVAL
+
+def lx_getcwd(ubuf: u64, size: u64) -> u64:
+# getcwd(buf, size): there is no working directory (relative paths are EACCES), so it reports "/";
+# returns the length with the NUL, like the raw syscall
+    if size < 2:
+        return ERANGE
+    if user_ptr_ok(ubuf, 2) == 0:
+        return EFAULT
+    kb: u8[2]
+    kb[0] = 47
+    kb[1] = 0
+    r = copy_user(ubuf, u64(addr(kb[0])), 2)
+    if r != 0:
+        return r
+    return 2
 
 def lx_cx(fd: u64, on: u64):
     p = cur_proc()
@@ -1256,6 +1273,8 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
         return sys_getpid()
     if nr == 63:
         return lx_uname(a)
+    if nr == 79:
+        return lx_getcwd(a, b)
     if nr == 110:
         return sys_getppid()
     if nr == 186:

@@ -227,6 +227,7 @@ Each driver gets its own boot test, and none of them writes to disks it does not
    - **11.1e part 5 status: done (stat).** Linux `stat` (4): open's path rules, fstat, close. 31 Linux syscalls. Tests: lxfs (22 checks: file, granted dir, outside -> EACCES, missing -> ENOENT, bad buffer -> EFAULT), `run busybox ls /efi/forge/bin` -> Permission denied. `ls` of the granted dir next needs lstat (6) and fcntl (72).
    - **11.1e part 6 status: done (lstat).** Linux `lstat` (6) = stat (no symlinks on FAT32). 32 Linux syscalls. Tests: lxfs (23 checks: lstat file, outside -> EACCES).
    - **11.1e part 7 status: done (fcntl).** Linux `fcntl` (72): F_DUPFD / F_DUPFD_CLOEXEC, F_GETFD / F_SETFD, F_GETFL, no-op F_SETFL. 33 Linux syscalls. Tests: lxfs (28 checks), `busybox ls /efi/forge/docs` lists both files, `busybox printf %d-%s 42 ok` -> 42-ok.
+   - **11.1e part 8 status: done (getcwd).** Linux `getcwd` (79) always returns "/" (no working directory; relative paths stay EACCES). 34 Linux syscalls. Tests: lxtest (getcwd, ERANGE, EFAULT), `busybox pwd` -> /.
 2. C FFI with the SysV ABI (`extern "C"`, struct layout). Test: link against a C object file and call both ways.
 3. Python FFI: embed or extend CPython (hosted mode). Test: call a Forge function from Python and back.
 
