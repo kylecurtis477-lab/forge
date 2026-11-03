@@ -10,8 +10,13 @@ LP_ENOTPATCHABLE = 1
 LP_ERANGE = 2
 LP_EHASH = 3
 LP_ESELFTEST = 4
-lp_target: u64
-lp_hash: u64
+LP_EFULL = 5
+LP_MAX = 8
+# site table: each registered @patchable entry keeps its own text hash and patch state
+lp_sites: u64[8]
+lp_hashes: u64[8]
+lp_on: u64[8]
+lp_nsites: u64
 lp_applied: u64
 lp_reverted: u64
 lp_rollbacks: u64
@@ -29,12 +34,40 @@ def lp_fnv(va: u64, n: u64) -> u64:
 def lp_is_nop(va: u64) -> u64:
     return u64(vload8(va) == 0x0F and vload8(va + 1) == 0x1F and vload8(va + 2) == 0x44 and vload8(va + 3) == 0 and vload8(va + 4) == 0)
 
+def lp_find(target: u64) -> u64:
+# index of the site for target, or LP_MAX
+    i: u64 = 0
+    while i < lp_nsites:
+        if lp_sites[i] == target:
+            return i
+        i += 1
+    return LP_MAX
+
+def lp_site_hash(target: u64) -> u64:
+    i = lp_find(target)
+    if i == LP_MAX:
+        return 0
+    return lp_hashes[i]
+
 def lp_register(target: u64) -> u64:
+    if lp_find(target) != LP_MAX:
+        return 0
     if (target & 15) != 0 or lp_is_nop(target) == 0:
         return LP_ENOTPATCHABLE
-    lp_target = target
-    lp_hash = lp_fnv(target, 32)
+    if lp_nsites >= LP_MAX:
+        return LP_EFULL
+    lp_sites[lp_nsites] = target
+    lp_hashes[lp_nsites] = lp_fnv(target, 32)
+    lp_nsites += 1
     return 0
+
+def lp_npatched() -> u64:
+    n: u64 = 0
+    i: u64 = 0
+    while i < lp_nsites:
+        n += lp_on[i]
+        i += 1
+    return n
 
 @unsafe
 def lp_write5(target: u64, b: u64):
@@ -46,24 +79,28 @@ def lp_write5(target: u64, b: u64):
     stop_machine_end(f)
 
 def lp_apply(target: u64, newfn: u64) -> u64:
-    if target != lp_target or lp_is_nop(target) == 0:
+    i = lp_find(target)
+    if i == LP_MAX or lp_is_nop(target) == 0:
         return LP_ENOTPATCHABLE
-    if lp_fnv(target, 32) != lp_hash:
+    if lp_fnv(target, 32) != lp_hashes[i]:
         return LP_EHASH
     d = newfn - (target + 5)
     if d + 0x80000000 > 0xFFFFFFFF:
         return LP_ERANGE
     lp_write5(target, 0xE9 | ((d & 0xFFFFFFFF) << 8))
+    lp_on[i] = 1
     lp_applied += 1
     return 0
 
 @unsafe
 def lp_revert(target: u64) -> u64:
-    if target != lp_target or vload8(target) != 0xE9:
+    i = lp_find(target)
+    if i == LP_MAX or vload8(target) != 0xE9:
         return LP_ENOTPATCHABLE
     lp_write5(target, 0x0000441F0F)
+    lp_on[i] = 0
     lp_reverted += 1
-    if lp_fnv(target, 32) != lp_hash:
+    if lp_fnv(target, 32) != lp_hashes[i]:
         return LP_EHASH
     return 0
 

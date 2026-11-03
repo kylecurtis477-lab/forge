@@ -289,6 +289,17 @@ def sys_getpid() -> u64:
 # live-patch target (Phase 2.5): entry is a 5-byte nop that livepatch.fsi turns into a jmp
     return kcur_pid()
 
+def kcur_ppid() -> u64:
+    p = cur_proc()
+    if u64(p) == 0:
+        return 0
+    return p.ppid
+
+@patchable
+def sys_getppid() -> u64:
+# second live-patch site (no-restart gap 3)
+    return kcur_ppid()
+
 def tty0_push(c: u64) -> u64:
     if c == 8 or c == 127:
         if tty_count > 0 and tty_buf[(tty_head + tty_count - 1) & 511] != 10:
@@ -1272,7 +1283,7 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
     if nr == 97:
         return lapic_cpu()
     if nr == 110:
-        return cur_proc().ppid
+        return sys_getppid()
     if nr == 200:
     # self-test probes: 1 = kernel read of user memory without stac, 2 = kernel call into user code
         if user_ptr_ok(b, 8) == 0:

@@ -11,7 +11,7 @@ examples/user hello.forge 10 0 13 0
 examples/user sh.forge 10 0 13 0
 examples/user sum.forge 10 0 13 0
 examples/modules badabi.forge 0 0 0 0
-examples/modules getpid2.forge 3 0 5 0
+examples/modules getpid2.forge 3 0 4 0
 examples/modules hello.forge 2 0 4 0
 examples/modules newer.forge 0 0 0 0
 examples/modules tty1.forge 2 0 8 0

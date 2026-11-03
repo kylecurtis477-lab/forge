@@ -1054,6 +1054,7 @@ def kabi_future_probe() -> u64:
 def kexports_init():
     kexport("puts", u64(puts), 0)
     kexport("kcur_pid", u64(kcur_pid), 0)
+    kexport("kcur_ppid", u64(kcur_ppid), 0)
     kexport("putc", u64(putc), 0)
     kexport("put_u64", u64(put_u64), 0)
     kexport("put_hex", u64(put_hex), 0)
@@ -1264,7 +1265,7 @@ lph_iter: u64[4]
 def lp_hammer(i: u64):
 # kernel threads have no process: the right answer is 0, patched or not
     while atomic_load(addr(lph_stop), acquire) == 0:
-        if sys_getpid() != 0:
+        if sys_getpid() != 0 or sys_getppid() != 0:
             atomic_fetch_add(addr(lph_wrong), 1, acq_rel)
         atomic_fetch_add(addr(lph_calls), 1, acq_rel)
         atomic_fetch_add(addr(lph_iter[i]), 1, acq_rel)
@@ -1274,6 +1275,10 @@ def lp_hammer(i: u64):
 @unsafe
 def lp_check_getpid(fn: u64) -> u64:
     return u64(call_ptr(fn) == kcur_pid())
+
+@unsafe
+def lp_check_getppid(fn: u64) -> u64:
+    return u64(call_ptr(fn) == kcur_ppid())
 
 lp_fail_post: u64
 
@@ -1306,6 +1311,11 @@ def livepatch_test():
         panic("livepatch accepted a function without the patchable nop")
     if lp_register(tgt) != 0:
         panic("sys_getpid is not patchable")
+    tg2 = u64(sys_getppid)
+    if lp_register(tg2) != 0 or lp_register(tgt) != 0 or lp_nsites != 2:
+        panic("second live-patch site not registered")
+    if lp_apply(u64(kcur_ppid), tgt) != LP_ENOTPATCHABLE:
+        panic("live patch applied to an unregistered site")
     sz: u64 = 0
     img = mod_read("EFI/Forge/mod/getpid2.ko", addr(sz))
     m = mod_load(img, sz)
@@ -1313,6 +1323,8 @@ def livepatch_test():
         panic("getpid2.ko rejected")
     good = mod_sym(m, "lp_getpid")
     bad = mod_sym(m, "lp_getpid_bad")
+    good2 = mod_sym(m, "lp_getppid")
+    bad2 = mod_sym(m, "lp_getppid_bad")
     th: u64[4]
     i: u64 = 1
     while i < 4:
@@ -1323,24 +1335,49 @@ def livepatch_test():
         panic("bad live patch installed")
     # a patch that fails its check once installed is rolled back
     lp_fail_post = 1
-    if lp_apply_checked(tgt, good, u64(lp_check_flaky)) != LP_ESELFTEST or lp_is_nop(tgt) == 0 or lp_fnv(tgt, 32) != lp_hash:
+    if lp_apply_checked(tgt, good, u64(lp_check_flaky)) != LP_ESELFTEST or lp_is_nop(tgt) == 0 or lp_fnv(tgt, 32) != lp_site_hash(tgt):
         panic("failed live patch not rolled back")
+    if lp_apply_checked(tg2, bad2, u64(lp_check_getppid)) != LP_ESELFTEST or lp_is_nop(tg2) == 0:
+        panic("bad live patch installed on the second site")
+    both: u64 = 0
     k: u64 = 0
     while k < 25:
+    # the two sites are patched and reverted independently; the order alternates
         if lp_apply_checked(tgt, good, u64(lp_check_getpid)) != 0:
             panic("live patch failed")
         if lp_apply(tgt, good) != LP_ENOTPATCHABLE:
             panic("double patch accepted")
+        if lp_apply_checked(tg2, good2, u64(lp_check_getppid)) != 0:
+            panic("live patch of the second site failed")
+        if lp_npatched() == 2:
+            both += 1
         sleep_ticks(2)
-        if lp_revert(tgt) != 0:
-            panic("live patch revert: text hash mismatch")
+        if (k & 1) == 0:
+            if lp_revert(tgt) != 0:
+                panic("live patch revert: text hash mismatch")
+            if lp_is_nop(tg2) != 0 or lp_npatched() != 1:
+                panic("revert of one site changed the other")
+            sleep_ticks(1)
+            if lp_revert(tg2) != 0:
+                panic("live patch revert (site 2): text hash mismatch")
+        else:
+            if lp_revert(tg2) != 0:
+                panic("live patch revert (site 2): text hash mismatch")
+            if lp_is_nop(tgt) != 0 or lp_npatched() != 1:
+                panic("revert of one site changed the other")
+            sleep_ticks(1)
+            if lp_revert(tgt) != 0:
+                panic("live patch revert: text hash mismatch")
         sleep_ticks(1)
         k += 1
+    if lp_npatched() != 0 or lp_fnv(tgt, 32) != lp_site_hash(tgt) or lp_fnv(tg2, 32) != lp_site_hash(tg2):
+        panic("live patch sites not restored")
     lp_quiesce()
     via = call_ptr(mod_sym(m, "lp_calls"))
+    via2 = call_ptr(mod_sym(m, "lp_pcalls"))
     c1 = via
     sleep_ticks(2)
-    if call_ptr(mod_sym(m, "lp_calls")) != c1 or call_ptr(mod_sym(m, "lp_active")) != 0:
+    if call_ptr(mod_sym(m, "lp_calls")) != c1 or call_ptr(mod_sym(m, "lp_active")) != 0 or call_ptr(mod_sym(m, "lp_pcalls")) != via2 or call_ptr(mod_sym(m, "lp_pactive")) != 0:
         panic("patched code still reached after rollback")
     atomic_store(addr(lph_stop), 1, seq_cst)
     i = 1
@@ -1362,6 +1399,11 @@ def livepatch_test():
     puts(" through the patch), wrong ")
     put_u64(lph_wrong)
     putc(10)
+    puts("livepatch: 2 sites (sys_getpid, sys_getppid) patched independently, both live in ")
+    put_u64(both)
+    puts(" rounds, ")
+    put_u64(via2)
+    puts(" calls through the getppid patch\n")
     puts("livepatch: bad patch rejected before install (rejects ")
     put_u64(lp_rejects)
     puts("), failed patch rolled back (rollbacks ")
@@ -1371,7 +1413,7 @@ def livepatch_test():
     puts(", heap leaked ")
     put_u64(heap_live - h0)
     putc(10)
-    if lph_wrong != 0 or via == 0 or via >= lph_calls or lp_rollbacks != 1 or lp_rejects != 1 or frames_free != f0 or heap_live != h0:
+    if lph_wrong != 0 or via == 0 or via >= lph_calls or lp_rollbacks != 1 or lp_rejects != 2 or both != k or via2 == 0 or frames_free != f0 or heap_live != h0:
         panic("live patching test failed")
     puts("live patching OK\n")
 

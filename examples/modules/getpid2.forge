@@ -1,10 +1,12 @@
 # forge: no-runtime
-# Live patch for sys_getpid: same result, counts its calls; lp_getpid_bad is a deliberately wrong
-# replacement the kernel's self-test must reject and roll back.
+# Live patches for sys_getpid and sys_getppid: same results, count their calls; the _bad variants are deliberately wrong
+# replacements the kernel's self-test must reject.
 extern def kcur_pid() -> u64
+extern def kcur_ppid() -> u64
 
-calls: u64
-active: u64
+# per site (0 = getpid, 1 = getppid): calls through the patch, calls currently inside it
+calls: u64[2]
+active: u64[2]
 
 @export
 def mod_abi() -> u64:
@@ -18,13 +20,24 @@ def mod_init() -> u64:
 def mod_exit():
     pass
 
-@export
 @unsafe
+def enter(i: u64):
+    atomic_add64(u64(addr(active[i])), 1)
+    atomic_add64(u64(addr(calls[i])), 1)
+
+@unsafe
+def leave(i: u64):
+    atomic_add64(u64(addr(active[i])), 0xFFFFFFFFFFFFFFFF)
+
+@unsafe
+def rd(a: u64) -> u64:
+    return atomic_load64(a)
+
+@export
 def lp_getpid() -> u64:
-    atomic_add64(u64(addr(active)), 1)
-    atomic_add64(u64(addr(calls)), 1)
+    enter(0)
     r = kcur_pid()
-    atomic_add64(u64(addr(active)), 0xFFFFFFFFFFFFFFFF)
+    leave(0)
     return r
 
 @export
@@ -32,11 +45,28 @@ def lp_getpid_bad() -> u64:
     return kcur_pid() + 12345
 
 @export
-@unsafe
 def lp_calls() -> u64:
-    return atomic_load64(u64(addr(calls)))
+    return rd(u64(addr(calls[0])))
 
 @export
-@unsafe
 def lp_active() -> u64:
-    return atomic_load64(u64(addr(active)))
+    return rd(u64(addr(active[0])))
+
+@export
+def lp_getppid() -> u64:
+    enter(1)
+    r = kcur_ppid()
+    leave(1)
+    return r
+
+@export
+def lp_getppid_bad() -> u64:
+    return kcur_ppid() + 777
+
+@export
+def lp_pcalls() -> u64:
+    return rd(u64(addr(calls[1])))
+
+@export
+def lp_pactive() -> u64:
+    return rd(u64(addr(active[1])))
