@@ -45,6 +45,9 @@ def _start():
     out("forktest: fork ok (child exit 42, parent x=1), 5 children reaped, ECHILD\n")
     flush()
     b0 = sys_brk(0)
+    # the brk base sits above this image's last segment (bss holds x), never on its own text/data
+    if b0 < u64(addr(x)) + 8:
+        fail("brk base inside the image")
     b1 = sys_brk(b0 + 100000)
     if b1 != b0 + 100000:
         fail("brk grow")

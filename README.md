@@ -118,6 +118,10 @@ Eligible functions are plain int functions with int params. They are lowered to 
 It powers `examples/kernel` and `examples/efi`. The kernel is a higher-half x86-64 kernel with a frame allocator, its own 4-level paging, a heap, demand paging, a framebuffer console, ACPI/IOAPIC/LAPIC timer, IST stacks, SMP with a preemptive scheduler, ring-3 Forge user programs via syscall/sysret, and PCI + virtio-blk + read-only FAT32 (it loads `\EFI\Forge\init.elf` from the ESP). `examples/efi` is a native UEFI loader written in Forge (`\EFI\Forge\forgex64.efi`) that loads the kernel from a GPT ESP shared with Windows and Linux. The kernel boots through GRUB on BIOS and UEFI, or through the Forge loader (see docs/SYSTEMS.md).
 Both are boot-tested headless in QEMU/OVMF by `tests/os/run.sh`. See docs/SYSTEMS.md for the subset, dual-boot design, and roadmap, and docs/BUILD_PLAN.md for the phased build plan.
 
+Subsystem docs (design, formats, APIs, tests, limits):
+
+- docs/process.md: processes, the ELF loader, fork/exec/brk/mmap
+
 ## Limitations
 - Int-typed or inferred-int code raises `OverflowError` rather than promoting to a bigint, e.g. `fact(40)` called with a literal. `int(big)` raises. There are no bitwise operators on bigints.
 - No `*args`/`**kwargs`, and `type()` is not supported.

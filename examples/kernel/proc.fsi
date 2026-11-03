@@ -589,7 +589,8 @@ def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> nptr[Thread]:
         seal_log("kernel-supplied image")
         return 0
     pml4 = as_new()
-    entry = elf_load(pml4, img, len)
+    iend: u64 = 0
+    entry = elf_load(pml4, img, len, u64(addr(iend)))
     if entry == 0:
         as_free(pml4)
         return 0
@@ -599,7 +600,7 @@ def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> nptr[Thread]:
     p.caps = vc & CAPB_ALL
     dk = cur_thread().spawn_drv  # per spawning thread: a concurrent ordinary spawn is never a driver
     p.drv = dk
-    p.brk_base = page_up(elf_end)
+    p.brk_base = page_up(iend)
     p.brk = p.brk_base
     p.fds[0] = console()
     p.fds[1] = console()
@@ -788,7 +789,8 @@ def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
         kfree(img)
         return ENOEXEC
     pml4 = as_new()
-    entry = elf_load(pml4, img, sz)
+    iend: u64 = 0
+    entry = elf_load(pml4, img, sz, u64(addr(iend)))
     kfree(img)
     if entry == 0:
         as_free(pml4)
@@ -803,7 +805,7 @@ def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
     write_cr3(pml4)
     irq_restore(f)
     as_free(old)
-    p.brk_base = page_up(elf_end)
+    p.brk_base = page_up(iend)
     p.brk = p.brk_base
     p.mmap_next = MMAP_BASE
     p.caps = p.caps & vc & CAPB_ALL  # never more than the parent held

@@ -227,7 +227,6 @@ def as_free(pml4: u64) -> u64:
     return n + 1
 
 # ---- ELF64 loader ----
-elf_end: u64
 elf_bad_rejects: u64
 ELF_MAX_MAP = 0x4000000  # 64 MiB of PT_LOAD memory per image
 
@@ -252,8 +251,10 @@ struct Phdr:
     align: u64
 
 @unsafe
-def elf_load(pml4: u64, img: u64, len: u64) -> u64:
-# returns the entry point, or 0 if the image is rejected
+def elf_load(pml4: u64, img: u64, len: u64, endp: u64) -> u64:
+# returns the entry point, or 0 if the image is rejected; stores the image end at endp (if nonzero).
+# The end is per call, never a global: CPUs load images concurrently (a shared elf_end once gave
+# a forked process another image's brk base, so brk memory landed on its own text page).
     if len < 64:
         return 0
     eh = ptr[Ehdr](img)
@@ -269,7 +270,7 @@ def elf_load(pml4: u64, img: u64, len: u64) -> u64:
         return 0
     i = 0
     nload = 0
-    elf_end = 0
+    elf_end: u64 = 0
     mapped: u64 = 0
     while i < phnum:
         ph = ptr[Phdr](img + phoff + i * 56)
@@ -329,4 +330,6 @@ def elf_load(pml4: u64, img: u64, len: u64) -> u64:
         i += 1
     if nload == 0 or entry >= USER_TOP:
         return 0
+    if endp != 0:
+        vstore64(endp, elf_end)
     return entry

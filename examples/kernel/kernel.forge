@@ -909,7 +909,7 @@ def wx_seg(k: u64, fl: u64, va: u64):
 def elf_try(img: u64, len: u64) -> u64:
 # load into a throwaway address space (the W^X test images are deliberately unsealed)
     pml4 = as_new()
-    e = elf_load(pml4, img, len)
+    e = elf_load(pml4, img, len, 0)
     as_free(pml4)
     return e
 
