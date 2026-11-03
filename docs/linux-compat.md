@@ -25,7 +25,7 @@ Inside the personality a process reaches **only** the Linux table. No Forge sysc
 including the driver (400+), kexec/ktest (408/409, still also gated by `ktest_hooks`) and grant
 syscalls: they return -ENOSYS like any unknown number.
 
-## Syscalls (11.1a to 11.1e; 38 in all)
+## Syscalls (11.1a to 11.1e; 39 in all)
 
 | nr | name | notes |
 |----|------|-------|
@@ -63,6 +63,7 @@ syscalls: they return -ENOSYS like any unknown number.
 | 218 | set_tid_address | sets the calling thread's clear-child-tid word, returns its tid |
 | 60 / 231 | exit / exit_group | exit ends one clone()d thread (the main thread waits for the others first); exit_group ends the whole process |
 | 158 | arch_prctl | (11.1b) ARCH_SET_FS (address must be below USER_TOP, else EPERM), ARCH_GET_FS (bad pointer -> EFAULT); ARCH_SET_GS / others -> EINVAL |
+| 271 | ppoll | (11.1e part 13) never sleeps: every held object is ready (files and directories read without waiting; the console reports ready and its read then blocks as usual), so timeout and sigmask are unused; POLLIN / POLLOUT echoed from events, a closed fd -> POLLNVAL, a negative fd skipped; nfds > 64 -> EINVAL, bad pointer -> EFAULT |
 | other | | -ENOSYS, counted per process (`Proc.lx_unsup`), first 4 logged: `linux: pid N syscall X not supported -> ENOSYS` |
 
 Errno values are Linux's: Forge's error codes were already the negated Linux errnos.
@@ -250,4 +251,4 @@ BusyBox is built from source only; no prebuilt third-party binary is used.
 - Image: static EXEC at 0x400000, EI_OSABI set to 3, sealed `forgeseal.py --foreign` (level 3, unsafe 0, caps 0). `image_verify` refuses a level-3 seal on anything but a capability-free Linux image (reason 8); the 6.4 gate still refuses it outside the compat sandbox.
 - Manifest `examples/apps/busybox.mf`: one `dir /efi/forge/docs` grant.
 
-Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). open 2 (11.1e part 4: absolute paths under a grant; wc, sha256sum and cat of granted files work, a file outside is EACCES). stat 4 (11.1e part 5; `ls` of a directory outside the grant -> Permission denied). lstat 6 (11.1e part 6; same as stat, no symlinks). fcntl 72 (11.1e part 7; `ls` of the granted directory and `printf` work). getcwd 79 (11.1e part 8; `pwd` prints /). nanosleep 35 (11.1e part 9; `sleep 1` works). geteuid 107 (11.1e part 10; ash starts without an ENOSYS, `sh -c exit 3` exits 3). dup2 33 (11.1e part 11; ash `<` / `>` redirections). lseek 8 (11.1e part 12; `tail` works). They will be added one per commit.
+Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). open 2 (11.1e part 4: absolute paths under a grant; wc, sha256sum and cat of granted files work, a file outside is EACCES). stat 4 (11.1e part 5; `ls` of a directory outside the grant -> Permission denied). lstat 6 (11.1e part 6; same as stat, no symlinks). fcntl 72 (11.1e part 7; `ls` of the granted directory and `printf` work). getcwd 79 (11.1e part 8; `pwd` prints /). nanosleep 35 (11.1e part 9; `sleep 1` works). geteuid 107 (11.1e part 10; ash starts without an ENOSYS, `sh -c exit 3` exits 3). dup2 33 (11.1e part 11; ash `<` / `>` redirections). lseek 8 (11.1e part 12; `tail` works). ppoll 271 (11.1e part 13; ash's `read` builtin). They will be added one per commit.

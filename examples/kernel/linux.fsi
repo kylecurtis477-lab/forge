@@ -47,9 +47,11 @@
 # held only after the dup succeeded; newfd is not close-on-exec; oldfd == newfd only checks oldfd.
 # 11.1e: lseek 8 -- FAT32 files: SEEK_SET / SEEK_CUR / SEEK_END, past the end allowed, below 0 EINVAL;
 # a directory only rewinds (SEEK_SET 0); the console and other objects are ESPIPE.
+# 11.1e: ppoll 271 -- never sleeps: every held object is ready (files and directories read without
+# waiting; the console reports ready and its read then blocks as usual), closed fds get POLLNVAL.
 # Not yet: real-time signals (32..64), sigaltstack, signals to other processes.
 LX_ABI = 1
-LX_NSYS = 38  # syscalls in the table above
+LX_NSYS = 39  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ERANGE = 0xFFFFFFFFFFFFFFDE
@@ -626,6 +628,42 @@ def lx_lseek(fd: u64, off: u64, whence: u64) -> u64:
         return EINVAL
     fl.pos = np
     return np
+
+def lx_ppoll(ufds: u64, nfds: u64) -> u64:
+# ppoll(fds, nfds, timeout, sigmask): every held object is always ready (files and directories
+# read without waiting; the console reports ready and a read then waits for input like a blocking
+# read), so the timeout and sigmask are not used and it never sleeps; POLLIN 1 / POLLOUT 4 are
+# echoed from events, a closed fd gets POLLNVAL 32, a negative fd is skipped; nfds > 64 -> EINVAL
+    if nfds > 64:
+        return EINVAL
+    if nfds == 0:
+        return 0
+    if user_ptr_ok(ufds, nfds * 8) == 0:
+        return EFAULT
+    p = cur_proc()
+    ready: u64 = 0
+    i: u64 = 0
+    while i < nfds:
+        pf: u64[1]
+        r = copy_user(u64(addr(pf[0])), ufds + i * 8, 8)
+        if r != 0:
+            return r
+        fd = pf[0] & 0xFFFFFFFF
+        ev = (pf[0] >> 32) & 0xFFFF
+        rev: u64 = 0
+        if (fd >> 31) == 0:
+            if fd >= NFD or p.fds[fd] == 0:
+                rev = 32
+            else:
+                rev = ev & 5
+        pf[0] = (pf[0] & 0xFFFFFFFFFFFF) | (rev << 48)
+        r = copy_user(ufds + i * 8, u64(addr(pf[0])), 8)
+        if r != 0:
+            return r
+        if rev != 0:
+            ready += 1
+        i += 1
+    return ready
 
 def lx_getcwd(ubuf: u64, size: u64) -> u64:
 # getcwd(buf, size): there is no working directory (relative paths are EACCES), so it reports "/";
@@ -1365,6 +1403,8 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
         return lx_nanosleep(a, b)
     if nr == 79:
         return lx_getcwd(a, b)
+    if nr == 271:
+        return lx_ppoll(a, b)
     if nr == 107:
         return 1000  # geteuid: matches AT_EUID in the auxv; no root inside the sandbox
     if nr == 110:

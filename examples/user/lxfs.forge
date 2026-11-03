@@ -182,6 +182,14 @@ def lx_main(sp: u64):
     check(lsys(8, lf, 200000, 0, 0, 0) == 200000 and lsys(0, lf, u64(addr(lb[0])), 4, 0, 0) == 0 and lsys(8, lf, 0xFFFFFFFFFFFC0000, 1, 0, 0) == EINVAL and lsys(8, lf, 0, 3, 0, 0) == EINVAL, "lseek past the end reads 0, below 0 / bad whence -> EINVAL")
     check(lsys(8, 1, 0, 1, 0, 0) == ESPIPE and lsys(8, DOCS, 0, 0, 0, 0) == 0 and lsys(8, DOCS, 5, 0, 0, 0) == EINVAL and lsys(8, 99, 0, 0, 0, 0) == EBADF and lsys(3, lf, 0, 0, 0, 0) == 0, "lseek console -> ESPIPE, dir rewind only, EBADF")
     put("lxfs: lseek: SET/CUR/END, past the end, below 0 / bad whence -> EINVAL, console -> ESPIPE, dir rewind, EBADF ok\n")
+    # 11.1e ppoll(271): struct pollfd { int fd; short events, revents } packed in a u64
+    pfd: u64[3]
+    pfd[0] = DOCS | (u64(1) << 32)
+    pfd[1] = 1 | (u64(5) << 32)
+    pfd[2] = 13 | (u64(1) << 32)
+    check(lsys(271, u64(addr(pfd[0])), 3, 0, 0, 0) == 3 and (pfd[0] >> 48) == 1 and (pfd[1] >> 48) == 5 and (pfd[2] >> 48) == 32, "ppoll: dir POLLIN, console POLLIN|POLLOUT, closed fd POLLNVAL")
+    check(lsys(271, 0x10, 1, 0, 0, 0) == EFAULT and lsys(271, u64(addr(pfd[0])), 65, 0, 0, 0) == EINVAL and lsys(271, 0, 0, 0, 0, 0) == 0, "ppoll EFAULT, nfds > 64 -> EINVAL, nfds 0")
+    put("lxfs: ppoll: dir/console ready, closed fd POLLNVAL, EFAULT, EINVAL ok\n")
     put("lxfs: fcntl: GETFL/SETFL, GETFD/SETFD, DUPFD(min 10), DUPFD_CLOEXEC ok; SETFL O_NONBLOCK, bad cmd -> EINVAL, EBADF\n")
     flush()
     put("lxfs: lstat: big.bin S_IFREG 98304 (no symlinks on FAT32), outside -> EACCES\n")
