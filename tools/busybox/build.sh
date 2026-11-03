@@ -25,6 +25,7 @@ pin() {
         esac
     fi
 }
+[ -d "$S/gnupg" ] && GNUPGHOME=$S/gnupg gpg -q --import "$T"/keys/*.asc 2>/dev/null
 pin busybox-1.38.0.tar.bz2 34f9ea6ff8636f2c9241153b9114eefa9e65674a45318ae1ef95bb5f31c53bb2 sig
 pin musl-1.2.5.tar.gz a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4 asc
 mkdir -p $W/bin
