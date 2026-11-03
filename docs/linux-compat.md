@@ -25,7 +25,7 @@ Inside the personality a process reaches **only** the Linux table. No Forge sysc
 including the driver (400+), kexec/ktest (408/409, still also gated by `ktest_hooks`) and grant
 syscalls: they return -ENOSYS like any unknown number.
 
-## Syscalls (11.1a to 11.1e; 30 in all)
+## Syscalls (11.1a to 11.1e; 31 in all)
 
 | nr | name | notes |
 |----|------|-------|
@@ -35,6 +35,7 @@ syscalls: they return -ENOSYS like any unknown number.
 | 3 | close | |
 | 20 | writev | (11.1e part 2) iovecs copied in one at a time, each through write (same fd checks); iovcnt > 1024 -> EINVAL, bad iov -> EFAULT; a later fault or short write returns the bytes so far |
 | 63 | uname | (11.1e part 3) sysname `Linux`, nodename `forge`, release `0.2.6-forge`, version `#1 Forge Linux compat sandbox`, machine `x86_64`, domainname `(none)`; bad pointer -> EFAULT |
+| 4 | stat | (11.1e part 5) path resolved exactly like open (absolute, at or under a held directory handle; else EACCES / ENOENT), then fstat of that handle, which is closed again; bad buffer -> EFAULT |
 | 5 | fstat | (11.1c) 144-byte struct stat: st_dev 0xF0, st_ino = first cluster + 1, st_mode S_IFREG 0444 / S_IFDIR 0555 / S_IFCHR 0620 (console, st_rdev 0x401) / S_IFIFO 0600, st_size, st_blksize 4096, st_blocks; bad fd -> EBADF, bad pointer -> EFAULT, revoked grant -> EACCES |
 | 217 | getdents64 | (11.1c) linux_dirent64 records (d_ino synthetic, d_off = directory position, d_type DT_DIR / DT_REG, 8-byte aligned); buffer must be >= 768 bytes (else EINVAL); non-directory -> ENOTDIR, no read right -> EPERM, revoked grant -> EACCES |
 | 59 / 322 | execve / execveat | (11.1d) sealed Linux images only, reached through a held handle (see Exec below); Forge, unsealed or tampered images -> ENOEXEC, no cwd (relative path, AT_FDCWD) or outside every handle -> EACCES, live clone()d threads -> EBUSY, bad pointers -> EFAULT, argv over 16 entries / 127 bytes -> E2BIG, an argument with a space -> EINVAL, unknown flags -> EINVAL |
@@ -242,4 +243,4 @@ BusyBox is built from source only; no prebuilt third-party binary is used.
 - Image: static EXEC at 0x400000, EI_OSABI set to 3, sealed `forgeseal.py --foreign` (level 3, unsafe 0, caps 0). `image_verify` refuses a level-3 seal on anything but a capability-free Linux image (reason 8); the 6.4 gate still refuses it outside the compat sandbox.
 - Manifest `examples/apps/busybox.mf`: one `dir /efi/forge/docs` grant.
 
-Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). open 2 (11.1e part 4: absolute paths under a grant; wc, sha256sum and cat of granted files work, a file outside is EACCES). Still missing: stat 4 (ls), getcwd 79, nanosleep 35, fcntl 72 (printf). They will be added one per commit.
+Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). open 2 (11.1e part 4: absolute paths under a grant; wc, sha256sum and cat of granted files work, a file outside is EACCES). stat 4 (11.1e part 5; `ls` of a directory outside the grant -> Permission denied). Still missing: lstat 6 and fcntl 72 (ls of the granted directory), getcwd 79, nanosleep 35, fcntl 72 (printf). They will be added one per commit.
