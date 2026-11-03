@@ -145,7 +145,41 @@ appeared), `wait` and `grants` again. Required log lines:
 - Revocation is all-or-nothing per app (`revoke app`). There is no per-grant id revoke and no re-grant yet;
   to get access back, the app has to be relaunched.
 - The ledger is in memory and is not carried across kexec (the handoff does not serialise `File.gid`, so
-  carried handles are no longer granted). 10.3 adds a persistent audit log.
+  carried handles are no longer granted). The 10.3 audit log is in memory too (see below).
 - Grants cover the handles sh installs from a manifest. Handles that unsandboxed programs open are not
   ledgered: they hold the root capability anyway.
+
+## 10.3 The audit log: every grant and every use
+
+### How it works (`examples/kernel/audit.fsi`)
+grant.fsi appends a record for each event on a granted handle: `granted` (when sh's sandbox launch
+creates the grant), each **use** (read, write, getdents, openat through a granted directory, dup;
+a zero-length read is logged as `poll`), each **denial** after revocation, `revoked by pid N` (the
+revoking process) and `ended` (the app exited). A record holds the sequence number, grant id, pid,
+event, operation, count, bytes moved and the LAPIC tick.
+
+Consecutive uses of the same grant by the same pid with the same operation are merged into one record
+with a count, and successful reads add their byte counts to it. Every use is still counted, in order,
+but a polling loop does not flood the log. Records live in a 256-entry ring; the sequence counter counts
+every record ever written, so the dump states how many were evicted.
+
+Syscall 430 `audit_dump` (capability `grant`, which only sh declares; sh builtin `audit`) prints the log
+under the console lock, then cross-checks it: for every grant in the ledger, the logged uses and denials
+must equal the ledger's counters. If records were evicted, the check is skipped and the dump says so.
+
+### Tests (tests/os/run.sh)
+After the 10.2 revocation, the boot script runs `audit`. Required log lines include
+`audit: N records, 0 evicted`, sbtest's `granted` / `openat x1` / `ended (app exited)` records, grtest's
+`granted to grtest, /efi/forge/docs/big.bin`, `read x12, 49152 bytes`, `revoked by pid N`,
+`poll denied x1`, `read denied x2`, `dup denied x1`, and
+`audit: ledger check: uses and denials match the ledger for all 3 grants`.
+
+### Limits
+- The log is in **kernel memory only**: it is lost at reboot, not carried across kexec, and not
+  written to the object store.
+- It is not signed or hash-chained. It is accurate against a confined app, but a compromised kernel
+  can rewrite it.
+- Only granted handles are audited. Unsandboxed programs hold the root capability and are not logged.
+- Bytes are counted for reads (file and object handles); writes, getdents and openat count uses only.
+- With more than 256 records, the oldest are evicted (counted) and the ledger cross-check is skipped.
 

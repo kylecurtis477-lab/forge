@@ -14,6 +14,7 @@
 # Syscalls (both need the 'grant' capability, CAPB_GRANT, which only sh declares):
 #   428 grant_revoke(app_name) -> number of grants revoked (all active grants of that app)
 #   429 grant_list()           -> number of entries; the kernel prints the ledger to the console
+#   430 audit_dump()           -> records written; every grant event is also logged (audit.fsi, 10.3)
 # States: 1 active, 2 revoked, 3 ended (the app exited; kept as history). Ids are never reused. A new
 # grant takes a free entry or the oldest non-active one, so an active grant never ages out; with all
 # GR_N entries active the handle is closed instead of being handed out untracked (fail closed).
@@ -120,6 +121,7 @@ def gr_use(g: u64, what: ptr[u8]) -> u64:
     if gr_state[i] == GR_REVOKED:
         gr_denied[i] += 1
         atomic_fetch_add(addr(gr_denials), 1, acq_rel)
+        au_rec(AU_DENY, g, cur_proc().pid, au_opcode(what))
         if gr_denied[i] == 1:
             f = gr_pbegin()
             gr_desc(i)
@@ -131,6 +133,7 @@ def gr_use(g: u64, what: ptr[u8]) -> u64:
             gr_pend(f)
         return EACCES
     gr_uses[i] += 1
+    au_rec(AU_USE, g, cur_proc().pid, au_opcode(what))
     return 0
 
 def gr_fd(p: ptr[Proc], fd: u64, what: ptr[u8]) -> u64:
@@ -152,6 +155,7 @@ def gr_enter(p: ptr[Proc], sp: u64):
                 p.fds[i] = 0
                 p.fdr[i] = 0
             else:
+                au_rec(AU_GRANT, fl.gid, p.pid, 0)
                 f = gr_pbegin()
                 puts("grants: ")
                 gr_desc(gr_ix(fl.gid))
@@ -167,6 +171,7 @@ def gr_exit(pid: u64):
     while i < GR_N:
         if gr_id[i] != 0 and gr_pid[i] == pid and gr_state[i] == GR_ACTIVE:
             gr_state[i] = GR_ENDED
+            au_rec(AU_END, gr_id[i], pid, 0)
         i += 1
 
 def gr_name_eq(i: u64, s: slice[u8]) -> u64:
@@ -188,6 +193,7 @@ def sys_grant_revoke(uname: u64) -> u64:
     while i < GR_N:
         if gr_id[i] != 0 and gr_state[i] == GR_ACTIVE and gr_name_eq(i, nm[:]) == 1:
             gr_state[i] = GR_REVOKED
+            au_rec(AU_REVOKE, gr_id[i], gr_pid[i], cur_proc().pid)
             n += 1
             atomic_fetch_add(addr(gr_revocations), 1, acq_rel)
             f = gr_pbegin()

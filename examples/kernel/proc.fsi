@@ -1120,16 +1120,23 @@ def sys_read(fd: u64, ubuf: u64, n: u64) -> u64:
     fl = fd_get(cur_proc(), fd)
     if u64(fl) == 0:
         return EBADF
-    if gr_use(fl.gid, "read") != 0:
+    op = "read"
+    if n == 0:
+        op = "poll"
+    if gr_use(fl.gid, op) != 0:
         return EACCES
     if (cur_proc().fdr[fd] & CAP_READ) == 0:
         return EPERM
     if fl.type == F_CONSOLE:
         return tty_read(ubuf, n)
     if fl.type == F_FILE:
-        return file_read(fl, ubuf, n)
+        r = file_read(fl, ubuf, n)
+        au_moved(fl.gid, r)
+        return r
     if fl.type == F_OBJ:
-        return ofile_read(fl, ubuf, n)
+        r = ofile_read(fl, ubuf, n)
+        au_moved(fl.gid, r)
+        return r
     return EISDIR
 
 def sys_write(fd: u64, ubuf: u64, n: u64) -> u64:
@@ -1467,6 +1474,8 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         return sys_grant_revoke(a)
     if nr == 429:
         return sys_grant_list()
+    if nr == 430:
+        return sys_audit_dump()
     if nr == 423:
         return sys_chan_create(a)
     if nr == 424:

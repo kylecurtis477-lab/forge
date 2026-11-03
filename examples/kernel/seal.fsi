@@ -306,7 +306,7 @@ def sys_need(nr: u64) -> u64:
         return CAPB_KEXEC
     if nr == 200:
         return CAPB_PROBE
-    if nr == 428 or nr == 429:
+    if nr == 428 or nr == 429 or nr == 430:
         return CAPB_GRANT
     return 0
 

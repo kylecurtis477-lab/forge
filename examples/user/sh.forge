@@ -5,6 +5,7 @@
 # runs builtins (ls, exit) or fork+exec /efi/forge/bin/<cmd> and waits for it.
 # 10.2: `run app &` launches a sandboxed app in the background; `grants` prints the kernel's grant
 # ledger and `revoke app` revokes every active grant of that app (sys 428/429, capability 'grant').
+# 10.3: `audit` prints the kernel's grant audit log and its cross-check against the ledger (sys 430).
 include "ulib.fsi"
 
 line: u8[256]
@@ -151,7 +152,7 @@ def do_ls(dir: ptr[u8]):
 
 @export
 def _start():
-    out("Forge sh: builtins ls, wait, run app [&] (manifest sandbox), grants, revoke app, kexec [next], exit, cmd &; programs from /efi/forge/bin\n")
+    out("Forge sh: builtins ls, wait, run app [&] (manifest sandbox), grants, revoke app, audit, kexec [next], exit, cmd &; programs from /efi/forge/bin\n")
     flush()
     ncmd: u64 = 0
     while 1:
@@ -226,6 +227,11 @@ def _start():
         if streq(cmd, "grants"):
             if is_err(syscall3(429, 0, 0, 0)):
                 out("sh: grants: denied\n")
+                flush()
+            continue
+        if streq(cmd, "audit"):
+            if is_err(syscall3(430, 0, 0, 0)):
+                out("sh: audit: denied\n")
                 flush()
             continue
         if streq(cmd, "revoke"):
