@@ -1,0 +1,47 @@
+# forge: safe
+# forge: no-runtime
+# forge: caps(drv)
+# nvmed v1: the NVMe I/O-queue driver as a supervised ring-3 service (kernel side: nvsvc.fsi).
+# It takes one posted request at a time (414), builds the NVMe command for it (opcode, LBA, block
+# count - 1), submits it (415), reaps the completion and checks its command id (416), and replies
+# with the status and its served count (417). The served count is the only state it keeps, and the
+# kernel holds the last committed value (418), so a restarted or swapped-in instance continues.
+include "ulib.fsi"
+
+MAGIC = 0x4E5653
+magicw: u64[1] = [0x4E5653]  # initialized data: keeps the RW segment's file bytes inside the image
+trap: u64[1]
+
+@export
+def _start():
+    st = syscall3(418, 0, 0, 0)
+    if (st >> 32) != magicw[0]:
+        sys_exit(3)
+    served = st & 0xFFFFFFFF
+    m: u64[5]
+    while 1:
+        n = syscall3(414, u64(addr(m[0])), 0, 0)
+        if n == 0:
+            sys_exit(0)
+        if is_err(n):
+            sys_exit(2)
+        opc: u64 = 0
+        d12: u64 = 0
+        if m[1] == 1:
+            opc = 2
+        elif m[1] == 2:
+            opc = 1
+        if opc != 0:
+            d12 = m[3] - 1
+        cid = syscall3(415, opc, m[2], d12)
+        s: u64 = 0xFFFE
+        if is_err(cid) == 0:
+            if (m[4] & 1) != 0:
+            # injected fault: trap with the command in flight and the request unanswered
+                trap[m[4]] = 1
+            r = syscall3(416, 0, 0, 0)
+            s = r & 0xFFFF
+            if (r >> 16) != cid:
+                s = 0xFFFD
+        served += 1
+        syscall3(417, m[0], s, (MAGIC << 32) | served)

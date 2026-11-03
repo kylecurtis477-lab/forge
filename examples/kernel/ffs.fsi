@@ -418,6 +418,11 @@ def ffs_test():
         if ffs_create("persist.dat", 20000, 7, txt) == 0 or ffs_create("hello.txt", tl, 0, txt) == 0:
             panic("Forge FS: create failed")
         puts("Forge FS: created persist.dat (20000 bytes) and hello.txt\n")
+    # Phase 2 gap 2: the rest of the I/O goes through the ring-3 nvmed service, swapped v1 <-> v2 every
+    # 7 requests, and the driver is killed with request 30 in flight (restarted, request replayed)
+    if nvme_service_start(7, 30) == 0:
+        panic("NVMe service: nvmed images missing")
+    puts("NVMe service: nvmed v1 started; I/O now goes through ring 3\n")
     # scratch churn: create, verify, unlink, reuse the space
     n: u64 = 0
     while n < 5:
@@ -438,6 +443,25 @@ def ffs_test():
         panic("Forge FS: remount failed (checksum)")
     ffs_check("persist.dat", 20000, 7, txt)
     ffs_check("hello.txt", tl, 0, txt)
+    nvme_service_stop()
+    puts("NVMe service: ")
+    put_u64(nvs_reqs)
+    puts(" requests through nvmed, served count carried ")
+    put_u64(nvs_state & 0xFFFFFFFF)
+    puts(", swaps ")
+    put_u64(nvs_swaps)
+    puts(", restarts ")
+    put_u64(nvs_restarts)
+    puts(" (replayed ")
+    put_u64(nvs_replays)
+    puts(", drained ")
+    put_u64(nvs_drained)
+    puts("), forged SQEs refused ")
+    put_u64(nvs_rejects)
+    putc(10)
+    if nvs_restarts != 1 or nvs_replays < 1 or nvs_drained < 1 or nvs_swaps < 3 or nvs_rejects < 1 or (nvs_state & 0xFFFFFFFF) != nvs_reqs:
+        panic("NVMe service: hot-swap / restart accounting wrong")
+    puts("NVMe service hot-swap + supervised restart OK\n")
     puts("Forge FS: remount OK, ")
     put_u64(ffs_nfiles())
     puts(" files, generation ")

@@ -655,6 +655,8 @@ def proc_exit(code: u64):
     p = ptr[Proc](t.proc)
     if p.drv == DRV_KBD:
         kbd_died()
+    elif p.drv == DRV_NVME:
+        nvs_died()
     elif p.drv != 0:
         drv_died(p)
     i = 0
@@ -1291,6 +1293,8 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         return kx_gen
     if nr >= 411 and nr <= 413:
         return sys_kbd(nr, a, b, c, d)
+    if nr >= 414 and nr <= 418:
+        return sys_nvs(nr, a, b, c)
     if nr >= 400 and nr <= 408:
         return sys_drv(nr, a, b, c)
     if nr == 300:

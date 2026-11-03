@@ -1,0 +1,50 @@
+# forge: safe
+# forge: no-runtime
+# forge: caps(drv)
+# nvmed v2: same protocol as nvmed (kernel side: nvsvc.fsi), a second implementation the supervisor
+# swaps in and out at run time. On start it first probes the kernel's SQE checks with a command
+# that matches no request (a write to LBA 0, outside the Forge partition) and refuses to run if the
+# kernel accepted it.
+include "ulib.fsi"
+
+MAGIC = 0x4E5653
+magicw: u64[1] = [0x4E5653]  # initialized data: keeps the RW segment's file bytes inside the image
+trap: u64[1]
+
+def opcode(op: u64) -> u64:
+    if op == 1:
+        return 2
+    if op == 2:
+        return 1
+    return 0
+
+@export
+def _start():
+    if is_err(syscall3(415, 1, 0, 7)) == 0:
+        sys_exit(4)
+    st = syscall3(418, 0, 0, 0)
+    if (st >> 32) != magicw[0]:
+        sys_exit(3)
+    served = st & 0xFFFFFFFF
+    m: u64[5]
+    n = syscall3(414, u64(addr(m[0])), 0, 0)
+    while n != 0:
+        if is_err(n):
+            sys_exit(2)
+        opc = opcode(m[1])
+        d12: u64 = 0
+        if opc != 0:
+            d12 = m[3] - 1
+        s: u64 = 0xFFFE
+        cid = syscall3(415, opc, m[2], d12)
+        if is_err(cid) == 0:
+            if (m[4] & 1) != 0:
+                trap[m[4]] = 1
+            r = syscall3(416, 0, 0, 0)
+            s = r & 0xFFFF
+            if (r >> 16) != cid:
+                s = 0xFFFD
+        served += 1
+        syscall3(417, m[0], s, (MAGIC << 32) | served)
+        n = syscall3(414, u64(addr(m[0])), 0, 0)
+    sys_exit(0)
