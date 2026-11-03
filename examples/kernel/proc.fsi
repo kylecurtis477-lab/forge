@@ -122,6 +122,8 @@ struct File:
     pos: u64  # byte offset (file) / entry index (dir)
     ccl: u64  # cached cluster for sequential reads
     cidx: u64  # its index in the chain
+    gid: u64  # 10.2: grant id when this object was handed to a sandboxed app (0 = not a grant)
+    lab: u8[32]  # 10.2: the path it was opened by (the grant ledger's resource label)
 
 console_file: u64
 
@@ -819,6 +821,7 @@ def proc_exit(code: u64):
         p.fds[i] = 0
         p.fdr[i] = 0
         i += 1
+    gr_exit(p.pid)
     cli()
     spin_lock(addr(rq_lock))
     p.exit_code = code
@@ -1072,8 +1075,21 @@ def sys_open(upath: u64) -> u64:
         return EACCES
     o = ovfs_open(path[:])
     if o != OB_ERR:
-        return ovfs_install(p, o, p.fdr[CAP_ROOT_FD])
-    return open_install(p, fs_root, addr(path[0]), p.fdr[CAP_ROOT_FD])
+        return fd_label(p, ovfs_install(p, o, p.fdr[CAP_ROOT_FD]), path[:], 0)
+    return fd_label(p, open_install(p, fs_root, addr(path[0]), p.fdr[CAP_ROOT_FD]), path[:], 0)
+
+def fd_label(p: ptr[Proc], fd: u64, path: slice[u8], gid: u64) -> u64:
+# remember what a fresh handle was opened as (the grant ledger's label) and the grant it derives from
+    fl = fd_get(p, fd)
+    if u64(fl) == 0:
+        return fd
+    k: u64 = 0
+    while k < 31 and k < len(path) and path[k] != 0:
+        fl.lab[k] = path[k]
+        k += 1
+    fl.lab[k] = 0
+    fl.gid = gid
+    return fd
 
 @unsafe
 def sys_stat(upath: u64, ubuf: u64) -> u64:
@@ -1104,6 +1120,8 @@ def sys_read(fd: u64, ubuf: u64, n: u64) -> u64:
     fl = fd_get(cur_proc(), fd)
     if u64(fl) == 0:
         return EBADF
+    if gr_use(fl.gid, "read") != 0:
+        return EACCES
     if (cur_proc().fdr[fd] & CAP_READ) == 0:
         return EPERM
     if fl.type == F_CONSOLE:
@@ -1120,6 +1138,8 @@ def sys_write(fd: u64, ubuf: u64, n: u64) -> u64:
     fl = fd_get(cur_proc(), fd)
     if u64(fl) == 0:
         return EBADF
+    if gr_use(fl.gid, "write") != 0:
+        return EACCES
     if (cur_proc().fdr[fd] & CAP_WRITE) == 0:
         return EPERM
     if fl.type == F_CONSOLE:
@@ -1132,6 +1152,8 @@ def sys_getdents(fd: u64, ubuf: u64, n: u64) -> u64:
     fl = fd_get(cur_proc(), fd)
     if u64(fl) == 0:
         return EBADF
+    if gr_use(fl.gid, "getdents") != 0:
+        return EACCES
     if (cur_proc().fdr[fd] & CAP_READ) == 0:
         return EPERM
     if fl.type == F_ODIR:
@@ -1249,6 +1271,7 @@ def sandbox_enter(p: ptr[Proc], path: slice[u8]):
         sb_name[sp * 16 + k] = path[b + k]
         k += 1
     sb_name[sp * 16 + k] = 0
+    gr_enter(p, sp)
     n: u64 = 0
     i = 0
     while i < NFD:
@@ -1332,7 +1355,10 @@ def sys_openat(dirfd: u64, upath: u64) -> u64:
         return EPERM
     if path[0] == 47 or path_ok(path[:]) == 0:
         return EACCES
-    return open_install(p, d.clu, addr(path[0]), p.fdr[dirfd])
+    if gr_use(d.gid, "openat") != 0:
+        return EACCES
+    # a file found through a granted directory belongs to the same grant
+    return fd_label(p, open_install(p, d.clu, addr(path[0]), p.fdr[dirfd]), path[:], d.gid)
 
 def sys_dup(fd: u64, rights: u64) -> u64:
 # a new handle to the same object with a subset of the rights: dup can only narrow
@@ -1342,6 +1368,8 @@ def sys_dup(fd: u64, rights: u64) -> u64:
     old = p.fdr[fd]
     if (old & CAP_DUP) == 0 or (rights & (~old)) != 0:
         return EPERM
+    if gr_fd(p, fd, "dup") != 0:
+        return EACCES
     n = fd_free(p)
     if n == NFD:
         return EMFILE
@@ -1435,6 +1463,10 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         return sys_exec(frame, a, b, 1)
     if nr == 427:
         return sys_restrict(a, b)
+    if nr == 428:
+        return sys_grant_revoke(a)
+    if nr == 429:
+        return sys_grant_list()
     if nr == 423:
         return sys_chan_create(a)
     if nr == 424:

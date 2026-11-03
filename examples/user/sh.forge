@@ -1,8 +1,10 @@
 # forge: safe
 # forge: no-runtime
-# forge: caps(fs, spawn, ipc, drv, kexec, probe, ktest)
+# forge: caps(fs, spawn, ipc, drv, kexec, probe, ktest, grant)
 # sh: the first interactive program. Reads lines from the console (keyboard or serial),
 # runs builtins (ls, exit) or fork+exec /efi/forge/bin/<cmd> and waits for it.
+# 10.2: `run app &` launches a sandboxed app in the background; `grants` prints the kernel's grant
+# ledger and `revoke app` revokes every active grant of that app (sys 428/429, capability 'grant').
 include "ulib.fsi"
 
 line: u8[256]
@@ -30,7 +32,7 @@ def setpath(dst: ptr[u8], pre: ptr[u8], name: ptr[u8], suf: ptr[u8]):
         i += 1
     mem_set8(u64(dst) + pl, 0)
 
-def run_app(name: ptr[u8], args: ptr[u8]) -> u64:
+def run_app(name: ptr[u8], args: ptr[u8], bgr: u64) -> u64:
 # launch through /efi/forge/apps/<name>.mf: each "read PATH" / "dir PATH" line becomes a handle
 # (fds 4.. in manifest order) with only READ (+LOOKUP for dirs); the app gets nothing else
     setpath(addr(mpath[0]), "/efi/forge/apps/", name, ".mf")
@@ -84,6 +86,14 @@ def run_app(name: ptr[u8], args: ptr[u8]) -> u64:
         out("sh: run: exec failed\n")
         flush()
         sys_exit(127)
+    if bgr:
+        out("[")
+        out(name)
+        out(" started in the background (sandboxed), pid ")
+        out_u64(pid)
+        out("]\n")
+        flush()
+        return 0
     st: u64 = 0
     sys_wait(pid, addr(st))
     out("[")
@@ -141,7 +151,7 @@ def do_ls(dir: ptr[u8]):
 
 @export
 def _start():
-    out("Forge sh: builtins ls, wait, run app (manifest sandbox), kexec [next], exit, cmd &; programs from /efi/forge/bin\n")
+    out("Forge sh: builtins ls, wait, run app [&] (manifest sandbox), grants, revoke app, kexec [next], exit, cmd &; programs from /efi/forge/bin\n")
     flush()
     ncmd: u64 = 0
     while 1:
@@ -211,7 +221,26 @@ def _start():
             if line[b] == 32:
                 line[b] = 0
                 b += 1
-            run_app(addr(line[a]), addr(line[b]))
+            run_app(addr(line[a]), addr(line[b]), bgr)
+            continue
+        if streq(cmd, "grants"):
+            if is_err(syscall3(429, 0, 0, 0)):
+                out("sh: grants: denied\n")
+                flush()
+            continue
+        if streq(cmd, "revoke"):
+            rv = syscall3(428, u64(addr(line[a])), 0, 0)
+            if is_err(rv):
+                out("sh: revoke: no active grant for ")
+                out(addr(line[a]))
+                out("\n")
+            else:
+                out("sh: revoked ")
+                out_u64(rv)
+                out(" grant(s) of ")
+                out(addr(line[a]))
+                out("\n")
+            flush()
             continue
         if streq(cmd, "ls"):
             if line[a] == 0:

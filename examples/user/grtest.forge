@@ -1,0 +1,62 @@
+# forge: safe
+# forge: no-runtime
+# forge: caps(fs)
+# Phase 10.2: launched in the background by `run grtest &` through /efi/forge/apps/grtest.mf, so it
+# holds one grant (fd 4 = /efi/forge/docs/big.bin, read-only). It reads the first half, checking every
+# byte, announces "halfway", then keeps polling the handle with zero-length reads while sh lists the
+# ledger and runs `revoke grtest`. The revocation must cut it off mid-file: the next read on fd 4 and on
+# a dup made before the revocation both fail with EACCES, and dup itself is refused.
+include "ulib.fsi"
+
+EACCES = 0xFFFFFFFFFFFFFFF3
+TOTAL = 98304
+HALF = 49152
+
+buf: u8[4096]
+
+def fail(s: ptr[u8]):
+    out("grtest FAIL: ")
+    out(s)
+    out("\n")
+    flush()
+    sys_exit(1)
+
+@export
+def _start():
+    d = sys_dup(4, CAP_READ)
+    if is_err(d):
+        fail("dup of the granted handle")
+    got: u64 = 0
+    while got < HALF:
+        r = sys_read(4, u64(addr(buf[0])), 4096)
+        if r != 4096:
+            fail("read before revocation")
+        k: u64 = 0
+        while k < 4096:
+            i = got + k
+            if u64(buf[k]) != ((i * 7 + (i >> 9)) & 255):
+                fail("content")
+            k += 1
+        got += 4096
+    out("grtest: halfway, ")
+    out_u64(got)
+    out(" of ")
+    out_u64(TOTAL)
+    out(" bytes read through grant fd 4; waiting for revocation\n")
+    flush()
+    polls: u64 = 0
+    while sys_read(4, u64(addr(buf[0])), 0) != EACCES:
+        polls += 1
+        if polls > 20000000:
+            fail("never revoked")
+        sys_yield()
+    if sys_read(4, u64(addr(buf[0])), 4096) != EACCES:
+        fail("read after revocation")
+    if sys_read(d, u64(addr(buf[0])), 4096) != EACCES:
+        fail("derived handle still works")
+    if sys_dup(4, CAP_READ) != EACCES:
+        fail("dup after revocation")
+    out("grtest: cut off mid-read at byte ")
+    out_u64(got)
+    out(": read, read on the earlier dup, and dup all return EACCES\n")
+    flush()

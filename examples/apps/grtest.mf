@@ -1,0 +1,2 @@
+# grtest (Phase 10.2): one revocable grant, the 96 KiB test file
+read /efi/forge/docs/big.bin

@@ -92,3 +92,60 @@ Not protected against:
 - **Rollback and weak-passphrase guessing** are possible, see the threat model.
 - **Key wrap.** The wrapped DK is XORed with a PRF output and checked through the KEK check value, not a
   standard AEAD key wrap; tampering with it only makes every tag fail (the store reads as empty / locked).
+
+## 10.2 The grant ledger: revocable permissions on open handles
+
+Phase 5.3 sandboxes an app launched with `run app`: sh opens the handles that `/efi/forge/apps/app.mf`
+lists (`read PATH`, `dir PATH`), restricts their rights, and calls `sys_exec_sandboxed`, which drops the
+root capability. 10.2 turns each of those handles into a **grant** that the user can list and revoke while
+the app runs.
+
+### How it works (examples/kernel/grant.fsi)
+- **Ledger.** `sandbox_enter` creates one entry per handle the launcher installed (fd > 2): id, app name,
+  rights (`read`, or `dir` with LOOKUP), the path the handle was opened by, pid, state (active, revoked,
+  ended), number of uses, and number of denied uses. There are 64 entries. Ids are never reused. A new
+  grant takes a free entry or the oldest inactive one, so an active grant is never evicted. If all 64 are
+  active, the handle is closed instead of being handed over untracked (fail closed).
+- **The grant follows the object, not the fd.** The grant id is stored in the `File` object (`File.gid`), and
+  the path it was opened by in `File.lab`. Every handle that shares that File (a `dup`, a forked child's
+  copy, a handle passed over a channel) has the same grant. A file opened with `openat` through a granted
+  directory gets the directory's grant id, so revoking the directory also cuts off files already opened
+  through it.
+- **Checked on every use.** `read`, `write`, `getdents`, `openat` (on the directory handle) and `dup` call
+  `gr_use`. While the grant is active, the use is counted. Once it is revoked, the call returns EACCES. The
+  first denial per grant is logged. A zero-length read is also checked, so an app can poll its handle.
+  Revocation takes effect at the app's next syscall on any handle derived from the grant, mid-file, with no
+  cooperation from the app.
+- **Syscalls.** 428 `grant_revoke(app)` revokes every active grant of that app and returns how many it
+  revoked (ENOENT if there were none). 429 `grant_list()` prints the ledger. Both need the new `grant`
+  capability (CAPB_GRANT = 128, `# forge: caps(..., grant)`). Only sh declares it. An app cannot list or
+  revoke grants.
+- **sh.** `run app &` starts a sandboxed app in the background. `grants` prints the ledger. `revoke app`
+  revokes the app's grants.
+- When the app exits, its active grants become `ended` and stay in the ledger as history.
+- Ledger messages are printed whole under the console lock, so they never interleave with app output.
+
+### Tests (tests/os/run.sh, QEMU, BIOS and UEFI boots)
+`run grtest &` holds one grant, `/efi/forge/docs/big.bin` (96 KiB). grtest makes a dup of the handle and
+reads the first 48 KiB, checking every byte. It prints `halfway`, then polls the handle with zero-length
+reads. sh then runs `grants` (the entry is active), `revoke grtest` (sent only after `halfway` has
+appeared), `wait` and `grants` again. Required log lines:
+- `grants: grant 3 (grtest: read /efi/forge/docs/big.bin) active for pid N`
+- `grtest: halfway, 49152 of 98304 bytes read through grant fd 4`
+- `grants: revoked grant 3 (...) from pid N after K uses` and `sh: revoked 1 grant(s) of grtest`
+- the kernel's denial line `grant 3 (...): revoked; pid N read denied (EACCES)`
+- `grtest: cut off mid-read at byte 49152: read, read on the earlier dup, and dup all return EACCES`
+- the final ledger, showing sbtest's two grants `ended` and grtest's grant `revoked`
+
+### Limits
+- Revocation applies to **handles**. Data the app has already read stays in its memory. Revocation stops
+  further access; it does not take back what was already read.
+- The grant check runs at the syscall boundary. A read that is already in progress finishes; the next one
+  is refused.
+- Revocation is all-or-nothing per app (`revoke app`). There is no per-grant id revoke and no re-grant yet;
+  to get access back, the app has to be relaunched.
+- The ledger is in memory and is not carried across kexec (the handoff does not serialise `File.gid`, so
+  carried handles are no longer granted). 10.3 adds a persistent audit log.
+- Grants cover the handles sh installs from a manifest. Handles that unsandboxed programs open are not
+  ledgered: they hold the root capability anyway.
+

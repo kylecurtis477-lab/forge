@@ -54,7 +54,7 @@ def decode_row(path, n, row=0):
 # PS/2 keyboard through the QEMU monitor (sendkey), 's' lines arrive on COM1 (serial RX interrupt).
 SCRIPT = [('k', 'ls'), ('s', 'cat /efi/forge/docs/Long File Name Notes.txt'), ('k', 'forktest'),
           ('s', 'hello a b'), ('k', 'nosuch'), ('k', 'ls /EFI/Forge'), ('s', 'crash 40'),
-          ('s', 'sum /efi/forge/docs/big.bin'), ('s', 'captest'), ('s', 'chantest'), ('s', 'run sbtest'), ('s', 'wxtest'), ('s', 'unsealed'), ('s', 'tampered'), ('s', 'forged'), ('s', 'linuxabi'), ('s', 'capdeny'), ('s', 'badptr'), ('s', 'crash k 4'), ('k', 'hello Swap OK'), ('s', 'exit'),
+          ('s', 'sum /efi/forge/docs/big.bin'), ('s', 'captest'), ('s', 'chantest'), ('s', 'run sbtest'), ('s', 'run grtest &'), ('s', 'grants'), ('s', 'revoke grtest', 'grtest: halfway'), ('s', 'wait', 'grtest: cut off'), ('s', 'grants'), ('s', 'wxtest'), ('s', 'unsealed'), ('s', 'tampered'), ('s', 'forged'), ('s', 'linuxabi'), ('s', 'capdeny'), ('s', 'badptr'), ('s', 'crash k 4'), ('k', 'hello Swap OK'), ('s', 'exit'),
           ('s', 'hello x'), ('s', 'bg 1 &'), ('s', 'hello z &'), ('s', 'kexec next'),
           ('k', 'hello after kexec'), ('s', 'wait'), ('s', 'exit')]
 KEYS = {' ': 'spc', '/': 'slash', '-': 'minus', '.': 'dot', '\n': 'ret'}
@@ -78,8 +78,9 @@ def main():
             chunk = None
         if chunk:
             buf += chunk
-        if buf.count(b'sh$ ') > sent and sent < len(SCRIPT):
-            how, line = SCRIPT[sent]; sent += 1
+        # a third element holds the line back until that text has appeared (a background program's progress)
+        if buf.count(b'sh$ ') > sent and sent < len(SCRIPT) and (len(SCRIPT[sent]) < 3 or SCRIPT[sent][2].encode() in buf):
+            how, line = SCRIPT[sent][:2]; sent += 1
             try:
                 if how == 'k': type_keys(line)
                 else: p.stdin.write(line.encode() + b'\r'); p.stdin.flush()

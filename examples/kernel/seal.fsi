@@ -286,7 +286,8 @@ CAPB_DRV = 8
 CAPB_KEXEC = 16
 CAPB_PROBE = 32
 CAPB_KTEST = 64
-CAPB_ALL = 127
+CAPB_GRANT = 128  # 10.2: revoke and list grants (sys 428/429)
+CAPB_ALL = 255
 cap_sys_denials: u64
 
 def sys_need(nr: u64) -> u64:
@@ -305,6 +306,8 @@ def sys_need(nr: u64) -> u64:
         return CAPB_KEXEC
     if nr == 200:
         return CAPB_PROBE
+    if nr == 428 or nr == 429:
+        return CAPB_GRANT
     return 0
 
 def cap_name(c: u64) -> ptr[u8]:
@@ -320,6 +323,8 @@ def cap_name(c: u64) -> ptr[u8]:
         return "kexec"
     if c == CAPB_PROBE:
         return "probe"
+    if c == CAPB_GRANT:
+        return "grant"
     return "ktest"
 
 def cap_sys_deny(p: ptr[Proc], nr: u64, need: u64) -> u64:
