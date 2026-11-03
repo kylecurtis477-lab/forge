@@ -37,9 +37,11 @@
 # position) or lies under it ("<label>/<rest>" -> openat(handle, rest)) opens; anything else is EACCES.
 # 11.1e: stat 4 -- open's path rules, then fstat of that handle, then close.
 # 11.1e: lstat 6 -- the same as stat: the FAT32 ESP has no symbolic links, so there is nothing to not follow.
+# 11.1e: fcntl 72 -- F_DUPFD / F_DUPFD_CLOEXEC (dup's rules), F_GETFD / F_SETFD (FD_CLOEXEC), F_GETFL,
+# F_SETFL only when it changes nothing (no status flag is settable); other commands EINVAL.
 # Not yet: real-time signals (32..64), sigaltstack, signals to other processes.
 LX_ABI = 1
-LX_NSYS = 32  # syscalls in the table above
+LX_NSYS = 33  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ENOTTY = 0xFFFFFFFFFFFFFFE7
@@ -511,6 +513,52 @@ def lx_stat(upath: u64, ubuf: u64) -> u64:
     r = lx_fstat(fd, ubuf)
     sys_close(fd)
     return r
+
+def lx_fcntl(fd: u64, cmd: u64, arg: u64) -> u64:
+# fcntl: F_DUPFD 0 / F_DUPFD_CLOEXEC 1030 (sys_dup's rules, then the lowest free fd >= arg),
+# F_GETFD 1 / F_SETFD 2 (FD_CLOEXEC), F_GETFL 3 (console O_RDWR, everything else O_RDONLY: no
+# writable files), F_SETFL 4 (only a no-op: no status flag can be changed); anything else EINVAL
+    p = cur_proc()
+    if fd >= NFD or p.fds[fd] == 0:
+        return EBADF
+    if cmd == 0 or cmd == 1030:
+        if arg >= NFD:
+            return EINVAL
+        n = sys_dup(fd, p.fdr[fd])
+        if n >= NFD or n >= arg:
+            if n < NFD:
+                lx_cx(n, u64(cmd == 1030))
+            return n
+        j = arg
+        while j < NFD and p.fds[j] != 0:
+            j += 1
+        if j == NFD:
+            sys_close(n)
+            return EMFILE
+        p.fds[j] = p.fds[n]
+        p.fdr[j] = p.fdr[n]
+        p.fds[n] = 0
+        p.fdr[n] = 0
+        lx_cx(n, 0)
+        lx_cx(j, u64(cmd == 1030))
+        return j
+    if cmd == 1:
+        return (p.lx_cloexec >> fd) & 1
+    if cmd == 2:
+        lx_cx(fd, arg & 1)
+        return 0
+    fl = fd_get(p, fd)
+    cur: u64 = 0
+    if fl != 0:
+        if fl.type == F_CONSOLE:
+            cur = 2
+    if cmd == 3:
+        return cur
+    if cmd == 4:
+        if (arg & ~u64(3)) == (cur & ~u64(3)):
+            return 0
+        return EINVAL
+    return EINVAL
 
 def lx_cx(fd: u64, on: u64):
     p = cur_proc()
@@ -1164,7 +1212,7 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
 # mmap (9, six arguments) is routed by syscall_dispatch, which reads r8/r9 from the frame
     p = cur_proc()
     p.lx_calls += 1
-    if nr == 0 or nr == 1 or nr == 2 or nr == 4 or nr == 6 or nr == 20 or nr == 16 or nr == 5 or nr == 217 or nr == 257:
+    if nr == 0 or nr == 1 or nr == 2 or nr == 4 or nr == 6 or nr == 72 or nr == 20 or nr == 16 or nr == 5 or nr == 217 or nr == 257:
         atomic_fetch_add(addr(p.fdbusy), 1, acq_rel)
         r: u64 = 0
         if nr == 0:
@@ -1179,6 +1227,8 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
             r = lx_stat(a, b)
         elif nr == 5:
             r = lx_fstat(a, b)
+        elif nr == 72:
+            r = lx_fcntl(a, b, c)
         elif nr == 217:
             r = lx_getdents64(a, b, c)
         elif nr == 257:

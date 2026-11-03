@@ -25,7 +25,7 @@ Inside the personality a process reaches **only** the Linux table. No Forge sysc
 including the driver (400+), kexec/ktest (408/409, still also gated by `ktest_hooks`) and grant
 syscalls: they return -ENOSYS like any unknown number.
 
-## Syscalls (11.1a to 11.1e; 32 in all)
+## Syscalls (11.1a to 11.1e; 33 in all)
 
 | nr | name | notes |
 |----|------|-------|
@@ -35,6 +35,7 @@ syscalls: they return -ENOSYS like any unknown number.
 | 3 | close | |
 | 20 | writev | (11.1e part 2) iovecs copied in one at a time, each through write (same fd checks); iovcnt > 1024 -> EINVAL, bad iov -> EFAULT; a later fault or short write returns the bytes so far |
 | 63 | uname | (11.1e part 3) sysname `Linux`, nodename `forge`, release `0.2.6-forge`, version `#1 Forge Linux compat sandbox`, machine `x86_64`, domainname `(none)`; bad pointer -> EFAULT |
+| 72 | fcntl | (11.1e part 7) F_DUPFD 0 / F_DUPFD_CLOEXEC 1030 (dup's rules, lowest free fd >= arg; arg >= 16 -> EINVAL), F_GETFD 1 / F_SETFD 2 (FD_CLOEXEC), F_GETFL 3 (console O_RDWR, everything else O_RDONLY), F_SETFL 4 only when it changes nothing (O_NONBLOCK etc. -> EINVAL); bad fd -> EBADF, other commands -> EINVAL |
 | 4 | stat | (11.1e part 5) path resolved exactly like open (absolute, at or under a held directory handle; else EACCES / ENOENT), then fstat of that handle, which is closed again; bad buffer -> EFAULT |
 | 6 | lstat | (11.1e part 6) identical to stat 4: the FAT32 ESP has no symbolic links, so there is no link to not follow; same EACCES / ENOENT / EFAULT |
 | 5 | fstat | (11.1c) 144-byte struct stat: st_dev 0xF0, st_ino = first cluster + 1, st_mode S_IFREG 0444 / S_IFDIR 0555 / S_IFCHR 0620 (console, st_rdev 0x401) / S_IFIFO 0600, st_size, st_blksize 4096, st_blocks; bad fd -> EBADF, bad pointer -> EFAULT, revoked grant -> EACCES |
@@ -244,4 +245,4 @@ BusyBox is built from source only; no prebuilt third-party binary is used.
 - Image: static EXEC at 0x400000, EI_OSABI set to 3, sealed `forgeseal.py --foreign` (level 3, unsafe 0, caps 0). `image_verify` refuses a level-3 seal on anything but a capability-free Linux image (reason 8); the 6.4 gate still refuses it outside the compat sandbox.
 - Manifest `examples/apps/busybox.mf`: one `dir /efi/forge/docs` grant.
 
-Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). open 2 (11.1e part 4: absolute paths under a grant; wc, sha256sum and cat of granted files work, a file outside is EACCES). stat 4 (11.1e part 5; `ls` of a directory outside the grant -> Permission denied). lstat 6 (11.1e part 6; same as stat, no symlinks). Still missing: fcntl 72 (ls of the granted directory, printf), getcwd 79, nanosleep 35. They will be added one per commit.
+Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). open 2 (11.1e part 4: absolute paths under a grant; wc, sha256sum and cat of granted files work, a file outside is EACCES). stat 4 (11.1e part 5; `ls` of a directory outside the grant -> Permission denied). lstat 6 (11.1e part 6; same as stat, no symlinks). fcntl 72 (11.1e part 7; `ls` of the granted directory and `printf` work). Still missing: getcwd 79, nanosleep 35. They will be added one per commit.
