@@ -8,7 +8,7 @@
 # Checks: the System V process-start stack (argc, argv, envp, auxv incl. AT_PAGESZ/AT_ENTRY/AT_RANDOM),
 # write, brk grow/shrink, mmap/munmap and its W^X and MAP_FIXED refusals, ioctl TCGETS/TIOCGWINSZ
 # (and ENOTTY/EBADF), getpid/getppid/gettid, set_tid_address, register preservation across
-# syscall, Forge syscall 409 being unreachable (ENOSYS), and exit_group.
+# syscall, writev (3 iovecs; EINVAL, EFAULT), Forge syscall 409 being unreachable (ENOSYS), and exit_group.
 
 ENOSYS = 0xFFFFFFFFFFFFFFDA
 EACCES = 0xFFFFFFFFFFFFFFF3
@@ -23,6 +23,7 @@ checks: u64
 buf: u8[256]
 blen: u64
 tio: u64[8]
+iov: u64[6]
 
 # rax = n; rdi, rsi, rdx, r10, r8 = a..e; r9 = 0
 @naked
@@ -191,6 +192,16 @@ def lx_main(sp: u64):
     putn(cols)
     put("\n")
     flush()
+    # writev: three iovecs (one empty) form one line; iovcnt > IOV_MAX and a bad iov pointer refused
+    iov[0] = u64("lxtest: writev ")
+    iov[1] = 15
+    iov[2] = u64("x")
+    iov[3] = 0
+    iov[4] = u64("3 iovecs, 34 bytes\n")
+    iov[5] = 19
+    check(lsys(20, 1, u64(addr(iov[0])), 3, 0, 0) == 34, "writev 3 iovecs")
+    check(lsys(20, 1, u64(addr(iov[0])), 1025, 0, 0) == EINVAL and lsys(20, 1, 0x10, 1, 0, 0) == EFAULT, "writev EINVAL/EFAULT")
+    check(lsys(20, 9, u64(addr(iov[0])), 1, 0, 0) == EBADF and lsys(20, 1, u64(addr(iov[0])), 0, 0, 0) == 0, "writev EBADF, iovcnt 0")
     pid = lsys(39, 0, 0, 0, 0, 0)
     check(pid != 0 and lsys(186, 0, 0, 0, 0, 0) == pid and lsys(218, 0, 0, 0, 0, 0) == pid, "getpid/gettid/set_tid_address")
     check(lsys(110, 0, 0, 0, 0, 0) != 0, "getppid")

@@ -28,9 +28,11 @@
 # sandbox, its handles (minus O_CLOEXEC) and its narrowed capabilities carry over (section below).
 # 11.1d part 2: rt_sigaction 13, rt_sigprocmask 14, rt_sigreturn 15, kill 62, tgkill 234 -- only at the
 # calling process (the sandbox's only pid), SIGSEGV delivered on a user page fault (section below).
+# 11.1e: writev 20 (each iovec through sys_write, so the same fd checks; IOV_MAX 1024; stops at a
+# short write or a fault after some bytes, like Linux).
 # Not yet: real-time signals (32..64), sigaltstack, signals to other processes.
 LX_ABI = 1
-LX_NSYS = 27  # syscalls in the table above
+LX_NSYS = 28  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ENOTTY = 0xFFFFFFFFFFFFFFE7
@@ -1057,6 +1059,30 @@ def lx_sig_exec(p: ptr[Proc]):
         p.sig_m[i] = 0
         i += 1
 
+def lx_writev(fd: u64, uiov: u64, cnt: u64) -> u64:
+# writev(fd, iov, iovcnt): the iovecs are copied in one at a time; each goes through sys_write
+    if cnt > 1024:
+        return EINVAL
+    tot: u64 = 0
+    i: u64 = 0
+    while i < cnt:
+        v: u64[2]
+        if uiov == 0 or uiov >= USER_TOP - 16 * cnt or copy_user(u64(addr(v[0])), uiov + i * 16, 16) != 0:
+            if tot != 0:
+                return tot
+            return EFAULT
+        if v[1] != 0:
+            r = sys_write(fd, v[0], v[1])
+            if r >= 0xFFFFFFFFFFFFF001:
+                if tot != 0:
+                    return tot
+                return r
+            tot += r
+            if r < v[1]:
+                return tot
+        i += 1
+    return tot
+
 def lx_osabi(img: u64) -> u64:
     return (le32(img + 4) >> 24) & 0xFF  # e_ident[EI_OSABI]
 
@@ -1070,13 +1096,15 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
 # mmap (9, six arguments) is routed by syscall_dispatch, which reads r8/r9 from the frame
     p = cur_proc()
     p.lx_calls += 1
-    if nr == 0 or nr == 1 or nr == 16 or nr == 5 or nr == 217 or nr == 257:
+    if nr == 0 or nr == 1 or nr == 20 or nr == 16 or nr == 5 or nr == 217 or nr == 257:
         atomic_fetch_add(addr(p.fdbusy), 1, acq_rel)
         r: u64 = 0
         if nr == 0:
             r = sys_read(a, b, c)
         elif nr == 1:
             r = sys_write(a, b, c)
+        elif nr == 20:
+            r = lx_writev(a, b, c)
         elif nr == 5:
             r = lx_fstat(a, b)
         elif nr == 217:
