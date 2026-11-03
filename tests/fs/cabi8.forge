@@ -1,0 +1,35 @@
+# forge: no-runtime
+# C ABI stack arguments (11.2): words 7+ passed on the stack, both directions, odd counts aligned
+include "linux.fsi"
+
+extern def c_add8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64
+extern def c_align7(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64
+extern def c_calls8() -> i64
+extern def c_calls_narrow() -> i64
+
+@export
+def forge_add8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64:
+    return a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * f + 7 * g + 8 * h
+
+@export
+def forge_narrow(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: u8, h: i16, i: u32, j: i64) -> i64:
+    return a + b + c + d + e + f + i64(g) + h + i64(i) + j
+
+def nine(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> i64:
+    return a * 100000000 + b * 10000000 + c * 1000000 + d * 100000 + e * 10000 + f * 1000 + g * 100 + h * 10 + i
+
+def main() -> i64:
+    put_i64(c_add8(1, 2, 3, 4, 5, 6, 7, 8))
+    nl()
+    put_i64(c_align7(1, 2, 3, 4, 5, 6, 7))
+    nl()
+    x = c_add8(1, 1, 1, 1, 1, 1, 1, 1)
+    put_i64(c_align7(x, 0, 0, 0, 0, 0, c_add8(0, 0, 0, 0, 0, 0, 1, 1)))
+    nl()
+    put_i64(c_calls8())
+    nl()
+    put_i64(c_calls_narrow())
+    nl()
+    put_i64(nine(1, 2, 3, 4, 5, 6, 7, 8, 9))
+    nl()
+    return 0

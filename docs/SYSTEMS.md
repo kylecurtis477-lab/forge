@@ -24,6 +24,7 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 - **ABI:**
   - `extern def` declares C functions. `@export` makes a symbol global.
   - Narrow arguments and return values are normalized at the boundary, so mixed Forge/C code is safe (tests/fs/cabi).
+  - Up to 16 parameter words: words 7+ go on the stack per SysV (word 7 lowest, rsp 16-aligned at the call), for extern, @export and Forge-to-Forge calls (tests/fs/cabi8). A slice parameter must fit in the first 6 registers; @efiapi/@interrupt functions are still limited to 6.
   - `@interrupt` and `@interrupt_err` generate a register-saving `iretq` wrapper. The body gets `frame: ptr[u64]`, which points at the error code or RIP.
   - `@efiapi` generates an MS-ABI entry (up to 6 params, 5th/6th from the stack). `@naked` emits no prologue. `@section("...")` places the function in a named section.
 - **Globals:** `name: T = init` goes in .data, otherwise .bss. Initializers can be constants, arrays `[..]`, strings, or symbols. `NAME = constexpr` defines a constant. `include "file"` does textual inclusion (relative to the including file, or absolute).

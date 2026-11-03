@@ -16476,6 +16476,36 @@ def fs_args(maxn, ptys):
 
 FS_AREG = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]
 FS_WREG = ["%rcx", "%rdx", "%r8", "%r9"]
+def fs_sysv_call(n, target):
+# the n argument words are on the stack (word 0 deepest); SysV: words 0-5 in registers, 6.. on the
+# stack with word 6 lowest, rsp 16-aligned at the call
+    global fs_dep
+    if n <= 6:
+        i = n - 1
+        while i >= 0:
+            fs_pop(FS_AREG[i])
+            i -= 1
+        fs_callsite(target)
+        return 0
+    k = n - 6
+    sz = 8 * k
+    if (fs_dep + k) % 2:
+        sz += 8
+    e(c3("sub $", str(sz), ",%rsp"))
+    j = 0
+    while j < k:
+        e(c3("mov ", str(sz + 8 * (k - 1 - j)), "(%rsp),%rax"))
+        e(c3("mov %rax,", str(8 * j), "(%rsp)"))
+        j += 1
+    i = 0
+    while i < 6:
+        e(c4("mov ", str(sz + 8 * (n - 1 - i)), "(%rsp),", FS_AREG[i]))
+        i += 1
+    e(concat("call ", target))
+    e(c3("add $", str(sz + 8 * n), ",%rsp"))
+    fs_dep -= n
+    return 0
+
 
 FS_ATN = ["atomic_load", "atomic_store", "atomic_swap", "atomic_fetch_add", "atomic_cas", "atomic_fence"]
 FS_ORDN = ["relaxed", "acquire", "release", "acq_rel", "seq_cst"]
@@ -16598,12 +16628,8 @@ def fs_atyped(nm):
 
 def fs_callf(f):
     global fs_ety, fs_mode
-    n = fs_args(6, f)
-    i = n - 1
-    while i >= 0:
-        fs_pop(FS_AREG[i])
-        i -= 1
-    fs_callsite(fsf_n[f])
+    n = fs_args(16, f)
+    fs_sysv_call(n, fsf_n[f])
     fs_ety = fsf_ret[f]
     fs_norm(fs_ety)
     fs_mode = 0
@@ -17256,12 +17282,8 @@ def fs_primary():
         f = fs_func(nm)
         if f < 0:
             fs_die(concat("unknown function ", nm))
-        n = fs_args(6, f)
-        i = n - 1
-        while i >= 0:
-            fs_pop(FS_AREG[i])
-            i -= 1
-        fs_callsite(nm)
+        n = fs_args(16, f)
+        fs_sysv_call(n, nm)
         fs_ety = fsf_ret[f]
         # SysV leaves upper bits of narrow return values unspecified
         fs_norm(fs_ety)
@@ -18579,8 +18601,18 @@ def fs_sig(ext):
         if fsk[fsp_t[fsf_p0[f] + i]] == 5:
             nr += 1
         i += 1
-    if nr > 6:
-        fs_die("more than 6 parameter registers are not supported yet (a slice uses 2)")
+    # SysV: words 7..16 travel on the stack (11.2); a slice (2 words) must still fit in registers
+    if nr > 16:
+        fs_die("more than 16 parameter words are not supported (a slice uses 2)")
+    if nr > 6 and fs_bop(fs_datt, 22, 0):
+        fs_die("stack parameters (more than 6 words) are not supported with @efiapi / @interrupt")
+    r = 0
+    i = 0
+    while i < n:
+        if fsk[fsp_t[fsf_p0[f] + i]] == 5 and r + 2 > 6:
+            fs_die("a slice parameter must fit in the first 6 parameter registers")
+        r += 1 + (fsk[fsp_t[fsf_p0[f] + i]] == 5)
+        i += 1
     fsf_ret[f] = FT_VOID
     if fs_isop("->"):
         fp += 1
@@ -18827,7 +18859,13 @@ def fs_function2(f):
     r = 0
     while i < fsf_np[f]:
         l = fs_newlocal(fsp_n[fsf_p0[f] + i], fsp_t[fsf_p0[f] + i])
-        if fsk[fsp_t[fsf_p0[f] + i]] == 5:
+        if r >= 6:
+        # SysV stack parameter: word r at 16 + 8 * (r - 6) above the frame pointer
+            e(c3("mov ", str(16 + 8 * (r - 6)), "(%rbp),%rax"))
+            fs_norm(fsp_t[fsf_p0[f] + i])
+            e(c3("mov %rax,", str(fsl_o[l]), "(%rbp)"))
+            r += 1
+        elif fsk[fsp_t[fsf_p0[f] + i]] == 5:
             e(c4("mov ", FS_AREG[r], ",", concat(str(fsl_o[l]), "(%rbp)")))
             e(c4("mov ", FS_AREG[r + 1], ",", concat(str(fsl_o[l] + 8), "(%rbp)")))
             r += 2
