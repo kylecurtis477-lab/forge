@@ -45,12 +45,15 @@
 # an unprivileged id, since the sandbox holds no root capability; getuid/getgid/getegid are not in the table yet.
 # 11.1e: dup2 33 -- dup's rules (rights, grant ledger), then the copy moves to newfd, closing what it
 # held only after the dup succeeded; newfd is not close-on-exec; oldfd == newfd only checks oldfd.
+# 11.1e: lseek 8 -- FAT32 files: SEEK_SET / SEEK_CUR / SEEK_END, past the end allowed, below 0 EINVAL;
+# a directory only rewinds (SEEK_SET 0); the console and other objects are ESPIPE.
 # Not yet: real-time signals (32..64), sigaltstack, signals to other processes.
 LX_ABI = 1
-LX_NSYS = 37  # syscalls in the table above
+LX_NSYS = 38  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ERANGE = 0xFFFFFFFFFFFFFFDE
+ESPIPE = 0xFFFFFFFFFFFFFFE3
 ENOTTY = 0xFFFFFFFFFFFFFFE7
 ENODEV = 0xFFFFFFFFFFFFFFED
 lx_procs: u64  # Linux-personality execs
@@ -591,6 +594,38 @@ def lx_dup2(old: u64, new: u64) -> u64:
     lx_cx(n, 0)
     lx_cx(new, 0)
     return new
+
+def lx_lseek(fd: u64, off: u64, whence: u64) -> u64:
+# lseek(fd, off, whence): files only -- SEEK_SET 0 / SEEK_CUR 1 / SEEK_END 2, a negative result is
+# EINVAL, past the end is allowed (reads there return 0); a directory only rewinds (SEEK_SET 0);
+# the console and other objects are ESPIPE
+    p = cur_proc()
+    fl = fd_get(p, fd)
+    if fl == 0:
+        return EBADF
+    if fl.type == F_DIR:
+        if whence == 0 and off == 0:
+            fl.pos = 0
+            return 0
+        return EINVAL
+    if fl.type != F_FILE:
+        return ESPIPE
+    base: u64 = 0
+    if whence == 1:
+        base = fl.pos
+    elif whence == 2:
+        base = fl.size
+    elif whence != 0:
+        return EINVAL
+    np = base + off
+    if (off >> 63) != 0 and np > base:
+        return EINVAL  # a negative offset reaching below 0
+    if (off >> 63) == 0 and np < base:
+        return EINVAL  # overflow
+    if (np >> 63) != 0:
+        return EINVAL
+    fl.pos = np
+    return np
 
 def lx_getcwd(ubuf: u64, size: u64) -> u64:
 # getcwd(buf, size): there is no working directory (relative paths are EACCES), so it reports "/";
@@ -1278,7 +1313,7 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
 # mmap (9, six arguments) is routed by syscall_dispatch, which reads r8/r9 from the frame
     p = cur_proc()
     p.lx_calls += 1
-    if nr == 0 or nr == 1 or nr == 2 or nr == 4 or nr == 6 or nr == 72 or nr == 20 or nr == 16 or nr == 5 or nr == 217 or nr == 257 or nr == 33:
+    if nr == 0 or nr == 1 or nr == 2 or nr == 4 or nr == 6 or nr == 72 or nr == 20 or nr == 16 or nr == 5 or nr == 217 or nr == 257 or nr == 33 or nr == 8:
         atomic_fetch_add(addr(p.fdbusy), 1, acq_rel)
         r: u64 = 0
         if nr == 0:
@@ -1299,6 +1334,8 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
             r = lx_getdents64(a, b, c)
         elif nr == 33:
             r = lx_dup2(a, b)
+        elif nr == 8:
+            r = lx_lseek(a, b, c)
         elif nr == 257:
             r = lx_openat(a, b, c)
         else:

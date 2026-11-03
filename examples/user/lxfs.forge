@@ -14,6 +14,7 @@ ENOTDIR = 0xFFFFFFFFFFFFFFEC
 ENOENT = 0xFFFFFFFFFFFFFFFE
 EBADF = 0xFFFFFFFFFFFFFFF7
 EINVAL = 0xFFFFFFFFFFFFFFEA
+ESPIPE = 0xFFFFFFFFFFFFFFE3
 AT_FDCWD = 0xFFFFFFFFFFFFFF9C
 DOCS = 4
 
@@ -121,7 +122,7 @@ def lx_main(sp: u64):
         o += rl
     put("\n")
     flush()
-    check(n < 4096 and cnt == 2 and algn == 1 and big == 1, "getdents64: 2 linux_dirent64 records, big.bin a regular file")
+    check(n < 4096 and cnt == 3 and algn == 1 and big == 1, "getdents64: 3 linux_dirent64 records (hello.sh added in 11.1e part 12), big.bin a regular file")
     check(lsys(217, DOCS, u64(addr(dents[0])), 4096, 0, 0) == 0, "getdents64 at the end -> 0")
     fd = lsys(257, DOCS, u64("big.bin"), 0x80000, 0, 0)  # O_RDONLY | O_CLOEXEC
     ok: u64 = 0
@@ -173,6 +174,14 @@ def lx_main(sp: u64):
     check(lsys(33, bf, bf, 0, 0, 0) == bf and lsys(33, 99, 5, 0, 0, 0) == EBADF and lsys(33, bf, 64, 0, 0, 0) == EBADF, "dup2 same fd, EBADF")
     check(lsys(3, 12, 0, 0, 0, 0) == 0 and lsys(3, bf, 0, 0, 0, 0) == 0, "dup2 copies close")
     put("lxfs: dup2: to a free fd, over an open fd (replaced, FD_CLOEXEC cleared), same fd, EBADF ok\n")
+    # 11.1e lseek(8)
+    lf = lsys(2, u64("/efi/forge/docs/big.bin"), 0, 0, 0, 0)
+    lb: u8[4]
+    check(lf < 16 and lsys(8, lf, 100, 0, 0, 0) == 100 and lsys(0, lf, u64(addr(lb[0])), 1, 0, 0) == 1 and lb[0] == 188 and lsys(8, lf, 0, 1, 0, 0) == 101, "lseek SEEK_SET 100, read byte 188, SEEK_CUR")
+    check(lsys(8, lf, 0xFFFFFFFFFFFFFFFD, 2, 0, 0) == 98301 and lsys(0, lf, u64(addr(lb[0])), 4, 0, 0) == 3 and lb[0] == 170 and lb[2] == 184, "lseek SEEK_END -3, read the last 3 bytes")
+    check(lsys(8, lf, 200000, 0, 0, 0) == 200000 and lsys(0, lf, u64(addr(lb[0])), 4, 0, 0) == 0 and lsys(8, lf, 0xFFFFFFFFFFFC0000, 1, 0, 0) == EINVAL and lsys(8, lf, 0, 3, 0, 0) == EINVAL, "lseek past the end reads 0, below 0 / bad whence -> EINVAL")
+    check(lsys(8, 1, 0, 1, 0, 0) == ESPIPE and lsys(8, DOCS, 0, 0, 0, 0) == 0 and lsys(8, DOCS, 5, 0, 0, 0) == EINVAL and lsys(8, 99, 0, 0, 0, 0) == EBADF and lsys(3, lf, 0, 0, 0, 0) == 0, "lseek console -> ESPIPE, dir rewind only, EBADF")
+    put("lxfs: lseek: SET/CUR/END, past the end, below 0 / bad whence -> EINVAL, console -> ESPIPE, dir rewind, EBADF ok\n")
     put("lxfs: fcntl: GETFL/SETFL, GETFD/SETFD, DUPFD(min 10), DUPFD_CLOEXEC ok; SETFL O_NONBLOCK, bad cmd -> EINVAL, EBADF\n")
     flush()
     put("lxfs: lstat: big.bin S_IFREG 98304 (no symlinks on FAT32), outside -> EACCES\n")

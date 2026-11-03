@@ -23,6 +23,7 @@ printf 'Forge long file name test: this file lives at \\EFI\\Forge\\docs\\Long F
 mcopy -i $B/esp.fat $B/notes.txt "::/EFI/Forge/docs/Long File Name Notes.txt"
 python3 -c "import sys; sys.stdout.buffer.write(bytes((i * 7 + (i >> 9)) & 255 for i in range(98304)))" > $B/big.bin
 mcopy -i $B/esp.fat $B/big.bin ::/EFI/Forge/docs/big.bin
+mcopy -i $B/esp.fat scripts/hello.sh ::/EFI/Forge/docs/hello.sh
 mmd -i $B/esp.fat ::/EFI/Forge/apps
 for a in ../apps/*.mf; do mcopy -i $B/esp.fat $a ::/EFI/Forge/apps/$(basename $a); done
 mcopy -i $B/esp.fat $B/forgex64.efi ::/EFI/BOOT/BOOTX64.EFI

@@ -231,6 +231,7 @@ Each driver gets its own boot test, and none of them writes to disks it does not
    - **11.1e part 9 status: done (nanosleep).** Linux `nanosleep` (35): 10 ms ticks, rounded up, capped at a day, not signal-interruptible yet. 35 Linux syscalls. Tests: lxtest (30 ms sleep, EINVAL, EFAULT), `busybox sleep 1`.
    - **11.1e part 10 status: done (geteuid).** Linux `geteuid` (107) returns 1000, matching AT_EUID in the auxv (no root in the sandbox). 36 Linux syscalls. Tests: lxtest (geteuid == 1000), `busybox sh -c exit 3` -> exit 3 with no ENOSYS.
    - **11.1e part 11 status: done (dup2).** Linux `dup2` (33): dup's rules, then the copy moves to newfd (old newfd closed after the dup succeeds), FD_CLOEXEC cleared. 37 Linux syscalls. Tests: lxfs (dup2 free / over an open fd / same fd / EBADF), `busybox sh -c 'exit 4 </efi/forge/docs/big.bin'` -> exit 4 (the redirection goes through dup2).
+   - **11.1e part 12 status: done (lseek).** Linux `lseek` (8) on FAT32 files (SET/CUR/END, past the end ok, below 0 EINVAL), directories rewind only, console ESPIPE. 38 Linux syscalls. Tests: lxfs (lseek checks), `busybox tail -n 2 /efi/forge/docs/hello.sh` (a small text file now on the ESP) with no ENOSYS.
 2. C FFI with the SysV ABI (`extern "C"`, struct layout). Test: link against a C object file and call both ways.
 3. Python FFI: embed or extend CPython (hosted mode). Test: call a Forge function from Python and back.
 
