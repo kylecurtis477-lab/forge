@@ -2,6 +2,16 @@
 # Phase 9.2 object-store log: replay rebuilds the store, a crash (log cut) at every word or a corrupt
 # word anywhere leaves a consistent prefix of history, and writes continue after recovery
 include "linux.fsi"
+# object-store capacities (obj.fsi takes them from the includer)
+OB_NT = 32
+OB_NO = 256
+OB_NV = 2048
+OB_NB = 1024
+OB_NW = 16384
+OB_NL = 32768
+OB_HB = 2048
+OB_NX = 8192
+OB_HX = 16384
 include "../../examples/kernel/obj.fsi"
 
 reffp: u64[256]

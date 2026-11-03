@@ -1,0 +1,166 @@
+# forge: no-runtime
+# Phase 9.3 object-store indexes: 100k objects, lookups by type, by field value and by full-text term
+# agree with a linear scan, stay correct across updates and rewinds, and are much faster than scanning.
+include "linux.fsi"
+# object-store capacities (obj.fsi takes them from the includer)
+OB_NT = 8
+OB_NO = 131072
+OB_NV = 262144
+OB_NB = 262144
+OB_NW = 1048576
+OB_NL = 8388608
+OB_HB = 524288
+OB_NX = 1048576
+OB_HX = 2097152
+include "../../examples/kernel/obj.fsi"
+
+N = 100000
+
+def show(s: ptr[u8], v: u64):
+    puts(s)
+    put_u64(v)
+    nl()
+
+TAG = 0x676174  # "tag" packed little-endian
+COMMON = 0x6E6F6D6D6F43  # "Common"
+NOSUCH = 0x686375736F6E  # "nosuch"
+
+def term(w: u64) -> u64:
+# hash of the term packed in w (up to 8 bytes, zero padded)
+    h = ob_term_start()
+    while w != 0:
+        h = ob_term_byte(h, w & 255)
+        w = w >> 8
+    return h
+
+tbuf: u64[2]
+
+def put_bytes(p: u64, w: u64) -> u64:
+    while w != 0:
+        tbuf[p / 8] |= (w & 255) << ((p % 8) * 8)
+        p += 1
+        w = w >> 8
+    return p
+
+def tagterm(k: u64) -> u64:
+# hash of the term "tag<k>"
+    h = term(TAG)
+    d: u64 = 1
+    while d * 10 <= k:
+        d *= 10
+    while d != 0:
+        h = ob_term_byte(h, 48 + (k / d) % 10)
+        d /= 10
+    return h
+
+def pack_text(i: u64):
+# fields 2..3: "tag<i % 977> Common" packed 8 bytes per word
+    tbuf[0] = 0
+    tbuf[1] = 0
+    p: u64 = 0
+    k = i % 977
+    p = put_bytes(p, TAG)
+    d: u64 = 1
+    while d * 10 <= k:
+        d *= 10
+    while d != 0:
+        tbuf[p / 8] |= (48 + (k / d) % 10) << ((p % 8) * 8)
+        p += 1
+        d /= 10
+    p += 1
+    p = put_bytes(p, COMMON)
+    ob_in[2] = tbuf[0]
+    ob_in[3] = tbuf[1]
+
+def main() -> i64:
+    ob_reset()
+    ob_log_clear()
+    ob_type_def(1, 4)
+    ob_type_def(2, 2)
+    show("text type: ", ob_type_text(1, 2) + 1)
+    i: u64 = 0
+    while i < N:
+        o = obj_new(1)
+        ob_in[0] = i % 10
+        ob_in[1] = i * 7 + 3
+        pack_text(i)
+        obj_write(o, 4)
+        i += 1
+    i = 0
+    while i < 100:
+        o2 = obj_new(2)
+        ob_in[0] = i
+        ob_in[1] = 1
+        obj_write(o2, 2)
+        i += 1
+    show("objects: ", ob_nobj)
+    show("index entries: ", ob_nix)
+    show("index full: ", ob_ixfull)
+    # agreement with the scan
+    bad: u64 = 0
+    i = 0
+    while i < 200:
+        v = (i * 4999) % (N + 50)
+        if obj_find(1, 1, v * 7 + 3, 0) != obj_find_scan(1, 1, v * 7 + 3, 0):
+            bad += 1
+        if obj_find(1, 0, i % 12, i * 400) != obj_find_scan(1, 0, i % 12, i * 400):
+            bad += 1
+        i += 1
+    show("find mismatches: ", bad)
+    show("find id 99999: ", obj_find(1, 1, 99999 * 7 + 3, 0))
+    show("find kind 7 from 500: ", obj_find(1, 0, 7, 500))
+    show("type 2 first: ", obj_type_first(2))
+    c: u64 = 0
+    o = obj_type_first(2)
+    while o != OB_ERR:
+        c += 1
+        o = obj_type_next(o)
+    show("type 2 count: ", c)
+    show("text tag5: ", obj_text_find(tagterm(5), 0))
+    show("text tag5 next: ", obj_text_find(tagterm(5), 6))
+    show("text COMMON from 99998: ", obj_text_find(term(COMMON), 99998))
+    show("text absent: ", u64(obj_text_find(term(NOSUCH), 0) == OB_ERR))
+    # updates and rewinds keep the index current
+    t0 = ob_clock
+    ob_in[0] = 3
+    ob_in[1] = 424242
+    pack_text(976)
+    obj_write(42, 4)
+    show("old id gone: ", u64(obj_find(1, 1, 42 * 7 + 3, 0) == OB_ERR))
+    show("new id: ", obj_find(1, 1, 424242, 0))
+    show("tag42 gone: ", obj_text_find(tagterm(42), 0))
+    show("tag976 now: ", obj_text_find(tagterm(976), 0))
+    obj_rewind(42, t0)
+    show("rewound id: ", obj_find(1, 1, 42 * 7 + 3, 0))
+    show("rewound new gone: ", u64(obj_find(1, 1, 424242, 0) == OB_ERR))
+    show("rewound tag42: ", obj_text_find(tagterm(42), 0))
+    # replay from the log rebuilds the same indexes
+    L = ob_lp
+    ob_replay(L)
+    show("replayed objects: ", ob_nobj)
+    show("replayed id: ", obj_find(1, 1, 99998 * 7 + 3, 0))
+    show("replayed tag42: ", obj_text_find(tagterm(42), 0))
+    # latency: indexed lookups vs the scan, near the end of the store
+    q: u64 = 0
+    a = rdtsc()
+    i = 0
+    while i < 10000:
+        q += obj_find(1, 1, (N - 1 - (i % 100)) * 7 + 3, 0)
+        i += 1
+    ix = (rdtsc() - a) / 10000
+    a = rdtsc()
+    i = 0
+    while i < 20:
+        q += obj_find_scan(1, 1, (N - 1 - (i % 100)) * 7 + 3, 0)
+        i += 1
+    sc = (rdtsc() - a) / 20
+    a = rdtsc()
+    i = 0
+    while i < 10000:
+        q += obj_text_find(tagterm(970 + i % 7), 0)
+        i += 1
+    tx = (rdtsc() - a) / 10000
+    show("checksum: ", q)
+    show("index >= 50x faster than scan: ", u64(ix * 50 < sc))
+    show("text lookup >= 20x faster than scan: ", u64(tx * 20 < sc))
+    return 0

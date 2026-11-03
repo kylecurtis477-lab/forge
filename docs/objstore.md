@@ -16,10 +16,31 @@ Tests: `tests/fs/objstore.forge`, `tests/fs/objlog.forge`, and `os/objstore-cras
   - `obj_read_at(o, ts)` and `obj_read(o)` put the payload in `ob_out`; `obj_field(o, f)` reads one field.
   - `obj_rewind(o, ts)` and `sys_rewind(ts)` write the old payload back as a new version, so history is never lost.
   - `obj_diff(o, t1, t2)` compares an object at two times, and `obj_nversions(o)` counts its versions.
-- **Search**: `obj_find(t, field, value, start)` is a linear scan for now; Phase 9.3 adds indexes.
+- **Search (9.3)**: `obj_find(t, field, value, start)`, `obj_text_find(term, start)` and `obj_type_first`/`obj_type_next` go through indexes (below); `obj_find_scan` is the linear reference.
 
-Capacities are `OB_NT` 32 types, `OB_NO` 256 objects, `OB_NV` 2048 versions, `OB_NB` 1024 blobs,
-`OB_NW` 16384 blob words, and `OB_MAXW` 64 words per payload. When a table is full, the call returns `OB_ERR`.
+Capacities are consts that the includer defines before `include "obj.fsi"` (a missing one is a compile
+error): `OB_NT` types, `OB_NO` objects, `OB_NV` versions, `OB_NB` blobs, `OB_NW` blob words, `OB_NL` log words,
+`OB_HB` blob-hash slots (power of two, at least 2 x `OB_NB`), `OB_NX` index entries and `OB_HX` index-hash slots
+(power of two). The kernel uses 32 / 256 / 2048 / 1024 / 16384 / 32768 / 2048 / 8192 / 16384; tests/fs/objindex.forge
+sizes the store for 100k objects. `OB_MAXW` (64 words per payload) is fixed. When a table is full, the call returns `OB_ERR`.
+
+## Indexes (9.3)
+All indexes are derived state, maintained in `ob_add_ver`, so writes, rewinds and log replay keep them current.
+- **Blob hash**: `ob_bht` maps a payload hash to its blob (linear probing), so dedup is O(1) instead of a scan.
+- **By type**: objects of each type are linked in id order (`ob_tfirst`, `ob_tnext`): `obj_type_first(t)`, then
+  `obj_type_next(o)` until `OB_ERR`.
+- **By field**: one hash index (`ob_hx` buckets, `ix_*` entries) keyed by (type, field, value). A version adds an
+  entry for every field whose value differs from the previous version. Lookups check each candidate against the
+  object's current version, so entries left behind by later changes are skipped; `obj_find` returns the smallest
+  matching id >= `start`, exactly like the scan.
+- **Full text**: `ob_type_text(t, f0)` declares fields `f0..` of type `t` as text (8 bytes per word, little-endian,
+  zero padded); it is logged as record `OB_RX` `0x4F42580000000005` (type, f0). Terms are runs of ASCII letters,
+  digits and `_`, case-folded, hashed with FNV-1a (`ob_term_start`, `ob_term_byte`), and indexed under the pseudo
+  field `OB_TXF`. `obj_text_find(h, start)` re-scans each candidate's current text, so it never returns a stale match.
+- **Overflow**: if `OB_NX` entries run out, `ob_ixfull` is set and lookups fall back to scanning, so answers stay correct.
+- **Latency** (tests/fs/objindex.forge, 100,100 objects, rdtsc cycles per lookup on the build box): indexed field
+  lookup about 50, full-text lookup about 21,000 (about 100 candidates rechecked), linear scan about 1,500,000. The
+  test requires the index to be at least 50x and full-text at least 20x faster than the scan.
 
 ## Write-ahead log (9.2)
 Every mutation appends one record to `ob_log`, which holds up to `OB_NL` 32768 words. A record is a tag word, its fields, and then the
@@ -46,6 +67,8 @@ up front. It lives on the explicitly created Forge-owned partition (see the Forg
 
 ## Testing
 - `tests/fs/objstore.forge` covers versions, dedup, rewind, diff and find.
+- `tests/fs/objindex.forge` builds 100k objects and checks field, type and text lookups against the scan,
+  across an update, a rewind and a log replay, plus the latency ratios.
 - `tests/fs/objlog.forge` replays every possible cut and every single-bit flip, then checks that writes after
   recovery work.
 - `os/objstore-crash-recover` runs two QEMU boots:
@@ -55,4 +78,6 @@ up front. It lives on the explicitly created Forge-owned partition (see the Forg
 ## Known limits
 - The tables are fixed-size and in memory, and the log holds at most `OD_NB` blocks. There's no compaction or checkpoint yet.
 - The store is single-writer and has no locking. In the kernel it runs from the boot thread only.
-- Search is linear until 9.3.
+- Index entries are never removed (stale ones are filtered at lookup), so heavy rewriting of indexed fields grows
+  the index until `OB_NX`, after which lookups scan. A text hash collision can only return a false match if two
+  terms share a 64-bit FNV hash.

@@ -1,0 +1,26 @@
+text type: 1
+objects: 100100
+index entries: 400200
+index full: 0
+find mismatches: 0
+find id 99999: 99999
+find kind 7 from 500: 507
+type 2 first: 100000
+type 2 count: 100
+text tag5: 5
+text tag5 next: 982
+text COMMON from 99998: 99998
+text absent: 1
+old id gone: 1
+new id: 42
+tag42 gone: 1019
+tag976 now: 42
+rewound id: 42
+rewound new gone: 1
+rewound tag42: 42
+replayed objects: 100100
+replayed id: 99998
+replayed tag42: 42
+checksum: 1011224784
+index >= 50x faster than scan: 1
+text lookup >= 20x faster than scan: 1
