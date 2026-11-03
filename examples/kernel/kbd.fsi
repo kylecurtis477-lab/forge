@@ -227,16 +227,24 @@ def kbd_swapper(arg: u64):
         irq_restore(f)
 
 def kbd_service_start():
+    kbd_service_start_from(0)
+
+def kbd_service_start_from(carried: u64):
+# carried = 1: journal, state word, version and counters were set from a kexec handoff (kxd_adopt)
     kb_img[1] = fs_read_file("EFI/Forge/bin/kbdd", addr(kb_sz[1]))
     kb_img[2] = fs_read_file("EFI/Forge/bin/kbdd2", addr(kb_sz[2]))
     if kb_img[1] == 0 or kb_img[2] == 0:
         panic("input service images missing")
-    kb_head = 0
-    kb_ack = 0
-    kb_take = 0
-    kb_state = KB_STATE_MAGIC << 8
+    v: u64 = 1
+    if carried != 0:
+        v = kb_ver
+    else:
+        kb_head = 0
+        kb_ack = 0
+        kb_take = 0
+        kb_state = KB_STATE_MAGIC << 8
     kb_stop = 0
-    kbd_start_l(1)
+    kbd_start_l(v)
     kb_svc = 1
     kb_sup = thread_spawn(u64(kbd_supervisor), 0)
     kb_swapper = thread_spawn(u64(kbd_swapper), 0)

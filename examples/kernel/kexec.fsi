@@ -19,12 +19,75 @@
 #   +56 is caller | caps << 8 +64 npg +72 first page +80 syscall (nr, a, b, c, d) +128 fds (file index + 1) x16
 #   +256 args (128 B) +384 syscall frame
 # file record: +0 type +8 first cluster +16 size +24 position +32 fds referring to it
+# driver state (no-restart gap 4; header page, past KXH_BYTES, so a receiver that ignores it still
+# adopts v3): +1016 hash of +1024..+2048 | +1024 magic KXD_MAGIC +1032 records (0 or 1)
+#   input service record: +1040 kind (DRV_KBD) +1048 driver version +1056 decoder state word
+#   +1064 journal entries not yet committed (n <= 256) +1072 commits +1080 entries committed
+#   +1088 swaps +1096 restarts | +1536 the n entries (u16 each)
+# Driver processes themselves are not carried; the new kernel starts a fresh driver that restores
+# the carried state word and replays the uncommitted entries.
 KXH_MAGIC = 0x464F48584B475246
 KXH_VERSION = 3  # format written by this kernel
 KXH_MIN_VERSION = 3  # oldest format this kernel can adopt
 KXH_BYTES = 448
 KX_FIXED_PAGES = 12
 EBUSY = 0xFFFFFFFFFFFFFFF0
+KXD_MAGIC = 0x5652444B58  # "XKDRV"
+kxd_sent: u64  # entries carried by the sender (set in the receiver once adopted)
+kxd_adopted: u64
+
+@unsafe
+def kxd_save(h: u64):
+# called with every other CPU halted and input interrupts off: the journal can no longer change
+    memset(h + 1016, 0, 1032)
+    vstore64(h + 1024, KXD_MAGIC)
+    if kb_svc != 0:
+        n = kb_head - kb_ack
+        if n > KB_JN:
+            n = KB_JN
+        vstore64(h + 1032, 1)
+        vstore64(h + 1040, DRV_KBD)
+        vstore64(h + 1048, kb_ver)
+        vstore64(h + 1056, kb_state)
+        vstore64(h + 1064, n)
+        vstore64(h + 1072, kb_commits)
+        vstore64(h + 1080, kb_committed)
+        vstore64(h + 1088, kb_swaps)
+        vstore64(h + 1096, kb_restarts)
+        i: u64 = 0
+        while i < n:
+            vstore16(h + 1536 + i * 2, kb_j[(kb_ack + i) & (KB_JN - 1)])
+            i += 1
+    vstore64(h + 1016, kx_hash(h + 1024, 1024))
+
+@unsafe
+def kxd_adopt(h: u64) -> u64:
+# 1 if an input service record was adopted into the (not yet running) service
+    if vload64(h + 1024) != KXD_MAGIC or vload64(h + 1016) != kx_hash(h + 1024, 1024):
+        return 0
+    if vload64(h + 1032) != 1 or vload64(h + 1040) != DRV_KBD:
+        return 0
+    v = vload64(h + 1048)
+    st = vload64(h + 1056)
+    n = vload64(h + 1064)
+    if (v != 1 and v != 2) or (st >> 8) != KB_STATE_MAGIC or n > KB_JN:
+        return 0
+    i: u64 = 0
+    while i < n:
+        kb_j[i] = vload16(h + 1536 + i * 2)
+        i += 1
+    kb_ack = 0
+    kb_take = 0
+    kb_head = n
+    kb_state = st
+    kb_ver = v
+    kb_commits = vload64(h + 1072)
+    kb_committed = vload64(h + 1080)
+    kb_swaps = vload64(h + 1088)
+    kb_restarts = vload64(h + 1096)
+    kxd_sent = n
+    kxd_adopted = 1
+    return 1
 kx_nproc: u64
 kx_nfile: u64
 kx_files: u64[1024]
@@ -471,6 +534,13 @@ def sys_kexec(frame: u64, which: u64) -> u64:
         i += 1
     tlb_halt = 1
     stop_machine_begin()
+    if kb_svc != 0:
+    # a shift press + release arriving during the handoff: nobody decodes it in this kernel
+        kb_j[kb_head & (KB_JN - 1)] = 0x2A
+        kb_j[(kb_head + 1) & (KB_JN - 1)] = 0xAA
+        kb_head += 2
+        kb_in += 2
+    kxd_save(h)
     lapic_wr(0x320, 0x10000)
     lapic_wr(0x380, 0)
     write_cr3(kernel_pml4)
@@ -647,6 +717,7 @@ def kx_restore() -> nptr[Thread]:
     kx_restored = pg_total
     kx_nproc = nproc
     kx_freed = total
+    kxd_adopt(h)
     kx_release(hb, total, total)
     bi.handoff = 0
     i = 0

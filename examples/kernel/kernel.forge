@@ -1621,6 +1621,7 @@ def shell_test():
 def kexec_test():
 # a second shell session that replaces the kernel under itself (sh builtin `kexec`, syscall 409)
     input_init()
+    kbd_service_start()
     ktest_hooks = 1
     sz: u64 = 0
     img = fs_read_file("/EFI/Forge/bin/sh", addr(sz))
@@ -1636,8 +1637,38 @@ def kexec_resume():
     t = kx_restore()
     if u64(t) == 0:
         panic("kexec: the handoff was not adopted")
+    if kxd_adopted == 0:
+        panic("kexec: input service state not carried")
+    c0 = kb_commits
+    n0 = kb_committed
+    s0 = kb_state
+    v0 = kb_ver
+    kbd_service_start_from(1)
+    puts("kexec: input service state carried: kbdd v")
+    put_u64(v0)
+    puts(", decoder state ")
+    put_hex(s0)
+    puts(", ")
+    put_u64(kxd_sent)
+    puts(" uncommitted entries, ")
+    put_u64(c0)
+    puts(" commits so far\n")
     code = proc_reap(t)
     orph = proc_reap_orphans()
+    kbd_service_stop()
+    puts("kexec: input service in generation 1: ")
+    put_u64(kb_commits - c0)
+    puts(" more commits, carried entries replayed by the new driver: ")
+    if kb_committed >= n0 + kxd_sent:
+        puts("yes")
+    else:
+        puts("no")
+    puts(", restarts ")
+    put_u64(kb_restarts)
+    putc(10)
+    if kxd_sent < 2 or kb_commits <= c0 or kb_committed < n0 + kxd_sent or kb_dropped != 0:
+        panic("kexec: driver state not carried across the handoff")
+    puts("driver state carried across kexec OK\n")
     input_off()
     puts("sh exited with ")
     put_u64(code)
