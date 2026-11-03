@@ -30,9 +30,11 @@
 # calling process (the sandbox's only pid), SIGSEGV delivered on a user page fault (section below).
 # 11.1e: writev 20 (each iovec through sys_write, so the same fd checks; IOV_MAX 1024; stops at a
 # short write or a fault after some bytes, like Linux).
+# 11.1e: uname 63 (sysname Linux -- the personality's ABI --, nodename forge, release 0.2.6-forge,
+# machine x86_64).
 # Not yet: real-time signals (32..64), sigaltstack, signals to other processes.
 LX_ABI = 1
-LX_NSYS = 28  # syscalls in the table above
+LX_NSYS = 29  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ENOTTY = 0xFFFFFFFFFFFFFFE7
@@ -1083,6 +1085,33 @@ def lx_writev(fd: u64, uiov: u64, cnt: u64) -> u64:
         i += 1
     return tot
 
+def lx_uname(ubuf: u64) -> u64:
+# struct utsname: 6 NUL-padded 65-byte fields, packed from constants (no pointer walks)
+    b: u8[390]
+    i: u64 = 0
+    while i < 390:
+        b[i] = 0
+        i += 1
+    # Linux
+    lx_le(b[:], 0, 0x78756e694c, 5)
+    # forge
+    lx_le(b[:], 65, 0x6567726f66, 5)
+    # 0.2.6-forge
+    lx_le(b[:], 130, 0x6f662d362e322e30, 8)
+    lx_le(b[:], 138, 0x656772, 3)
+    # #1 Forge Linux compat sandbox
+    lx_le(b[:], 195, 0x6567726f46203123, 8)
+    lx_le(b[:], 203, 0x632078756e694c20, 8)
+    lx_le(b[:], 211, 0x6173207461706d6f, 8)
+    lx_le(b[:], 219, 0x786f62646e, 5)
+    # x86_64
+    lx_le(b[:], 260, 0x34365f363878, 6)
+    # (none)
+    lx_le(b[:], 325, 0x29656e6f6e28, 6)
+    if ubuf == 0 or ubuf >= USER_TOP - 390 or copy_user(ubuf, u64(addr(b[0])), 390) != 0:
+        return EFAULT
+    return 0
+
 def lx_osabi(img: u64) -> u64:
     return (le32(img + 4) >> 24) & 0xFF  # e_ident[EI_OSABI]
 
@@ -1132,6 +1161,8 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
         return m
     if nr == 39:
         return sys_getpid()
+    if nr == 63:
+        return lx_uname(a)
     if nr == 110:
         return sys_getppid()
     if nr == 186:

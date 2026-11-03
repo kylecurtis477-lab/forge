@@ -127,7 +127,7 @@ compiles it with forgec/fas/fld, sets EI_OSABI = 3, then seals it. tests/os/run.
   ENOTTY/EBADF, getpid/gettid/set_tid_address/getppid, 12 registers preserved across a syscall,
   TLS (arch_prctl SET/GET_FS, `%fs:0` self pointer read 400000 times across 400 yields and timer
   preemptions, plus the EPERM/EFAULT/EINVAL refusals), Forge syscall 409 -> ENOSYS, then
-  `lxtest: PASS (28 checks)` and `[lxtest exited 0 (sandboxed)]`.
+  `lxtest: PASS (30 checks)` and `[lxtest exited 0 (sandboxed)]`.
 
 ## Files (11.1c)
 
@@ -239,4 +239,4 @@ BusyBox is built from source only; no prebuilt third-party binary is used.
 - Image: static EXEC at 0x400000, EI_OSABI set to 3, sealed `forgeseal.py --foreign` (level 3, unsafe 0, caps 0). `image_verify` refuses a level-3 seal on anything but a capability-free Linux image (reason 8); the 6.4 gate still refuses it outside the compat sandbox.
 - Manifest `examples/apps/busybox.mf`: one `dir /efi/forge/docs` grant.
 
-Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it). Missing syscalls seen at first run: uname 63, open 2 and stat 4 (cat, ls, wc, sha256sum, head), getcwd 79, nanosleep 35, fcntl 72 (printf). They will be added one per commit.
+Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). Still missing: open 2 and stat 4 (cat, ls, wc, sha256sum, head), getcwd 79, nanosleep 35, fcntl 72 (printf). They will be added one per commit.
