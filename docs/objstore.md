@@ -62,7 +62,7 @@ arrives out of order, and truncates the log there.
 up front. It lives on the explicitly created Forge-owned partition (see the Forge FS) and is never written anywhere else.
 - `od_open()` replays an existing log. If the log ends in a torn tail, it zeroes the tail both in memory and on disk, so later appends
   can't revive stale records. If there's no log, it creates one.
-- Since Phase 10.1 every block is ChaCha20-encrypted and tagged, and written alternately to two slots; a slot whose tag fails reads as
+- Since Phase 10.1 every block is ChaCha20-encrypted and HMAC-SHA256 authenticated (encrypt-then-MAC), and written alternately to two slots; a slot whose tag fails reads as
   zeros, which replay treats as a torn tail. Without the right user key the store stays locked.
 - `od_commit(o)` writes every log block that changed since the last sync, then issues an NVMe flush
   before returning. Once a commit has returned, it is durable.

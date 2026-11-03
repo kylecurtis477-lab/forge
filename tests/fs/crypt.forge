@@ -1,37 +1,165 @@
 # forge: no-runtime
-# Phase 10.1 crypto known-answer tests: ChaCha20 (RFC 8439 2.3.2 block) and SHA-256 ("abc", empty, 1M 'a').
+# Phase 10.1 crypto known-answer tests, full-width (every output word is checked):
+#   ChaCha20: RFC 8439 2.3.2 block function and 2.4.2 encryption ("Ladies and Gentlemen ..." sunscreen text)
+#   SHA-256: FIPS 180-2 / NIST examples ("abc", the 448-bit two-block message, 1M 'a') and the empty string
+#   HMAC-SHA256: RFC 4231 test cases 1, 2 and 6 (hashed long key)
+#   ct_eq4: the constant-time 256-bit compare, equal and single-bit-different
 include "linux.fsi"
 include "../../examples/kernel/crypt.fsi"
+
+exp: u64[16]
 
 def show(s: ptr[u8], v: u64):
     puts(s)
     put_u64(v)
     nl()
 
-def main() -> i64:
+@unsafe
+def feed(s: ptr[u8]):
+    i: u64 = 0
+    while s[i] != 0:
+        sh_byte(u64(s[i]))
+        i += 1
+
+def hexv(c: u64) -> u64:
+    if c >= 97:
+        return c - 87
+    return c - 48
+
+@unsafe
+def sh_is(x: ptr[u8]) -> u64:
+# the digest in sh_h equals the 64-hex-digit string x
+    ok: u64 = 1
+    i: u64 = 0
+    while i < 8:
+        v: u64 = 0
+        j: u64 = 0
+        while j < 8:
+            v = (v << 4) | hexv(u64(x[i * 8 + j]))
+            j += 1
+        if sh_h[i] != v:
+            ok = 0
+        i += 1
+    return ok
+
+def rfc_key():
     i: u64 = 0
     while i < 8:
         b = i * 4
         cc_key[i] = b | ((b + 1) << 8) | ((b + 2) << 16) | ((b + 3) << 24)
         i += 1
+
+def hmac_bytes(kb: u64, kn: u64):
+# HMAC key = kn copies of byte kb (hashed first when longer than the block)
+    i: u64 = 0
+    if kn > 64:
+        sh_init()
+        while i < kn:
+            sh_byte(kb)
+            i += 1
+        sh_fin()
+        hm_setkey_digest()
+        return
+    while i < 64:
+        hm_k[i] = u8(0)
+        if i < kn:
+            hm_k[i] = u8(kb)
+        i += 1
+
+@unsafe
+def main() -> i64:
+    rfc_key()
     cc_block(1, 0x09000000, 0x4a000000, 0)
-    show("chacha20 rfc8439 word0: ", u64(cc_ks[0] == 0xe4e7f110))
-    show("chacha20 rfc8439 word15: ", u64(cc_ks[15] == 0x4e3c50a2))
-    show("chacha20 rfc8439 word7: ", u64(cc_ks[7] == 0x4e6cd4c3))
+    exp[0] = 0xe4e7f110
+    exp[1] = 0x15593bd1
+    exp[2] = 0x1fdd0f50
+    exp[3] = 0xc47120a3
+    exp[4] = 0xc7f4d1c7
+    exp[5] = 0x0368c033
+    exp[6] = 0x9aaa2204
+    exp[7] = 0x4e6cd4c3
+    exp[8] = 0x466482d2
+    exp[9] = 0x09aa9f07
+    exp[10] = 0x05d7c214
+    exp[11] = 0xa2028bd9
+    exp[12] = 0xd19c12b5
+    exp[13] = 0xb94e16de
+    exp[14] = 0xe883d0cb
+    exp[15] = 0x4e3c50a2
+    ok: u64 = 1
+    i: u64 = 0
+    while i < 16:
+        if cc_ks[i] != exp[i]:
+            ok = 0
+        i += 1
+    show("chacha20 rfc8439 2.3.2 block (16 words): ", ok)
+    # 2.4.2: nonce 00:00:00:00:00:00:00:4a:00:00:00:00, counter 1; first and last 8 ciphertext bytes
+    pt = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+    n: u64 = 0
+    while pt[n] != 0:
+        n += 1
+    c0: u64 = 0
+    c1: u64 = 0
+    i = 0
+    while i < n:
+        if i % 64 == 0:
+            cc_block(1 + i / 64, 0, 0x4a000000, 0)
+        kb = (cc_ks[(i % 64) / 4] >> ((i % 4) * 8)) & 255
+        c = u64(pt[i]) ^ kb
+        if i < 8:
+            c0 = (c0 << 8) | c
+        if i >= n - 8:
+            c1 = (c1 << 8) | c
+        i += 1
+    show("chacha20 rfc8439 2.4.2 encrypt (114 bytes): ", u64(n == 114 and c0 == 0x6e2e359a2568f980 and c1 == 0x8eedf2785e42874d))
     sh_init()
-    sh_byte(97)
-    sh_byte(98)
-    sh_byte(99)
+    feed("abc")
     sh_fin()
-    show("sha256 abc: ", u64(sh_h[0] == 0xba7816bf and sh_h[7] == 0xf20015ad))
+    show("sha256 fips abc: ", sh_is("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"))
+    sh_init()
+    feed("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
+    sh_fin()
+    show("sha256 fips 448-bit two-block: ", sh_is("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"))
     sh_init()
     sh_fin()
-    show("sha256 empty: ", u64(sh_h[0] == 0xe3b0c442 and sh_h[7] == 0x7852b855))
+    show("sha256 empty: ", sh_is("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"))
     sh_init()
     i = 0
     while i < 1000000:
         sh_byte(97)
         i += 1
     sh_fin()
-    show("sha256 1M a: ", u64(sh_h[0] == 0xcdc76e5c and sh_h[7] == 0xc7112cd0))
+    show("sha256 fips 1M a: ", sh_is("cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"))
+    hmac_bytes(0x0b, 20)
+    hm_begin()
+    feed("Hi There")
+    hm_end()
+    show("hmac-sha256 rfc4231 tc1: ", sh_is("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"))
+    i = 0
+    while i < 64:
+        hm_k[i] = u8(0)
+        i += 1
+    hm_k[0] = u8(74)
+    hm_k[1] = u8(101)
+    hm_k[2] = u8(102)
+    hm_k[3] = u8(101)
+    hm_begin()
+    feed("what do ya want for nothing?")
+    hm_end()
+    show("hmac-sha256 rfc4231 tc2: ", sh_is("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"))
+    hmac_bytes(0xaa, 131)
+    hm_begin()
+    feed("Test Using Larger Than Block-Size Key - Hash Key First")
+    hm_end()
+    show("hmac-sha256 rfc4231 tc6 (131-byte key): ", sh_is("60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"))
+    ta: u64[4]
+    tb: u64[4]
+    i = 0
+    while i < 4:
+        ta[i] = i * 0x9E3779B97F4A7C15
+        tb[i] = ta[i]
+        i += 1
+    show("ct_eq4 equal: ", ct_eq4(ta, tb))
+    tb[3] = tb[3] ^ (1 << 63)
+    show("ct_eq4 one bit off: ", 1 - ct_eq4(ta, tb))
     return 0

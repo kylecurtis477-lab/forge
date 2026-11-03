@@ -1,7 +1,9 @@
 # Phase 10.1: encryption at rest. Self-contained, fully safe Forge crypto shared by the kernel (objd.fsi
 # encrypts every object-store log block) and the hosted test tests/fs/crypt.forge:
 #   ChaCha20 (RFC 8439 block function; 32-bit words held in u64 slots) for confidentiality,
-#   SHA-256 (FIPS 180-4) for key derivation and the per-block keyed tag.
+#   SHA-256 (FIPS 180-4), and HMAC-SHA256 (RFC 2104 / RFC 4231) built on it for key derivation and the
+#   per-block integrity tag (a real HMAC: inner/outer padded keys, so the tag is not length-extendable),
+#   and ct_eq4, a constant-time compare for 256-bit tags.
 # Keys are 8 little-endian 32-bit words. Nothing here touches memory outside these arrays.
 cc_key: u64[8]  # ChaCha20 key (32-bit words)
 cc_x: u64[16]  # working state
@@ -154,12 +156,58 @@ def sh_fin():
         sh_byte((bits >> (56 - i * 8)) & 255)
         i += 1
 
-def sh_key(k: u64[8]):
-# hash key words (cc-key format, 32-bit little-endian words)
+# ---- HMAC-SHA256 (RFC 2104): HMAC(K, m) = SHA256((K^opad) || SHA256((K^ipad) || m)) ----
+hm_k: u8[64]  # the HMAC key block (key bytes, zero padded to the SHA-256 block size)
+hm_ih: u64[8]  # inner hash
+
+def hm_setkey32(k: u64[8]):
+# a 32-byte key in cc-key format (8 little-endian 32-bit words)
+    i: u64 = 0
+    while i < 64:
+        hm_k[i] = u8(0)
+        if i < 32:
+            hm_k[i] = u8((k[i / 4] >> ((i % 4) * 8)) & 255)
+        i += 1
+
+def hm_setkey_digest():
+# the key is the SHA-256 digest in sh_h (RFC 2104: keys longer than 64 bytes are hashed first)
+    i: u64 = 0
+    while i < 64:
+        hm_k[i] = u8(0)
+        if i < 32:
+            hm_k[i] = u8((sh_h[i / 4] >> (24 - (i % 4) * 8)) & 255)
+        i += 1
+
+def hm_begin():
+# start HMAC with hm_k; feed the message with sh_byte / sh_u64, then call hm_end
+    sh_init()
+    i: u64 = 0
+    while i < 64:
+        sh_byte(u64(hm_k[i]) ^ 0x36)
+        i += 1
+
+def hm_end():
+# finish: the 256-bit MAC is left in sh_h (8 big-endian 32-bit words)
+    sh_fin()
     i: u64 = 0
     while i < 8:
-        sh_byte(k[i] & 255)
-        sh_byte((k[i] >> 8) & 255)
-        sh_byte((k[i] >> 16) & 255)
-        sh_byte((k[i] >> 24) & 255)
+        hm_ih[i] = sh_h[i]
         i += 1
+    sh_init()
+    i = 0
+    while i < 64:
+        sh_byte(u64(hm_k[i]) ^ 0x5c)
+        i += 1
+    i = 0
+    while i < 8:
+        sh_byte((hm_ih[i] >> 24) & 255)
+        sh_byte((hm_ih[i] >> 16) & 255)
+        sh_byte((hm_ih[i] >> 8) & 255)
+        sh_byte(hm_ih[i] & 255)
+        i += 1
+    sh_fin()
+
+def ct_eq4(a: u64[4], b: u64[4]) -> u64:
+# 1 if the two 256-bit values are equal; examines every word, no early exit (constant time)
+    d = (a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3])
+    return 1 - ((d | (0 - d)) >> 63)

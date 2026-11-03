@@ -3,11 +3,17 @@
 # flushes before returning, so a returned commit is durable. Mount replays the log (obj.fsi ob_replay),
 # drops a torn or corrupt tail and zeroes it on disk so later appends can never revive stale records.
 # Only Forge FS calls are used, so every write stays inside the explicitly created Forge partition.
-# Phase 10.1: every log block is encrypted at rest (crypt.fsi ChaCha20, nonce = write counter + block) and
-# carries a keyed SHA-256 tag; each logical block alternates between two physical slots so a torn write
-# never destroys the previous contents. The data key is random and stored only wrapped by the user key
-# (objects.key); see docs/privacy.md.
-OD_PW = 510  # payload words per logical log block; word 510 = write counter, 511 = keyed tag
+# Phase 10.1: every log block is encrypted at rest and authenticated, encrypt-then-MAC: ChaCha20 under the
+# enc key with nonce = (64-bit write counter, block number), then a full 256-bit HMAC-SHA256 under the
+# separate MAC key over (block, counter, ciphertext), compared in constant time (crypt.fsi ct_eq4). Enc and
+# MAC keys are HMAC-derived from the random per-user data key, which is stored only wrapped by the user
+# key (objects.key). The write counter is never reused, across reboots, torn writes, rewinds and
+# tampering: it only grows, and a high-water mark reserved ahead of use is made durable in objects.ctr
+# (two HMAC-tagged slots) before any counter beyond it is used. Each logical block alternates between two
+# physical slots so a torn write never destroys the previous contents. See docs/privacy.md.
+OD_PW = 507  # payload words per logical log block; word 507 = write counter, 508..511 = HMAC-SHA256 tag
+OD_WRES = 4096  # counters reserved per objects.ctr update
+OD_CMAGIC = 0x52544345474F46  # "FOGECTR"
 OD_NB = (OB_NL + OD_PW - 1) / OD_PW  # logical log blocks; each has two physical slots (A/B)
 OD_UID = 1000  # the store owner (one user per store)
 OD_KMAGIC = 0x59454B4547524F46  # "FORGEKEY"
@@ -17,13 +23,19 @@ od_torn: u64
 od_commits: u64
 od_wc: u64  # last write counter used (never reused: it is part of every block's nonce)
 od_cs: u8[OD_NB]  # current valid slot per logical block
-od_kek: u64[8]  # key-encryption key (from the TPM when present, else the platform key; never stored)
+od_kek: u64[8]  # key-encryption key (the platform key; TPM sealing is not implemented; never stored)
 od_dk: u64[8]  # the store's data key (random, stored only wrapped by od_kek)
 od_ek: u64[8]  # ChaCha20 key derived from od_dk
 od_mk: u64[8]  # tag key derived from od_dk
 od_t: u64[8]  # kdf output
 od_ksrc: u64  # 0 none, 1 TPM, 2 fw_cfg platform key
 od_badtag: u64  # slots rejected (torn, never written, or tampered) at the last open
+od_hwm: u64  # durable counter high-water mark: no counter above it has been used
+od_cst: u64  # objects.ctr first block
+od_hs: u64  # current objects.ctr slot
+od_rawmax: u64  # highest counter seen in any slot at open, verified or not
+od_tv: u64[4]  # computed tag
+od_tr: u64[4]  # stored tag
 
 # ---- user key: TPM-sealed when a TPM is present, else QEMU fw_cfg "opt/forge/userkey" ----
 def od_tpm_present() -> u64:
@@ -95,13 +107,13 @@ def od_be(v: u64) -> u64:
     return ((v >> 24) & 255) | (((v >> 16) & 255) << 8) | (((v >> 8) & 255) << 16) | ((v & 255) << 24)
 
 def od_kdf(k: u64[8], label: u64, salt0: u64, salt1: u64):
-# od_t = SHA-256(k || label || salt)
-    sh_init()
-    sh_key(k)
+# od_t = HMAC-SHA256(k, label || salt) (an HKDF-Expand style PRF; distinct labels give independent keys)
+    hm_setkey32(k)
+    hm_begin()
     sh_u64(label)
     sh_u64(salt0)
     sh_u64(salt1)
-    sh_fin()
+    hm_end()
     i: u64 = 0
     while i < 8:
         od_t[i] = od_be(sh_h[i])
@@ -190,8 +202,11 @@ def od_key_new() -> u64:
     while i < 8:
         ffs_b[4 + i] = od_dk[i] ^ od_t[i]
         i += 1
-    od_kdf(od_kek, 0x6B6863, s0, s1)  # "chk"
-    ffs_b[12] = od_t[0] | (od_t[1] << 32)
+    od_kdf(od_kek, 0x6B6863, s0, s1)  # "chk": a 256-bit key check value
+    i = 0
+    while i < 4:
+        ffs_b[12 + i] = od_t[i * 2] | (od_t[i * 2 + 1] << 32)
+        i += 1
     if ffs_put(st, 0) == 0 or nvme_flush() == 0:
         return 0
     od_keys_from_dk()
@@ -207,10 +222,15 @@ def od_key_load() -> u64:
     s0 = ffs_b[2]
     s1 = ffs_b[3]
     od_kdf(od_kek, 0x6B6863, s0, s1)
-    if ffs_b[12] != (od_t[0] | (od_t[1] << 32)):
+    k: u64 = 0
+    while k < 4:
+        od_tv[k] = od_t[k * 2] | (od_t[k * 2 + 1] << 32)
+        od_tr[k] = ffs_b[12 + k]
+        k += 1
+    if ct_eq4(od_tv, od_tr) == 0:
         return 3
     od_kdf(od_kek, 0x70617277, s0, s1)
-    k: u64 = 0
+    k = 0
     while k < 8:
         od_dk[k] = ffs_b[4 + k] ^ od_t[k]
         k += 1
@@ -218,18 +238,81 @@ def od_key_load() -> u64:
     return 1
 
 # ---- encrypted, tagged log blocks ----
-def od_tag(b: u64, wc: u64) -> u64:
-# keyed tag over (block, counter, ciphertext words 0..509 in ffs_b)
-    sh_init()
-    sh_key(od_mk)
+def od_mac_end():
+# finish the HMAC and leave the 256-bit tag in od_tv
+    hm_end()
+    i: u64 = 0
+    while i < 4:
+        od_tv[i] = (sh_h[i * 2] << 32) | sh_h[i * 2 + 1]
+        i += 1
+
+def od_tag(b: u64, wc: u64):
+# od_tv = HMAC-SHA256(od_mk, block || counter || ciphertext words 0..OD_PW-1 in ffs_b)
+    hm_setkey32(od_mk)
+    hm_begin()
     sh_u64(b)
     sh_u64(wc)
     i: u64 = 0
     while i < OD_PW:
         sh_u64(ffs_b[i])
         i += 1
-    sh_fin()
-    return sh_h[0] | (sh_h[1] << 32)
+    od_mac_end()
+
+def od_tag_ok(at: u64) -> u64:
+# constant-time compare of od_tv with the tag stored at ffs_b[at..at+3]
+    i: u64 = 0
+    while i < 4:
+        od_tr[i] = ffs_b[at + i]
+        i += 1
+    return ct_eq4(od_tv, od_tr)
+
+# ---- objects.ctr: the durable counter high-water mark (two slots, HMAC-tagged, higher valid one wins) ----
+def od_ctr_tag(slot: u64, v: u64):
+    hm_setkey32(od_mk)
+    hm_begin()
+    sh_u64(OD_CMAGIC)
+    sh_u64(slot)
+    sh_u64(v)
+    od_mac_end()
+
+def od_ctr_put(v: u64) -> u64:
+# make "no counter above v is used" durable (flushed) before any counter up to v is used
+    i: u64 = 0
+    while i < 512:
+        ffs_b[i] = 0
+        i += 1
+    slot = 1 - od_hs
+    od_ctr_tag(slot, v)
+    ffs_b[0] = OD_CMAGIC
+    ffs_b[1] = v
+    i = 0
+    while i < 4:
+        ffs_b[2 + i] = od_tv[i]
+        i += 1
+    if ffs_put(od_cst + slot, 0) == 0 or nvme_flush() == 0:
+        return 0
+    od_hs = slot
+    od_hwm = v
+    return 1
+
+def od_ctr_load() -> u64:
+# od_hwm = the higher verified slot (0 if neither verifies); 0 if objects.ctr is missing
+    i = ffs_find("objects.ctr")
+    if i == FFS_NI or ffs_it[i * 8 + 7] != 2:
+        return 0
+    od_cst = ffs_it[i * 8 + 6]
+    od_hwm = 0
+    od_hs = 1
+    slot: u64 = 0
+    while slot < 2:
+        if ffs_get(od_cst + slot, 0) != 0 and ffs_b[0] == OD_CMAGIC:
+            v = ffs_b[1]
+            od_ctr_tag(slot, v)
+            if od_tag_ok(2) != 0 and v >= od_hwm:
+                od_hwm = v
+                od_hs = slot
+        slot += 1
+    return 1
 
 def od_xor(b: u64, wc: u64):
 # ffs_b[0..509] ^= ChaCha20(od_ek, nonce = (wc, block b))
@@ -255,11 +338,25 @@ def od_put(b: u64) -> u64:
         if w < OB_NL:
             ffs_b[i] = ob_log[w]
         i += 1
+    if od_wc + 1 > od_hwm:
+        if od_ctr_put(od_wc + OD_WRES) == 0:
+            return 0
+        i = 0
+        while i < OD_PW:
+            w = b * OD_PW + i
+            ffs_b[i] = 0
+            if w < OB_NL:
+                ffs_b[i] = ob_log[w]
+            i += 1
     od_wc += 1
     wc = od_wc
     od_xor(b, wc)
     ffs_b[OD_PW] = wc
-    ffs_b[OD_PW + 1] = od_tag(b, wc)
+    od_tag(b, wc)
+    i = 0
+    while i < 4:
+        ffs_b[OD_PW + 1 + i] = od_tv[i]
+        i += 1
     slot = 1 - u64(od_cs[b])
     if ffs_put(od_st + b * 2 + slot, 0) == 0:
         return 0
@@ -271,7 +368,12 @@ def od_slot_wc(b: u64, slot: u64) -> u64:
     if ffs_get(od_st + b * 2 + slot, 0) == 0:
         return 0
     wc = ffs_b[OD_PW]
-    if wc == 0 or ffs_b[OD_PW + 1] != od_tag(b, wc):
+    if wc > od_rawmax and wc < (1 << 62):
+        od_rawmax = wc  # even an unverified counter is never reused
+    if wc == 0:
+        return 0
+    od_tag(b, wc)
+    if od_tag_ok(OD_PW + 1) == 0:
         return 0
     return wc
 
@@ -311,8 +413,11 @@ def od_open() -> u64:
         if od_key_new() == 0:
             return 0
         od_st = od_mkfile("objects.log", OD_NB * 2)
-        if od_st == 0:
+        od_cst = od_mkfile("objects.ctr", 2)
+        if od_st == 0 or od_cst == 0:
             return 0
+        od_hs = 1
+        od_hwm = 0
         ob_reset()
         ob_log_clear()
         w: u64 = 0
@@ -330,7 +435,10 @@ def od_open() -> u64:
     od_st = ffs_it[i * 8 + 6]
     if od_key_load() != 1:
         return 3
+    if od_ctr_load() == 0:
+        return 0
     od_wc = 0
+    od_rawmax = 0
     b = 0
     while b < OD_NB:
         w0 = od_slot_wc(b, 0)
@@ -362,6 +470,11 @@ def od_open() -> u64:
                     ob_log[b * OD_PW + k] = ffs_b[k]
                 k += 1
         b += 1
+    # the next counter is above every counter ever made durable or seen on disk
+    if od_hwm > od_wc:
+        od_wc = od_hwm
+    if od_rawmax > od_wc:
+        od_wc = od_rawmax
     ob_replay(OB_NL)
     # anything after the last good record is a torn/corrupt tail: zero it in memory and on disk
     last: u64 = 0
@@ -487,7 +600,7 @@ def objrw_verify():
     puts("objstore system rewind persisted OK\n")
 
 def od_keymsg(r: u64):
-    puts("objstore: encrypted at rest (ChaCha20 + keyed SHA-256 tags), uid 1000 data key ")
+    puts("objstore: encrypted at rest (ChaCha20, encrypt-then-MAC HMAC-SHA256), uid 1000 data key ")
     if r == 2:
         puts("created, wrapped by the ")
     else:

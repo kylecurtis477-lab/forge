@@ -1,6 +1,11 @@
-chacha20 rfc8439 word0: 1
-chacha20 rfc8439 word15: 1
-chacha20 rfc8439 word7: 1
-sha256 abc: 1
+chacha20 rfc8439 2.3.2 block (16 words): 1
+chacha20 rfc8439 2.4.2 encrypt (114 bytes): 1
+sha256 fips abc: 1
+sha256 fips 448-bit two-block: 1
 sha256 empty: 1
-sha256 1M a: 1
+sha256 fips 1M a: 1
+hmac-sha256 rfc4231 tc1: 1
+hmac-sha256 rfc4231 tc2: 1
+hmac-sha256 rfc4231 tc6 (131-byte key): 1
+ct_eq4 equal: 1
+ct_eq4 one bit off: 1
