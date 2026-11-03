@@ -424,28 +424,37 @@ kbd_e0: u64
 VEC_KBD = 0x42
 VEC_COM1 = 0x43
 
+def kbd_decode_l(sc: u64):
+# in-kernel scan-code decoder (rq_lock held); the input service (kbd.fsi) runs the same in ring 3
+    if sc == 0xE0:
+        kbd_e0 = 1
+        return
+    if kbd_e0:
+        kbd_e0 = 0
+        return
+    if sc == 0x2A or sc == 0x36:
+        kbd_shift = 1
+    elif sc == 0xAA or sc == 0xB6:
+        kbd_shift = 0
+    elif sc < 58:
+        c = u64(SC_MAP[sc])
+        if kbd_shift:
+            c = u64(SC_SHIFT[sc])
+        if c != 0:
+            tty_push_l(c)
+
 @interrupt
 @unsafe
 def on_kbd(frame: ptr[u64]):
     atomic_fetch_add(addr(kbd_irqs), 1, acq_rel)
     while inb(0x64) & 1:
         sc = u64(inb(0x60))
-        if sc == 0xE0:
-            kbd_e0 = 1
-            continue
-        if kbd_e0:
-            kbd_e0 = 0
-            continue
-        if sc == 0x2A or sc == 0x36:
-            kbd_shift = 1
-        elif sc == 0xAA or sc == 0xB6:
-            kbd_shift = 0
-        elif sc < 58:
-            c = u64(SC_MAP[sc])
-            if kbd_shift:
-                c = u64(SC_SHIFT[sc])
-            if c != 0:
-                tty_input(c)
+        if kb_svc:
+            kbd_event(0, sc)
+        else:
+            spin_lock(addr(rq_lock))
+            kbd_decode_l(sc)
+            spin_unlock(addr(rq_lock))
     lapic_eoi()
 
 @interrupt
@@ -454,6 +463,9 @@ def on_com1(frame: ptr[u64]):
     atomic_fetch_add(addr(com_irqs), 1, acq_rel)
     while inb(0x3FD) & 1:
         c = u64(inb(0x3F8))
+        if kb_svc:
+            kbd_event(1, c)
+            continue
         if c == 13:
             c = 10
         tty_input(c)
@@ -574,7 +586,8 @@ def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> nptr[Thread]:
     p = proc_new(0)
     p.pml4 = pml4
     p.caps = vc & CAPB_ALL
-    p.drv = spawn_drv
+    dk = cur_thread().spawn_drv  # per spawning thread: a concurrent ordinary spawn is never a driver
+    p.drv = dk
     p.brk_base = page_up(elf_end)
     p.brk = p.brk_base
     p.fds[0] = console()
@@ -583,7 +596,7 @@ def proc_spawn_args(img: u64, len: u64, args: ptr[u8]) -> nptr[Thread]:
     p.fdr[0] = CAP_ALL
     p.fdr[1] = CAP_ALL
     p.fdr[2] = CAP_ALL
-    if spawn_drv == 0 and fs_root != 0:
+    if dk == 0 and fs_root != 0:
         rt = file_new(F_DIR)
         rt.clu = fs_root
         p.fds[CAP_ROOT_FD] = u64(rt)
@@ -640,7 +653,9 @@ def proc_reap(t: ptr[Thread]) -> u64:
 def proc_exit(code: u64):
     t = cur_thread()
     p = ptr[Proc](t.proc)
-    if p.drv != 0:
+    if p.drv == DRV_KBD:
+        kbd_died()
+    elif p.drv != 0:
         drv_died(p)
     i = 0
     while i < NFD:
@@ -653,7 +668,8 @@ def proc_exit(code: u64):
     p.exit_code = code
     t.exit_code = code
     p.state = P_ZOMBIE
-    # orphans go to the kernel (ppid 0), which reaps them in proc_reap_orphans
+    # orphans go to the kernel (ppid 0), which reaps them in proc_reap_orphans (driver processes
+    # are reaped by their supervisor only)
     i = 0
     while i < MAX_PROCS:
         if procs[i] != 0 and ptr[Proc](procs[i]).ppid == p.pid:
@@ -675,7 +691,7 @@ def proc_reap_orphans() -> u64:
         i = 0
         while i < MAX_PROCS:
             q = procs[i]
-            if q != 0 and ptr[Proc](q).ppid == 0 and ptr[Proc](q).state == P_ZOMBIE and ptr[Thread](ptr[Proc](q).thread).state == T_DEAD:
+            if q != 0 and ptr[Proc](q).ppid == 0 and ptr[Proc](q).drv == 0 and ptr[Proc](q).state == P_ZOMBIE and ptr[Thread](ptr[Proc](q).thread).state == T_DEAD:
                 procs[i] = 0
                 z = q
                 break
@@ -1273,6 +1289,8 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         return sys_kexec(frame, a)
     if nr == 410:
         return kx_gen
+    if nr >= 411 and nr <= 413:
+        return sys_kbd(nr, a, b, c, d)
     if nr >= 400 and nr <= 408:
         return sys_drv(nr, a, b, c)
     if nr == 300:

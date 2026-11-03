@@ -29,6 +29,7 @@ include "proc.fsi"
 include "chan.fsi"
 include "module.fsi"
 include "drv.fsi"
+include "kbd.fsi"
 include "livepatch.fsi"
 include "kexec.fsi"
 include "ed25519.fsi"
@@ -1427,6 +1428,36 @@ def tty_swap_to(v: u64) -> u64:
     kfree(st)
     return ok
 
+def kbd_report():
+    puts("input service: ")
+    put_u64(kb_in)
+    puts(" entries in, ")
+    put_u64(kb_committed)
+    puts(" committed by kbdd in ")
+    put_u64(kb_commits)
+    puts(" batches, ")
+    put_u64(kb_drained)
+    puts(" decoded by the kernel after stop, ")
+    put_u64(kb_dropped)
+    puts(" dropped, ")
+    put_u64(kb_chars)
+    puts(" chars; ")
+    put_u64(kb_swaps)
+    puts(" hot swaps v1<->v2 (")
+    put_u64(kb_swaps_queued)
+    puts(" with input queued), restarts ")
+    put_u64(kb_restarts)
+    puts(", replayed ")
+    put_u64(kb_replayed)
+    putc(10)
+    lost = kb_in - kb_committed - kb_drained - kb_dropped
+    puts("input service: lost ")
+    put_u64(lost)
+    putc(10)
+    if lost != 0 or kb_dropped != 0 or kb_swaps < 10 or kb_restarts != 1 or kb_replayed == 0 or kb_commits == 0:
+        panic("input service test failed")
+    puts("input service hot-swap + supervised restart OK\n")
+
 def tty_swapper(arg: u64):
     v: u64 = 1
     while tsw_stop == 0:
@@ -1456,6 +1487,7 @@ def shell_test():
         panic("unsealed tty module was hot-swapped in")
     puts("tty hot-swap: unsealed tty1u.ko refused, current line discipline kept\n")
     tsw_thread = u64(thread_spawn(u64(tty_swapper), 0))
+    kbd_service_start()
     ktest_hooks = 1
     sz: u64 = 0
     img = fs_read_file("/EFI/Forge/bin/sh", addr(sz))
@@ -1467,6 +1499,7 @@ def shell_test():
         panic("sh rejected by ELF loader")
     code = proc_reap(t)
     orph = proc_reap_orphans()
+    kbd_service_stop()
     input_off()
     puts("sh exited with ")
     put_u64(code)
@@ -1513,6 +1546,7 @@ def shell_test():
     if lost != 0 or tty_dropped != 0 or tsw_swaps < 10 or tsw_partial == 0:
         panic("tty hot swap lost input")
     puts("tty hot-swap OK\n")
+    kbd_report()
     blkd_supervised_stop()
     # slab pages grown at a new allocation peak, and kernel page tables, are kept by the
     # allocator by design (objects are checked by heap_live)

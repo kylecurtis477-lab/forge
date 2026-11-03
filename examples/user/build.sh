@@ -8,7 +8,7 @@ B=../../build/user; mkdir -p $B
 K=$B/seal.key
 [ -s $K ] || head -c 32 /dev/urandom > $K
 python3 ../../tools/forgeseal.py --pub $K > $B/seal.pub
-for p in hello fault sh cat forktest blkd crash sum bg captest chantest sbtest wxtest capdeny badptr; do
+for p in hello fault sh cat forktest blkd crash sum bg captest chantest sbtest wxtest capdeny badptr kbdd kbdd2; do
   ../../build/forgec $p.forge $B/$p.s $FORGEC_FLAGS
   ../../build/fas -o $B/$p.o $B/$p.s
   ../../build/fld -o $B/$p.elf $B/$p.o

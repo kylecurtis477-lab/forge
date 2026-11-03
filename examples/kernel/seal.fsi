@@ -297,7 +297,7 @@ def sys_need(nr: u64) -> u64:
         return CAPB_SPAWN
     if nr >= 423 and nr <= 425:
         return CAPB_IPC
-    if nr >= 400 and nr <= 407:
+    if (nr >= 400 and nr <= 407) or (nr >= 411 and nr <= 413):
         return CAPB_DRV
     if nr == 408:
         return CAPB_KTEST

@@ -2,6 +2,7 @@
 # forge: no-runtime
 # forge: caps(ktest)
 # crash N: fault injection for the boot test -- the block driver service dies on the N-th next request.
+# crash k N: the input service (kbdd) dies on the batch holding the N-th next journal entry.
 include "ulib.fsi"
 
 @export
@@ -10,14 +11,21 @@ def _start():
     sys_getargs(u64(addr(av[0])), 32)
     n: u64 = 0
     i: u64 = 0
+    kbd: u64 = 0
+    if av[0] == 107:  # "k N": the input service instead
+        kbd = 1
+        i = 2
     while av[i] >= 48 and av[i] <= 57:
         n = n * 10 + u64(av[i]) - 48
         i += 1
-    if syscall3(408, n, 0, 0) != 0:
+    if syscall3(408, n, kbd, 0) != 0:
         out("crash: fault injection is disabled\n")
         flush()
         sys_exit(1)
-    out("crash: block driver will die on request ")
+    if kbd:
+        out("crash: input driver will die on the batch holding entry ")
+    else:
+        out("crash: block driver will die on request ")
     out_u64(n)
     out("\n")
     flush()

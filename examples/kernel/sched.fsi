@@ -28,6 +28,7 @@ struct Thread:
     wake_at: u64
     sc: u64[5]  # the syscall in progress (nr, a, b, c, d): a kexec handoff re-issues it
     kx_parked: u64
+    spawn_drv: u64  # driver kind for proc_spawn* called by this thread (0: ordinary process)
 
 asm(
     ".text",

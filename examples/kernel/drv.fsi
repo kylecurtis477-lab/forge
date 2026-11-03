@@ -35,7 +35,6 @@ drv_served: u64
 drv_deaths: u64
 drv_eio: u64
 drv_replays: u64
-spawn_drv: u64
 drv_supq: WaitQ  # supervisor waiting for a driver death
 
 @unsafe
@@ -108,7 +107,10 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
     # (EPERM) unless the kernel's own boot self-test armed it for its shell session.
         if ktest_hooks == 0:
             return EPERM
-        blk_crash_after = a
+        if b == 1:
+            kb_crash_after = a  # the input service dies on the batch holding the a-th next entry
+        else:
+            blk_crash_after = a
         return 0
     if u64(p) == 0 or p.drv != DRV_BLK:
         return EPERM
@@ -238,9 +240,9 @@ def vb_reinit():
 def blkd_start(img: u64, sz: u64) -> nptr[Thread]:
 # hand the device over: no kernel-driver request is in flight while vb_m is held
     mutex_lock(addr(vb_m))
-    spawn_drv = DRV_BLK
+    cur_thread().spawn_drv = DRV_BLK
     t = proc_spawn_args(img, sz, "")
-    spawn_drv = 0
+    cur_thread().spawn_drv = 0
     if u64(t) != 0:
         blkd_pid = t.id
         blkd_up = 1
@@ -266,9 +268,9 @@ ktest_hooks: u64  # set only by the in-kernel boot self-test (shell_test)
 blk_crash_after: u64  # fault injection: crash on the n-th next request (0 = off)
 
 def blkd_spawn(args: ptr[u8]) -> nptr[Thread]:
-    spawn_drv = DRV_BLK
+    cur_thread().spawn_drv = DRV_BLK
     t = proc_spawn_args(sup_img, sup_sz, args)
-    spawn_drv = 0
+    cur_thread().spawn_drv = 0
     return t
 
 @unsafe
