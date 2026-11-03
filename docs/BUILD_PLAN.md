@@ -229,6 +229,7 @@ Each driver gets its own boot test, and none of them writes to disks it does not
    - **11.1e part 7 status: done (fcntl).** Linux `fcntl` (72): F_DUPFD / F_DUPFD_CLOEXEC, F_GETFD / F_SETFD, F_GETFL, no-op F_SETFL. 33 Linux syscalls. Tests: lxfs (28 checks), `busybox ls /efi/forge/docs` lists both files, `busybox printf %d-%s 42 ok` -> 42-ok.
    - **11.1e part 8 status: done (getcwd).** Linux `getcwd` (79) always returns "/" (no working directory; relative paths stay EACCES). 34 Linux syscalls. Tests: lxtest (getcwd, ERANGE, EFAULT), `busybox pwd` -> /.
    - **11.1e part 9 status: done (nanosleep).** Linux `nanosleep` (35): 10 ms ticks, rounded up, capped at a day, not signal-interruptible yet. 35 Linux syscalls. Tests: lxtest (30 ms sleep, EINVAL, EFAULT), `busybox sleep 1`.
+   - **11.1e part 10 status: done (geteuid).** Linux `geteuid` (107) returns 1000, matching AT_EUID in the auxv (no root in the sandbox). 36 Linux syscalls. Tests: lxtest (geteuid == 1000), `busybox sh -c exit 3` -> exit 3 with no ENOSYS.
 2. C FFI with the SysV ABI (`extern "C"`, struct layout). Test: link against a C object file and call both ways.
 3. Python FFI: embed or extend CPython (hosted mode). Test: call a Forge function from Python and back.
 

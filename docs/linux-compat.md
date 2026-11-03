@@ -25,7 +25,7 @@ Inside the personality a process reaches **only** the Linux table. No Forge sysc
 including the driver (400+), kexec/ktest (408/409, still also gated by `ktest_hooks`) and grant
 syscalls: they return -ENOSYS like any unknown number.
 
-## Syscalls (11.1a to 11.1e; 35 in all)
+## Syscalls (11.1a to 11.1e; 36 in all)
 
 | nr | name | notes |
 |----|------|-------|
@@ -41,6 +41,7 @@ syscalls: they return -ENOSYS like any unknown number.
 | 4 | stat | (11.1e part 5) path resolved exactly like open (absolute, at or under a held directory handle; else EACCES / ENOENT), then fstat of that handle, which is closed again; bad buffer -> EFAULT |
 | 6 | lstat | (11.1e part 6) identical to stat 4: the FAT32 ESP has no symbolic links, so there is no link to not follow; same EACCES / ENOENT / EFAULT |
 | 5 | fstat | (11.1c) 144-byte struct stat: st_dev 0xF0, st_ino = first cluster + 1, st_mode S_IFREG 0444 / S_IFDIR 0555 / S_IFCHR 0620 (console, st_rdev 0x401) / S_IFIFO 0600, st_size, st_blksize 4096, st_blocks; bad fd -> EBADF, bad pointer -> EFAULT, revoked grant -> EACCES |
+| 107 | geteuid | (11.1e part 10) 1000, the uid the auxv already reports (AT_UID = AT_EUID = AT_GID = AT_EGID = 1000): an ordinary unprivileged id, because a sandboxed image holds no root capability and nothing in the kernel checks Linux uids; getuid 102 / getgid 104 / getegid 108 are not in the table yet (ENOSYS) and would return the same 1000 |
 | 217 | getdents64 | (11.1c) linux_dirent64 records (d_ino synthetic, d_off = directory position, d_type DT_DIR / DT_REG, 8-byte aligned); buffer must be >= 768 bytes (else EINVAL); non-directory -> ENOTDIR, no read right -> EPERM, revoked grant -> EACCES |
 | 59 / 322 | execve / execveat | (11.1d) sealed Linux images only, reached through a held handle (see Exec below); Forge, unsealed or tampered images -> ENOEXEC, no cwd (relative path, AT_FDCWD) or outside every handle -> EACCES, live clone()d threads -> EBUSY, bad pointers -> EFAULT, argv over 16 entries / 127 bytes -> E2BIG, an argument with a space -> EINVAL, unknown flags -> EINVAL |
 | 13 | rt_sigaction | (11.1d part 2) signals 1..31; sigsetsize must be 8; SIGKILL / SIGSTOP, unknown flags (SA_ONSTACK included), or a handler without SA_RESTORER -> EINVAL; bad pointers -> EFAULT; SIG_IGN drops a pending one |
@@ -247,4 +248,4 @@ BusyBox is built from source only; no prebuilt third-party binary is used.
 - Image: static EXEC at 0x400000, EI_OSABI set to 3, sealed `forgeseal.py --foreign` (level 3, unsafe 0, caps 0). `image_verify` refuses a level-3 seal on anything but a capability-free Linux image (reason 8); the 6.4 gate still refuses it outside the compat sandbox.
 - Manifest `examples/apps/busybox.mf`: one `dir /efi/forge/docs` grant.
 
-Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). open 2 (11.1e part 4: absolute paths under a grant; wc, sha256sum and cat of granted files work, a file outside is EACCES). stat 4 (11.1e part 5; `ls` of a directory outside the grant -> Permission denied). lstat 6 (11.1e part 6; same as stat, no symlinks). fcntl 72 (11.1e part 7; `ls` of the granted directory and `printf` work). getcwd 79 (11.1e part 8; `pwd` prints /). nanosleep 35 (11.1e part 9; `sleep 1` works). They will be added one per commit.
+Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). open 2 (11.1e part 4: absolute paths under a grant; wc, sha256sum and cat of granted files work, a file outside is EACCES). stat 4 (11.1e part 5; `ls` of a directory outside the grant -> Permission denied). lstat 6 (11.1e part 6; same as stat, no symlinks). fcntl 72 (11.1e part 7; `ls` of the granted directory and `printf` work). getcwd 79 (11.1e part 8; `pwd` prints /). nanosleep 35 (11.1e part 9; `sleep 1` works). geteuid 107 (11.1e part 10; ash starts without an ENOSYS, `sh -c exit 3` exits 3). They will be added one per commit.

@@ -41,9 +41,11 @@
 # F_SETFL only when it changes nothing (no status flag is settable); other commands EINVAL.
 # 11.1e: getcwd 79 -- always "/": there is no working directory, so relative paths stay EACCES.
 # 11.1e: nanosleep 35 -- whole 10 ms scheduler ticks, rounded up (at most a day); not interruptible by signals yet.
+# 11.1e: geteuid 107 -- 1000, the same uid the auxv reports (AT_UID/AT_EUID/AT_GID/AT_EGID are all 1000):
+# an unprivileged id, since the sandbox holds no root capability; getuid/getgid/getegid are not in the table yet.
 # Not yet: real-time signals (32..64), sigaltstack, signals to other processes.
 LX_ABI = 1
-LX_NSYS = 35  # syscalls in the table above
+LX_NSYS = 36  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ERANGE = 0xFFFFFFFFFFFFFFDE
@@ -1297,6 +1299,8 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
         return lx_nanosleep(a, b)
     if nr == 79:
         return lx_getcwd(a, b)
+    if nr == 107:
+        return 1000  # geteuid: matches AT_EUID in the auxv; no root inside the sandbox
     if nr == 110:
         return sys_getppid()
     if nr == 186:
