@@ -190,6 +190,8 @@ Each driver gets its own boot test, and none of them writes to disks it does not
 - `rewind` works for any object or the whole system to a timestamp.
 - The POSIX-like VFS becomes a view onto the store.
 - Tests: write/rewind/diff round-trips; system rewind after a bad change in QEMU; search latency on 100k objects; crash consistency.
+- Sub-items: 9.1 store core (typed objects, CoW versions, content-addressed blobs, read-at, rewind, diff); 9.2 persistence on the Forge partition with crash consistency; 9.3 indexed search (type, field, full text) with the 100k-object latency test; 9.4 system rewind after a bad change in QEMU; 9.5 the VFS as a view onto the store.
+  - **9.1 status: done.** `examples/kernel/obj.fsi` (fully safe Forge, shared by the kernel and hosted tests): a type table gives each type its field count and writes of the wrong shape are refused; every write appends an immutable version (object, blob, previous version, logical timestamp) and never touches older ones; payloads are content-addressed blobs (FNV-1a + word compare, identical payloads share a blob); `obj_read_at`, `obj_rewind` (a rewind is itself a new version, so history is kept), `sys_rewind` (every object back to a timestamp), `obj_diff` (fields changed between two times) and a linear `obj_find` (the index is 9.3). Test: tests/fs/objstore.forge covers write/read-at/rewind/diff round-trips, dedup, shape checks and a whole-system rewind after 200 bad writes, at O2 and O0.
 
 ## Phase 10 — Private by design (signature feature 4)
 - Per-user keys (TPM-sealed when available), with every object and swap page encrypted at rest.

@@ -1,0 +1,21 @@
+type ok: 1
+bad type: 1
+untyped new refused: 1
+wrong shape refused: 1
+dedup blobs: 2
+dedup hits: 1
+a.f1 now: 21
+a.f1 at t1: 20
+a absent before t1: 1
+diff t1 t2: 1
+diff t1 t1: 0
+find 21: 0
+find 20: 1
+a.f1 after rewind: 20
+a versions: 3
+t2 kept in history: 21
+system rewind changed: 2
+a.f2: 30
+b.f2: 30
+diff b t3 now: 0
+blobs: 102
