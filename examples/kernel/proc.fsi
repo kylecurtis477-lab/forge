@@ -897,6 +897,7 @@ def sys_fork(frame: u64) -> u64:
     ct.cr3 = c.pml4
     ct.user = 1
     ct.proc = u64(c)
+    ct.fsbase = cur_thread().fsbase
     fpu_save(ct.fpu)  # the parent's live FPU/SSE registers
     c.pid = ct.id
     c.thread = u64(ct)
@@ -980,6 +981,8 @@ def sys_exec(frame: u64, upath: u64, uargs: u64, sb: u64) -> u64:
     vstore64(frame + SF_RSP * 8, usp)
     vstore64(frame + SF_RFLAGS * 8, 0x202)
     fpu_restore(fpu_template)
+    cur_thread().fsbase = 0  # 11.1b: a new image starts without TLS
+    wrmsr(MSR_FS_BASE, 0)
     nexecs += 1
     if sb:
         sandbox_enter(p, path[:])
@@ -1449,6 +1452,11 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
     # 11.1: a Linux-personality process reaches only the Linux table; no Forge syscall is visible
         if nr == 9:
             return lx_mmap(a, b, c, d, vload64(frame + SF_R8 * 8), vload64(frame + SF_R9 * 8))
+        if nr == 158:
+        # 11.1b: arch_prctl may change this thread's FS base; load it now (sched.fsi reloads on switches)
+            r = lx_arch_prctl(a, b)
+            wrmsr(MSR_FS_BASE, cur_thread().fsbase)
+            return r
         return lx_dispatch(nr, a, b, c, d)
     need = sys_need(nr)
     if need != 0:

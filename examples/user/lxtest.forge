@@ -15,6 +15,8 @@ EACCES = 0xFFFFFFFFFFFFFFF3
 EINVAL = 0xFFFFFFFFFFFFFFEA
 EBADF = 0xFFFFFFFFFFFFFFF7
 ENOTTY = 0xFFFFFFFFFFFFFFE7
+EPERM = 0xFFFFFFFFFFFFFFFF
+EFAULT = 0xFFFFFFFFFFFFFFF2
 
 fails: u64
 checks: u64
@@ -51,6 +53,11 @@ def regs_kept() -> u64:
         "cmp $0xBBBB, %r14", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
         "cmp $0xCCCC, %r15", "setne %cl", "movzbl %cl, %ecx", "add %rcx, %rax",
         "pop %r15", "pop %r14", "pop %r13", "pop %r12", "pop %rbp", "pop %rbx", "ret")
+
+# the u64 at %fs:off (TLS through the FS base set by arch_prctl)
+@naked
+def fs_read(off: u64) -> u64:
+    asm("mov %fs:(%rdi), %rax", "ret")
 
 @unsafe
 def peek(a: u64) -> u64:
@@ -190,6 +197,31 @@ def lx_main(sp: u64):
     check(regs_kept() == 0, "registers preserved across syscall")
     # Forge-only syscalls are not visible from the Linux personality
     check(lsys(409, 0, 0, 0, 0, 0) == ENOSYS and lsys(39 + 1000, 0, 0, 0, 0, 0) == ENOSYS, "Forge syscalls unreachable")
+    # TLS: arch_prctl(ARCH_SET_FS) on an mmap'd block whose first word points at itself (the x86-64
+    # TLS convention); the FS base must survive yields and timer preemptions (sched.fsi reloads it)
+    tls = lsys(9, 0, 4096, 3, 0x22, 0xFFFFFFFFFFFFFFFF)
+    poke(tls, tls)
+    poke(tls + 8, 0x5A5A)
+    check(lsys(158, 0x1002, tls, 0, 0, 0) == 0, "arch_prctl SET_FS")
+    got: u64[1]
+    got[0] = 0
+    check(lsys(158, 0x1003, u64(addr(got[0])), 0, 0, 0) == 0 and got[0] == tls, "arch_prctl GET_FS")
+    bad: u64 = 0
+    k: u64 = 0
+    while k < 400000:
+        if fs_read(0) != tls or fs_read(8) != 0x5A5A:
+            bad += 1
+        if k % 1000 == 0:
+            lsys(24, 0, 0, 0, 0, 0)
+        k += 1
+    check(bad == 0, "FS base survives sched_yield and preemption")
+    check(lsys(158, 0x1002, 0x800000000000, 0, 0, 0) == EPERM, "arch_prctl SET_FS kernel address -> EPERM")
+    check(lsys(158, 0x1003, 0xFFFF800000001000, 0, 0, 0) == EFAULT, "arch_prctl GET_FS bad pointer -> EFAULT")
+    check(lsys(158, 0x1001, 0, 0, 0, 0) == EINVAL, "arch_prctl SET_GS -> EINVAL")
+    put("lxtest: TLS %fs:0 = self ok, 400 yields, bad reads ")
+    putn(bad)
+    put("\n")
+    flush()
     put("lxtest: pid ")
     putn(pid)
     put(", registers preserved, syscall 409 -> ENOSYS\n")

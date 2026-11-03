@@ -16,6 +16,7 @@ MSR_LSTAR = 0xC0000082
 MSR_FMASK = 0xC0000084
 MSR_GS_BASE = 0xC0000101
 MSR_KGS_BASE = 0xC0000102
+MSR_FS_BASE = 0xC0000100  # 11.1b: per-thread user FS base (sched.fsi switches it)
 
 con_lock: u64
 syscalls: u64

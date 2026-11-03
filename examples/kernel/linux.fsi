@@ -14,15 +14,18 @@
 #
 # 11.1a implements: read 0, write 1, close 3, mmap 9 (anonymous, private, never executable),
 # munmap 11, brk 12, ioctl 16 (TCGETS, TIOCGWINSZ on the console), getpid 39, exit 60,
-# getppid 110, gettid 186, set_tid_address 218, exit_group 231. Everything else returns -ENOSYS and
+# getppid 110, gettid 186, (11.1b) sched_yield 24, arch_prctl 158 (ARCH_SET_FS / ARCH_GET_FS: a
+# per-thread FS base that sched.fsi reloads on every context switch), set_tid_address 218, exit_group 231. Everything else returns -ENOSYS and
 # is counted (and logged the first 4 times per process). Process start follows the System V x86-64
 # ABI: rsp -> argc, argv[], NULL, envp[] (empty), NULL, auxv (AT_PAGESZ, AT_ENTRY, AT_UID/EUID/GID/
 # EGID, AT_SECURE, AT_RANDOM -> 16 bytes, AT_EXECFN), AT_NULL. AT_RANDOM bytes are rdtsc-seeded
 # splitmix64: unpredictable enough for stack canaries in a test program, not a CSPRNG.
-# Not yet: clone/futex/arch_prctl (threads, TLS: 11.1b), openat/fstat/getdents64 (11.1c), execve,
+# Not yet: clone/futex (threads: 11.1b part 2), openat/fstat/getdents64 (11.1c), execve,
 # signals.
 LX_ABI = 1
-LX_NSYS = 13  # syscalls in the table above
+LX_NSYS = 15  # syscalls in the table above
+ARCH_SET_FS = 0x1002
+ARCH_GET_FS = 0x1003
 ENOTTY = 0xFFFFFFFFFFFFFFE7
 ENODEV = 0xFFFFFFFFFFFFFFED
 lx_procs: u64  # Linux-personality execs
@@ -184,6 +187,24 @@ def lx_unsupported(nr: u64) -> u64:
         gr_pend(f)
     return ENOSYS
 
+# arch_prctl (158), routed by syscall_dispatch, which loads the MSR afterwards. Only the FS base is
+# supported: ARCH_SET_FS takes any address below USER_TOP (a non-canonical value would fault wrmsr),
+# ARCH_GET_FS stores the current one to a user u64.
+def lx_arch_prctl(code: u64, a: u64) -> u64:
+    t = cur_thread()
+    if code == ARCH_SET_FS:
+        if a >= USER_TOP:
+            return EPERM
+        t.fsbase = a
+        return 0
+    if code == ARCH_GET_FS:
+        v: u64[1]
+        v[0] = t.fsbase
+        if a >= USER_TOP - 8 or copy_user(a, u64(addr(v[0])), 8) != 0:
+            return EFAULT
+        return 0
+    return EINVAL
+
 def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
 # mmap (9, six arguments) is routed by syscall_dispatch, which reads r8/r9 from the frame
     p = cur_proc()
@@ -208,6 +229,9 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
         return sys_getpid()  # one thread per process until 11.1b
     if nr == 218:
         return sys_getpid()
+    if nr == 24:
+        yield_cpu()
+        return 0
     if nr == 60 or nr == 231:
         proc_exit(a & 0xFF)
     return lx_unsupported(nr)

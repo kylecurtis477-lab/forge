@@ -25,7 +25,7 @@ Inside the personality a process reaches **only** the Linux table. No Forge sysc
 including the driver (400+), kexec/ktest (408/409, still also gated by `ktest_hooks`) and grant
 syscalls: they return -ENOSYS like any unknown number.
 
-## Syscalls (11.1a)
+## Syscalls (11.1a, 11.1b)
 
 | nr | name | notes |
 |----|------|-------|
@@ -35,10 +35,12 @@ syscalls: they return -ENOSYS like any unknown number.
 | 9 | mmap | anonymous + private only; PROT_EXEC -> EACCES (W^X: no new code), MAP_FIXED -> EINVAL, file mappings -> ENODEV; r8/r9 come from the saved frame |
 | 11 | munmap | |
 | 12 | brk | Linux semantics: returns the current break on failure |
+| 24 | sched_yield | (11.1b) |
 | 16 | ioctl | console fds: TCGETS (cooked, echoing termios), TIOCGWINSZ (framebuffer rows x cols, 25x80 on serial); other requests -> ENOTTY, non-console -> ENOTTY, bad fd -> EBADF |
 | 39 / 110 / 186 | getpid / getppid / gettid | one thread per process until 11.1b |
 | 218 | set_tid_address | returns the tid; clear-child-tid comes with threads |
 | 60 / 231 | exit / exit_group | |
+| 158 | arch_prctl | (11.1b) ARCH_SET_FS (address must be below USER_TOP, else EPERM), ARCH_GET_FS (bad pointer -> EFAULT); ARCH_SET_GS / others -> EINVAL |
 | other | | -ENOSYS, counted per process (`Proc.lx_unsup`), first 4 logged: `linux: pid N syscall X not supported -> ENOSYS` |
 
 Errno values are Linux's: Forge's error codes were already the negated Linux errnos.
@@ -50,6 +52,14 @@ kernel's syscall frame (`examples/kernel/user.fsi`, `SF_SIZE = 128`) saves rdi, 
 r9 and restores them on return, for Forge programs too (previously they were zeroed). A fresh exec
 still starts with all registers zero. The kexec handoff carries the bigger frame (format v4) and the
 process's ABI (record word +56, bit 40).
+
+## Thread-local storage (11.1b)
+
+Each kernel `Thread` has an `fsbase`. `arch_prctl(ARCH_SET_FS)` stores it and loads
+IA32_FS_BASE (MSR 0xC0000100) at once; `schedule_l` reloads the MSR whenever the next thread's
+`fsbase` differs from the current one. The kernel itself never uses FS, so the MSR always belongs to
+the running user thread. fork copies the caller's FS base, exec resets it to 0, and the kexec
+handoff carries it (process record word +120).
 
 ## Process start
 
@@ -75,11 +85,13 @@ compiles it with forgec/fas/fld, sets EI_OSABI = 3, then seals it. tests/os/run.
 - `run lxtest` -> argc/argv, 9 auxv entries (AT_PAGESZ, AT_ENTRY == &_start, AT_SECURE, AT_RANDOM),
   brk grow/touch/shrink, mmap/munmap, the PROT_EXEC and MAP_FIXED refusals, TCGETS/TIOCGWINSZ,
   ENOTTY/EBADF, getpid/gettid/set_tid_address/getppid, 12 registers preserved across a syscall,
-  Forge syscall 409 -> ENOSYS, then `lxtest: PASS (19 checks)` and `[lxtest exited 0 (sandboxed)]`.
+  TLS (arch_prctl SET/GET_FS, `%fs:0` self pointer read 400000 times across 400 yields and timer
+  preemptions, plus the EPERM/EFAULT/EINVAL refusals), Forge syscall 409 -> ENOSYS, then
+  `lxtest: PASS (25 checks)` and `[lxtest exited 0 (sandboxed)]`.
 
 ## Not yet
 
-- 11.1b: clone (threads), futex, arch_prctl(ARCH_SET_FS) with a per-thread FS base.
+- 11.1b part 2: clone (threads sharing the address space), futex, clear-child-tid.
 - 11.1c: openat, fstat, getdents64 over the sandbox's granted handles.
 - execve, signals, /proc, sockets, file-backed mmap.
 - Busybox (the Phase 11.1 acceptance test) needs a third-party static binary; it will be added only

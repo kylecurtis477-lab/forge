@@ -29,6 +29,7 @@ struct Thread:
     sc: u64[5]  # the syscall in progress (nr, a, b, c, d): a kexec handoff re-issues it
     kx_parked: u64
     spawn_drv: u64  # driver kind for proc_spawn* called by this thread (0: ordinary process)
+    fsbase: u64  # 11.1b: user FS base (Linux TLS, arch_prctl ARCH_SET_FS); loaded on every switch to this thread
 
 asm(
     ".text",
@@ -214,6 +215,9 @@ def schedule_l(exiting: u64):
     percpu_kstack[cpu * 4] = nxt.kstack_top
     if nxt.cr3 != cur.cr3:
         switch_cr3(cpu, nxt.cr3)
+    # 11.1b: the kernel never uses FS, so the MSR always holds the running thread's user FS base
+    if nxt.fsbase != cur.fsbase:
+        wrmsr(MSR_FS_BASE, nxt.fsbase)
     fpu_save(cur.fpu)
     fpu_restore(nxt.fpu)
     ctx_switch(u64(addr(cur.rsp)), nxt.rsp)

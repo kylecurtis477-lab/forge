@@ -16,7 +16,7 @@
 #   +64 fpu size +72 data hash +80 metadata hash +88 proc page +96 file page +104 index page
 #   +112 data page +128 sender's kernel version (64 B) +384 RSDP copy (64 B)
 # process record: +0 pid +8 ppid +16 state +24 exit code +32 brk_base +40 brk +48 mmap_next
-#   +56 is caller | caps << 8 | abi << 40 (v4) +64 npg +72 first page +80 syscall (nr, a, b, c, d) +128 fds (file index + 1) x16
+#   +56 is caller | caps << 8 | abi << 40 (v4) +64 npg +72 first page +80 syscall (nr, a, b, c, d) +120 FS base (v4) +128 fds (file index + 1) x16
 #   +256 args (128 B) +384 syscall frame (128 B since v4: the argument registers are saved too)
 # file record: +0 type +8 first cluster +16 size +24 position +32 fds referring to it
 # driver state (no-restart gap 4; header page, past KXH_BYTES, so a receiver that ignores it still
@@ -396,6 +396,7 @@ def sys_kexec(frame: u64, which: u64) -> u64:
             while j < 5:
                 vstore64(r + 80 + j * 8, qt.sc[j])
                 j += 1
+            vstore64(r + 120, qt.fsbase)
             j = 0
             while j < NFD:
                 if q.fds[j] != 0:
@@ -667,6 +668,7 @@ def kx_restore() -> nptr[Thread]:
         vstore64(sp + 16, cf)
         ct.rsp = sp
         ct.cr3 = c.pml4
+        ct.fsbase = vload64(r + 120)
         ct.user = 1
         ct.proc = u64(c)
         if vload64(h + 64) == fpu_size:
