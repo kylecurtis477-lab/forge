@@ -1,0 +1,60 @@
+# forge: no-runtime
+# Array and struct parameters are copies: the callee gets its own frame copy, a forwarded parameter
+# reaches the next callee intact, and writes in the callee never reach the caller.
+include "linux.fsi"
+
+struct Pt:
+    x: u64
+    y: u64
+
+gk: u64[8]
+
+def mix(k: u64[8]) -> u64:
+    s: u64 = 0
+    i: u64 = 0
+    while i < 8:
+        s = s * 31 + k[i]
+        i += 1
+    return s
+
+def fwd(k: u64[8]) -> u64:
+    return mix(k)
+
+def scribble(k: u64[8]) -> u64:
+    k[0] = 1000
+    return mix(k)
+
+def junk(a: u64) -> u64:
+    z: u64[64]
+    i: u64 = 0
+    while i < 64:
+        z[i] = a * i
+        i += 1
+    return z[3]
+
+def ptsum(p: Pt, q: Pt) -> u64:
+    p.x = p.x + 1
+    return p.x * 100 + p.y * 10 + q.x + q.y
+
+def show(s: ptr[u8], v: u64):
+    puts(s)
+    put_u64(v)
+    puts("\n")
+
+def main() -> i64:
+    gk[0] = 5
+    gk[7] = 9
+    show("direct ", mix(gk))
+    junk(77)
+    show("forwarded ", fwd(gk))
+    show("scribbled copy ", scribble(gk))
+    show("caller kept ", gk[0])
+    a: Pt
+    a.x = 3
+    a.y = 4
+    b: Pt
+    b.x = 5
+    b.y = 6
+    show("struct ", ptsum(a, b))
+    show("struct caller kept ", a.x)
+    return 0

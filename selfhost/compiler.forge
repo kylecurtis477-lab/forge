@@ -18838,6 +18838,16 @@ def fs_function2(f):
             e(c3("mov %rax,", str(fsl_o[l]), "(%rbp)"))
             r += 1
         i += 1
+    # array and struct parameters are passed by address and are copies: once every argument register is
+    # spilled, copy each one into its own frame slot (the slot's first word holds the caller's address)
+    i = 0
+    while i < fsf_np[f]:
+        if fsk[fsl_t[i]] == 2 or fsk[fsl_t[i]] == 3:
+            e(c3("mov ", str(fsl_o[i]), "(%rbp),%rsi"))
+            e(c3("lea ", str(fsl_o[i]), "(%rbp),%rdi"))
+            e(c3("mov $", str(ftsz[fsl_t[i]]), ",%rcx"))
+            e("rep movsb")
+        i += 1
     fp = fsf_pos[f]
     fs_term = 0
     fs_suite()
