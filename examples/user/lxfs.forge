@@ -68,7 +68,10 @@ def putn(v: u64):
 
 def putz(p: u64):
     i: u64 = 0
-    while peek8(p + i) != 0 and blen < 255 and i < 200:
+    # flush when the buffer fills instead of dropping the rest (lines used to be cut at 255 bytes)
+    while peek8(p + i) != 0 and i < 200:
+        if blen >= 255:
+            flush()
         buf[blen] = u8(peek8(p + i))
         blen += 1
         i += 1
