@@ -43,9 +43,11 @@
 # 11.1e: nanosleep 35 -- whole 10 ms scheduler ticks, rounded up (at most a day); not interruptible by signals yet.
 # 11.1e: geteuid 107 -- 1000, the same uid the auxv reports (AT_UID/AT_EUID/AT_GID/AT_EGID are all 1000):
 # an unprivileged id, since the sandbox holds no root capability; getuid/getgid/getegid are not in the table yet.
+# 11.1e: dup2 33 -- dup's rules (rights, grant ledger), then the copy moves to newfd, closing what it
+# held only after the dup succeeded; newfd is not close-on-exec; oldfd == newfd only checks oldfd.
 # Not yet: real-time signals (32..64), sigaltstack, signals to other processes.
 LX_ABI = 1
-LX_NSYS = 36  # syscalls in the table above
+LX_NSYS = 37  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ERANGE = 0xFFFFFFFFFFFFFFDE
@@ -564,6 +566,31 @@ def lx_fcntl(fd: u64, cmd: u64, arg: u64) -> u64:
             return 0
         return EINVAL
     return EINVAL
+
+def lx_dup2(old: u64, new: u64) -> u64:
+# dup2(old, new): sys_dup's rules (rights carried over, grant ledger counted), then the copy moves to
+# new, closing whatever new held first (only once the dup has succeeded, like Linux); new is not
+# close-on-exec; old == new just checks old
+    p = cur_proc()
+    if old >= NFD or p.fds[old] == 0 or new >= NFD:
+        return EBADF
+    if old == new:
+        return new
+    n = sys_dup(old, p.fdr[old])
+    if n >= NFD or n == new:
+        if n == new:
+            lx_cx(new, 0)
+        return n
+    if p.fds[new] != 0:
+        lx_cx(new, 0)
+        sys_close(new)
+    p.fds[new] = p.fds[n]
+    p.fdr[new] = p.fdr[n]
+    p.fds[n] = 0
+    p.fdr[n] = 0
+    lx_cx(n, 0)
+    lx_cx(new, 0)
+    return new
 
 def lx_getcwd(ubuf: u64, size: u64) -> u64:
 # getcwd(buf, size): there is no working directory (relative paths are EACCES), so it reports "/";
@@ -1251,7 +1278,7 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
 # mmap (9, six arguments) is routed by syscall_dispatch, which reads r8/r9 from the frame
     p = cur_proc()
     p.lx_calls += 1
-    if nr == 0 or nr == 1 or nr == 2 or nr == 4 or nr == 6 or nr == 72 or nr == 20 or nr == 16 or nr == 5 or nr == 217 or nr == 257:
+    if nr == 0 or nr == 1 or nr == 2 or nr == 4 or nr == 6 or nr == 72 or nr == 20 or nr == 16 or nr == 5 or nr == 217 or nr == 257 or nr == 33:
         atomic_fetch_add(addr(p.fdbusy), 1, acq_rel)
         r: u64 = 0
         if nr == 0:
@@ -1270,6 +1297,8 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
             r = lx_fcntl(a, b, c)
         elif nr == 217:
             r = lx_getdents64(a, b, c)
+        elif nr == 33:
+            r = lx_dup2(a, b)
         elif nr == 257:
             r = lx_openat(a, b, c)
         else:
