@@ -30,6 +30,9 @@ struct Thread:
     kx_parked: u64
     spawn_drv: u64  # driver kind for proc_spawn* called by this thread (0: ordinary process)
     fsbase: u64  # 11.1b: user FS base (Linux TLS, arch_prctl ARCH_SET_FS); loaded on every switch to this thread
+    ctid: u64  # 11.1b: Linux clear-child-tid address (zeroed and futex-woken when this thread exits)
+    fx_as: u64  # 11.1b: futex key (address space, user address) while parked in fx_thr[]
+    fx_addr: u64
 
 asm(
     ".text",
@@ -118,6 +121,11 @@ def rq_pop(cpu: u64) -> u64:
             t = ptr[Thread](t).next
         k += 1
     return 0
+
+# the matching cast for a stored Thread address (run queue, Proc.thread / xthr[], wait queues)
+@unsafe
+def as_thread(x: u64) -> ptr[Thread]:
+    return ptr[Thread](x)
 
 @unsafe
 def cur_thread() -> ptr[Thread]:

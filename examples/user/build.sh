@@ -30,3 +30,9 @@ python3 ../../tools/forgeseal.py hello.forge $B/linuxabi.elf $K ../../tests/unsa
 ../../build/fld -o $B/lxtest.raw $B/lxtest.o
 python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" $B/lxtest.raw $B/lxtest.elf
 python3 ../../tools/forgeseal.py lxtest.forge $B/lxtest.elf $K ../../tests/unsafe/baseline.txt >/dev/null
+# 11.1b: lxthreads (clone threads, futex, TLS), built and tagged the same way
+../../build/forgec lxthreads.forge $B/lxthreads.s $FORGEC_FLAGS
+../../build/fas -o $B/lxthreads.o $B/lxthreads.s
+../../build/fld -o $B/lxthreads.raw $B/lxthreads.o
+python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" $B/lxthreads.raw $B/lxthreads.elf
+python3 ../../tools/forgeseal.py lxthreads.forge $B/lxthreads.elf $K ../../tests/unsafe/baseline.txt >/dev/null

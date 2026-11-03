@@ -20,10 +20,12 @@
 # ABI: rsp -> argc, argv[], NULL, envp[] (empty), NULL, auxv (AT_PAGESZ, AT_ENTRY, AT_UID/EUID/GID/
 # EGID, AT_SECURE, AT_RANDOM -> 16 bytes, AT_EXECFN), AT_NULL. AT_RANDOM bytes are rdtsc-seeded
 # splitmix64: unpredictable enough for stack canaries in a test program, not a CSPRNG.
-# Not yet: clone/futex (threads: 11.1b part 2), openat/fstat/getdents64 (11.1c), execve,
+# 11.1b part 2: clone 56 (threads only), futex 202 (WAIT, WAKE), set_tid_address clears and wakes
+# the tid word at thread exit (see the threads section below).
+# Not yet: openat/fstat/getdents64 (11.1c), execve,
 # signals.
 LX_ABI = 1
-LX_NSYS = 15  # syscalls in the table above
+LX_NSYS = 17  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ENOTTY = 0xFFFFFFFFFFFFFFE7
@@ -205,33 +207,285 @@ def lx_arch_prctl(code: u64, a: u64) -> u64:
         return 0
     return EINVAL
 
+# ---- 11.1b: threads (clone), futexes, group exit ----
+# A clone()d thread is a kernel Thread in the caller's Proc (sys_fork in thread mode): same pml4,
+# same fds, same brk/mmap state, its own kernel stack, user stack, FS base and tid. Every thread of a
+# process is pinned to the CPU the main thread ran on when it first cloned, so two threads of one
+# process never run at the same time: no cross-CPU TLB shootdown is needed for munmap/brk, and
+# a futex wait (value check + enqueue with irqs off) cannot race its waker. Real parallelism across
+# CPUs is future work.
+# The main thread (Proc.thread) is always the last thread to die, so wait/reap/destroy see a
+# finished process exactly as before: SYS_exit of a clone()d thread ends that thread (clearing and
+# futex-waking its clear-child-tid word); SYS_exit of the main thread waits for the others; a group
+# exit (exit_group, a fatal fault in any thread) sets Proc.exiting, wakes the process's futex
+# waiters, and every other thread dies at its next syscall, futex wake-up or user-mode timer tick.
+# A thread blocked elsewhere (console read) holds the group exit until its call returns.
+LX_MAXTHR = 8  # clone()d threads alive at once per process (Proc.xthr)
+CLONE_THREAD_REQ = 0x10F00  # CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD
+CLONE_OK = 0x17D0F00  # ... | SYSVSEM | SETTLS | PARENT_SETTID | CHILD_CLEARTID | DETACHED | CHILD_SETTID
+CLONE_SETTLS = 0x80000
+CLONE_PARENT_SETTID = 0x100000
+CLONE_CHILD_CLEARTID = 0x200000
+CLONE_CHILD_SETTID = 0x1000000
+EAGAIN = 0xFFFFFFFFFFFFFFF5
+FX_N = 64  # futex waiters, all processes
+fx_thr: u64[64]  # parked waiters (Thread.fx_as/fx_addr hold the key); slots change under rq_lock
+lx_nthreads: u64  # clone()d threads, all processes
+lx_fx_waits: u64
+lx_fx_wakes: u64
+
+def lx_uaddr32(ua: u64) -> u64:
+    return ua != 0 and ua < USER_TOP - 4 and (ua & 3) == 0
+
+def lx_put32(ua: u64, v: u64) -> u64:
+    if lx_uaddr32(ua) == 0:
+        return EFAULT
+    k: u32[1]
+    k[0] = u32(v & 0xFFFFFFFF)
+    if copy_user(ua, u64(addr(k[0])), 4) != 0:
+        return EFAULT
+    return 0
+
+def lx_get32(ua: u64) -> u64:
+# the u32 at ua, or 1 << 32 if it cannot be read
+    if lx_uaddr32(ua) == 0:
+        return 0x100000000
+    k: u32[1]
+    k[0] = 0
+    if copy_user(u64(addr(k[0])), ua, 4) != 0:
+        return 0x100000000
+    return u64(k[0])
+
+def lx_clone(frame: u64, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> u64:
+    p = cur_proc()
+    t = cur_thread()
+    if (flags & CLONE_THREAD_REQ) != CLONE_THREAD_REQ:
+        return lx_unsupported(56)  # fork/vfork through clone: not in 11.1b
+    if (flags & ~CLONE_OK) != 0 or stack == 0 or stack >= USER_TOP:
+        return EINVAL
+    if (flags & CLONE_SETTLS) != 0 and tls >= USER_TOP:
+        return EPERM
+    if p.exiting:
+        return EAGAIN
+    slot = LX_MAXTHR
+    i: u64 = 0
+    while i < LX_MAXTHR:
+        x = p.xthr[i]
+        if x == 0:
+            slot = i
+            break
+        if as_thread(x).state == T_DEAD:
+            thread_free(as_thread(x))
+            p.xthr[i] = 0
+            slot = i
+            break
+        i += 1
+    if slot == LX_MAXTHR:
+        return EAGAIN
+    ct = as_thread(sys_fork(frame, stack))
+    if (flags & CLONE_SETTLS) != 0:
+        ct.fsbase = tls
+    if (flags & CLONE_CHILD_CLEARTID) != 0:
+        ct.ctid = ctid
+    if (flags & CLONE_PARENT_SETTID) != 0:
+        lx_put32(ptid, ct.id)
+    if (flags & CLONE_CHILD_SETTID) != 0:
+        lx_put32(ctid, ct.id)  # same address space: the parent's view is the child's
+    f = irq_save()
+    spin_lock(addr(rq_lock))
+    if t.pin == 0:
+        t.pin = lapic_cpu() + 1
+    ct.pin = t.pin
+    p.xthr[slot] = u64(ct)
+    p.nxthr += 1
+    p.nmade += 1
+    lx_nthreads += 1
+    rq_push(ct)
+    spin_unlock(addr(rq_lock))
+    irq_restore(f)
+    return ct.id
+
+def lx_fx_wake(asp: u64, ua: u64, n: u64) -> u64:
+# wake up to n waiters on (as, ua); ua == 0 wakes every waiter in the address space (group exit)
+    k: u64 = 0
+    f = irq_save()
+    spin_lock(addr(rq_lock))
+    i: u64 = 0
+    while i < FX_N and k < n:
+        x = fx_thr[i]
+        if x != 0 and as_thread(x).fx_as == asp and (ua == 0 or as_thread(x).fx_addr == ua):
+            fx_thr[i] = 0
+            wake_l(as_thread(x))
+            k += 1
+        i += 1
+    lx_fx_wakes += k
+    spin_unlock(addr(rq_lock))
+    irq_restore(f)
+    return k
+
+def lx_futex(ua: u64, op: u64, val: u64, timeout: u64) -> u64:
+# FUTEX_WAIT (0) and FUTEX_WAKE (1); FUTEX_PRIVATE_FLAG (128) is accepted and implied: keys are
+# (address space, address), so only threads of one process meet on a futex
+    cmd = op & ~u64(0x80)
+    if lx_uaddr32(ua) == 0:
+        return EINVAL
+    p = cur_proc()
+    if cmd == 1:
+        return lx_fx_wake(p.pml4, ua, val)
+    if cmd != 0:
+        return lx_unsupported(202)
+    if timeout != 0:
+        return EINVAL  # timed waits: not in 11.1b
+    t = cur_thread()
+    f = irq_save()
+    v = lx_get32(ua)
+    if v > 0xFFFFFFFF:
+        irq_restore(f)
+        return EFAULT
+    if v != (val & 0xFFFFFFFF):
+        irq_restore(f)
+        return EAGAIN
+    spin_lock(addr(rq_lock))
+    i: u64 = 0
+    while i < FX_N and fx_thr[i] != 0:
+        i += 1
+    if i == FX_N:
+        spin_unlock(addr(rq_lock))
+        irq_restore(f)
+        return ENOMEM
+    t.fx_as = p.pml4
+    t.fx_addr = ua
+    fx_thr[i] = u64(t)
+    t.state = T_BLOCKED
+    lx_fx_waits += 1
+    schedule_l(0)  # returns with rq_lock released once a waker took us out of fx_thr[]
+    irq_restore(f)
+    lx_exit_check()
+    return 0
+
+def lx_thread_exit(t: ptr[Thread], p: ptr[Proc]):
+# a clone()d thread ends (never returns); its Thread is freed on slot reuse or with the process
+    if t.ctid != 0:
+        lx_put32(t.ctid, 0)
+        lx_fx_wake(p.pml4, t.ctid, 1)
+    irq_save()  # interrupts stay off: schedule_l(1) never returns here
+    spin_lock(addr(rq_lock))
+    p.nxthr -= 1
+    wq_wake_all_l(addr(p.thrq))
+    schedule_l(1)
+    panic("dead thread resumed")
+
+def lx_wait_threads(p: ptr[Proc]):
+    f = irq_save()
+    spin_lock(addr(rq_lock))
+    while p.nxthr != 0:
+        wq_block_l(addr(p.thrq))
+    spin_unlock(addr(rq_lock))
+    irq_restore(f)
+
+def lx_exit_begin(t: ptr[Thread], p: ptr[Proc], code: u64) -> u64:
+# proc_exit of a Linux process: a group exit. A clone()d caller ends here; the main thread returns
+# the exit status once it is the only thread left.
+    f = irq_save()
+    if p.exiting == 0:
+        p.exiting = 1
+        p.gcode = code
+    irq_restore(f)
+    if p.nmade != 0:
+        lx_fx_wake(p.pml4, 0, FX_N)
+    if u64(t) != p.thread:
+        lx_thread_exit(t, p)
+    lx_wait_threads(p)
+    return p.gcode
+
+def lx_exit_check():
+# at a syscall, a futex wake-up or a user-mode tick: obey a pending group exit
+    t = cur_thread()
+    if t.proc == 0:
+        return
+    p = as_proc(t.proc)
+    if p.exiting == 0:
+        return
+    if u64(t) == p.thread:
+        proc_exit(p.gcode)
+    lx_thread_exit(t, p)
+
+def lx_tick_check(fr: u64):
+# from the timer: fr is the interrupt frame; at kstack_top - 40 it was pushed on entry from ring 3
+    t = cur_thread()
+    if u64(t) == 0 or t.user == 0 or t.proc == 0 or fr != t.kstack_top - 40:
+        return
+    if as_proc(t.proc).exiting:
+        lx_exit_check()
+
+def lx_proc_done(p: ptr[Proc]):
+# proc_destroy of a process that cloned: free the dead clone()d threads, log the totals
+    i: u64 = 0
+    while i < LX_MAXTHR:
+        if p.xthr[i] != 0:
+            thread_free(as_thread(p.xthr[i]))
+            p.xthr[i] = 0
+        i += 1
+    f = gr_pbegin()
+    puts("linux: pid ")
+    put_u64(p.pid)
+    puts(" finished: ")
+    put_u64(p.nmade)
+    puts(" threads created, all joined and freed; futex waits ")
+    put_u64(lx_fx_waits)
+    puts(", wakes ")
+    put_u64(lx_fx_wakes)
+    puts("\n")
+    gr_pend(f)
+
 def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
 # mmap (9, six arguments) is routed by syscall_dispatch, which reads r8/r9 from the frame
     p = cur_proc()
     p.lx_calls += 1
-    if nr == 0:
-        return sys_read(a, b, c)
-    if nr == 1:
-        return sys_write(a, b, c)
+    if nr == 0 or nr == 1 or nr == 16:
+        atomic_fetch_add(addr(p.fdbusy), 1, acq_rel)
+        r: u64 = 0
+        if nr == 0:
+            r = sys_read(a, b, c)
+        elif nr == 1:
+            r = sys_write(a, b, c)
+        else:
+            r = lx_ioctl(a, b, c)
+        atomic_fetch_add(addr(p.fdbusy), 0xFFFFFFFFFFFFFFFF, acq_rel)
+        return r
     if nr == 3:
+        if p.nxthr != 0 and atomic_load(addr(p.fdbusy), acquire) != 0:
+            return EBUSY  # 11.1b: another thread is using a (shared) fd
         return sys_close(a)
-    if nr == 11:
-        return sys_munmap(a, b)
-    if nr == 12:
-        return sys_brk(a)
-    if nr == 16:
-        return lx_ioctl(a, b, c)
+    if nr == 11 or nr == 12:
+        f = irq_save()  # threads share mm state (and one CPU): irqs off serialises it
+        m: u64 = 0
+        if nr == 11:
+            m = sys_munmap(a, b)
+        else:
+            m = sys_brk(a)
+        irq_restore(f)
+        return m
     if nr == 39:
         return sys_getpid()
     if nr == 110:
         return sys_getppid()
     if nr == 186:
-        return sys_getpid()  # one thread per process until 11.1b
+        return cur_thread().id  # the main thread's tid is the pid
     if nr == 218:
-        return sys_getpid()
+        cur_thread().ctid = a
+        return cur_thread().id
+    if nr == 202:
+        return lx_futex(a, b, c, d)
     if nr == 24:
         yield_cpu()
         return 0
-    if nr == 60 or nr == 231:
+    if nr == 60:
+        t = cur_thread()
+        if u64(t) != p.thread:
+            lx_thread_exit(t, p)
+        lx_wait_threads(p)  # the main thread outlives its threads (Linux lets it go first)
+        proc_exit(a & 0xFF)
+    if nr == 231:
         proc_exit(a & 0xFF)
     return lx_unsupported(nr)

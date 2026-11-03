@@ -1,0 +1,252 @@
+# forge: no-runtime
+# forge: caps()
+# Phase 11.1b Linux-ABI thread test (docs/linux-compat.md). Built and sealed like lxtest (EI_OSABI = 3,
+# runs only through `run lxthreads`). No Forge runtime, raw Linux syscalls only:
+# - clone(CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|SETTLS|PARENT_SETTID|CHILD_CLEARTID) of 4 workers,
+#   each on its own mmap'd stack with its own TLS block (FS base); the workers increment one shared
+#   counter 2000 times each under a futex mutex (Drepper's three-state lock), yielding inside the
+#   critical section so the others contend and sleep in FUTEX_WAIT
+# - every worker checks its own %fs:0 / %fs:8 across the yields (per-thread FS base on each switch)
+# - join through CLONE_CHILD_CLEARTID: the kernel zeroes the tid word at exit and FUTEX_WAKEs it
+# - gettid distinct per thread, getpid shared; futex EAGAIN on a stale value; clone refusals
+# - group exit: a thread spinning in user mode and a thread asleep in FUTEX_WAIT must both die when
+#   the main thread calls exit_group (the exit status shows the process ended cleanly)
+
+EAGAIN = 0xFFFFFFFFFFFFFFF5
+EINVAL = 0xFFFFFFFFFFFFFFEA
+ENOSYS = 0xFFFFFFFFFFFFFFDA
+NW = 4  # workers
+NINC = 2000
+CLONE_T = 0x10F00 | 0x40000 | 0x80000 | 0x100000 | 0x200000
+
+fails: u64
+checks: u64
+buf: u8[256]
+blen: u64
+counter: u64
+mtx: u32[2]  # [0] the mutex, [1] a futex nobody ever changes
+ctid: u32[8]
+ptid: u32[8]
+tlsb: u64[8]
+fwaits: u64  # FUTEX_WAIT calls made by the workers
+spins: u64
+
+# clone(flags, stack, ptid, ctid, tls); the child calls fn(tls) on the new stack, then exit(0)
+@naked
+def tclone(flags: u64, stack: u64, pt: u64, ct: u64, tls: u64, fn: u64) -> u64:
+    asm("mov %rcx, %r10", "mov $56, %eax", "syscall", "test %rax, %rax", "jnz 1f",
+        "xor %ebp, %ebp", "mov %r8, %rdi", "call *%r9", "mov $60, %eax", "xor %edi, %edi", "syscall", "ud2",
+        "1:", "ret")
+
+@naked
+def cas32(a: u64, old: u64, new: u64) -> u64:
+    asm("mov %esi, %eax", "lock cmpxchg %edx, (%rdi)", "ret")
+
+@naked
+def xchg32(a: u64, v: u64) -> u64:
+    asm("mov %esi, %eax", "xchg %eax, (%rdi)", "ret")
+
+@naked
+def dec32(a: u64) -> u64:
+    asm("mov $-1, %eax", "lock xadd %eax, (%rdi)", "ret")
+
+@unsafe
+def peek32(a: u64) -> u64:
+    return u64(ptr[u32](a)[0])
+
+@unsafe
+def poke32(a: u64, v: u64):
+    ptr[u32](a)[0] = u32(v)
+
+def futex(a: u64, op: u64, v: u64) -> u64:
+    return lsys(202, a, op | 128, v, 0, 0)
+
+def lock():
+    m = u64(addr(mtx[0]))
+    c = cas32(m, 0, 1)
+    if c != 0:
+        if c != 2:
+            c = xchg32(m, 2)
+        while c != 0:
+            atomic_fetch_add(addr(fwaits), 1, acq_rel)
+            futex(m, 0, 2)
+            c = xchg32(m, 2)
+
+def unlock():
+    m = u64(addr(mtx[0]))
+    if dec32(m) != 1:
+        poke32(m, 0)
+        futex(m, 1, 1)
+
+def worker(tls: u64) -> u64:
+    poke(tls + 16, lsys(186, 0, 0, 0, 0, 0))
+    poke(tls + 24, lsys(39, 0, 0, 0, 0, 0))
+    bad: u64 = 0
+    k: u64 = 0
+    while k < NINC:
+        if fs_read(0) != tls or fs_read(8) != peek(tls + 8):
+            bad += 1
+        lock()
+        v = counter
+        if k % 50 == 0:
+            lsys(24, 0, 0, 0, 0, 0)
+        counter = v + 1
+        unlock()
+        k += 1
+    poke(tls + 32, bad)
+    return 0
+
+def spinner(tls: u64) -> u64:
+    while 1:
+        atomic_fetch_add(addr(spins), 1, acq_rel)
+    return 0
+
+def sleeper(tls: u64) -> u64:
+    while 1:
+        futex(u64(addr(mtx[1])), 0, 0)
+    return 0
+
+def mkthread(i: u64, fn: u64) -> u64:
+    stk = lsys(9, 0, 16384, 3, 0x22, 0xFFFFFFFFFFFFFFFF)
+    tls = lsys(9, 0, 4096, 3, 0x22, 0xFFFFFFFFFFFFFFFF)
+    poke(tls, tls)
+    poke(tls + 8, 100 + i)
+    tlsb[i] = tls
+    ctid[i] = 1
+    return tclone(CLONE_T, stk + 16384, u64(addr(ptid[i])), u64(addr(ctid[i])), tls, fn)
+
+# rax = n; rdi, rsi, rdx, r10, r8 = a..e; r9 = 0
+@naked
+def lsys(n: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64:
+    asm("mov %rdi,%rax", "mov %rsi,%rdi", "mov %rdx,%rsi", "mov %rcx,%rdx", "mov %r8,%r10",
+        "mov %r9,%r8", "xor %r9d,%r9d", "syscall", "ret")
+
+# the u64 at %fs:off (TLS through the FS base set by arch_prctl)
+@naked
+def fs_read(off: u64) -> u64:
+    asm("mov %fs:(%rdi), %rax", "ret")
+
+@unsafe
+def peek(a: u64) -> u64:
+    return ptr[u64](a)[0]
+
+@unsafe
+def poke(a: u64, v: u64):
+    ptr[u64](a)[0] = v
+
+@unsafe
+def peek8(a: u64) -> u64:
+    return u64(ptr[u8](a)[0])
+
+def flush():
+    lsys(1, 1, u64(addr(buf[0])), blen, 0, 0)
+    blen = 0
+
+def put(s: ptr[u8]):
+    putz(u64(s))
+
+def putn(v: u64):
+    d: u8[20]
+    n: u64 = 0
+    while n == 0 or v != 0:
+        d[n] = u8(48 + v % 10)
+        v = v / 10
+        n += 1
+    while n > 0 and blen < 255:
+        n -= 1
+        buf[blen] = d[n]
+        blen += 1
+
+def putz(p: u64):
+    i: u64 = 0
+    while peek8(p + i) != 0 and blen < 255 and i < 200:
+        buf[blen] = u8(peek8(p + i))
+        blen += 1
+        i += 1
+
+def check(ok: u64, what: ptr[u8]):
+    checks += 1
+    if ok == 0:
+        fails += 1
+        put("lxthreads: FAIL ")
+        put(what)
+        put("\n")
+        flush()
+
+def lx_main(sp: u64):
+    pid = lsys(39, 0, 0, 0, 0, 0)
+    i: u64 = 0
+    while i < 8:
+        ctid[i] = 0
+        ptid[i] = 0
+        i += 1
+    mtx[0] = 0
+    mtx[1] = 0
+    counter = 0
+    tid: u64[8]
+    okc: u64 = 1
+    i = 0
+    while i < NW:
+        tid[i] = mkthread(i, u64(worker))
+        if tid[i] > 0xFFFFFFFFFFFFF000 or tid[i] == pid or u64(ptid[i]) != tid[i]:
+            okc = 0
+        i += 1
+    check(okc, "clone 4 threads (tid returned and PARENT_SETTID)")
+    # join: CHILD_CLEARTID zeroes ctid[i] at exit and FUTEX_WAKEs it
+    i = 0
+    while i < NW:
+        while 1:
+            v = peek32(u64(addr(ctid[i])))
+            if v == 0:
+                break
+            futex(u64(addr(ctid[i])), 0, v)
+        i += 1
+    put("lxthreads: 4 threads joined via CLONE_CHILD_CLEARTID + FUTEX_WAIT, counter ")
+    putn(counter)
+    put(" (expected ")
+    putn(NW * NINC)
+    put("), futex waits ")
+    putn(fwaits)
+    put("\n")
+    flush()
+    check(counter == NW * NINC, "futex mutex: no lost increments")
+    check(fwaits != 0, "workers contended and slept in FUTEX_WAIT")
+    bad: u64 = 0
+    dist: u64 = 1
+    i = 0
+    while i < NW:
+        bad += peek(tlsb[i] + 32)
+        if peek(tlsb[i] + 16) != tid[i] or peek(tlsb[i] + 24) != pid:
+            dist = 0
+        i += 1
+    check(bad == 0, "per-thread FS base (TLS) across switches")
+    check(dist == 1 and lsys(186, 0, 0, 0, 0, 0) == pid, "gettid per thread, getpid shared")
+    put("lxthreads: per-thread TLS ok (bad reads ")
+    putn(bad)
+    put("), gettid distinct, getpid shared\n")
+    flush()
+    w = u64(addr(mtx[1]))
+    check(lsys(202, w, 128, 5, 0, 0) == EAGAIN, "FUTEX_WAIT stale value -> EAGAIN")
+    check(lsys(202, w, 129, 1, 0, 0) == 0, "FUTEX_WAKE nobody -> 0")
+    check(lsys(202, w + 1, 128, 0, 0, 0) == EINVAL, "futex misaligned -> EINVAL")
+    check(lsys(56, 17, 0, 0, 0, 0) == ENOSYS, "clone without CLONE_VM (fork) -> ENOSYS")
+    check(lsys(56, CLONE_T | 0x8000000000, 0x1000, 0, 0, 0) == EINVAL, "clone unknown flag -> EINVAL")
+    put("lxthreads: futex EAGAIN/EINVAL ok, clone(fork) -> ENOSYS\n")
+    flush()
+    # group exit: one thread spins in user mode, one sleeps in FUTEX_WAIT forever
+    mkthread(4, u64(spinner))
+    mkthread(5, u64(sleeper))
+    while atomic_load(addr(spins), acquire) < 1000:
+        lsys(24, 0, 0, 0, 0, 0)
+    put("lxthreads: spinner and sleeper running; exit_group must end both\n")
+    if fails == 0:
+        put("lxthreads: PASS (")
+        putn(checks)
+        put(" checks)\n")
+    flush()
+    lsys(231, fails, 0, 0, 0, 0)
+
+@naked
+@export
+def _start():
+    asm("mov %rsp, %rdi", "and $-16, %rsp", "call lx_main", "ud2")

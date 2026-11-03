@@ -52,6 +52,15 @@ struct Proc:
     abi: u64  # 11.1: 0 Forge syscalls, LX_ABI = the Linux personality (linux.fsi)
     lx_calls: u64  # Linux syscalls made
     lx_unsup: u64  # ... of which answered ENOSYS
+    # 11.1b: Linux threads (linux.fsi). `thread` is the main thread and always the last to die; the
+    # clone()d threads share pml4, fds and brk/mmap state and are pinned to the main thread's CPU
+    nxthr: u64  # clone()d threads still alive
+    xthr: u64[8]  # clone()d threads (dead ones are freed on slot reuse or in proc_destroy)
+    thrq: WaitQ  # the main thread waits here for nxthr to reach 0
+    exiting: u64  # a group exit (exit_group, a fatal fault) is under way
+    gcode: u64  # its exit status
+    nmade: u64  # threads ever created by clone
+    fdbusy: u64  # threads inside read/write/ioctl (close of a shared fd waits for 0: EBUSY)
 
 procs: u64[64]
 kx_freeze: u64  # a kexec handoff is collecting every user process at a syscall boundary
@@ -76,12 +85,16 @@ sb_live: u64
 sb_denials: u64
 nexecs: u64
 
+# the one checked-by-convention cast from a stored Proc address (procs[], Thread.proc) to a Proc
 @unsafe
+def as_proc(x: u64) -> ptr[Proc]:
+    return ptr[Proc](x)
+
 def proc_find_l(pid: u64) -> nptr[Proc]:
     i = 0
     while i < MAX_PROCS:
-        if procs[i] != 0 and ptr[Proc](procs[i]).pid == pid:
-            return ptr[Proc](procs[i])
+        if procs[i] != 0 and as_proc(procs[i]).pid == pid:
+            return as_proc(procs[i])
         i += 1
     return 0
 
@@ -107,9 +120,8 @@ def proc_remove_l(p: ptr[Proc]):
             procs[i] = 0
         i += 1
 
-@unsafe
 def cur_proc() -> ptr[Proc]:
-    return ptr[Proc](cur_thread().proc)
+    return as_proc(cur_thread().proc)
 
 # ---- files ----
 F_CONSOLE = 1
@@ -789,6 +801,8 @@ def proc_destroy(p: ptr[Proc]):
 # p is a zombie whose thread is dead and which is no longer in the table
     t = ptr[Thread](p.thread)
     thread_free(t)
+    if p.nmade != 0:
+        lx_proc_done(p)  # 11.1b: frees the dead clone()d threads
     as_free(p.pml4)
     sb_clear(p.pid)
     kfree(u64(p))
@@ -812,6 +826,8 @@ def proc_reap(t: ptr[Thread]) -> u64:
 def proc_exit(code: u64):
     t = cur_thread()
     p = ptr[Proc](t.proc)
+    if p.abi == LX_ABI:
+        code = lx_exit_begin(t, p, code)  # 11.1b: a clone()d thread never returns; main waits for them
     if p.drv == DRV_KBD:
         kbd_died()
     elif p.drv == DRV_NVME:
@@ -866,22 +882,26 @@ def proc_reap_orphans() -> u64:
         n += 1
 
 @unsafe
-def sys_fork(frame: u64) -> u64:
+def sys_fork(frame: u64, ustack: u64) -> u64:
+# ustack == 0: fork. ustack != 0 (11.1b, Linux clone of a thread, linux.fsi lx_clone): no new process;
+# returns the new, not yet runnable Thread in the caller's process, resuming on ustack with rax = 0
     t = cur_thread()
     p = ptr[Proc](t.proc)
-    c = proc_new(p.pid)
-    c.pml4 = as_clone(p.pml4)
-    c.brk_base = p.brk_base
-    c.brk = p.brk
-    c.mmap_next = p.mmap_next
-    c.caps = p.caps
-    c.abi = p.abi
-    memcpy(u64(addr(c.args[0])), u64(addr(p.args[0])), 128)
-    i = 0
-    while i < NFD:
-        c.fds[i] = file_get(p.fds[i])
-        c.fdr[i] = p.fdr[i]
-        i += 1
+    c = p
+    if ustack == 0:
+        c = proc_new(p.pid)
+        c.pml4 = as_clone(p.pml4)
+        c.brk_base = p.brk_base
+        c.brk = p.brk
+        c.mmap_next = p.mmap_next
+        c.caps = p.caps
+        c.abi = p.abi
+        memcpy(u64(addr(c.args[0])), u64(addr(p.args[0])), 128)
+        i = 0
+        while i < NFD:
+            c.fds[i] = file_get(p.fds[i])
+            c.fdr[i] = p.fdr[i]
+            i += 1
     ct = thread_new(fork_child_entry_addr(), 0)
     # the child's kernel stack: its own copy of the syscall frame at the top, the switch frame below it
     # (move the switch frame down first: the two regions overlap)
@@ -897,8 +917,11 @@ def sys_fork(frame: u64) -> u64:
     ct.cr3 = c.pml4
     ct.user = 1
     ct.proc = u64(c)
-    ct.fsbase = cur_thread().fsbase
+    ct.fsbase = t.fsbase
     fpu_save(ct.fpu)  # the parent's live FPU/SSE registers
+    if ustack != 0:
+        vstore64(cf + SF_RSP * 8, ustack)
+        return u64(ct)
     c.pid = ct.id
     c.thread = u64(ct)
     if proc_insert(c) == 0:
@@ -1450,8 +1473,14 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
         kx_park()
     if cur_proc().abi == LX_ABI:
     # 11.1: a Linux-personality process reaches only the Linux table; no Forge syscall is visible
+        lx_exit_check()  # 11.1b: a pending group exit ends this thread here
         if nr == 9:
-            return lx_mmap(a, b, c, d, vload64(frame + SF_R8 * 8), vload64(frame + SF_R9 * 8))
+            f = irq_save()  # 11.1b: the process's threads share one CPU; irqs off serialises mm state
+            r = lx_mmap(a, b, c, d, vload64(frame + SF_R8 * 8), vload64(frame + SF_R9 * 8))
+            irq_restore(f)
+            return r
+        if nr == 56:
+            return lx_clone(frame, a, b, c, d, vload64(frame + SF_R8 * 8))
         if nr == 158:
         # 11.1b: arch_prctl may change this thread's FS base; load it now (sched.fsi reloads on switches)
             r = lx_arch_prctl(a, b)
@@ -1485,7 +1514,7 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
     if nr == 39:
         return sys_getpid()
     if nr == 57:
-        return sys_fork(frame)
+        return sys_fork(frame, 0)
     if nr == 59:
         return sys_exec(frame, a, b, 0)
     if nr == 60:

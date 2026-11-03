@@ -25,7 +25,7 @@ Inside the personality a process reaches **only** the Linux table. No Forge sysc
 including the driver (400+), kexec/ktest (408/409, still also gated by `ktest_hooks`) and grant
 syscalls: they return -ENOSYS like any unknown number.
 
-## Syscalls (11.1a, 11.1b)
+## Syscalls (11.1a, 11.1b; 17 in all)
 
 | nr | name | notes |
 |----|------|-------|
@@ -37,9 +37,11 @@ syscalls: they return -ENOSYS like any unknown number.
 | 12 | brk | Linux semantics: returns the current break on failure |
 | 24 | sched_yield | (11.1b) |
 | 16 | ioctl | console fds: TCGETS (cooked, echoing termios), TIOCGWINSZ (framebuffer rows x cols, 25x80 on serial); other requests -> ENOTTY, non-console -> ENOTTY, bad fd -> EBADF |
-| 39 / 110 / 186 | getpid / getppid / gettid | one thread per process until 11.1b |
-| 218 | set_tid_address | returns the tid; clear-child-tid comes with threads |
-| 60 / 231 | exit / exit_group | |
+| 39 / 110 / 186 | getpid / getppid / gettid | getpid is the process (main thread) id; gettid is per thread |
+| 56 | clone | (11.1b) threads only: CLONE_VM\|FS\|FILES\|SIGHAND\|THREAD required, plus SYSVSEM, SETTLS, PARENT_SETTID, CHILD_SETTID, CHILD_CLEARTID, DETACHED; at most 8 clone()d threads live; fork-style clone -> ENOSYS, other flags or a bad stack -> EINVAL, TLS above USER_TOP -> EPERM, no slot -> EAGAIN |
+| 202 | futex | (11.1b) FUTEX_WAIT / FUTEX_WAKE (PRIVATE flag accepted); stale value -> EAGAIN, misaligned or kernel address -> EINVAL, timeouts -> EINVAL (not yet), other ops -> ENOSYS |
+| 218 | set_tid_address | sets the calling thread's clear-child-tid word, returns its tid |
+| 60 / 231 | exit / exit_group | exit ends one clone()d thread (the main thread waits for the others first); exit_group ends the whole process |
 | 158 | arch_prctl | (11.1b) ARCH_SET_FS (address must be below USER_TOP, else EPERM), ARCH_GET_FS (bad pointer -> EFAULT); ARCH_SET_GS / others -> EINVAL |
 | other | | -ENOSYS, counted per process (`Proc.lx_unsup`), first 4 logged: `linux: pid N syscall X not supported -> ENOSYS` |
 
@@ -60,6 +62,35 @@ IA32_FS_BASE (MSR 0xC0000100) at once; `schedule_l` reloads the MSR whenever the
 `fsbase` differs from the current one. The kernel itself never uses FS, so the MSR always belongs to
 the running user thread. fork copies the caller's FS base, exec resets it to 0, and the kexec
 handoff carries it (process record word +120).
+
+## Threads and futex (11.1b part 2)
+
+- `clone` reuses the fork path in thread mode (`sys_fork(frame, ustack)`): a new kernel Thread with
+  a copy of the caller's syscall frame (rax = 0, RSP = the new stack), the same Proc and page tables,
+  the caller's FPU state and FS base (or the CLONE_SETTLS one). It is listed in `Proc.xthr[8]`.
+- All threads of a process are pinned to the CPU its main thread runs on: no cross-CPU TLB
+  shootdown is needed for munmap/brk, and futex check-then-sleep is atomic with interrupts off.
+  Parallel threads on several CPUs are future work.
+- Futex waiters sit in a 64-entry kernel table keyed by (address space, user address).
+- CLONE_CHILD_CLEARTID: when a thread exits the kernel writes 0 to the word and FUTEX_WAKEs it
+  (pthread_join).
+- Group exit (exit_group, or the main thread exiting first): the process is marked exiting; every
+  waiter is woken; each other thread ends at its next syscall, futex wake-up or user-mode timer tick;
+  the main thread waits until it is the last, then exits with the group status. Threads are freed
+  with the process: `linux: pid N finished: K threads created, all joined and freed; ...`.
+- Limits: a thread blocked in a console read delays a group exit until the read returns; close of
+  an fd returns EBUSY while another thread is inside read/write/ioctl; kexec already refuses sandboxed
+  Linux processes, so threads never need to cross a kexec.
+
+## Test: lxthreads
+
+`run lxthreads` (examples/user/lxthreads.forge, raw syscalls only): 4 clone()d workers, each on its
+own mmap'd stack with its own TLS block, add 2000 each to one counter under a futex mutex (three-state
+lock, yielding inside the critical section so the others sleep in FUTEX_WAIT): `counter 8000 (expected
+8000)`. Then per-thread `%fs` checks, distinct gettid and shared getpid, join through
+CLONE_CHILD_CLEARTID, futex EAGAIN/EINVAL, clone(fork) -> ENOSYS, and a group exit with one thread
+spinning in user mode and one asleep in FUTEX_WAIT: `lxthreads: PASS (10 checks)`, the kernel's
+`6 threads created, all joined and freed` and `[lxthreads exited 0 (sandboxed)]`.
 
 ## Process start
 
@@ -91,7 +122,7 @@ compiles it with forgec/fas/fld, sets EI_OSABI = 3, then seals it. tests/os/run.
 
 ## Not yet
 
-- 11.1b part 2: clone (threads sharing the address space), futex, clear-child-tid.
+- Timed futex waits, FUTEX_REQUEUE/WAKE_OP, threads running in parallel on several CPUs.
 - 11.1c: openat, fstat, getdents64 over the sandbox's granted handles.
 - execve, signals, /proc, sockets, file-backed mmap.
 - Busybox (the Phase 11.1 acceptance test) needs a third-party static binary; it will be added only

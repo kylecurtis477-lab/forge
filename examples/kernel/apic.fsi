@@ -99,6 +99,7 @@ def on_lapic_timer(frame: ptr[u64]):
         if lapic_cpu() == 0 and sleepq.head != 0:
             sleep_tick_l()
         schedule_l(0)
+        lx_tick_check(u64(frame))  # 11.1b: a thread of an exiting Linux process dies at a user-mode tick
 
 def lapic_timer_start():
     if tsc_deadline_on:
