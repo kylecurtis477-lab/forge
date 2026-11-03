@@ -33,12 +33,12 @@ ob_out: u64[64]  # payload produced by obj_read / obj_read_at
 # 9.2 write-ahead log: every mutation appends one self-checking record (tag, fields, FNV of the record);
 # records only refer to earlier ones (a version follows its blob and object), so any prefix of the log
 # is a consistent store, and replay stops at the first torn or corrupt record.
-OB_NL = 65536
+OB_NL = 32768
 OB_RT = 0x4F42540000000001  # type: t, nfields
 OB_RO = 0x4F424F0000000002  # object: id, type
 OB_RB = 0x4F42420000000003  # blob: n, words...
 OB_RV = 0x4F42560000000004  # version: obj, blob, ts
-ob_log: u64[65536]
+ob_log: u64[32768]
 ob_lp: u64
 ob_lr: u64  # 1 while replaying (do not log)
 ob_lfull: u64

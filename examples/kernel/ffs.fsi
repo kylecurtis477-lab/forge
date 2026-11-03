@@ -471,4 +471,5 @@ def ffs_test():
     puts(" block writes, all inside the Forge partition; writes outside refused ")
     put_u64(nv_refused)
     putc(10)
+    objstore_test()
     puts("Forge FS OK\n")

@@ -58,6 +58,10 @@ if grep -aq ", mounted" $T/b2.log && grep -aq "survived the reboot, hashes match
   echo "PASS os/forgefs-persists"; else echo "FAIL os/forgefs-persists: $(grep -a 'Forge FS\|PANIC' $T/b2.log | tail -2)"; fi
 [ "$S1" = "$S2" ] && [ "$S2" = "$S3" ] && echo "PASS os/forgefs-outside-unchanged ($S3)" || echo "FAIL os/forgefs-outside-unchanged ($S1 / $S2 / $S3)"
 for b in 1 2; do grep -aq "NVMe service hot-swap + supervised restart OK" $T/b$b.log && echo "PASS os/nvme-service-swap-restart-boot$b" || echo "FAIL os/nvme-service-swap-restart-boot$b: $(grep -a 'NVMe s\|PANIC' $T/b$b.log | tail -2)"; done
+# Phase 9.2: object-store log on the Forge partition; boot 1 commits then tears a record, boot 2 recovers
+F1=$(grep -ao "durable commits, clock [0-9]*, fingerprint [0-9a-fx]*" $T/b1.log | sed 's/.*fingerprint //')
+if [ -n "$F1" ] && grep -aq "crash simulated (torn record" $T/b1.log && grep -aE "torn tail dropped \([1-9][0-9]* words\), fingerprint $F1\$" $T/b2.log >/dev/null && grep -aq "^objstore crash recovery OK" $T/b2.log; then
+  echo "PASS os/objstore-crash-recover"; else echo "FAIL os/objstore-crash-recover: $(grep -a 'objstore\|PANIC' $T/b1.log $T/b2.log | tail -3)"; fi
 python3 tools/forge-part.py read $T/nv.img hello.txt | grep -q "written by the Forge kernel on its own GPT partition" && echo "PASS os/forgefs-host-read" || echo "FAIL os/forgefs-host-read"
 grep -ah "Forge FS: remount" $T/b2.log
 rm -rf $T
