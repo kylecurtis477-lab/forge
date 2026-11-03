@@ -1563,6 +1563,15 @@ def skip_arg(p):
                 return p
         p += 1
 
+def arg_step(p):
+# skip the argument at p; returns the index after its ',' or the ')' ending the call
+    p = skip_arg(p)
+    if tok_is_op(p, ","):
+        return p + 1
+    if not tok_is_op(p, ")"):
+        die(tl[p], concat(concat("expected ')', found '", tv[p]), "'"))
+    return p
+
 def skip_larg(p):
 # like skip_arg, but a lambda default also ends at a top-level ':'
     d = 0
@@ -1591,9 +1600,7 @@ def count_pos(p0):
     while not tok_is_op(p, ")") and tk[p] != K_EOF:
         if not is_kwarg(p):
             n += 1
-        p = skip_arg(p)
-        if tok_is_op(p, ","):
-            p += 1
+        p = arg_step(p)
     return n
 
 def need_slots(f, sk):
@@ -1603,9 +1610,7 @@ def need_slots(f, sk):
     while not tok_is_op(p, ")") and tk[p] != K_EOF:
         if is_kwarg(p):
             return 1
-        p = skip_arg(p)
-        if tok_is_op(p, ","):
-            p += 1
+        p = arg_step(p)
     return 0
 
 def push_slots(f, sk):
@@ -1635,9 +1640,7 @@ def push_slots(f, sk):
                 die(line, concat(concat("too many arguments to ", fnames[f]), "()"))
             spos[i] = p
             i += 1
-        p = skip_arg(p)
-        if tok_is_op(p, ","):
-            p += 1
+        p = arg_step(p)
     endp = p + 1
     k = 0
     while k < np:

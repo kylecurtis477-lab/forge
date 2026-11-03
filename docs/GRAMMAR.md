@@ -135,3 +135,11 @@ param       = ['*' | '**'] NAME [':' test if t] ['=' test if no star] | '*'
   (tests/ast/roundtrip.sh).
 - `tools/grammar_fuzz.py` generates random programs from this grammar (must parse and
   round-trip) and mutations that break a rule in a known way (must be rejected).
+
+## Diagnostics note: mismatched closers in call arguments
+A call whose argument list hits a closer that does not match, for example `f(}` or `f(1]2)`, used to hang the
+compiler: `skip_arg` stops at a mismatched closer at depth 0, and the argument loops (`count_pos`,
+`need_slots`, `push_slots`) never advanced. The loops now go through `arg_step`, which reports
+`error: line N: expected ')', found '<tok>'` and stops. Regression tests: `tests/errors/call_stray_*.forge`.
+`run_tests.sh` also runs every error test under `timeout 20`, so a future hang fails the test instead of
+stalling the suite.
