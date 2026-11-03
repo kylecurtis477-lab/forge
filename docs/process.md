@@ -24,6 +24,9 @@ W^X (`RWX` segments and mixed RX/RW pages are refused) and caps total mapped mem
 - Syscalls: `fork`, `exec`, `wait`, `exit`, `brk` (`brk(0)` returns the current break;
   growing maps zero pages, shrinking unmaps), `mmap(len)`, `munmap(va, len)`.
 
+- VFS: `open`/`stat`/`read`/`getdents` also serve the object-store files under `/obj` (file types `F_OBJ` = 5 and
+  `F_ODIR` = 6, read-only, see docs/objstore.md 9.5); every other path goes to FAT32 as before.
+
 ## Known bug fixed (Nov 2, 2026)
 `elf_load` used to record the image end in a global `elf_end` that callers read after it
 returned. When two CPUs loaded images at once (a spawn racing an exec), one process could get

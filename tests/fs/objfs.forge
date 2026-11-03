@@ -1,0 +1,105 @@
+# forge: no-runtime
+# Phase 9.5 files as objects: create, overwrite, look up by name (index probe), read any file as of any
+# clock, and a system rewind that takes files back too.
+include "linux.fsi"
+# object-store capacities (obj.fsi takes them from the includer)
+OB_NT = 8
+OB_NO = 1024
+OB_NV = 8192
+OB_NB = 4096
+OB_NW = 262144
+OB_NL = 524288
+OB_HB = 8192
+OB_NX = 65536
+OB_HX = 131072
+include "../../examples/kernel/obj.fsi"
+include "../../examples/kernel/objfs.fsi"
+
+def show(s: ptr[u8], v: u64):
+    puts(s)
+    put_u64(v)
+    nl()
+
+def name(w0: u64, w1: u64):
+# stage a file name packed little-endian in two words
+    i: u64 = 0
+    while i < 32:
+        ofs_nm[i] = 0
+        i += 1
+    i = 0
+    while i < 8:
+        ofs_nm[i] = u8((w0 >> (i * 8)) & 255)
+        ofs_nm[8 + i] = u8((w1 >> (i * 8)) & 255)
+        i += 1
+
+def fill(n: u64, seed: u64):
+    i: u64 = 0
+    while i < n:
+        ofs_buf[i] = u8((i * 7 + seed) & 255)
+        i += 1
+
+def check(n: u64, seed: u64) -> u64:
+    i: u64 = 0
+    while i < n:
+        if ofs_buf[i] != u8((i * 7 + seed) & 255):
+            return 0
+        i += 1
+    return 1
+
+def main() -> i64:
+    ob_reset()
+    ob_log_clear()
+    show("init: ", ofs_init() + 1)
+    name(0x7478742E6F6C6C65, 0)  # "ello.txt"
+    show("absent: ", u64(ofs_lookup() == OB_ERR))
+    fill(100, 1)
+    t1 = ofs_put(100)
+    a = ofs_lookup()
+    name(0x632E6D6574737973, 0x6766)
+    fill(OFS_MAX, 2)
+    ofs_put(OFS_MAX)
+    b = ofs_lookup()
+    show("two files: ", u64(a != b and a != OB_ERR and b != OB_ERR))
+    show("too big refused: ", u64(ofs_put(OFS_MAX + 1) == OB_ERR))
+    i: u64 = 0
+    while i < 200:
+        name(0x66 + (i << 8), 0)
+        fill(i, i)
+        ofs_put(i)
+        i += 1
+    name(0x66 + (123 << 8), 0)
+    c = ofs_lookup()
+    show("file 123 size: ", ofs_read_at(c, ob_clock))
+    show("file 123 data ok: ", check(123, 123))
+    name(0x7478742E6F6C6C65, 0)
+    fill(40, 9)
+    t2 = ofs_put(40)
+    show("same file after overwrite: ", u64(ofs_lookup() == a))
+    show("size now: ", ofs_read_at(a, ob_clock))
+    show("data now ok: ", check(40, 9))
+    show("size at t1: ", ofs_read_at(a, t1))
+    show("data at t1 ok: ", check(100, 1))
+    show("absent before t1: ", u64(ofs_read_at(a, t1 - 1) == OB_ERR))
+    show("name len: ", ofs_name_of(b, ob_clock))
+    show("name byte 9: ", u64(ofs_nm[9]))
+    # a bad change to every file, then a system rewind brings the files back
+    tg = ob_clock
+    o = obj_type_first(OFS_T)
+    n: u64 = 0
+    while o != OB_ERR:
+        ofs_name_of(o, ob_clock)
+        fill(3, 0)
+        ofs_put(3)
+        n += 1
+        o = obj_type_next(o)
+    show("files clobbered: ", n)
+    show("rewound: ", sys_rewind(tg))
+    show("size after rewind: ", ofs_read_at(a, ob_clock))
+    show("data after rewind ok: ", check(40, 9))
+    show("t2 still readable: ", u64(ofs_read_at(a, t2) == 40))
+    name(0x66 + (123 << 8), 0)
+    show("lookup after rewind: ", u64(ofs_lookup() == c))
+    ob_replay(ob_lp)
+    show("replay size: ", ofs_read_at(c, ob_clock))
+    show("replay data ok: ", check(123, 123))
+    return 0

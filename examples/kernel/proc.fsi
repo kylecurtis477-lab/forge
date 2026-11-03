@@ -258,6 +258,148 @@ def dir_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
     mutex_unlock(addr(fs_m))
     return done
 
+# ---- /obj (Phase 9.5): the object store's files (objfs.fsi) as a read-only VFS view ----
+# "/obj" lists the files, "/obj/<name>" opens one, "/obj/@<clock>/<name>" opens it as of that clock and
+# "/obj/@<clock>" lists the files as of then. A handle snapshots its clock at open (fl.ccl; fl.clu = object
+# id), so later writes never change what an open handle reads. ofs_m serialises every objfs access.
+F_OBJ = 5
+F_ODIR = 6
+ofs_m: Mutex
+
+ovfs_o: u64  # ovfs_resolve results: object id, clock
+ovfs_ts: u64
+
+def ovfs_resolve(s: slice[u8]) -> u64:
+# OB_ERR if s is not under /obj; else 0 (no such file / store not mounted), 1 (file ovfs_o as of
+# ovfs_ts) or 2 (the listing as of ovfs_ts). Caller holds ofs_m.
+    n = len(s)
+    if n < 4 or s[0] != 47 or s[1] != 111 or s[2] != 98 or s[3] != 106:
+        return OB_ERR
+    if n > 4 and s[4] != 0 and s[4] != 47:
+        return OB_ERR
+    i: u64 = 4
+    while i < n and s[i] == 47:
+        i += 1
+    ts = ob_clock
+    if i < n and s[i] == 64:
+        i += 1
+        ts = 0
+        d: u64 = 0
+        while i < n and s[i] >= 48 and s[i] <= 57:
+            ts = ts * 10 + u64(s[i] - 48)
+            d += 1
+            i += 1
+        if d == 0 or ts > ob_clock or (i < n and s[i] != 0 and s[i] != 47):
+            return 0
+        while i < n and s[i] == 47:
+            i += 1
+    if ofs_ok == 0:
+        return 0
+    ovfs_ts = ts
+    if i >= n or s[i] == 0:
+        return 2
+    k: u64 = 0
+    while k < 32:
+        ofs_nm[k] = 0
+        k += 1
+    k = 0
+    while i < n and s[i] != 0:
+        if s[i] == 47 or k == 31:
+            return 0
+        ofs_nm[k] = s[i]
+        k += 1
+        i += 1
+    o = ofs_lookup()
+    if o == OB_ERR or ofs_read_at(o, ts) == OB_ERR:
+        return 0
+    ovfs_o = o
+    return 1
+
+def ovfs_open(s: slice[u8]) -> u64:
+# OB_ERR if s is not under /obj; else 0 or a new File snapshotting the file (or listing) as of open time
+    mutex_lock(addr(ofs_m))
+    r = ovfs_resolve(s)
+    o = ovfs_o
+    ts = ovfs_ts
+    sz = ob_out[5]
+    mutex_unlock(addr(ofs_m))
+    if r == OB_ERR or r == 0:
+        return r
+    if r == 2:
+        dl = file_new(F_ODIR)
+        dl.ccl = ts
+        return u64(dl)
+    fl = file_new(F_OBJ)
+    fl.clu = o
+    fl.ccl = ts
+    fl.size = sz
+    return u64(fl)
+
+
+def ofile_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
+    mutex_lock(addr(ofs_m))
+    sz = ofs_read_at(fl.clu, fl.ccl)
+    if sz == OB_ERR or fl.pos >= sz:
+        mutex_unlock(addr(ofs_m))
+        return 0
+    if n > sz - fl.pos:
+        n = sz - fl.pos
+    if copy_user(ubuf, u64(addr(ofs_buf[fl.pos])), n) != 0:
+        mutex_unlock(addr(ofs_m))
+        return EFAULT
+    mutex_unlock(addr(ofs_m))
+    fl.pos += n
+    return n
+
+ovfs_pos: u64
+
+def odir_next(ts: u64) -> u64:
+# next file in an /obj listing as of ts, after the first ovfs_pos type-list entries (advances ovfs_pos);
+# leaves its name in ofs_nm and its size in ob_out[5]. Caller holds ofs_m.
+    o = obj_type_first(OFS_T)
+    k: u64 = 0
+    while o != OB_ERR and k < ovfs_pos:
+        o = obj_type_next(o)
+        k += 1
+    while o != OB_ERR:
+        ovfs_pos += 1
+        if ofs_name_of(o, ts) != OB_ERR:
+            return o
+        o = obj_type_next(o)
+    return OB_ERR
+
+def odir_read(fl: ptr[File], ubuf: u64, n: u64) -> u64:
+# same getdents records as dir_read: u64 size, u8 is_dir (0), name, NUL
+    rec: u8[48]
+    done: u64 = 0
+    mutex_lock(addr(ofs_m))
+    while 1:
+        ovfs_pos = fl.pos
+        o = odir_next(fl.ccl)
+        if o == OB_ERR:
+            break
+        l: u64 = 0
+        while l < 32 and ofs_nm[l] != 0:
+            rec[9 + l] = ofs_nm[l]
+            l += 1
+        rec[9 + l] = 0
+        rl = 9 + l + 1
+        if done + rl > n:
+            break
+        fl.pos = ovfs_pos
+        sz = ob_out[5]
+        k: u64 = 0
+        while k < 8:
+            rec[k] = u8((sz >> (k * 8)) & 255)
+            k += 1
+        rec[8] = 0
+        if copy_user(ubuf + done, u64(addr(rec[0])), rl) != 0:
+            mutex_unlock(addr(ofs_m))
+            return EFAULT
+        done += rl
+    mutex_unlock(addr(ofs_m))
+    return done
+
 # ---- tty: one input queue fed by PS/2 and COM1 interrupts; lines are handed out on '\n' ----
 tty_buf: u8[512]
 tty_head: u64
@@ -928,6 +1070,9 @@ def sys_open(upath: u64) -> u64:
         return EACCES
     if path_ok(path[:]) == 0:
         return EACCES
+    o = ovfs_open(path[:])
+    if o != OB_ERR:
+        return ovfs_install(p, o, p.fdr[CAP_ROOT_FD])
     return open_install(p, fs_root, addr(path[0]), p.fdr[CAP_ROOT_FD])
 
 @unsafe
@@ -941,11 +1086,13 @@ def sys_stat(upath: u64, ubuf: u64) -> u64:
         return EACCES
     if path_ok(path[:]) == 0:
         return EACCES
-    fl = vfs_open(addr(path[0]))
+    fl = ovfs_open(path[:])
+    if fl == OB_ERR:
+        fl = vfs_open(addr(path[0]))
     if fl == 0:
         return ENOENT
     st[0] = ptr[File](fl).size
-    st[1] = u64(ptr[File](fl).type == F_DIR)
+    st[1] = u64(ptr[File](fl).type == F_DIR or ptr[File](fl).type == F_ODIR)
     file_put(fl)
     if user_ptr_ok(ubuf, 16) == 0 or copy_user(ubuf, u64(addr(st[0])), 16) != 0:
         return EFAULT
@@ -963,6 +1110,8 @@ def sys_read(fd: u64, ubuf: u64, n: u64) -> u64:
         return tty_read(ubuf, n)
     if fl.type == F_FILE:
         return file_read(fl, ubuf, n)
+    if fl.type == F_OBJ:
+        return ofile_read(fl, ubuf, n)
     return EISDIR
 
 def sys_write(fd: u64, ubuf: u64, n: u64) -> u64:
@@ -985,6 +1134,8 @@ def sys_getdents(fd: u64, ubuf: u64, n: u64) -> u64:
         return EBADF
     if (cur_proc().fdr[fd] & CAP_READ) == 0:
         return EPERM
+    if fl.type == F_ODIR:
+        return odir_read(fl, ubuf, n)
     if fl.type != F_DIR:
         return ENOTDIR
     return dir_read(fl, ubuf, n)
@@ -1153,6 +1304,18 @@ def open_install(p: ptr[Proc], c: u64, path: ptr[u8], r: u64) -> u64:
         return ENOENT
     p.fds[fd] = fl
     p.fdr[fd] = r & (CAP_READ | CAP_LOOKUP | CAP_DUP | CAP_XFER)
+    return fd
+
+def ovfs_install(p: ptr[Proc], fl: u64, r: u64) -> u64:
+# an /obj handle (from ovfs_open) into a free fd: read-only, never a lookup capability
+    fd = fd_free(p)
+    if fd == NFD:
+        file_put(fl)
+        return EMFILE
+    if fl == 0:
+        return ENOENT
+    p.fds[fd] = fl
+    p.fdr[fd] = r & (CAP_READ | CAP_DUP | CAP_XFER)
     return fd
 
 def sys_openat(dirfd: u64, upath: u64) -> u64:

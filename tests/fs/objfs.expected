@@ -1,0 +1,22 @@
+init: 1
+absent: 1
+two files: 1
+too big refused: 1
+file 123 size: 123
+file 123 data ok: 1
+same file after overwrite: 1
+size now: 40
+data now ok: 1
+size at t1: 100
+data at t1 ok: 1
+absent before t1: 1
+name len: 10
+name byte 9: 103
+files clobbered: 202
+rewound: 202
+size after rewind: 40
+data after rewind ok: 1
+t2 still readable: 1
+lookup after rewind: 1
+replay size: 123
+replay data ok: 1

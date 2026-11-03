@@ -226,6 +226,7 @@ def objstore_test():
         panic("objstore: objects.log unavailable")
     if r == 1 and ob_tf[2] != 0:
         objrw_verify()
+        objfs_verify()
         return
     if r == 2:
         if ob_type_def(1, 3) != 0 or od_sync() == 0:
@@ -292,6 +293,156 @@ def objstore_test():
     puts("objstore: all 50 committed versions of object 0 read back, rewind + new commit durable\n")
     puts("objstore crash recovery OK\n")
     objrw_test()
+    objfs_test()
     puts("objstore: boot done, state fingerprint ")
     put_hex(od_sfp())
     putc(10)
+
+# ---- Phase 9.5: files as objects, read back through the VFS (/obj in proc.fsi) ----
+ofs_pth: u8[64]
+ofs_pl: u64
+
+def ofs_pa(w: u64):
+# append the bytes of a little-endian packed word (up to its first NUL) to ofs_pth
+    k: u64 = 0
+    while k < 8 and ((w >> (k * 8)) & 255) != 0 and ofs_pl < 63:
+        ofs_pth[ofs_pl] = u8((w >> (k * 8)) & 255)
+        ofs_pl += 1
+        k += 1
+    ofs_pth[ofs_pl] = 0
+
+def ofs_pn(v: u64):
+    d: u64 = 1
+    while d * 10 <= v:
+        d *= 10
+    while d > 0 and ofs_pl < 63:
+        ofs_pth[ofs_pl] = u8(48 + (v / d) % 10)
+        ofs_pl += 1
+        d /= 10
+    ofs_pth[ofs_pl] = 0
+
+def ofs_p0():
+    ofs_pl = 0
+    ofs_pth[0] = 0
+
+def ofs_fill(n: u64, seed: u64):
+    i: u64 = 0
+    while i < n:
+        ofs_buf[i] = u8((i * 7 + seed) & 255)
+        i += 1
+
+def ofs_check(n: u64, seed: u64) -> u64:
+    i: u64 = 0
+    while i < n:
+        if ofs_buf[i] != u8((i * 7 + seed) & 255):
+            return 0
+        i += 1
+    return 1
+
+def ofs_kname(w: u64):
+    k: u64 = 0
+    while k < 32:
+        ofs_nm[k] = 0
+        k += 1
+    k = 0
+    while k < 8:
+        ofs_nm[k] = u8((w >> (k * 8)) & 255)
+        k += 1
+
+def ofs_kput(w: u64, n: u64, seed: u64):
+    mutex_lock(addr(ofs_m))
+    ofs_kname(w)
+    ofs_fill(n, seed)
+    if ofs_put(n) == OB_ERR or od_sync() == 0:
+        panic("objfs: write failed")
+    mutex_unlock(addr(ofs_m))
+
+def ofs_kopen_p() -> u64:
+# what open("<ofs_pth>") would give, read back the way the read/getdents syscalls do it: a file's
+# contents go into ofs_buf and its size is returned; a listing returns 1000 + its entry count;
+# OB_ERR = not under /obj, 0x7FFF = no such file
+    mutex_lock(addr(ofs_m))
+    r = ovfs_resolve(ofs_pth[:])
+    v: u64 = 0x7FFF
+    if r == OB_ERR:
+        v = OB_ERR
+    if r == 1:
+        v = ofs_read_at(ovfs_o, ovfs_ts)
+    if r == 2:
+        ovfs_pos = 0
+        n: u64 = 0
+        while odir_next(ovfs_ts) != OB_ERR:
+            n += 1
+        v = 1000 + n
+    mutex_unlock(addr(ofs_m))
+    return v
+
+OFS_MOTD = 0x64746F6D  # "motd"
+OFS_NOTES = 0x7365746F6E  # "notes"
+OFS_PRE = 0x2F6A626F2F  # "/obj/"
+
+def ofs_kopen(w: u64) -> u64:
+    ofs_p0()
+    ofs_pa(OFS_PRE)
+    ofs_pa(w)
+    return ofs_kopen_p()
+
+def ofs_klist(ts: u64) -> u64:
+    ofs_p0()
+    ofs_pa(0x6A626F2F)  # "/obj"
+    if ts != OB_ERR:
+        ofs_pa(0x402F)  # "/@"
+        ofs_pn(ts)
+    return ofs_kopen_p()
+
+def objfs_test():
+    if ofs_init() != 0 or od_sync() == 0:
+        panic("objfs: init failed")
+    ofs_kput(OFS_MOTD, 300, 1)
+    ofs_kput(OFS_NOTES, 50, 3)
+    t1 = ob_clock
+    ofs_kput(OFS_MOTD, 200, 2)
+    ok: u64 = 1
+    if ofs_kopen(OFS_MOTD) != 200 or ofs_check(200, 2) == 0:
+        ok = 0
+    ofs_p0()
+    ofs_pa(OFS_PRE)
+    ofs_pa(0x40)
+    ofs_pn(t1)
+    ofs_pa(0x2F)
+    ofs_pa(OFS_MOTD)
+    if ofs_kopen_p() != 300 or ofs_check(300, 1) == 0:
+        ok = 0
+    if ofs_kopen(OFS_NOTES) != 50 or ofs_check(50, 3) == 0:
+        ok = 0
+    nd = ofs_klist(OB_ERR)
+    if nd != 1002 or ofs_klist(0) != 1000 or ofs_kopen(0x68637573) != 0x7FFF:
+        ok = 0
+    ofs_p0()
+    ofs_pa(0x786A626F2F)  # "/objx" is not under /obj
+    if ofs_kopen_p() != OB_ERR:
+        ok = 0
+    puts("objfs: /obj lists ")
+    put_u64(nd - 1000)
+    puts(" files; /obj/motd reads v2 (200 bytes), /obj/@")
+    put_u64(t1)
+    puts("/motd reads v1 (300 bytes), /obj/@0 lists 0\n")
+    if ok == 0:
+        panic("objfs: VFS view wrong")
+    puts("objstore VFS view OK\n")
+
+def objfs_verify():
+# next boot: the files came back from the log
+    if ofs_init() != 0:
+        panic("objfs: no file type after reboot")
+    sz = ofs_kopen(OFS_MOTD)
+    ok = ofs_check(200, 2)
+    nd = ofs_klist(OB_ERR) - 1000
+    puts("objfs: after reboot /obj lists ")
+    put_u64(nd)
+    puts(" files, /obj/motd is ")
+    put_u64(sz)
+    puts(" bytes\n")
+    if sz != 200 or ok == 0 or nd != 2:
+        panic("objfs: files lost")
+    puts("objstore VFS view persisted OK\n")

@@ -69,6 +69,11 @@ if [ -n "$G2" ] && grep -aq "bad change committed, health check: 8 broken slots"
   echo "PASS os/objstore-system-rewind"; else echo "FAIL os/objstore-system-rewind: $(grep -a 'objstore\|PANIC' $T/b2.log | tail -3)"; fi
 if [ -n "$G2" ] && grep -aq "after reboot, health check: 0 broken slots, state fingerprint $G2\$" $T/b3.log && grep -aq "^objstore system rewind persisted OK" $T/b3.log; then
   echo "PASS os/objstore-rewind-persists"; else echo "FAIL os/objstore-rewind-persists: $(grep -a 'objstore\|PANIC' $T/b3.log | tail -3)"; fi
+# Phase 9.5: files as objects, read through the /obj VFS view (latest, as of an old clock, listings); boot 3 again
+if grep -aqE "objfs: /obj lists 2 files; /obj/motd reads v2 \(200 bytes\), /obj/@[0-9]+/motd reads v1 \(300 bytes\), /obj/@0 lists 0" $T/b2.log && grep -aq "^objstore VFS view OK" $T/b2.log; then
+  echo "PASS os/objfs-vfs-view"; else echo "FAIL os/objfs-vfs-view: $(grep -a 'objfs\|PANIC' $T/b2.log | tail -3)"; fi
+if grep -aq "objfs: after reboot /obj lists 2 files, /obj/motd is 200 bytes" $T/b3.log && grep -aq "^objstore VFS view persisted OK" $T/b3.log; then
+  echo "PASS os/objfs-persists"; else echo "FAIL os/objfs-persists: $(grep -a 'objfs\|PANIC' $T/b3.log | tail -3)"; fi
 python3 tools/forge-part.py read $T/nv.img hello.txt | grep -q "written by the Forge kernel on its own GPT partition" && echo "PASS os/forgefs-host-read" || echo "FAIL os/forgefs-host-read"
 grep -ah "Forge FS: remount" $T/b2.log
 rm -rf $T

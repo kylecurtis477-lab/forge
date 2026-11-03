@@ -35,6 +35,7 @@ OB_HB = 2048
 OB_NX = 8192
 OB_HX = 16384
 include "obj.fsi"
+include "objfs.fsi"
 include "objd.fsi"
 include "fat.fsi"
 include "proc.fsi"

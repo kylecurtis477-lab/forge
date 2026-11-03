@@ -76,18 +76,46 @@ field 1 = 100 + slot, field 2 = 1 when healthy) and `od_health()` counts broken 
 - Boot 3 sees type 2 in the replayed store, runs the health check (0 broken) and prints the state fingerprint,
   which must equal boot 2's `boot done` fingerprint.
 
+## Files as objects and the /obj VFS view (9.5)
+`examples/kernel/objfs.fsi` (safe Forge, shared by the kernel and the hosted test) stores a file as one object of
+type `OFS_T` = 3 with `OB_MAXW` fields:
+
+| field | contents |
+|---|---|
+| 0 | FNV-1a hash of the name (indexed, so a lookup is one index probe plus a name compare) |
+| 1..4 | the name, up to 31 bytes, NUL padded, 8 bytes per word little-endian |
+| 5 | size in bytes |
+| 6..63 | the contents, up to `OFS_MAX` = 464 bytes |
+
+API: `ofs_init()` (defines the type once), `ofs_lookup()` (file named `ofs_nm`), `ofs_put(n)` (create or overwrite
+with `ofs_buf[0:n]`; every write is a new version), `ofs_read_at(o, ts)` and `ofs_name_of(o, ts)`. Because files are
+ordinary objects, `obj_read_at`, `obj_rewind` and `sys_rewind` apply to them unchanged.
+
+`proc.fsi` serves them read-only under `/obj` through the normal `open`/`stat`/`read`/`getdents` syscalls:
+- `/obj` lists the files (getdents records like FAT32 directories; is_dir 0), `/obj/<name>` opens one,
+- `/obj/@<clock>/<name>` opens a file as it was at that clock and `/obj/@<clock>` lists the files as of then.
+- A handle (`F_OBJ` / `F_ODIR`) records its clock at open, so later writes never change what it reads.
+- /obj handles are read-only and never carry `CAP_LOOKUP`; paths still need the root capability and pass `path_ok`.
+- `ofs_m` serialises all objfs access from syscalls and the boot test.
+
 ## Testing
 - `tests/fs/objstore.forge` covers versions, dedup, rewind, diff and find.
 - `tests/fs/objindex.forge` builds 100k objects and checks field, type and text lookups against the scan,
   across an update, a rewind and a log replay, plus the latency ratios.
 - `tests/fs/objlog.forge` replays every possible cut and every single-bit flip, then checks that writes after
   recovery work.
+- tests/fs/objfs.forge (hosted): create, overwrite, lookup among 200 files, reads as of old clocks, size limit, a
+  system rewind of every file and log replay.
+- `os/objfs-vfs-view` and `os/objfs-persists` (tests/os/forgefs.sh boots 2 and 3) cover 9.5 through the /obj path resolver.
 - `os/objstore-system-rewind` and `os/objstore-rewind-persists` (tests/os/forgefs.sh, boots 2 and 3) cover 9.4.
 - `os/objstore-crash-recover` runs two QEMU boots:
   - Boot 1 makes 62 durable commits, prints a fingerprint, and then writes a torn record.
   - Boot 2 recovers, drops the torn tail, verifies all 50 versions of object 0, and must print the same fingerprint.
 
 ## Known limits
+- objfs files are at most 464 bytes, names at most 31 bytes, and /obj is read-only; the QEMU test exercises the
+  kernel resolver (`ovfs_resolve`) rather than a userland `open("/obj/...")`.
+- An /obj listing walks the type list from the start for each entry (O(n^2) per full listing).
 - The tables are fixed-size and in memory, and the log holds at most `OD_NB` blocks. There's no compaction or checkpoint yet.
 - The store is single-writer and has no locking. In the kernel it runs from the boot thread only.
 - Index entries are never removed (stale ones are filtered at lookup), so heavy rewriting of indexed fields grows
