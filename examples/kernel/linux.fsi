@@ -26,9 +26,11 @@
 # holds (no AT_FDCWD, no absolute paths, read-only opens), with the grant ledger counting each use.
 # 11.1d: execve 59, execveat 322 -- sealed Linux images reached through a held handle only; the
 # sandbox, its handles (minus O_CLOEXEC) and its narrowed capabilities carry over (section below).
-# Not yet: signals.
+# 11.1d part 2: rt_sigaction 13, rt_sigprocmask 14, rt_sigreturn 15, kill 62, tgkill 234 -- only at the
+# calling process (the sandbox's only pid), SIGSEGV delivered on a user page fault (section below).
+# Not yet: real-time signals (32..64), sigaltstack, signals to other processes.
 LX_ABI = 1
-LX_NSYS = 22  # syscalls in the table above
+LX_NSYS = 27  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ENOTTY = 0xFFFFFFFFFFFFFFE7
@@ -286,6 +288,7 @@ def lx_clone(frame: u64, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64)
     if slot == LX_MAXTHR:
         return EAGAIN
     ct = as_thread(sys_fork(frame, stack))
+    ct.sig_mask = t.sig_mask  # 11.1d: a new thread inherits the blocked set
     if (flags & CLONE_SETTLS) != 0:
         ct.fsbase = tls
     if (flags & CLONE_CHILD_CLEARTID) != 0:
@@ -737,6 +740,323 @@ def lx_execve(frame: u64, dirfd: u64, upath: u64, uargv: u64, flags: u64) -> u64
     exec_pack(pa[:], path[:], args[:])
     return exec_image(frame, img, sz, vc, pa[:])
 
+# ---- 11.1d part 2: signals ---------------------------------------------------------------------
+# Signals 1..31, all inside the sandbox: kill / tgkill reach only the calling process (its own pid,
+# or 0 = its group; any other pid -> EPERM, logged), so a sandboxed program can signal itself and
+# its own threads and nothing else. rt_sigaction installs a handler only with SA_RESTORER (the
+# return trampoline is the program's own code: the kernel maps none); SIGKILL / SIGSTOP cannot be
+# caught, blocked or ignored. Pending signals are checked on the way out of every Linux syscall
+# (lx_sig_deliver): the lowest unblocked one runs -- a caught signal gets a frame on the user stack,
+# SIG_IGN and the ignore-by-default signals (CHLD, CONT, URG, WINCH, and the stop signals, which
+# are not implemented) are dropped, anything else ends the whole process (group exit, status
+# 128 + signal). A user page fault in a Linux process whose SIGSEGV is caught and unblocked is
+# delivered the same way from on_page_fault (lx_sig_fault); otherwise it is killed as before.
+#
+# The frame is Forge's, not Linux's ucontext (words, at the handler's rsp):
+#   0 restorer (the handler's return address)  1 LX_SIGMAGIC | signal  2 blocked set to restore
+#   3 rax 4 rcx 5 rdx 6 rsi 7 rdi 8 r8 9 r9 10 r10 11 r11 12 rip 13 rsp 14 rflags  15 0
+#   16.. siginfo: si_signo (int) si_errno si_code, then si_addr (SIGSEGV) or si_pid / si_uid
+# The handler gets rdi = signal, rsi = &siginfo, rdx = &frame; it may edit words 3..14 (to resume
+# a faulting instruction elsewhere). rt_sigreturn (the restorer's syscall, rsp = frame + 8) checks
+# the magic, restores rip / rsp / rflags (user flags only; rip and rsp must be user addresses) and
+# rax, rdi, rsi, rdx, r8, r9, r10, and the blocked set. rcx and r11 are not restored (the return is
+# a sysret, as from any syscall); rbx, rbp, r12..r15 are the handler's callee-saved registers and
+# so already hold the interrupted values. A bad frame ends the process (status 128 + SIGSEGV).
+# Delivery is at syscall exit only: a thread parked in futex wait is not interrupted.
+
+ESRCH = 0xFFFFFFFFFFFFFFFD
+LX_NSIG = 32
+LX_SIGSEGV = 11
+LX_SIGMAGIC = 0x464F524753494700  # "\0GISGROF" | signal
+LX_FRAME_W = 20
+SA_SIGINFO = 0x4
+SA_RESTORER = 0x04000000
+SA_RESTART = 0x10000000
+SA_NODEFER = 0x40000000
+SA_RESETHAND = 0x80000000
+LX_SA_OK = 0xD4000004  # SIGINFO | RESTORER | RESTART | NODEFER | RESETHAND (no SA_ONSTACK)
+LX_UNCATCH = 0x80200  # bit 9 SIGKILL, bit 19 SIGSTOP
+LX_SIG_DFLIGN = 0x10FE0000  # CHLD 17, CONT 18, STOP 19, TSTP 20, TTIN 21, TTOU 22, URG 23, WINCH 28
+SI_USER = 0
+SI_TKILL = 0xFFFFFFFA  # -6 as an int
+lx_sigs: u64  # signals delivered to handlers
+lx_sigsegv: u64  # ... of which from a page fault
+
+def lx_sigaction(sig: u64, uact: u64, uold: u64, ssz: u64) -> u64:
+    p = cur_proc()
+    if ssz != 8 or sig == 0 or sig >= LX_NSIG:
+        return EINVAL
+    if uact != 0 and ((LX_UNCATCH >> sig) & 1) != 0:
+        return EINVAL
+    na: u64[4]
+    if uact != 0:
+        if user_ptr_ok(uact, 32) == 0 or copy_user(u64(addr(na[0])), uact, 32) != 0:
+            return EFAULT
+        if (na[1] & ~LX_SA_OK) != 0:
+            return EINVAL
+        if na[0] > 1 and ((na[1] & SA_RESTORER) == 0 or na[2] == 0 or na[0] >= USER_TOP or na[2] >= USER_TOP):
+            return EINVAL  # a handler needs the program's own return trampoline
+    if uold != 0:
+        oa: u64[4]
+        oa[0] = p.sig_h[sig]
+        oa[1] = p.sig_fl[sig]
+        oa[2] = p.sig_rs[sig]
+        oa[3] = p.sig_m[sig]
+        if user_ptr_ok(uold, 32) == 0 or copy_user(uold, u64(addr(oa[0])), 32) != 0:
+            return EFAULT
+    if uact != 0:
+        f = irq_save()
+        p.sig_h[sig] = na[0]
+        p.sig_fl[sig] = na[1]
+        p.sig_rs[sig] = na[2]
+        p.sig_m[sig] = na[3] & ~LX_UNCATCH & 0xFFFFFFFE
+        if na[0] == 1 or (na[0] == 0 and ((LX_SIG_DFLIGN >> sig) & 1) != 0):
+            p.sig_pend = p.sig_pend & ~(u64(1) << sig)  # setting an ignore discards it (POSIX)
+        irq_restore(f)
+    return 0
+
+def lx_sigprocmask(how: u64, uset: u64, uold: u64, ssz: u64) -> u64:
+    t = cur_thread()
+    if ssz != 8:
+        return EINVAL
+    old = t.sig_mask
+    if uset != 0:
+        v: u64 = 0
+        if user_ptr_ok(uset, 8) == 0 or copy_user(u64(addr(v)), uset, 8) != 0:
+            return EFAULT
+        v = v & ~LX_UNCATCH & 0xFFFFFFFE
+        if how == 0:
+            t.sig_mask = old | v
+        elif how == 1:
+            t.sig_mask = old & ~v
+        elif how == 2:
+            t.sig_mask = v
+        else:
+            return EINVAL
+    if uold != 0:
+        if user_ptr_ok(uold, 8) == 0 or copy_user(uold, u64(addr(old)), 8) != 0:
+            t.sig_mask = old
+            return EFAULT
+    return 0
+
+def lx_sig_refuse(what: ptr[u8], a: u64, sig: u64) -> u64:
+    p = cur_proc()
+    f = gr_pbegin()
+    puts("linux: pid ")
+    put_u64(p.pid)
+    puts(" ")
+    puts(what)
+    puts("(")
+    put_u64(a)
+    puts(", ")
+    put_u64(sig)
+    puts(") refused: outside the sandbox (only its own pid)\n")
+    gr_pend(f)
+    return EPERM
+
+def lx_kill(pid: u64, sig: u64) -> u64:
+    p = cur_proc()
+    if sig >= LX_NSIG:
+        return EINVAL
+    if pid != p.pid and pid != 0:
+        return lx_sig_refuse("kill", pid, sig)
+    if sig != 0:
+        f = irq_save()
+        p.sig_pend = p.sig_pend | (u64(1) << sig)
+        p.sig_cd[sig] = SI_USER
+        irq_restore(f)
+    return 0
+
+def lx_tgkill(tgid: u64, tid: u64, sig: u64) -> u64:
+    p = cur_proc()
+    if sig >= LX_NSIG or tgid == 0 or tid == 0 or tgid >= 0x80000000 or tid >= 0x80000000:
+        return EINVAL
+    if tgid != p.pid:
+        return lx_sig_refuse("tgkill", tgid, sig)
+    tt: u64 = 0
+    f = irq_save()
+    if tid == as_thread(p.thread).id:
+        tt = p.thread
+    i: u64 = 0
+    while i < LX_MAXTHR:
+        x = p.xthr[i]
+        if x != 0 and as_thread(x).id == tid and as_thread(x).state != T_DEAD:
+            tt = x
+        i += 1
+    if tt != 0 and sig != 0:
+        th = as_thread(tt)
+        th.sig_pend = th.sig_pend | (u64(1) << sig)
+        p.sig_cd[sig] = SI_TKILL
+    irq_restore(f)
+    if tt == 0:
+        return ESRCH
+    return 0
+
+def lx_sig_frame(p: ptr[Proc], t: ptr[Thread], sig: u64, w: slice[u64], usp: u64) -> u64:
+# w[3..14] already hold the interrupted registers; fill the rest, push it below usp's red zone and
+# return the handler's rsp (0: the stack cannot take it)
+    base = ((usp - 128 - LX_FRAME_W * 8) & ~u64(15)) - 8
+    w[0] = p.sig_rs[sig]
+    w[1] = LX_SIGMAGIC | sig
+    w[2] = t.sig_mask
+    w[15] = 0
+    if usp >= USER_TOP or usp < 4096 or user_ptr_ok(base, LX_FRAME_W * 8) == 0:
+        return 0
+    if copy_user(base, u64(addr(w[0])), LX_FRAME_W * 8) != 0:
+        return 0
+    m = p.sig_m[sig]
+    if (p.sig_fl[sig] & SA_NODEFER) == 0:
+        m = m | (u64(1) << sig)
+    t.sig_mask = t.sig_mask | m
+    if (p.sig_fl[sig] & SA_RESETHAND) != 0:
+        p.sig_h[sig] = 0
+        p.sig_fl[sig] = 0
+    lx_sigs += 1
+    return base
+
+def lx_sig_die(p: ptr[Proc], sig: u64, why: ptr[u8]):
+    f = gr_pbegin()
+    puts("linux: pid ")
+    put_u64(p.pid)
+    puts(" killed by signal ")
+    put_u64(sig)
+    puts(" (")
+    puts(why)
+    puts(")\n")
+    gr_pend(f)
+    proc_exit(128 + sig)
+
+def lx_sig_deliver(sf: ptr[SFrame], r: u64) -> u64:
+# on the way out of a Linux syscall (result r): run the lowest pending unblocked signal
+    t = cur_thread()
+    p = cur_proc()
+    while 1:
+        f = irq_save()
+        pend = (p.sig_pend | t.sig_pend) & ~t.sig_mask & 0xFFFFFFFE
+        if pend == 0:
+            irq_restore(f)
+            return r
+        sig: u64 = 1
+        while ((pend >> sig) & 1) == 0:
+            sig += 1
+        bit = u64(1) << sig
+        if (t.sig_pend & bit) != 0:
+            t.sig_pend = t.sig_pend & ~bit
+        else:
+            p.sig_pend = p.sig_pend & ~bit
+        irq_restore(f)
+        h = p.sig_h[sig]
+        if h == 0 and ((LX_SIG_DFLIGN >> sig) & 1) == 0:
+            lx_sig_die(p, sig, "default action")
+        if h > 1:
+            w: u64[20]
+            w[3] = r
+            w[4] = sf.rip
+            w[5] = sf.rdx
+            w[6] = sf.rsi
+            w[7] = sf.rdi
+            w[8] = sf.r8
+            w[9] = sf.r9
+            w[10] = sf.r10
+            w[11] = sf.rflags
+            w[12] = sf.rip
+            w[13] = sf.rsp
+            w[14] = sf.rflags
+            w[16] = sig
+            w[17] = p.sig_cd[sig]
+            w[18] = p.pid
+            w[19] = 0
+            base = lx_sig_frame(p, t, sig, w[:], sf.rsp)
+            if base == 0:
+                lx_sig_die(p, LX_SIGSEGV, "no room for a signal frame")
+            sf.rip = h
+            sf.rsp = base
+            sf.rdi = sig
+            sf.rsi = base + 16 * 8
+            sf.rdx = base
+            return 0
+    return r
+
+def lx_sig_fault(fr: ptr[IFrame], cr2: u64) -> u64:
+# a ring-3 page fault: 1 if the faulting Linux process's SIGSEGV handler now runs (fr edited for the
+# iret), 0 to kill it as before (not Linux, SIGSEGV not caught, blocked, or no room on the stack)
+    t = cur_thread()
+    if u64(t) == 0 or t.proc == 0:
+        return 0
+    p = as_proc(t.proc)
+    h = p.sig_h[LX_SIGSEGV]
+    if p.abi != LX_ABI or h <= 1 or ((t.sig_mask >> LX_SIGSEGV) & 1) != 0:
+        return 0
+    w: u64[20]
+    w[3] = fr.rax
+    w[4] = fr.rcx
+    w[5] = fr.rdx
+    w[6] = fr.rsi
+    w[7] = fr.rdi
+    w[8] = fr.r8
+    w[9] = fr.r9
+    w[10] = fr.r10
+    w[11] = fr.r11
+    w[12] = fr.rip
+    w[13] = fr.rsp
+    w[14] = fr.rflags
+    w[16] = LX_SIGSEGV
+    w[17] = 1 + (fr.err & 1)  # SEGV_MAPERR (not present), SEGV_ACCERR (protection)
+    w[18] = cr2
+    w[19] = 0
+    base = lx_sig_frame(p, t, LX_SIGSEGV, w[:], fr.rsp)
+    if base == 0:
+        return 0
+    lx_sigsegv += 1
+    f = gr_pbegin()
+    puts("linux: pid ")
+    put_u64(p.pid)
+    puts(" SIGSEGV at rip=")
+    put_hex(fr.rip)
+    puts(" addr=")
+    put_hex(cr2)
+    puts(" -> its handler\n")
+    gr_pend(f)
+    fr.rip = h
+    fr.rsp = base
+    fr.rdi = LX_SIGSEGV
+    fr.rsi = base + 16 * 8
+    fr.rdx = base
+    fr.rax = 0
+    return 1
+
+def lx_sigreturn(sf: ptr[SFrame]) -> u64:
+    t = cur_thread()
+    p = cur_proc()
+    base = sf.rsp - 8
+    w: u64[20]
+    if user_ptr_ok(base, LX_FRAME_W * 8) == 0 or copy_user(u64(addr(w[0])), base, LX_FRAME_W * 8) != 0:
+        lx_sig_die(p, LX_SIGSEGV, "rt_sigreturn without a signal frame")
+    if (w[1] & ~u64(0xFF)) != LX_SIGMAGIC or w[12] >= USER_TOP or w[13] >= USER_TOP:
+        lx_sig_die(p, LX_SIGSEGV, "rt_sigreturn: bad signal frame")
+    sf.rip = w[12]
+    sf.rsp = w[13]
+    sf.rflags = (w[14] & 0xCD5) | 0x202  # user flags only (no TF/IOPL/NT/AC), interrupts on
+    sf.rdx = w[5]
+    sf.rsi = w[6]
+    sf.rdi = w[7]
+    sf.r8 = w[8]
+    sf.r9 = w[9]
+    sf.r10 = w[10]
+    t.sig_mask = w[2] & ~LX_UNCATCH & 0xFFFFFFFE
+    return w[3]
+
+def lx_sig_exec(p: ptr[Proc]):
+# execve: caught signals return to SIG_DFL; SIG_IGN, the blocked set and pending signals carry over
+    i: u64 = 0
+    while i < LX_NSIG:
+        if p.sig_h[i] > 1:
+            p.sig_h[i] = 0
+        p.sig_fl[i] = 0
+        p.sig_rs[i] = 0
+        p.sig_m[i] = 0
+        i += 1
+
 def lx_osabi(img: u64) -> u64:
     return (le32(img + 4) >> 24) & 0xFF  # e_ident[EI_OSABI]
 
@@ -804,4 +1124,12 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
         proc_exit(a & 0xFF)
     if nr == 231:
         proc_exit(a & 0xFF)
+    if nr == 13:
+        return lx_sigaction(a, b, c, d)
+    if nr == 14:
+        return lx_sigprocmask(a, b, c, d)
+    if nr == 62:
+        return lx_kill(a, b)
+    if nr == 234:
+        return lx_tgkill(a, b, c)
     return lx_unsupported(nr)

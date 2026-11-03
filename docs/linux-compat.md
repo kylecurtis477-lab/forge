@@ -25,7 +25,7 @@ Inside the personality a process reaches **only** the Linux table. No Forge sysc
 including the driver (400+), kexec/ktest (408/409, still also gated by `ktest_hooks`) and grant
 syscalls: they return -ENOSYS like any unknown number.
 
-## Syscalls (11.1a, 11.1b, 11.1c, 11.1d; 22 in all)
+## Syscalls (11.1a, 11.1b, 11.1c, 11.1d; 27 in all)
 
 | nr | name | notes |
 |----|------|-------|
@@ -35,6 +35,11 @@ syscalls: they return -ENOSYS like any unknown number.
 | 5 | fstat | (11.1c) 144-byte struct stat: st_dev 0xF0, st_ino = first cluster + 1, st_mode S_IFREG 0444 / S_IFDIR 0555 / S_IFCHR 0620 (console, st_rdev 0x401) / S_IFIFO 0600, st_size, st_blksize 4096, st_blocks; bad fd -> EBADF, bad pointer -> EFAULT, revoked grant -> EACCES |
 | 217 | getdents64 | (11.1c) linux_dirent64 records (d_ino synthetic, d_off = directory position, d_type DT_DIR / DT_REG, 8-byte aligned); buffer must be >= 768 bytes (else EINVAL); non-directory -> ENOTDIR, no read right -> EPERM, revoked grant -> EACCES |
 | 59 / 322 | execve / execveat | (11.1d) sealed Linux images only, reached through a held handle (see Exec below); Forge, unsealed or tampered images -> ENOEXEC, no cwd (relative path, AT_FDCWD) or outside every handle -> EACCES, live clone()d threads -> EBUSY, bad pointers -> EFAULT, argv over 16 entries / 127 bytes -> E2BIG, an argument with a space -> EINVAL, unknown flags -> EINVAL |
+| 13 | rt_sigaction | (11.1d part 2) signals 1..31; sigsetsize must be 8; SIGKILL / SIGSTOP, unknown flags (SA_ONSTACK included), or a handler without SA_RESTORER -> EINVAL; bad pointers -> EFAULT; SIG_IGN drops a pending one |
+| 14 | rt_sigprocmask | (11.1d part 2) per-thread blocked set; SIG_BLOCK / SIG_UNBLOCK / SIG_SETMASK, other how -> EINVAL; SIGKILL / SIGSTOP silently stay unblocked |
+| 15 | rt_sigreturn | (11.1d part 2) restores the frame written at delivery (see Signals); a frame without the Forge magic, or rip / rsp outside user space -> killed with SIGSEGV |
+| 62 | kill | (11.1d part 2) only its own pid (or 0); any other pid -> EPERM, logged (the sandbox); signal 0 probes; > 31 -> EINVAL |
+| 234 | tgkill | (11.1d part 2) tgid must be its own pid (else EPERM); tid must be its main thread or a live clone()d thread (else ESRCH) |
 | 257 | openat | (11.1c) only relative to a directory handle the sandbox holds (Forge `openat` rules: no absolute paths, no `..`); AT_FDCWD -> EACCES (there is no ambient cwd), write/create/truncate/append flags -> EROFS, O_DIRECTORY on a file -> ENOTDIR; O_CLOEXEC / O_NONBLOCK / O_NOFOLLOW / O_LARGEFILE accepted |
 | 9 | mmap | anonymous + private only; PROT_EXEC -> EACCES (W^X: no new code), MAP_FIXED -> EINVAL, file mappings -> ENODEV; r8/r9 come from the saved frame |
 | 11 | munmap | |
@@ -177,11 +182,45 @@ plain fd and fd 4 still there, AT_FDCWD still refused, then `execveat(4, "lxexec
 checks fexecve (AT_EMPTY_PATH) of the held Forge `hello` -> ENOEXEC and an unknown flag -> EINVAL.
 21 checks across the three images.
 
+## Signals (11.1d part 2)
+
+Signals 1..31, delivered only to the process itself (kill / tgkill of any other pid -> EPERM, logged
+`linux: pid N kill(a, s) refused: outside the sandbox (only its own pid)`). Pending signals are per
+process (kill) or per thread (tgkill); the blocked set is per thread, inherited by clone() and kept
+across execve (handlers reset to SIG_DFL, as on Linux).
+
+- Delivery happens on the way out of a Linux syscall (lowest unblocked signal first); a thread
+  waiting in futex is not interrupted.
+- A handler runs with rdi = signo, rsi = siginfo (si_signo, si_code SI_USER or SI_TKILL or
+  SEGV_MAPERR / SEGV_ACCERR, si_pid or si_addr), rdx = the frame. Its signal is blocked unless
+  SA_NODEFER; SA_RESETHAND resets it to SIG_DFL. It returns through its SA_RESTORER.
+- The frame is Forge's own layout, not Linux's ucontext: 20 words below the red zone, word 0 the
+  restorer, 1 magic | signo, 2 saved mask, 3 rax (the interrupted syscall's result), 4..11 rcx rdx
+  rsi rdi r8 r9 r10 r11, 12 rip, 13 rsp, 14 rflags, 16..19 siginfo. A handler may edit rip / rax
+  (lxsig does, to step over a faulting instruction); rt_sigreturn keeps rflags to the arithmetic
+  flags + IF and refuses a kernel rip / rsp. Callee-saved registers survive through the handler's ABI.
+- A user page fault with a SIGSEGV handler installed and unblocked runs it
+  (`linux: pid N SIGSEGV at rip=.. addr=.. -> its handler`); otherwise the process is killed as before.
+- Default actions: SIGCHLD, SIGURG, SIGWINCH, SIGCONT and the stop signals are ignored (no job
+  control); every other signal ends the process with status 128 + signo
+  (`linux: pid N killed by signal S (default action)`).
+
+## Test: lxsig
+
+`run lxsig` (34 checks): rt_sigaction refusals; a SA_SIGINFO handler run by kill(self) (siginfo,
+the signal blocked inside the handler, the mask and kill's result restored by rt_sigreturn);
+SIG_BLOCK keeps SIGUSR1 pending until SIG_SETMASK; SIGKILL / SIGSTOP unblockable; tgkill of its own
+tid (SI_TKILL), an unknown tid -> ESRCH, pid 1 -> EPERM; SIG_IGN, SIGCHLD ignored by default,
+SA_RESETHAND; a read of 0x10 (SEGV_MAPERR) and a write to its own code (SEGV_ACCERR), each resumed
+by the handler past the instruction with a new rax. `run lxsig term` sends itself SIGTERM with the
+default action and exits 143.
+
 ## Not yet
 
 - Timed futex waits, FUTEX_REQUEUE/WAKE_OP, threads running in parallel on several CPUs.
 - stat / lstat / newfstatat by path, readlink, getcwd, writable files.
-- signals, /proc, sockets, file-backed mmap.
+- Real-time signals (32..64), sigaltstack, signals to other processes, interrupting a futex wait.
+- /proc, sockets, file-backed mmap.
 - Busybox (the Phase 11.1 acceptance test) needs a third-party static binary; it will be added only
   after the owner approves downloading one, and it will run under the same gate (sealed + sandboxed).
 - OSABI 0 Linux binaries (most static musl builds) are not detected as Linux; they are refused today

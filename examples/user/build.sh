@@ -48,3 +48,9 @@ python3 ../../tools/forgeseal.py lxfs.forge $B/lxfs.elf $K ../../tests/unsafe/ba
 ../../build/fld -o $B/lxexec.raw $B/lxexec.o
 python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" $B/lxexec.raw $B/lxexec.elf
 python3 ../../tools/forgeseal.py lxexec.forge $B/lxexec.elf $K ../../tests/unsafe/baseline.txt >/dev/null
+# 11.1d: lxsig part 2 (signals), built and tagged the same way
+../../build/forgec lxsig.forge $B/lxsig.s $FORGEC_FLAGS
+../../build/fas -o $B/lxsig.o $B/lxsig.s
+../../build/fld -o $B/lxsig.raw $B/lxsig.o
+python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" $B/lxsig.raw $B/lxsig.elf
+python3 ../../tools/forgeseal.py lxsig.forge $B/lxsig.elf $K ../../tests/unsafe/baseline.txt >/dev/null

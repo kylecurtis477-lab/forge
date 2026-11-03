@@ -33,6 +33,8 @@ struct Thread:
     ctid: u64  # 11.1b: Linux clear-child-tid address (zeroed and futex-woken when this thread exits)
     fx_as: u64  # 11.1b: futex key (address space, user address) while parked in fx_thr[]
     fx_addr: u64
+    sig_mask: u64  # 11.1d: Linux blocked signals (bit n = signal n)
+    sig_pend: u64  # 11.1d: thread-directed pending signals (tgkill)
 
 asm(
     ".text",

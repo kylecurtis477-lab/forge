@@ -1,0 +1,1 @@
+# lxsig (Phase 11.1d part 2): Linux-ABI signals test; needs no grant (signals go only to itself)

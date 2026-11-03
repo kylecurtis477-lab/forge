@@ -144,6 +144,45 @@ SF_RDI = 10  # 10..15: rdi, rsi, rdx, r10, r8, r9 (the six syscall argument regi
 SF_R8 = 14
 SF_R9 = 15
 
+# 11.1d: typed views of the two saved user contexts, so the signal code reads and edits them as
+# struct fields (no raw loads): the syscall frame above, and what an @interrupt_err wrapper leaves
+# below its frame pointer (the 9 caller-saved registers it pushed, then the CPU's error code + iret
+# frame). syscall_dispatch and on_page_fault make the one cast each.
+struct SFrame:
+    pad: u64
+    r15: u64
+    r14: u64
+    r13: u64
+    r12: u64
+    rbp: u64
+    rbx: u64
+    rflags: u64
+    rip: u64
+    rsp: u64
+    rdi: u64
+    rsi: u64
+    rdx: u64
+    r10: u64
+    r8: u64
+    r9: u64
+
+struct IFrame:
+    r11: u64
+    r10: u64
+    r9: u64
+    r8: u64
+    rdi: u64
+    rsi: u64
+    rdx: u64
+    rcx: u64
+    rax: u64
+    err: u64
+    rip: u64
+    cs: u64
+    rflags: u64
+    rsp: u64
+    ss: u64
+
 @naked
 def syscall_entry_addr() -> u64:
     asm("lea syscall_entry(%rip), %rax", "ret")

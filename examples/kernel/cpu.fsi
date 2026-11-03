@@ -127,6 +127,8 @@ def on_breakpoint(frame: ptr[u64]):
 def on_page_fault(frame: ptr[u64]):
     cr2 = read_cr2()
     if frame[0] & 4:
+        if lx_sig_fault(ptr[IFrame](frame - 9), cr2):
+            return  # 11.1d: a Linux process's SIGSEGV handler runs (the wrapper irets into it)
         user_kill("#PF", 14, frame[1], cr2)
     if uaccess_fixup(frame, frame[0], cr2):
         return

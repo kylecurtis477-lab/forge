@@ -1,0 +1,240 @@
+# forge: no-runtime
+# forge: caps()
+# Phase 11.1d part 2 Linux-ABI signals test (docs/linux-compat.md). Built and sealed like lxtest
+# (EI_OSABI = 3, runs only through `run lxsig`); no manifest grants: signals need no handle.
+#   run lxsig       rt_sigaction refusals; a SA_SIGINFO handler run by kill / tgkill of itself (siginfo,
+#                   the blocked set inside and after the handler, the syscall's result coming back
+#                   through rt_sigreturn); rt_sigprocmask block / unblock (delivery when unblocked);
+#                   SIG_IGN, ignore-by-default and SA_RESETHAND; kill / tgkill of any other pid
+#                   -> EPERM (the sandbox); SIGSEGV from a read of an unmapped page and a write to
+#                   its own code, each resumed past the faulting instruction by editing the frame.
+#   run lxsig term  SIGTERM to itself with the default action: the process ends, status 143.
+
+EINVAL = 0xFFFFFFFFFFFFFFEA
+EFAULT = 0xFFFFFFFFFFFFFFF2
+EPERM = 0xFFFFFFFFFFFFFFFF
+ESRCH = 0xFFFFFFFFFFFFFFFD
+SA_SIGINFO = 0x4
+SA_RESTORER = 0x04000000
+SA_RESETHAND = 0x80000000
+SA_ONSTACK = 0x08000000
+SIGUSR1 = 10
+SIGUSR2 = 12
+SIGSEGV = 11
+
+fails: u64
+checks: u64
+buf: u8[256]
+blen: u64
+sa: u64[4]
+oa: u64[4]
+hits: u64[32]  # handler runs per signal
+lsig: u64  # last signal / si_code / si_addr-or-pid seen by the handler
+lcode: u64
+lval: u64
+lmask: u64  # the blocked set inside the handler
+skipn: u64  # bytes the SIGSEGV handler skips (the faulting instruction's length)
+rax_set: u64  # what the SIGSEGV handler puts in the resumed rax
+
+@naked
+def lsys(n: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64:
+    asm("mov %rdi,%rax", "mov %rsi,%rdi", "mov %rdx,%rsi", "mov %rcx,%rdx", "mov %r8,%r10",
+        "mov %r9,%r8", "xor %r9d,%r9d", "syscall", "ret")
+
+# the return trampoline every handler is installed with (SA_RESTORER)
+@naked
+def restorer():
+    asm("mov $15, %eax", "syscall", "ud2")
+
+# loads from a; the 3-byte mov is what faults
+@naked
+def probe_rd(a: u64) -> u64:
+    asm("mov (%rdi), %rax", "ret")
+
+# stores 1 to a; the 7-byte movq is what faults
+@naked
+def probe_wr(a: u64) -> u64:
+    asm("xor %eax, %eax", "movq $1, (%rdi)", "ret")
+
+@unsafe
+def peek(a: u64) -> u64:
+    return ptr[u64](a)[0]
+
+@unsafe
+def poke(a: u64, v: u64):
+    ptr[u64](a)[0] = v
+
+@unsafe
+def peek8(a: u64) -> u64:
+    return u64(ptr[u8](a)[0])
+
+def flush():
+    lsys(1, 1, u64(addr(buf[0])), blen, 0, 0)
+    blen = 0
+
+def put(s: ptr[u8]):
+    p = u64(s)
+    i: u64 = 0
+    while peek8(p + i) != 0 and blen < 255 and i < 200:
+        buf[blen] = u8(peek8(p + i))
+        blen += 1
+        i += 1
+
+def putn(v: u64):
+    d: u8[20]
+    n: u64 = 0
+    while n == 0 or v != 0:
+        d[n] = u8(48 + v % 10)
+        v = v / 10
+        n += 1
+    while n > 0 and blen < 255:
+        n -= 1
+        buf[blen] = d[n]
+        blen += 1
+
+def check(ok: u64, what: ptr[u8]):
+    checks += 1
+    if ok == 0:
+        fails += 1
+        put("lxsig: FAIL ")
+        put(what)
+        put("\n")
+        flush()
+
+def getpid() -> u64:
+    return lsys(39, 0, 0, 0, 0, 0)
+
+def mask() -> u64:
+    m: u64 = 0xFFFF
+    lsys(14, 0, 0, u64(addr(m)), 8, 0)
+    return m
+
+def setmask(how: u64, m: u64) -> u64:
+    v: u64 = m
+    return lsys(14, how, u64(addr(v)), 0, 8, 0)
+
+# rt_sigaction(sig, {h, flags | SA_RESTORER, restorer, 0}, &oa)
+def act(sig: u64, h: u64, flags: u64) -> u64:
+    sa[0] = h
+    sa[1] = flags
+    sa[2] = u64(restorer)
+    sa[3] = 0
+    oa[0] = 0xFFFF
+    return lsys(13, sig, u64(addr(sa[0])), u64(addr(oa[0])), 8, 0)
+
+def onsig(sig: u64, info: u64, uc: u64) -> u64:
+    hits[sig & 31] += 1
+    lsig = peek(info) & 0xFFFFFFFF
+    lcode = peek(info + 8) & 0xFFFFFFFF
+    lval = peek(info + 16)
+    lmask = mask()
+    if sig == SIGSEGV:
+        poke(uc + 12 * 8, peek(uc + 12 * 8) + skipn)  # resume after the faulting instruction
+        poke(uc + 3 * 8, rax_set)
+    return 0
+
+def term():
+    put("lxsig: term pid ")
+    putn(getpid())
+    put(": kill(self, SIGTERM) with the default action\n")
+    flush()
+    lsys(62, getpid(), 15, 0, 0, 0)
+    put("lxsig: FAIL still alive after SIGTERM\n")
+    flush()
+    lsys(231, 1, 0, 0, 0, 0)
+
+def lx_main(sp: u64):
+    if peek(sp) > 1 and peek8(peek(sp + 16)) == 116:
+        term()
+    pid = getpid()
+    tid = lsys(186, 0, 0, 0, 0, 0)
+    h = u64(onsig)
+    check(act(9, h, SA_SIGINFO | SA_RESTORER) == EINVAL, "sigaction(SIGKILL) -> EINVAL")
+    check(act(19, h, SA_SIGINFO | SA_RESTORER) == EINVAL, "sigaction(SIGSTOP) -> EINVAL")
+    check(act(32, h, SA_SIGINFO | SA_RESTORER) == EINVAL, "sigaction(32) -> EINVAL")
+    check(act(SIGUSR1, h, SA_SIGINFO) == EINVAL, "handler without SA_RESTORER -> EINVAL")
+    check(act(SIGUSR1, h, SA_SIGINFO | SA_RESTORER | SA_ONSTACK) == EINVAL, "SA_ONSTACK -> EINVAL")
+    check(lsys(13, SIGUSR1, 16, 0, 8, 0) == EFAULT, "sigaction bad pointer -> EFAULT")
+    check(lsys(13, SIGUSR1, u64(addr(sa[0])), 0, 4, 0) == EINVAL, "sigsetsize 4 -> EINVAL")
+    put("lxsig: pid ")
+    putn(pid)
+    put(": sigaction refusals ok (SIGKILL, SIGSTOP, 32, no SA_RESTORER, SA_ONSTACK, bad pointer)\n")
+    flush()
+    # a handler run by kill of itself
+    check(act(SIGUSR1, h, SA_SIGINFO | SA_RESTORER) == 0 and oa[0] == 0, "install SIGUSR1 (old SIG_DFL)")
+    r = lsys(62, pid, SIGUSR1, 0, 0, 0)
+    check(r == 0 and hits[SIGUSR1] == 1, "kill(self, SIGUSR1) ran the handler, kill returned 0")
+    check(lsig == SIGUSR1 and lcode == 0 and (lval & 0xFFFFFFFF) == pid, "siginfo: signo, SI_USER, si_pid")
+    check(((lmask >> SIGUSR1) & 1) == 1, "SIGUSR1 blocked inside its handler")
+    check(mask() == 0, "blocked set restored by rt_sigreturn")
+    put("lxsig: kill(self, SIGUSR1) -> handler (si_code SI_USER, si_pid ")
+    putn(lval & 0xFFFFFFFF)
+    put("), rt_sigreturn -> kill returned ")
+    putn(r)
+    put("\n")
+    flush()
+    # rt_sigprocmask
+    check(setmask(0, u64(1) << SIGUSR1) == 0 and mask() == (u64(1) << SIGUSR1), "SIG_BLOCK SIGUSR1")
+    lsys(62, pid, SIGUSR1, 0, 0, 0)
+    check(hits[SIGUSR1] == 1, "blocked SIGUSR1 stays pending")
+    check(setmask(2, 0) == 0 and hits[SIGUSR1] == 2, "SIG_SETMASK 0 delivers the pending SIGUSR1")
+    check(setmask(7, 0) == EINVAL, "sigprocmask how 7 -> EINVAL")
+    setmask(2, 0xFFFFFFFFFFFFFFFF)
+    check(((mask() >> 9) & 1) == 0 and ((mask() >> 19) & 1) == 0, "SIGKILL / SIGSTOP cannot be blocked")
+    setmask(2, 0)
+    put("lxsig: sigprocmask: blocked SIGUSR1 pending, delivered on SIG_SETMASK; SIGKILL/SIGSTOP unblockable\n")
+    flush()
+    # tgkill and the sandbox boundary
+    check(act(SIGUSR2, h, SA_SIGINFO | SA_RESTORER) == 0, "install SIGUSR2")
+    check(lsys(234, pid, tid, SIGUSR2, 0, 0) == 0 and hits[SIGUSR2] == 1, "tgkill(self, own tid, SIGUSR2)")
+    check(lcode == 0xFFFFFFFA, "siginfo: SI_TKILL")
+    check(lsys(234, pid, 99999, SIGUSR2, 0, 0) == ESRCH, "tgkill unknown tid -> ESRCH")
+    check(lsys(234, 1, 1, SIGUSR2, 0, 0) == EPERM, "tgkill(pid 1) -> EPERM")
+    check(lsys(62, 1, SIGUSR1, 0, 0, 0) == EPERM, "kill(pid 1) -> EPERM")
+    check(lsys(62, pid, 0, 0, 0, 0) == 0, "kill(self, 0) -> 0")
+    check(lsys(62, pid, 99, 0, 0, 0) == EINVAL, "kill signal 99 -> EINVAL")
+    put("lxsig: tgkill(self, ")
+    putn(tid)
+    put(") -> handler (SI_TKILL); kill/tgkill of pid 1 -> EPERM\n")
+    flush()
+    # ignored, ignore-by-default, SA_RESETHAND
+    act(SIGUSR2, 1, 0)
+    lsys(62, pid, SIGUSR2, 0, 0, 0)
+    check(hits[SIGUSR2] == 1, "SIG_IGN drops SIGUSR2")
+    lsys(62, pid, 17, 0, 0, 0)
+    check(1, "SIGCHLD with SIG_DFL is ignored")
+    act(SIGUSR1, h, SA_SIGINFO | SA_RESTORER | SA_RESETHAND)
+    lsys(62, pid, SIGUSR1, 0, 0, 0)
+    check(hits[SIGUSR1] == 3 and act(SIGUSR1, 1, 0) == 0 and oa[0] == 0, "SA_RESETHAND: handler once, then SIG_DFL")
+    # SIGSEGV on faults, resumed past the instruction
+    check(act(SIGSEGV, h, SA_SIGINFO | SA_RESTORER) == 0, "install SIGSEGV")
+    skipn = 3
+    rax_set = 0xDEAD
+    v = probe_rd(0x10)
+    check(v == 0xDEAD and hits[SIGSEGV] == 1, "read of 0x10 -> SIGSEGV handler, resumed")
+    check(lsig == SIGSEGV and lcode == 1 and lval == 0x10, "siginfo: SEGV_MAPERR, si_addr 0x10")
+    check(((lmask >> SIGSEGV) & 1) == 1 and mask() == 0, "SIGSEGV blocked in its handler, unblocked after")
+    put("lxsig: read of 0x10 -> SIGSEGV (SEGV_MAPERR) -> handler skipped the load, rax ")
+    putn(v)
+    put("\n")
+    flush()
+    skipn = 7
+    rax_set = 0xBEEF
+    code = u64(lx_main)
+    v = probe_wr(code)
+    check(v == 0xBEEF and hits[SIGSEGV] == 2, "write to own code -> SIGSEGV handler, resumed")
+    check(lcode == 2 and lval == code, "siginfo: SEGV_ACCERR, si_addr = the code page")
+    put("lxsig: write to its own code -> SIGSEGV (SEGV_ACCERR) -> handler skipped the store, rax ")
+    putn(v)
+    put("\n")
+    if fails == 0:
+        put("lxsig: PASS (")
+        putn(checks)
+        put(" checks)\n")
+    flush()
+    lsys(231, fails, 0, 0, 0, 0)
+
+@naked
+@export
+def _start():
+    asm("mov %rsp, %rdi", "and $-16, %rsp", "call lx_main", "ud2")

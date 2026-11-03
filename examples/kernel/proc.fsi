@@ -63,6 +63,13 @@ struct Proc:
     gcode: u64  # its exit status
     nmade: u64  # threads ever created by clone
     fdbusy: u64  # threads inside read/write/ioctl (close of a shared fd waits for 0: EBUSY)
+    # 11.1d: Linux signal dispositions (linux.fsi), index = signal number 1..31
+    sig_h: u64[32]  # handler (0 SIG_DFL, 1 SIG_IGN)
+    sig_fl: u64[32]  # sa_flags
+    sig_rs: u64[32]  # sa_restorer
+    sig_m: u64[32]  # sa_mask
+    sig_cd: u64[32]  # si_code of the pending instance (SI_USER, SI_TKILL)
+    sig_pend: u64  # process-directed pending signals (kill)
 
 procs: u64[64]
 kx_freeze: u64  # a kexec handoff is collecting every user process at a syscall boundary
@@ -1029,6 +1036,7 @@ def exec_image(frame: u64, img: u64, sz: u64, vc: u64, pa: slice[u8]) -> u64:
     p.lx_calls = 0
     p.lx_unsup = 0
     p.lx_cloexec = 0
+    lx_sig_exec(p)  # 11.1d: caught signals go back to SIG_DFL (ignored stay ignored, mask kept)
     usp = USTACK_TOP - 8
     if abi == LX_ABI:
         usp = lx_stack(p, entry, pa)
@@ -1509,24 +1517,27 @@ def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64
     if cur_proc().abi == LX_ABI:
     # 11.1: a Linux-personality process reaches only the Linux table; no Forge syscall is visible
         lx_exit_check()  # 11.1b: a pending group exit ends this thread here
-        r8 = vload64(frame + SF_R8 * 8)  # 5th argument (mmap, clone, execveat)
+        sf = ptr[SFrame](frame)  # 11.1d: r8/r9 (5th/6th arguments) and the signal code's view
+        r: u64 = 0
         if nr == 9:
             f = irq_save()  # 11.1b: the process's threads share one CPU; irqs off serialises mm state
-            r = lx_mmap(a, b, c, d, r8, vload64(frame + SF_R9 * 8))
+            r = lx_mmap(a, b, c, d, sf.r8, sf.r9)
             irq_restore(f)
-            return r
-        if nr == 56:
-            return lx_clone(frame, a, b, c, d, r8)
-        if nr == 59:
-            return lx_execve(frame, LX_NODIR, a, b, 0)  # 11.1d
-        if nr == 322:
-            return lx_execve(frame, a, b, c, r8)
-        if nr == 158:
+        elif nr == 56:
+            r = lx_clone(frame, a, b, c, d, sf.r8)
+        elif nr == 59:
+            r = lx_execve(frame, LX_NODIR, a, b, 0)  # 11.1d
+        elif nr == 322:
+            r = lx_execve(frame, a, b, c, sf.r8)
+        elif nr == 15:
+            r = lx_sigreturn(sf)  # 11.1d: the frame comes back from the user stack
+        elif nr == 158:
         # 11.1b: arch_prctl may change this thread's FS base; load it now (sched.fsi reloads on switches)
             r = lx_arch_prctl(a, b)
             wrmsr(MSR_FS_BASE, cur_thread().fsbase)
-            return r
-        return lx_dispatch(nr, a, b, c, d)
+        else:
+            r = lx_dispatch(nr, a, b, c, d)
+        return lx_sig_deliver(sf, r)  # 11.1d: a pending unblocked signal runs before user code resumes
     need = sys_need(nr)
     if need != 0:
         sp = cur_proc()
