@@ -1,0 +1,37 @@
+# forge: no-runtime
+# Phase 10.1 crypto known-answer tests: ChaCha20 (RFC 8439 2.3.2 block) and SHA-256 ("abc", empty, 1M 'a').
+include "linux.fsi"
+include "../../examples/kernel/crypt.fsi"
+
+def show(s: ptr[u8], v: u64):
+    puts(s)
+    put_u64(v)
+    nl()
+
+def main() -> i64:
+    i: u64 = 0
+    while i < 8:
+        b = i * 4
+        cc_key[i] = b | ((b + 1) << 8) | ((b + 2) << 16) | ((b + 3) << 24)
+        i += 1
+    cc_block(1, 0x09000000, 0x4a000000, 0)
+    show("chacha20 rfc8439 word0: ", u64(cc_ks[0] == 0xe4e7f110))
+    show("chacha20 rfc8439 word15: ", u64(cc_ks[15] == 0x4e3c50a2))
+    show("chacha20 rfc8439 word7: ", u64(cc_ks[7] == 0x4e6cd4c3))
+    sh_init()
+    sh_byte(97)
+    sh_byte(98)
+    sh_byte(99)
+    sh_fin()
+    show("sha256 abc: ", u64(sh_h[0] == 0xba7816bf and sh_h[7] == 0xf20015ad))
+    sh_init()
+    sh_fin()
+    show("sha256 empty: ", u64(sh_h[0] == 0xe3b0c442 and sh_h[7] == 0x7852b855))
+    sh_init()
+    i = 0
+    while i < 1000000:
+        sh_byte(97)
+        i += 1
+    sh_fin()
+    show("sha256 1M a: ", u64(sh_h[0] == 0xcdc76e5c and sh_h[7] == 0xc7112cd0))
+    return 0

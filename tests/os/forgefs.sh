@@ -3,6 +3,7 @@
 # A shared GPT disk (ESP + Windows + Linux placeholders filled with data) is attached as NVMe:
 #   boot 0: no Forge partition -> the kernel writes nothing, disk byte-identical
 #   create the partition (host, explicit flag); boot 1 formats + writes; boot 2 finds the files again; boot 3 checks the 9.4 rewind persisted
+#   (boots 1-3 get the user key through fw_cfg; Phase 10.1) boot 4 has a wrong key and boot 5 none: the store stays locked and untouched
 # After every boot, every byte outside the Forge partition (ESP, other partitions, GPT) must be unchanged.
 cd "$(dirname "$0")/../.."
 T=$(mktemp -d /tmp/forge-ffs.XXXXXX)
@@ -30,13 +31,15 @@ for i in range(n):
 print('outside=%s %s'%(hashlib.sha256(d[:lo]+d[hi:]).hexdigest()[:16],' '.join(out)))
 P
 }
-boot() {
+KEY=forge-test-passphrase-uid1000
+boot() {  # boot [userkey]: the user key reaches the kernel as QEMU fw_cfg file opt/forge/userkey
   rm -f $T/s.log
+  K=(); [ -n "${1:-}" ] && K=(-fw_cfg "name=opt/forge/userkey,string=$1")
   timeout 180 qemu-system-x86_64 -machine q35 -cpu max -display none -no-reboot -m 256 -smp 4 -net none \
     -serial file:$T/s.log -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -drive file=$T/vdisk.img,format=raw,if=none,id=vd,readonly=on -device virtio-blk-pci,drive=vd \
     -boot d -cdrom build/kernel/forge.iso \
-    -drive file=$T/nv.img,format=raw,if=none,id=nv,cache=writethrough -device nvme,drive=nv,serial=forge-nv0 >/dev/null 2>&1 &
+    -drive file=$T/nv.img,format=raw,if=none,id=nv,cache=writethrough -device nvme,drive=nv,serial=forge-nv0 "${K[@]}" >/dev/null 2>&1 &
   Q=$!
   for i in $(seq 180); do grep -aqE '^(Forge FS OK|Forge FS: not mounted|PANIC|panic)' $T/s.log 2>/dev/null && break; sleep 1; done
   sleep 1; kill $Q 2>/dev/null; wait $Q 2>/dev/null
@@ -50,9 +53,9 @@ python3 tools/forge-part.py create $T/nv.img 16 --yes-add-forge-partition > $T/t
 S1=$(snap $T/nv.img)
 P1=$(echo "$S1" | cut -d' ' -f2-); P0=$(echo "$S0" | cut -d' ' -f2-)
 [ "$P1" = "$P0" ] && echo "PASS os/forgefs-tool-keeps-partitions" || echo "FAIL os/forgefs-tool-keeps-partitions ($S0 / $S1)"
-boot; cp $T/s.log $T/b1.log; S2=$(snap $T/nv.img)
-boot; cp $T/s.log $T/b2.log; S3=$(snap $T/nv.img)
-boot; cp $T/s.log $T/b3.log; S4=$(snap $T/nv.img)
+boot $KEY; cp $T/s.log $T/b1.log; S2=$(snap $T/nv.img)
+boot $KEY; cp $T/s.log $T/b2.log; S3=$(snap $T/nv.img)
+boot $KEY; cp $T/s.log $T/b3.log; S4=$(snap $T/nv.img)
 if grep -aq "formatted (blank Forge partition)" $T/b1.log && grep -aq "created persist.dat" $T/b1.log && grep -aq "^Forge FS OK" $T/b1.log; then
   echo "PASS os/forgefs-format-write"; else echo "FAIL os/forgefs-format-write: $(grep -a 'Forge FS\|PANIC' $T/b1.log | tail -2)"; fi
 if grep -aq ", mounted" $T/b2.log && grep -aq "survived the reboot, hashes match" $T/b2.log && grep -aq "^Forge FS OK" $T/b2.log; then
@@ -74,6 +77,35 @@ if grep -aqE "objfs: /obj lists 2 files; /obj/motd reads v2 \(200 bytes\), /obj/
   echo "PASS os/objfs-vfs-view"; else echo "FAIL os/objfs-vfs-view: $(grep -a 'objfs\|PANIC' $T/b2.log | tail -3)"; fi
 if grep -aq "objfs: after reboot /obj lists 2 files, /obj/motd is 200 bytes" $T/b3.log && grep -aq "^objstore VFS view persisted OK" $T/b3.log; then
   echo "PASS os/objfs-persists"; else echo "FAIL os/objfs-persists: $(grep -a 'objfs\|PANIC' $T/b3.log | tail -3)"; fi
+# Phase 10.1: objects encrypted at rest. The image must hold no object plaintext, no key material in the
+# clear, and look random where the log was written; a wrong key or no key leaves the store locked and untouched.
+grep -aq "objstore: encrypted at rest (ChaCha20 + keyed SHA-256 tags), uid 1000 data key created, wrapped by the platform key (no TPM)" $T/b1.log && grep -aq "data key unwrapped with the platform key" $T/b3.log && echo "PASS os/objstore-key-wrap" || echo "FAIL os/objstore-key-wrap: $(grep -a 'objstore: \(enc\|lock\)' $T/b1.log $T/b3.log | tail -2)"
+python3 tools/forge-part.py read $T/nv.img objects.log > $T/olog.bin; python3 tools/forge-part.py read $T/nv.img objects.key > $T/okey.bin
+PT=$(python3 - $T/nv.img $T/olog.bin $KEY <<'P'
+import sys,zlib,struct
+import uuid
+d=open(sys.argv[1],'rb').read(); elba,n=struct.unpack_from('<QI',d,512+72); F=uuid.UUID('D0C2E3A1-6B7F-4F0A-9E11-466F72676546').bytes_le
+for i in range(n):
+    e=d[elba*512+i*128:elba*512+i*128+128]
+    if e[:16]==F: s,l=struct.unpack_from('<QQ',e,32); d=d[s*512:(l+1)*512]  # the Forge partition only
+L=open(sys.argv[2],'rb').read(); bad=[]
+for pat in (b'motd\0', b'notes\0', sys.argv[3].encode()):
+    if pat in d: bad.append('found %r'%pat)
+w=[L[i:i+4096] for i in range(0,len(L),4096)]
+used=[b[:4080] for b in w if struct.unpack_from('<Q',b,4080)[0]!=0]
+ct=b''.join(used)
+if len(used)<4: bad.append('only %d written slots'%len(used))
+elif len(zlib.compress(ct,9))<len(ct)*0.99: bad.append('ciphertext compresses (%d -> %d)'%(len(ct),len(zlib.compress(ct,9))))
+print('%d written slots, %d ciphertext bytes'%(len(used),len(ct)) if not bad else 'BAD '+'; '.join(bad))
+P
+)
+case "$PT" in BAD*) echo "FAIL os/objstore-no-plaintext: $PT";; *) echo "PASS os/objstore-no-plaintext ($PT)";; esac
+O0=$(cat $T/olog.bin $T/okey.bin | sha256sum)
+boot wrong-passphrase-for-uid1000; cp $T/s.log $T/b4.log
+boot; cp $T/s.log $T/b5.log
+python3 tools/forge-part.py read $T/nv.img objects.log > $T/olog.bin; python3 tools/forge-part.py read $T/nv.img objects.key > $T/okey.bin
+if grep -aq "objstore: locked: wrong user key for uid 1000, nothing decrypted or written" $T/b4.log && grep -aq "objstore: locked: no user key" $T/b5.log && [ "$(cat $T/olog.bin $T/okey.bin | sha256sum)" = "$O0" ]; then
+  echo "PASS os/objstore-wrong-key-locked"; else echo "FAIL os/objstore-wrong-key-locked: $(grep -a 'objstore: lock\|PANIC' $T/b4.log $T/b5.log | tail -2)"; fi
 python3 tools/forge-part.py read $T/nv.img hello.txt | grep -q "written by the Forge kernel on its own GPT partition" && echo "PASS os/forgefs-host-read" || echo "FAIL os/forgefs-host-read"
 grep -ah "Forge FS: remount" $T/b2.log
-rm -rf $T
+[ -n "${FORGEFS_KEEP:-}" ] && cp -a $T /tmp/ffkeep; rm -rf $T

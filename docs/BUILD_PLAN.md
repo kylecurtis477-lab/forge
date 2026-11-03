@@ -201,6 +201,8 @@ Each driver gets its own boot test, and none of them writes to disks it does not
 - Per-user keys (TPM-sealed when available), with every object and swap page encrypted at rest.
 - Per-app access grants are visible in one ledger and revocable live, and revocation takes effect on open handles.
 - Tests: the disk image contains no plaintext; revoking access cuts an app off mid-read; an audit log of every grant and use is kept.
+- Sub-items: 10.1 per-user keys and objects encrypted at rest; 10.2 the per-app grant ledger with live revocation on open handles; 10.3 the audit log of every grant and use.
+  - **10.1 status: done.** `examples/kernel/crypt.fsi` (ChaCha20, SHA-256, KATs in tests/fs/crypt.forge) and objd.fsi: a random data key per store, stored only wrapped by the user key (TPM-sealed when present, else the platform key from QEMU fw_cfg `opt/forge/userkey`) in `objects.key`; every `objects.log` block is encrypted (nonce = write counter + block) and tagged with a keyed SHA-256, and alternates between two slots so a torn write keeps the old slot. Without a key or with a wrong key the store stays locked and untouched. Tests: os/objstore-key-wrap, os/objstore-no-plaintext, os/objstore-wrong-key-locked; all Phase 9 QEMU tests run encrypted. Limits: no TPM in the test setup (sealing not implemented), Forge has no swap, one user per store, Forge FS metadata is plaintext. See docs/privacy.md.
 
 ## Phase 11 — Linux compatibility and FFI
 *Pillar: F.*

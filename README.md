@@ -123,6 +123,7 @@ Subsystem docs (design, formats, APIs, tests, limits):
 - docs/process.md: processes, the ELF loader, fork/exec/brk/mmap
 - docs/bootstrap.md: the seed compiler, the self-hosting fixpoint and reseeding
 - docs/objstore.md: the living object store (Phase 9): versions, blobs, the write-ahead log, persistence, indexes, system rewind and the /obj files-as-objects VFS view
+- docs/privacy.md: privacy by design (Phase 10): per-user keys and the object store encrypted at rest
 - docs/services.md: isolated driver services (kbdd, nvmed) and kexec driver state
 - docs/livepatch.md: live patching of kernel functions
 - docs/GRAMMAR.md, docs/SYSTEMS.md, docs/BUILD_PLAN.md: the language grammar, systems features and the plan

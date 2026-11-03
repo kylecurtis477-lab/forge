@@ -3,21 +3,132 @@
 # flushes before returning, so a returned commit is durable. Mount replays the log (obj.fsi ob_replay),
 # drops a torn or corrupt tail and zeroes it on disk so later appends can never revive stale records.
 # Only Forge FS calls are used, so every write stays inside the explicitly created Forge partition.
-OD_NB = 64
+# Phase 10.1: every log block is encrypted at rest (crypt.fsi ChaCha20, nonce = write counter + block) and
+# carries a keyed SHA-256 tag; each logical block alternates between two physical slots so a torn write
+# never destroys the previous contents. The data key is random and stored only wrapped by the user key
+# (objects.key); see docs/privacy.md.
+OD_PW = 510  # payload words per logical log block; word 510 = write counter, 511 = keyed tag
+OD_NB = (OB_NL + OD_PW - 1) / OD_PW  # logical log blocks; each has two physical slots (A/B)
+OD_UID = 1000  # the store owner (one user per store)
+OD_KMAGIC = 0x59454B4547524F46  # "FORGEKEY"
 od_st: u64
 od_synced: u64
 od_torn: u64
 od_commits: u64
+od_wc: u64  # last write counter used (never reused: it is part of every block's nonce)
+od_cs: u8[OD_NB]  # current valid slot per logical block
+od_kek: u64[8]  # key-encryption key (from the TPM when present, else the platform key; never stored)
+od_dk: u64[8]  # the store's data key (random, stored only wrapped by od_kek)
+od_ek: u64[8]  # ChaCha20 key derived from od_dk
+od_mk: u64[8]  # tag key derived from od_dk
+od_t: u64[8]  # kdf output
+od_ksrc: u64  # 0 none, 1 TPM, 2 fw_cfg platform key
+od_badtag: u64  # slots rejected (torn, never written, or tampered) at the last open
 
-def od_reserve() -> u64:
-    if ffs_ok == 0 or ffs_find("objects.log") != FFS_NI:
+# ---- user key: TPM-sealed when a TPM is present, else QEMU fw_cfg "opt/forge/userkey" ----
+def od_tpm_present() -> u64:
+# TPM 2.0 sealing is not implemented: no TPM device is attached in any test configuration
+    return 0
+
+def od_fwcfg_key() -> u64:
+# read fw_cfg file opt/forge/userkey (8..64 bytes) and hash it into od_kek; 0 if absent
+    pio_add(0x510, 2)
+    pio_wr(0x510, 2, 0)
+    if pio_rd(0x511, 1) != 81 or pio_rd(0x511, 1) != 69 or pio_rd(0x511, 1) != 77 or pio_rd(0x511, 1) != 85:
+        return 0
+    pio_wr(0x510, 2, 0x19)
+    n: u64 = 0
+    i: u64 = 0
+    while i < 4:
+        n = (n << 8) | pio_rd(0x511, 1)
+        i += 1
+    nm: u8[56]
+    sel: u64 = 0
+    sz: u64 = 0
+    e: u64 = 0
+    while e < n and e < 256:
+        es: u64 = 0
+        i = 0
+        while i < 4:
+            es = (es << 8) | pio_rd(0x511, 1)
+            i += 1
+        ec = (pio_rd(0x511, 1) << 8) | pio_rd(0x511, 1)
+        pio_rd(0x511, 1)
+        pio_rd(0x511, 1)
+        i = 0
+        while i < 56:
+            nm[i] = u8(pio_rd(0x511, 1))
+            i += 1
+        v: u64[3]
+        v[0] = 0
+        v[1] = 0
+        v[2] = 0
+        i = 0
+        while i < 24:
+            v[i / 8] = v[i / 8] | (u64(nm[i]) << ((i % 8) * 8))
+            i += 1
+        same: u64 = 0
+        if v[0] == 0x67726F662F74706F and v[1] == 0x656B726573752F65 and v[2] == 0x79:
+            same = 1
+        if same == 1 and sel == 0:
+            sel = ec
+            sz = es
+        e += 1
+    if sel == 0 or sz < 8 or sz > 64:
+        return 0
+    pio_wr(0x510, 2, sel)
+    sh_init()
+    sh_u64(0x6B656B2D65677266)  # "frge-kek" domain label
+    i = 0
+    while i < sz:
+        sh_byte(pio_rd(0x511, 1))
+        i += 1
+    sh_fin()
+    i = 0
+    while i < 8:
+        od_kek[i] = od_be(sh_h[i])
+        i += 1
+    return 1
+
+def od_be(v: u64) -> u64:
+# a SHA-256 output word (big-endian) as a little-endian key word
+    return ((v >> 24) & 255) | (((v >> 16) & 255) << 8) | (((v >> 8) & 255) << 16) | ((v & 255) << 24)
+
+def od_kdf(k: u64[8], label: u64, salt0: u64, salt1: u64):
+# od_t = SHA-256(k || label || salt)
+    sh_init()
+    sh_key(k)
+    sh_u64(label)
+    sh_u64(salt0)
+    sh_u64(salt1)
+    sh_fin()
+    i: u64 = 0
+    while i < 8:
+        od_t[i] = od_be(sh_h[i])
+        i += 1
+
+def od_keys_from_dk():
+    od_kdf(od_dk, 0x636E65, 0, 0)  # "enc"
+    i: u64 = 0
+    while i < 8:
+        od_ek[i] = od_t[i]
+        i += 1
+    od_kdf(od_dk, 0x63616D, 0, 0)  # "mac"
+    i = 0
+    while i < 8:
+        od_mk[i] = od_t[i]
+        i += 1
+
+def od_mkfile(name: ptr[u8], nb: u64) -> u64:
+# reserve a zero-filled nb-block Forge FS file; its first block (0 on failure)
+    if ffs_ok == 0 or ffs_find(name) != FFS_NI:
         return 0
     slot: u64 = 0
     while slot < FFS_NI and ffs_it[slot * 8] != 0:
         slot += 1
     if slot == FFS_NI:
         return 0
-    st = ffs_alloc(OD_NB)
+    st = ffs_alloc(nb)
     if st == 0:
         return 0
     i: u64 = 0
@@ -25,39 +136,151 @@ def od_reserve() -> u64:
         ffs_b[i] = 0
         i += 1
     b: u64 = 0
-    while b < OD_NB:
+    while b < nb:
         if ffs_put(st + b, 0) == 0:
             return 0
         b += 1
     if nvme_flush() == 0:
         return 0
-    ffs_pack("objects.log")
+    ffs_pack(name)
     k = slot * 8
     i = 0
     while i < 5:
         ffs_it[k + i] = ffs_nm[i]
         i += 1
-    ffs_it[k + 5] = OD_NB * 4096
+    ffs_it[k + 5] = nb * 4096
     ffs_it[k + 6] = st
-    ffs_it[k + 7] = OD_NB
+    ffs_it[k + 7] = nb
     if ffs_commit() == 0:
         return 0
-    od_st = st
-    return 1
+    return st
 
-def od_put(b: u64) -> u64:
+def od_key_new() -> u64:
+# first mount: a random data key, stored only wrapped by the user key, in objects.key
+    st = od_mkfile("objects.key", 1)
+    if st == 0:
+        return 0
+    sh_init()
     i: u64 = 0
     while i < 512:
-        ffs_b[i] = ob_log[b * 512 + i]
+        t0 = rdtsc()
+        j: u64 = 0
+        while j < (t0 & 15):
+            j += 1
+        sh_u64(rdtsc() - t0)
+        sh_u64(t0)
         i += 1
-    return ffs_put(od_st + b, 0)
+    sh_fin()
+    s0 = sh_h[0] | (sh_h[1] << 32)
+    s1 = sh_h[2] | (sh_h[3] << 32)
+    i = 0
+    while i < 8:
+        od_dk[i] = od_be(sh_h[i]) ^ sh_h[7 - i]
+        i += 1
+    od_kdf(od_kek, 0x70617277, s0, s1)  # "wrap"
+    i = 0
+    while i < 512:
+        ffs_b[i] = 0
+        i += 1
+    ffs_b[0] = OD_KMAGIC
+    ffs_b[1] = OD_UID
+    ffs_b[2] = s0
+    ffs_b[3] = s1
+    i = 0
+    while i < 8:
+        ffs_b[4 + i] = od_dk[i] ^ od_t[i]
+        i += 1
+    od_kdf(od_kek, 0x6B6863, s0, s1)  # "chk"
+    ffs_b[12] = od_t[0] | (od_t[1] << 32)
+    if ffs_put(st, 0) == 0 or nvme_flush() == 0:
+        return 0
+    od_keys_from_dk()
+    return 1
+
+def od_key_load() -> u64:
+# 1 = data key unwrapped, 3 = wrong user key / bad keyslot
+    i = ffs_find("objects.key")
+    if i == FFS_NI or ffs_get(ffs_it[i * 8 + 6], 0) == 0:
+        return 3
+    if ffs_b[0] != OD_KMAGIC or ffs_b[1] != OD_UID:
+        return 3
+    s0 = ffs_b[2]
+    s1 = ffs_b[3]
+    od_kdf(od_kek, 0x6B6863, s0, s1)
+    if ffs_b[12] != (od_t[0] | (od_t[1] << 32)):
+        return 3
+    od_kdf(od_kek, 0x70617277, s0, s1)
+    k: u64 = 0
+    while k < 8:
+        od_dk[k] = ffs_b[4 + k] ^ od_t[k]
+        k += 1
+    od_keys_from_dk()
+    return 1
+
+# ---- encrypted, tagged log blocks ----
+def od_tag(b: u64, wc: u64) -> u64:
+# keyed tag over (block, counter, ciphertext words 0..509 in ffs_b)
+    sh_init()
+    sh_key(od_mk)
+    sh_u64(b)
+    sh_u64(wc)
+    i: u64 = 0
+    while i < OD_PW:
+        sh_u64(ffs_b[i])
+        i += 1
+    sh_fin()
+    return sh_h[0] | (sh_h[1] << 32)
+
+def od_xor(b: u64, wc: u64):
+# ffs_b[0..509] ^= ChaCha20(od_ek, nonce = (wc, block b))
+    i: u64 = 0
+    while i < 8:
+        cc_key[i] = od_ek[i]
+        i += 1
+    j: u64 = 0
+    while j * 8 < OD_PW:
+        cc_block(j, wc & 0xFFFFFFFF, wc >> 32, b)
+        k: u64 = 0
+        while k < 8 and j * 8 + k < OD_PW:
+            ffs_b[j * 8 + k] = ffs_b[j * 8 + k] ^ cc_word(k)
+            k += 1
+        j += 1
+
+def od_put(b: u64) -> u64:
+# encrypt logical block b into the slot that is not current, so a torn write leaves the old slot intact
+    i: u64 = 0
+    while i < OD_PW:
+        w = b * OD_PW + i
+        ffs_b[i] = 0
+        if w < OB_NL:
+            ffs_b[i] = ob_log[w]
+        i += 1
+    od_wc += 1
+    wc = od_wc
+    od_xor(b, wc)
+    ffs_b[OD_PW] = wc
+    ffs_b[OD_PW + 1] = od_tag(b, wc)
+    slot = 1 - u64(od_cs[b])
+    if ffs_put(od_st + b * 2 + slot, 0) == 0:
+        return 0
+    od_cs[b] = u8(slot)
+    return 1
+
+def od_slot_wc(b: u64, slot: u64) -> u64:
+# the slot's write counter if its tag verifies, else 0 (ffs_b holds the slot afterwards)
+    if ffs_get(od_st + b * 2 + slot, 0) == 0:
+        return 0
+    wc = ffs_b[OD_PW]
+    if wc == 0 or ffs_b[OD_PW + 1] != od_tag(b, wc):
+        return 0
+    return wc
 
 def od_sync() -> u64:
 # write every log block touched since the last sync, then flush: the commit is durable on return
     if ob_lp == od_synced:
         return 1
-    b = od_synced / 512
-    e = (ob_lp - 1) / 512
+    b = od_synced / OD_PW
+    e = (ob_lp - 1) / OD_PW
     while b <= e:
         if od_put(b) == 0:
             return 0
@@ -69,12 +292,26 @@ def od_sync() -> u64:
     return 1
 
 def od_open() -> u64:
-# 0 = unavailable, 1 = recovered an existing log, 2 = created an empty one
+# 0 = unavailable, 1 = recovered an existing log, 2 = created an empty one, 3 = locked (no or wrong key)
     od_torn = 0
     od_commits = 0
+    od_badtag = 0
+    od_ksrc = 0
+    b: u64 = 0
+    if od_tpm_present() != 0:
+        od_ksrc = 1
+    elif od_fwcfg_key() != 0:
+        od_ksrc = 2
+    if od_ksrc == 0:
+        return 3
     i = ffs_find("objects.log")
     if i == FFS_NI:
-        if od_reserve() == 0:
+        if ffs_find("objects.key") != FFS_NI:
+            return 3
+        if od_key_new() == 0:
+            return 0
+        od_st = od_mkfile("objects.log", OD_NB * 2)
+        if od_st == 0:
             return 0
         ob_reset()
         ob_log_clear()
@@ -82,19 +319,48 @@ def od_open() -> u64:
         while w < OB_NL:
             ob_log[w] = 0
             w += 1
+        while b < OD_NB:
+            od_cs[b] = 1
+            b += 1
+        od_wc = 0
         od_synced = 0
         return 2
-    if ffs_it[i * 8 + 7] != OD_NB:
+    if ffs_it[i * 8 + 7] != OD_NB * 2:
         return 0
     od_st = ffs_it[i * 8 + 6]
-    b: u64 = 0
+    if od_key_load() != 1:
+        return 3
+    od_wc = 0
+    b = 0
     while b < OD_NB:
-        if ffs_get(od_st + b, 0) == 0:
-            return 0
-        k: u64 = 0
-        while k < 512:
-            ob_log[b * 512 + k] = ffs_b[k]
-            k += 1
+        w0 = od_slot_wc(b, 0)
+        w1 = od_slot_wc(b, 1)
+        if w0 == 0 and w1 == 0:
+            od_cs[b] = 1
+            od_badtag += 2
+            k: u64 = 0
+            while k < OD_PW:
+                if b * OD_PW + k < OB_NL:
+                    ob_log[b * OD_PW + k] = 0
+                k += 1
+        else:
+            slot: u64 = 1
+            wc = w1
+            if w0 > w1:
+                slot = 0
+                wc = w0
+                od_slot_wc(b, 0)
+            if w0 == 0 or w1 == 0:
+                od_badtag += 1
+            od_cs[b] = u8(slot)
+            if wc > od_wc:
+                od_wc = wc
+            od_xor(b, wc)
+            k = 0
+            while k < OD_PW:
+                if b * OD_PW + k < OB_NL:
+                    ob_log[b * OD_PW + k] = ffs_b[k]
+                k += 1
         b += 1
     ob_replay(OB_NL)
     # anything after the last good record is a torn/corrupt tail: zero it in memory and on disk
@@ -107,8 +373,8 @@ def od_open() -> u64:
             last = p
         p += 1
     if od_torn != 0:
-        b = ob_lp / 512
-        while b <= last / 512:
+        b = ob_lp / OD_PW
+        while b <= last / OD_PW:
             if od_put(b) == 0:
                 return 0
             b += 1
@@ -220,10 +486,34 @@ def objrw_verify():
         panic("objstore: rewound state lost")
     puts("objstore system rewind persisted OK\n")
 
+def od_keymsg(r: u64):
+    puts("objstore: encrypted at rest (ChaCha20 + keyed SHA-256 tags), uid 1000 data key ")
+    if r == 2:
+        puts("created, wrapped by the ")
+    else:
+        puts("unwrapped with the ")
+    if od_ksrc == 1:
+        puts("TPM-sealed key\n")
+    else:
+        puts("platform key (no TPM)\n")
+    if r == 1:
+        puts("objstore: ")
+        put_u64(OD_NB * 2)
+        puts(" log slots read, ")
+        put_u64(od_badtag)
+        puts(" never written or superseded-and-torn slots rejected by tag\n")
+
 def objstore_test():
     r = od_open()
     if r == 0:
         panic("objstore: objects.log unavailable")
+    if r == 3:
+        if od_ksrc == 0:
+            puts("objstore: locked: no user key (no TPM, no platform key), nothing read or written\n")
+        else:
+            puts("objstore: locked: wrong user key for uid 1000, nothing decrypted or written\n")
+        return
+    od_keymsg(r)
     if r == 1 and ob_tf[2] != 0:
         objrw_verify()
         objfs_verify()

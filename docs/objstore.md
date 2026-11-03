@@ -58,10 +58,12 @@ Records only refer to earlier ones, so any prefix of the log is a consistent sto
 arrives out of order, and truncates the log there.
 
 ## On disk (9.2b)
-`objd.fsi` keeps the log in a single Forge FS file, `objects.log`. The file is `OD_NB` 64 blocks, reserved and zero-filled
+`objd.fsi` keeps the log in a single Forge FS file, `objects.log`. The file is `OD_NB` logical blocks (65, two encrypted slots each since Phase 10.1, see docs/privacy.md), reserved and zero-filled
 up front. It lives on the explicitly created Forge-owned partition (see the Forge FS) and is never written anywhere else.
 - `od_open()` replays an existing log. If the log ends in a torn tail, it zeroes the tail both in memory and on disk, so later appends
   can't revive stale records. If there's no log, it creates one.
+- Since Phase 10.1 every block is ChaCha20-encrypted and tagged, and written alternately to two slots; a slot whose tag fails reads as
+  zeros, which replay treats as a torn tail. Without the right user key the store stays locked.
 - `od_commit(o)` writes every log block that changed since the last sync, then issues an NVMe flush
   before returning. Once a commit has returned, it is durable.
 
