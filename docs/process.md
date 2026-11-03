@@ -41,3 +41,8 @@ the shell, and the run needs `forktest: PASS` and `mmap 16KiB rw ok`.
 - Fork copies every page; there is no copy-on-write.
 - Processes are single-threaded. `munmap` invalidates locally and forgets the PCID elsewhere.
 - `brk` does not check whether new pages overlap pages that are already mapped. It relies on a correct brk base.
+
+## SMP note: single-CPU boots
+With `-smp 1` no APs come online, so no IPIs are sent; the x2APIC self-check
+("x2APIC sent no IPIs") now only fires when `ncpu_online > 1`. Regression test:
+`kernel-bios-smp1` in tests/os/run.sh boots the BIOS ISO with `-smp 1`.

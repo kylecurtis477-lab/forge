@@ -26,6 +26,9 @@ B=tests/os/boot.py
 cp build/efi/disk.img $L/vdisk.img && mdel -i $L/vdisk.img@@1048576 ::/EFI/BOOT/BOOTX64.EFI
 VD="-drive file=$L/vdisk.img,format=raw,if=none,id=vd,readonly=on -device virtio-blk-pci,drive=vd"
 python3 $B kernel-bios $L/bios.log 150 "multiboot2 (BIOS)|$K" "$FB" -- $Q $VD -boot d -cdrom build/kernel/forge.iso
+# single CPU (-machine pc -smp 1): no APs, no IPIs; the kernel must still boot to KERNEL OK and kexec
+Q1=${Q/-smp 4/-smp 1}
+python3 $B kernel-bios-smp1 $L/bios-smp1.log 200 "SMP: 1 cpus online|x2APIC: all cpus in x2APIC mode, IPIs sent via MSR 0x830: 0|preemptive SMP scheduler OK|ring 3 + syscall/sysret + ELF loader OK|processes + VFS + keyboard/serial input + sh OK|KERNEL OK|kexec handoff OK" "$FB" -- $Q1 -machine pc $VD -boot d -cdrom build/kernel/forge.iso
 cp $OVMF_VARS $L/vars.fd
 UEFI="-machine q35 -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE -drive if=pflash,format=raw,file=$L/vars.fd"
 python3 $B kernel-uefi $L/uefi.log 360 "multiboot2 (UEFI)|ACPI rev 2 XSDT|$K" "$FB" -- $Q $UEFI $VD -cdrom build/kernel/forge.iso

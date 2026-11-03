@@ -752,7 +752,7 @@ def sched_test():
         puts("x2APIC: all cpus in x2APIC mode, IPIs sent via MSR 0x830: ")
         put_u64(x2apic_ipis)
         putc(10)
-        if x2apic_ipis == 0:
+        if x2apic_ipis == 0 and ncpu_online > 1:
             panic("x2APIC sent no IPIs")
     else:
         puts("x2APIC: not offered, xAPIC MMIO\n")
