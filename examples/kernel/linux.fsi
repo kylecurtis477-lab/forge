@@ -32,9 +32,12 @@
 # short write or a fault after some bytes, like Linux).
 # 11.1e: uname 63 (sysname Linux -- the personality's ABI --, nodename forge, release 0.2.6-forge,
 # machine x86_64).
+# 11.1e: open 2, and openat(AT_FDCWD, absolute): there is still no cwd, so only an absolute path that
+# names a held directory handle's label ("<label>" itself -> a dup of that handle, sharing its
+# position) or lies under it ("<label>/<rest>" -> openat(handle, rest)) opens; anything else is EACCES.
 # Not yet: real-time signals (32..64), sigaltstack, signals to other processes.
 LX_ABI = 1
-LX_NSYS = 29  # syscalls in the table above
+LX_NSYS = 30  # syscalls in the table above
 ARCH_SET_FS = 0x1002
 ARCH_GET_FS = 0x1003
 ENOTTY = 0xFFFFFFFFFFFFFFE7
@@ -458,11 +461,13 @@ LX_DENT_MIN = 768  # getdents64 needs room for the largest record (documented)
 def lx_openat(dirfd: u64, upath: u64, flags: u64) -> u64:
 # no current directory, so no ambient lookup: AT_FDCWD and absolute paths are refused; a relative
 # path resolves under a held directory handle with LOOKUP (sys_openat: rights, grants, no "..")
-    if dirfd == AT_FDCWD:
-        return EACCES
     if (flags & O_ACCMODE) != 0 or (flags & O_WRITEISH) != 0:
         return EROFS  # the mounted file systems are read-only to applications
-    fd = sys_openat(dirfd & 0xFFFFFFFF, upath)
+    fd: u64 = 0
+    if dirfd == AT_FDCWD:
+        fd = lx_open_abs(upath)
+    else:
+        fd = sys_openat(dirfd & 0xFFFFFFFF, upath)
     if fd >= NFD:
         return fd
     if (flags & O_DIRECTORY) != 0:
@@ -472,6 +477,29 @@ def lx_openat(dirfd: u64, upath: u64, flags: u64) -> u64:
             return ENOTDIR
     lx_cx(fd, (flags >> 19) & 1)  # 11.1d: O_CLOEXEC (0x80000) is honoured by execve
     return fd
+
+def lx_open_abs(upath: u64) -> u64:
+# an absolute path at or under the label of a held directory handle (LOOKUP); else EACCES
+    path: u8[128]
+    if copy_str_user(u64(addr(path[0])), upath, 128) > 127:
+        return EFAULT
+    if path[0] != 47 or path_ok(path[:]) == 0:
+        return EACCES  # no cwd: relative paths have nothing to resolve against
+    p = cur_proc()
+    i: u64 = 0
+    while i < NFD:
+        d = fd_get(p, i)
+        if u64(d) != 0 and d.type == F_DIR and (p.fdr[i] & CAP_LOOKUP) != 0:
+            k: u64 = 0
+            while k < 31 and d.lab[k] != 0 and path[k] == d.lab[k]:
+                k += 1
+            if k > 0 and k < 31 and d.lab[k] == 0:
+                if path[k] == 0:
+                    return sys_dup(i, p.fdr[i])
+                if path[k] == 47 and path[k + 1] != 0:
+                    return sys_openat(i, upath + k + 1)
+        i += 1
+    return EACCES
 
 def lx_cx(fd: u64, on: u64):
     p = cur_proc()
@@ -1125,7 +1153,7 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
 # mmap (9, six arguments) is routed by syscall_dispatch, which reads r8/r9 from the frame
     p = cur_proc()
     p.lx_calls += 1
-    if nr == 0 or nr == 1 or nr == 20 or nr == 16 or nr == 5 or nr == 217 or nr == 257:
+    if nr == 0 or nr == 1 or nr == 2 or nr == 20 or nr == 16 or nr == 5 or nr == 217 or nr == 257:
         atomic_fetch_add(addr(p.fdbusy), 1, acq_rel)
         r: u64 = 0
         if nr == 0:
@@ -1134,6 +1162,8 @@ def lx_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
             r = sys_write(a, b, c)
         elif nr == 20:
             r = lx_writev(a, b, c)
+        elif nr == 2:
+            r = lx_openat(AT_FDCWD, a, b)
         elif nr == 5:
             r = lx_fstat(a, b)
         elif nr == 217:

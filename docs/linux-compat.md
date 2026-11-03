@@ -25,13 +25,16 @@ Inside the personality a process reaches **only** the Linux table. No Forge sysc
 including the driver (400+), kexec/ktest (408/409, still also gated by `ktest_hooks`) and grant
 syscalls: they return -ENOSYS like any unknown number.
 
-## Syscalls (11.1a, 11.1b, 11.1c, 11.1d; 27 in all)
+## Syscalls (11.1a to 11.1e; 30 in all)
 
 | nr | name | notes |
 |----|------|-------|
 | 0 | read | Forge read on the fd (grants and rights checked) |
 | 1 | write | Forge write |
+| 2 | open | (11.1e part 4) no cwd, so the path must be absolute and name a held directory handle's label exactly (-> a dup of that handle, sharing its position) or lie under it (-> openat(handle, rest)); relative, `..`, outside every handle, or a mere label prefix -> EACCES; write flags -> EROFS; O_DIRECTORY / O_CLOEXEC as for openat |
 | 3 | close | |
+| 20 | writev | (11.1e part 2) iovecs copied in one at a time, each through write (same fd checks); iovcnt > 1024 -> EINVAL, bad iov -> EFAULT; a later fault or short write returns the bytes so far |
+| 63 | uname | (11.1e part 3) sysname `Linux`, nodename `forge`, release `0.2.6-forge`, version `#1 Forge Linux compat sandbox`, machine `x86_64`, domainname `(none)`; bad pointer -> EFAULT |
 | 5 | fstat | (11.1c) 144-byte struct stat: st_dev 0xF0, st_ino = first cluster + 1, st_mode S_IFREG 0444 / S_IFDIR 0555 / S_IFCHR 0620 (console, st_rdev 0x401) / S_IFIFO 0600, st_size, st_blksize 4096, st_blocks; bad fd -> EBADF, bad pointer -> EFAULT, revoked grant -> EACCES |
 | 217 | getdents64 | (11.1c) linux_dirent64 records (d_ino synthetic, d_off = directory position, d_type DT_DIR / DT_REG, 8-byte aligned); buffer must be >= 768 bytes (else EINVAL); non-directory -> ENOTDIR, no read right -> EPERM, revoked grant -> EACCES |
 | 59 / 322 | execve / execveat | (11.1d) sealed Linux images only, reached through a held handle (see Exec below); Forge, unsealed or tampered images -> ENOEXEC, no cwd (relative path, AT_FDCWD) or outside every handle -> EACCES, live clone()d threads -> EBUSY, bad pointers -> EFAULT, argv over 16 entries / 127 bytes -> E2BIG, an argument with a space -> EINVAL, unknown flags -> EINVAL |
@@ -40,7 +43,7 @@ syscalls: they return -ENOSYS like any unknown number.
 | 15 | rt_sigreturn | (11.1d part 2) restores the frame written at delivery (see Signals); a frame without the Forge magic, or rip / rsp outside user space -> killed with SIGSEGV |
 | 62 | kill | (11.1d part 2) only its own pid (or 0); any other pid -> EPERM, logged (the sandbox); signal 0 probes; > 31 -> EINVAL |
 | 234 | tgkill | (11.1d part 2) tgid must be its own pid (else EPERM); tid must be its main thread or a live clone()d thread (else ESRCH) |
-| 257 | openat | (11.1c) only relative to a directory handle the sandbox holds (Forge `openat` rules: no absolute paths, no `..`); AT_FDCWD -> EACCES (there is no ambient cwd), write/create/truncate/append flags -> EROFS, O_DIRECTORY on a file -> ENOTDIR; O_CLOEXEC / O_NONBLOCK / O_NOFOLLOW / O_LARGEFILE accepted |
+| 257 | openat | (11.1c) only relative to a directory handle the sandbox holds (Forge `openat` rules: no absolute paths, no `..`); AT_FDCWD with a relative path -> EACCES (there is no ambient cwd); AT_FDCWD with an absolute path follows open (11.1e), write/create/truncate/append flags -> EROFS, O_DIRECTORY on a file -> ENOTDIR; O_CLOEXEC / O_NONBLOCK / O_NOFOLLOW / O_LARGEFILE accepted |
 | 9 | mmap | anonymous + private only; PROT_EXEC -> EACCES (W^X: no new code), MAP_FIXED -> EINVAL, file mappings -> ENODEV; r8/r9 come from the saved frame |
 | 11 | munmap | |
 | 12 | brk | Linux semantics: returns the current break on failure |
@@ -239,4 +242,4 @@ BusyBox is built from source only; no prebuilt third-party binary is used.
 - Image: static EXEC at 0x400000, EI_OSABI set to 3, sealed `forgeseal.py --foreign` (level 3, unsafe 0, caps 0). `image_verify` refuses a level-3 seal on anything but a capability-free Linux image (reason 8); the 6.4 gate still refuses it outside the compat sandbox.
 - Manifest `examples/apps/busybox.mf`: one `dir /efi/forge/docs` grant.
 
-Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). Still missing: open 2 and stat 4 (cat, ls, wc, sha256sum, head), getcwd 79, nanosleep 35, fcntl 72 (printf). They will be added one per commit.
+Status: echo, true, false, basename, env work. Added: writev 20 (11.1e part 2; seq, expr now work; lxtest checks it); uname 63 (11.1e part 3: sysname Linux, nodename forge, release 0.2.6-forge, machine x86_64; `uname -s -m` works). open 2 (11.1e part 4: absolute paths under a grant; wc, sha256sum and cat of granted files work, a file outside is EACCES). Still missing: stat 4 (ls), getcwd 79, nanosleep 35, fcntl 72 (printf). They will be added one per commit.
