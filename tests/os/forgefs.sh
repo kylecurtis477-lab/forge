@@ -2,7 +2,7 @@
 # Phase 8.9: writable Forge FS only on an explicitly created Forge-type GPT partition (tools/forge-part.py).
 # A shared GPT disk (ESP + Windows + Linux placeholders filled with data) is attached as NVMe:
 #   boot 0: no Forge partition -> the kernel writes nothing, disk byte-identical
-#   create the partition (host, explicit flag); boot 1 formats + writes; boot 2 finds the files again
+#   create the partition (host, explicit flag); boot 1 formats + writes; boot 2 finds the files again; boot 3 checks the 9.4 rewind persisted
 # After every boot, every byte outside the Forge partition (ESP, other partitions, GPT) must be unchanged.
 cd "$(dirname "$0")/../.."
 T=$(mktemp -d /tmp/forge-ffs.XXXXXX)
@@ -52,16 +52,23 @@ P1=$(echo "$S1" | cut -d' ' -f2-); P0=$(echo "$S0" | cut -d' ' -f2-)
 [ "$P1" = "$P0" ] && echo "PASS os/forgefs-tool-keeps-partitions" || echo "FAIL os/forgefs-tool-keeps-partitions ($S0 / $S1)"
 boot; cp $T/s.log $T/b1.log; S2=$(snap $T/nv.img)
 boot; cp $T/s.log $T/b2.log; S3=$(snap $T/nv.img)
+boot; cp $T/s.log $T/b3.log; S4=$(snap $T/nv.img)
 if grep -aq "formatted (blank Forge partition)" $T/b1.log && grep -aq "created persist.dat" $T/b1.log && grep -aq "^Forge FS OK" $T/b1.log; then
   echo "PASS os/forgefs-format-write"; else echo "FAIL os/forgefs-format-write: $(grep -a 'Forge FS\|PANIC' $T/b1.log | tail -2)"; fi
 if grep -aq ", mounted" $T/b2.log && grep -aq "survived the reboot, hashes match" $T/b2.log && grep -aq "^Forge FS OK" $T/b2.log; then
   echo "PASS os/forgefs-persists"; else echo "FAIL os/forgefs-persists: $(grep -a 'Forge FS\|PANIC' $T/b2.log | tail -2)"; fi
-[ "$S1" = "$S2" ] && [ "$S2" = "$S3" ] && echo "PASS os/forgefs-outside-unchanged ($S3)" || echo "FAIL os/forgefs-outside-unchanged ($S1 / $S2 / $S3)"
+[ "$S1" = "$S2" ] && [ "$S2" = "$S3" ] && [ "$S3" = "$S4" ] && echo "PASS os/forgefs-outside-unchanged ($S4)" || echo "FAIL os/forgefs-outside-unchanged ($S1 / $S2 / $S3 / $S4)"
 for b in 1 2; do grep -aq "NVMe service hot-swap + supervised restart OK" $T/b$b.log && echo "PASS os/nvme-service-swap-restart-boot$b" || echo "FAIL os/nvme-service-swap-restart-boot$b: $(grep -a 'NVMe s\|PANIC' $T/b$b.log | tail -2)"; done
 # Phase 9.2: object-store log on the Forge partition; boot 1 commits then tears a record, boot 2 recovers
 F1=$(grep -ao "durable commits, clock [0-9]*, fingerprint [0-9a-fx]*" $T/b1.log | sed 's/.*fingerprint //')
 if [ -n "$F1" ] && grep -aq "crash simulated (torn record" $T/b1.log && grep -aE "torn tail dropped \([1-9][0-9]* words\), fingerprint $F1\$" $T/b2.log >/dev/null && grep -aq "^objstore crash recovery OK" $T/b2.log; then
   echo "PASS os/objstore-crash-recover"; else echo "FAIL os/objstore-crash-recover: $(grep -a 'objstore\|PANIC' $T/b1.log $T/b2.log | tail -3)"; fi
+# Phase 9.4: boot 2 commits a bad change, detects it and rewinds the whole store; boot 3 finds the rewound state
+G2=$(grep -ao "boot done, state fingerprint [0-9a-fx]*" $T/b2.log | sed 's/.*fingerprint //')
+if [ -n "$G2" ] && grep -aq "bad change committed, health check: 8 broken slots" $T/b2.log && grep -aq "^objstore system rewind OK" $T/b2.log; then
+  echo "PASS os/objstore-system-rewind"; else echo "FAIL os/objstore-system-rewind: $(grep -a 'objstore\|PANIC' $T/b2.log | tail -3)"; fi
+if [ -n "$G2" ] && grep -aq "after reboot, health check: 0 broken slots, state fingerprint $G2\$" $T/b3.log && grep -aq "^objstore system rewind persisted OK" $T/b3.log; then
+  echo "PASS os/objstore-rewind-persists"; else echo "FAIL os/objstore-rewind-persists: $(grep -a 'objstore\|PANIC' $T/b3.log | tail -3)"; fi
 python3 tools/forge-part.py read $T/nv.img hello.txt | grep -q "written by the Forge kernel on its own GPT partition" && echo "PASS os/forgefs-host-read" || echo "FAIL os/forgefs-host-read"
 grep -ah "Forge FS: remount" $T/b2.log
 rm -rf $T

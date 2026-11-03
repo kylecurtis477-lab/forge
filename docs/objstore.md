@@ -65,12 +65,24 @@ up front. It lives on the explicitly created Forge-owned partition (see the Forg
 - `od_commit(o)` writes every log block that changed since the last sync, then issues an NVMe flush
   before returning. Once a commit has returned, it is durable.
 
+## System rewind (9.4)
+`objd.fsi` keeps a small "system configuration" as type 2 objects (`OD_NCFG` 8 slots; field 0 = slot,
+field 1 = 100 + slot, field 2 = 1 when healthy) and `od_health()` counts broken slots.
+- Boot 2 (after crash recovery) creates the slots, notes the last good clock and state fingerprint (`od_sfp`, the
+  payload fingerprint without the clock), then commits a bad change durably: every slot broken and object 1
+  overwritten. The health check reports 8 broken slots, `sys_rewind(good)` restores all 9 changed objects, and the
+  rewind is committed. The state fingerprint must equal the pre-change one; the bad versions stay in history
+  (a rewind is a new version). The boot ends by printing `boot done, state fingerprint X`.
+- Boot 3 sees type 2 in the replayed store, runs the health check (0 broken) and prints the state fingerprint,
+  which must equal boot 2's `boot done` fingerprint.
+
 ## Testing
 - `tests/fs/objstore.forge` covers versions, dedup, rewind, diff and find.
 - `tests/fs/objindex.forge` builds 100k objects and checks field, type and text lookups against the scan,
   across an update, a rewind and a log replay, plus the latency ratios.
 - `tests/fs/objlog.forge` replays every possible cut and every single-bit flip, then checks that writes after
   recovery work.
+- `os/objstore-system-rewind` and `os/objstore-rewind-persists` (tests/os/forgefs.sh, boots 2 and 3) cover 9.4.
 - `os/objstore-crash-recover` runs two QEMU boots:
   - Boot 1 makes 62 durable commits, prints a fingerprint, and then writes a torn record.
   - Boot 2 recovers, drops the torn tail, verifies all 50 versions of object 0, and must print the same fingerprint.

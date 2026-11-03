@@ -141,10 +141,92 @@ def od_commit(o: u64) -> u64:
         panic("objstore: commit failed")
     return ob_clock
 
+# Phase 9.4: whole-system rewind after a bad change. Type 2 objects are the "system configuration"
+# (field 0 = slot, field 1 = 100 + slot, field 2 = 1 when healthy). A bad change flips every slot to
+# broken, durably; the health check notices, sys_rewind takes every object back to the last good
+# clock (each rewind is a new version, so the bad change stays inspectable in history), and the next
+# boot finds the rewound state on disk.
+OD_NCFG = 8
+
+def od_health() -> u64:
+# number of broken configuration slots (OB_ERR if the configuration is missing)
+    bad: u64 = 0
+    k: u64 = 0
+    o = obj_type_first(2)
+    while o != OB_ERR:
+        if obj_read(o) == OB_ERR or ob_out[1] != 100 + ob_out[0] or ob_out[2] != 1:
+            bad += 1
+        k += 1
+        o = obj_type_next(o)
+    if k != OD_NCFG:
+        return OB_ERR
+    return bad
+
+def od_sfp() -> u64:
+# state fingerprint: current payloads of every object (no clock, so a rewind can reproduce it)
+    return od_fp() ^ ob_clock
+
+def objrw_test():
+    if ob_type_def(2, 3) != 0:
+        panic("objstore: config type failed")
+    k: u64 = 0
+    while k < OD_NCFG:
+        o = obj_new(2)
+        od_put3(k, 100 + k, 1)
+        od_commit(o)
+        k += 1
+    tg = ob_clock
+    fg = od_sfp()
+    if od_health() != 0:
+        panic("objstore: config unhealthy before the change")
+    # the bad change: every slot broken, and object 1 overwritten, each write durable
+    o = obj_type_first(2)
+    k = 0
+    while o != OB_ERR:
+        od_put3(k, 7, 0)
+        od_commit(o)
+        k += 1
+        o = obj_type_next(o)
+    od_put3(9, 9, 9)
+    od_commit(1)
+    hb = od_health()
+    puts("objstore: bad change committed, health check: ")
+    put_u64(hb)
+    puts(" broken slots\n")
+    if hb != OD_NCFG:
+        panic("objstore: bad change not detected")
+    n = sys_rewind(tg)
+    if od_sync() == 0:
+        panic("objstore: rewind commit failed")
+    if od_health() != 0 or od_sfp() != fg or n != OD_NCFG + 1:
+        panic("objstore: system rewind did not restore the good state")
+    puts("objstore: system rewound to clock ")
+    put_u64(tg)
+    puts(" (")
+    put_u64(n)
+    puts(" objects restored, bad change still in history), state fingerprint ")
+    put_hex(fg)
+    putc(10)
+    puts("objstore system rewind OK\n")
+
+def objrw_verify():
+# boot after the rewind: the rewound state must be what the disk holds
+    puts("objstore: after reboot, health check: ")
+    put_u64(od_health())
+    puts(" broken slots, state fingerprint ")
+    put_hex(od_sfp())
+    putc(10)
+    if od_health() != 0:
+        panic("objstore: rewound state lost")
+    puts("objstore system rewind persisted OK\n")
+
 def objstore_test():
     r = od_open()
     if r == 0:
         panic("objstore: objects.log unavailable")
+    if r == 1 and ob_tf[2] != 0:
+        objrw_verify()
+        return
     if r == 2:
         if ob_type_def(1, 3) != 0 or od_sync() == 0:
             panic("objstore: type def failed")
@@ -209,3 +291,7 @@ def objstore_test():
     od_commit(1)
     puts("objstore: all 50 committed versions of object 0 read back, rewind + new commit durable\n")
     puts("objstore crash recovery OK\n")
+    objrw_test()
+    puts("objstore: boot done, state fingerprint ")
+    put_hex(od_sfp())
+    putc(10)
