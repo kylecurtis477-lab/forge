@@ -41,6 +41,7 @@ tests/fmt/run.sh || fail=1
 { examples/kernel/build.sh && examples/efi/build.sh; } >/dev/null 2>&1 || { echo "FAIL os-artifacts-build (fas/fld artifact checks would be skipped)"; fail=1; }
 tests/fas/run.sh || fail=1
 tests/fld/run.sh || fail=1
+tests/krel/run.sh || fail=1
 tests/pkg/run.sh || fail=1
 tests/lsp/run.sh || fail=1
 tests/testblocks/run.sh || fail=1

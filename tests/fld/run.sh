@@ -1,7 +1,7 @@
 #!/bin/bash
 # Phase 7.2 tools/fld: images linked by fld must load the same bytes at the same addresses as GNU ld's
 # (user programs, the compiler, the tests corpus, and the kernel against examples/kernel/linker.ld +
-# tools/krel.py, the reference layout); the PE32+ loader is checked structurally (it boots in tests/os);
+# tools/krel.forge, the reference layout); the PE32+ loader is checked structurally (it boots in tests/os);
 # link errors are diagnosed. GNU ld is only the reference here: no build step uses it past the seed.
 cd "$(dirname "$0")/../.."
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
@@ -27,10 +27,12 @@ for o in build/user/*.o; do
   [ -f "$o" ] || continue; p=$(basename ${o%.o})
   ld -static -nostdlib -e _start -z noexecstack -z separate-code -o $T/u.ld $o && $FLD -o $T/u.fld $o && same user/$p $T/u.ld $T/u.fld
 done
-# kernel: GNU ld with the reference linker script + krel.py two-pass table vs fld --format kernel
+# kernel: GNU ld with the reference linker script + krel (tools/krel.forge; tests/krel checks it against krel.py)
+# two-pass table vs fld --format kernel
+build/forgec tools/krel.forge $T/krel.fs.s && build/fas -o $T/krel.fs.o $T/krel.fs.s && build/fld -o $T/krel $T/krel.fs.o || { echo "FAIL fld krel-build"; fail=1; }
 for k in kernel kernel-next; do
   o=build/kernel/$k.o; [ -f $o ] || continue
-  ld -n -q -T examples/kernel/linker.ld -o $T/k1.elf $o && python3 tools/krel.py $T/k1.elf $T/krel.s >/dev/null &&
+  ld -n -q -T examples/kernel/linker.ld -o $T/k1.elf $o && $T/krel $T/k1.elf $T/krel.s >/dev/null &&
     as -o $T/krel.o $T/krel.s && ld -n -T examples/kernel/linker.ld -o $T/k.ld $o $T/krel.o &&
     $FLD --format kernel -o $T/k.fld $o && same kernel/$k $T/k.ld $T/k.fld
 done

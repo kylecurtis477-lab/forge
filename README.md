@@ -144,3 +144,11 @@ Subsystem docs (design, formats, APIs, tests, limits):
 - **Still missing:** there is no SSA/linear IR and no linear-scan allocator (locals still go to rbx/r12-r15 first-come). List elements are not typed, so `lists` still uses tag-checked adds and bounds checks. The compiler still uses as/ld; it does not emit ELF itself. Explicit `Base.__init__(self, ...)` calls are not supported, and Optional types are not narrowed by control flow.
 
 Benchmarks (best of 5): see bench/results.md.
+
+## All-Forge tooling
+
+Policy: every tool that can be written in Forge is written in Forge (one language to build, debug and troubleshoot). Python tools are ported one per commit and must reproduce the Python original byte-for-byte on representative inputs before any script switches over.
+
+| tool | Forge source | status | verified by |
+|---|---|---|---|
+| krel (kernel .krel table, KASLR reference) | `tools/krel.forge` | ported; tests/fld uses it; `tools/krel.py` kept as the reference for tests/krel | `tests/krel/run.sh` ([docs/tools-krel.md](docs/tools-krel.md)) |

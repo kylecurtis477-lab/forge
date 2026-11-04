@@ -303,3 +303,8 @@ Each phase is finished, tested, and committed before the next one starts. The si
 ### 9.0 carry-overs (done)
 - UEFI OS-test load timeout raised 180s -> 360s (tests/os/run.sh).
 - New ring-3 `examples/user/badptr.forge`: probes every pointer-taking syscall with 4 bad pointers (HHDM, kernel text, USER_TOP-straddling, USER_TOP); 56 probes, all EFAULT; verifies queued message survives failed recv and zombie survives failed wait. Found and fixed: `sys_chan_send` returned EINVAL for a bad buffer, now EFAULT.
+
+## All-Forge tooling (porting Python tools to Forge)
+
+Directive: everything that can be Forge is Forge. One tool per commit, verified byte-identical against the Python original, then build/test scripts switch to the Forge build. Remaining Python: tools/mkfont.py (needs a TrueType rasterizer), tools/forge-part.py, examples/efi/mkgpt.py (random GUIDs: needs a seed/GUID option for byte comparison), tools/grammar_fuzz.py, tools/ed25519.py, tools/forgeseal.py, test helpers.
+- krel — *Status: done.* `tools/krel.forge` (`krel KERNEL.ELF OUT.s`). tests/krel/run.sh (in run_tests.sh) compares OUT.s, stdout and exit code with tools/krel.py on kernel and kernel-next (15 entries each), a synthetic high-half image with all three kinds, a low-only image (empty table) and an R_X86_64_32-to-high-half error image. tests/fld/run.sh now builds and uses krel.forge for its GNU-ld reference link. krel.py is kept only as the comparison reference.
