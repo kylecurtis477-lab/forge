@@ -32,4 +32,16 @@ same default
 same failing tests/testblocks/failing.forge
 same build-fail $T/bad.forge
 same timeout $T/spin.forge
+# build/forge_verify (tools/forge_verify.forge) must match tools/forge_verify.sh (the reference): same JSON
+# and exit code for the default set, fmt and parse failures, a failing test block and --unsafe-report
+vsame() { # name args...
+  n=$1; shift
+  build/forge_verify "$@" > $T/f2; r1=$?; tools/forge_verify.sh "$@" > $T/s2; r2=$?
+  [ $r1 = $r2 ] && cmp -s $T/f2 $T/s2 && ok "forge-verify-matches-sh-$n" || no "forge-verify-matches-sh-$n"
+}
+vsame default
+vsame fmt $T/ugly.forge
+vsame parse $T/bad.forge
+vsame failing-test tests/testblocks/failing.forge
+vsame unsafe-report --unsafe-report examples/user/cat.forge
 rm -rf $T; exit $fail

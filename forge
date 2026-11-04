@@ -2,14 +2,20 @@
 # forge <file.forge> [-o out] : compile with the self-hosted compiler, then assemble+link (tools/fas + tools/fld)
 set -e
 D="$(cd "$(dirname "$0")" && pwd)"
-# forge test [files] / forge verify [files] : JSON reports (tools/forge_test.forge, tools/forge_verify.sh;
-# tools/forge_test.sh is kept as the reference)
+# forge test [files] / forge verify [files] : JSON reports (tools/forge_test.forge, tools/forge_verify.forge;
+# tools/forge_test.sh and tools/forge_verify.sh are kept as the references)
 if [ "$1" = "test" ]; then
   shift
   [ "$D/build/forge_test" -nt "$D/tools/forge_test.forge" ] || "$0" "$D/tools/forge_test.forge" -o "$D/build/forge_test" >&2
   exec "$D/build/forge_test" "$@"
 fi
-[ "$1" = "verify" ] && { shift; exec "$D/tools/forge_verify.sh" "$@"; }
+if [ "$1" = "verify" ]; then
+  shift
+  [ "$D/build/forge_test" -nt "$D/tools/forge_test.forge" ] || "$0" "$D/tools/forge_test.forge" -o "$D/build/forge_test" >&2
+  [ "$D/build/fmt" -nt "$D/tools/fmt.forge" ] || "$0" "$D/tools/fmt.forge" -o "$D/build/fmt" >&2
+  [ "$D/build/forge_verify" -nt "$D/tools/forge_verify.forge" ] || "$0" "$D/tools/forge_verify.forge" -o "$D/build/forge_verify" >&2
+  exec "$D/build/forge_verify" "$@"
+fi
 # forge pkg [--registry DIR] lock | build [-o OUT] | sha256 FILE... : package manager (tools/pkg.forge).
 # Run in a project directory (forge.toml). Registry: --registry, else $FORGE_REGISTRY, else ./registry.
 # build stages the locked sources into target/stage, compiles the main module to target/<main>

@@ -1,0 +1,172 @@
+# forge verify [--unsafe-report] [files...]: Forge port of tools/forge_verify.sh (kept as the reference;
+# tests/testblocks/run.sh compares them). One gate over the checkers that exist today, per file:
+#   parse  - strict frozen-grammar parser (forgec --emit=ast-json)
+#   fmt    - canonical formatting (build/fmt --check)
+#   build  - full compile: typecheck + codegen + fas + fld (forgec, plus $FORGEC_FLAGS)
+#   test   - every `test "name":` block passes (build/forge_test), if the file has any
+#   unsafe - with --unsafe-report: freestanding files get the unsafe-region summary (functions, blocks, ops, asm)
+# Prints one JSON report and exits 1 if any check fails. Default set: tests/unit/*.forge.
+# build/fmt and build/forge_test must exist (the forge driver builds them on demand). One deliberate
+# difference from the shell: fas/fld write some errors to stdout, which the shell let into the JSON stream;
+# here their stdout is discarded, so the report stays valid JSON (the build check is "fail" either way).
+import os
+import sys
+
+def esc(s):
+    s = s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\t", "\\t")
+    return s.replace("\r", "").replace("\n", "")
+
+def first_line(s):
+    i = s.find("\n")
+    if i < 0:
+        return s
+    return s[:i]
+
+def repo_root():
+    me = sys.argv[0]
+    here = os.getcwd()
+    if me.find("/") >= 0:
+        os.chdir(os.path.dirname(me) + "/..")
+    else:
+        os.chdir("..")
+    d = os.getcwd()
+    os.chdir(here)
+    return d
+
+def unesc_at(s, i):
+# read a JSON string body starting at i (after the opening quote): [text, index after the closing quote]
+    out = ""
+    while i < len(s) and s[i] != "\"":
+        if s[i] == "\\" and i + 1 < len(s):
+            c = s[i + 1]
+            if c == "t":
+                out += "\t"
+            else:
+                out += c
+            i += 2
+        else:
+            out += s[i]
+            i += 1
+    return [out, i + 1]
+
+def test_summary(js):
+# what forge_verify.sh's python one-liner printed: "<failed> failing: name, name"
+    fk = "\"failed\":"
+    j = js.rfind(fk) + len(fk)
+    k = j
+    while k < len(js) and js[k] >= "0" and js[k] <= "9":
+        k += 1
+    bad = []
+    key = "{\"name\":\""
+    i = js.find(key)
+    while i >= 0:
+        r = unesc_at(js, i + len(key))
+        if not js[r[1]:].startswith(",\"status\":\"pass\""):
+            bad.append(r[0])
+        i = js.find(key, r[1])
+    return js[j:k] + " failing: " + ", ".join(bad)
+
+class Rep:
+    def __init__(self):
+        self.out = ""
+        self.cf = True
+        self.bad = False
+
+    def ck(self, name, status, msg=None):
+        if status != "ok" and status != "skip":
+            self.bad = True
+        if not self.cf:
+            self.out += ","
+        self.cf = False
+        if msg is not None and msg != "":
+            self.out += "\"" + name + "\":{\"status\":\"" + status + "\",\"message\":\"" + esc(msg) + "\"}"
+        else:
+            self.out += "\"" + name + "\":{\"status\":\"" + status + "\"}"
+
+def main():
+    D = repo_root()
+    args = sys.argv[1:]
+    ur = False
+    if len(args) > 0 and args[0] == "--unsafe-report":
+        ur = True
+        args = args[1:]
+    if len(args) == 0:
+        for n in sorted(os.listdir(D + "/tests/unit")):
+            if n.endswith(".forge"):
+                args.append(D + "/tests/unit/" + n)
+    flags = []
+    for w in os.getenv("FORGEC_FLAGS", "").split(" "):
+        if w != "":
+            flags.append(w)
+    T = D + "/build/forge_verify.tmp"
+    if not os.path.isdir(T):
+        os.mkdir(T)
+    fc = D + "/build/forgec"
+    rep = Rep()
+    rep.out = "{\"forge_verify\":1,\"files\":["
+    first = True
+    for f in args:
+        if not first:
+            rep.out += ","
+        first = False
+        rep.out += "{\"file\":\"" + esc(f) + "\",\"checks\":{"
+        rep.cf = True
+        r = os.run([fc, f, T + "/a.json", "--emit=ast-json"])
+        if r[0] == 0:
+            rep.ck("parse", "ok")
+        else:
+            rep.ck("parse", "fail", first_line(r[2]))
+        r = os.run([D + "/build/fmt", "--check", f], merge=True)
+        if r[0] == 0:
+            rep.ck("fmt", "ok")
+        else:
+            rep.ck("fmt", "fail", first_line(r[1]))
+        r = os.run([fc, f, T + "/b.s"] + flags)
+        e = r[2]
+        ok = r[0] == 0
+        if ok:
+            r = os.run([D + "/build/fas", "-o", T + "/b.o", T + "/b.s"])
+            e += r[2]
+            ok = r[0] == 0
+        if ok:
+            r = os.run([D + "/build/fld", "--base", "0x100000000000", "-o", T + "/b", T + "/b.o"])
+            e += r[2]
+            ok = r[0] == 0
+        if ok:
+            rep.ck("build", "ok")
+        else:
+            rep.ck("build", "fail", first_line(e))
+        src = read_file(f)
+        if src is not None and (src.startswith("test \"") or src.find("\ntest \"") >= 0):
+            r = os.run([D + "/build/forge_test", f])
+            if r[0] == 0:
+                rep.ck("test", "ok")
+            else:
+                rep.ck("test", "fail", test_summary(r[1]))
+        else:
+            rep.ck("test", "skip")
+        if ur:
+            wd = os.path.dirname(f)
+            if wd == "":
+                wd = "."
+            r = os.run([fc, os.path.basename(f), T + "/u.s", "--unsafe-report"], cwd=wd, merge=True)
+            u = []
+            for l in r[1].split("\n"):
+                if l.startswith("unsafe: ") and l.find(" functions") > 8 and l[8:l.find(" functions")].isdigit():
+                    u.append(l)
+            if len(u) > 0:
+                rep.ck("unsafe", "ok", "\n".join(u)[8:])
+            else:
+                rep.ck("unsafe", "skip", "hosted or did not build")
+        rep.out += "}}"
+    ok_s = "true"
+    if rep.bad:
+        ok_s = "false"
+    print(rep.out + "],\"ok\":" + ok_s + "}")
+    for n in os.listdir(T):
+        os.remove(T + "/" + n)
+    if rep.bad:
+        return 1
+    return 0
+
+exit(main())
