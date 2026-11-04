@@ -152,7 +152,7 @@ Generic defs/structs are recorded at prescan and skipped; an instance is created
 
 ### Grammar freeze
 - docs/GRAMMAR.md is the frozen grammar (v1); the strict `a_*` parser behind `--emit=ast-json` is its reference implementation, and changing either needs a version bump of both.
-- tests/grammar/{valid,invalid} plus tools/grammar_fuzz.py (`--seed N --n COUNT`, writes to build/fuzz) check it; see BUILD_PLAN Phase 3 item 3.
+- tests/grammar/{valid,invalid} plus tools/grammar_fuzz.forge (reference: grammar_fuzz.py; `--seed N --n COUNT`, writes to build/fuzz) check it; see BUILD_PLAN Phase 3 item 3.
 
 ### AST export (`--emit=ast-json`, `--emit=pretty`)
 - Entry: `forge_main` sees the flag and calls `ast_main`, which lexes only the named file with `ast_raw=1` (`add_id` then skips std-module renaming), parses it with `ast_parse` into flat node arrays (`ak` kind, `av` value, `al` line, `acs`/`acn` child slice into `akid`), and writes JSON (`ast_json`) or source (`pp_s`/`pp_e`).

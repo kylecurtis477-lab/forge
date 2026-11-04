@@ -133,7 +133,7 @@ param       = ['*' | '**'] NAME [':' test if t] ['=' test if no star] | '*'
   rejected with E0105-class diagnostics (`tests/grammar/run.sh`).
 - Every example, kernel source, tool, test and the compiler itself must parse
   (tests/ast/roundtrip.sh).
-- `tools/grammar_fuzz.py` generates random programs from this grammar (must parse and
+- `tools/grammar_fuzz.forge` (port of the reference `tools/grammar_fuzz.py`) generates random programs from this grammar (must parse and
   round-trip) and mutations that break a rule in a known way (must be rejected).
 
 ## Diagnostics note: mismatched closers in call arguments
