@@ -17,7 +17,7 @@ $T/c.fld selfhost/forgec.forge $T/c.s && cmp -s $T/c.s build/stage3.s && echo "P
 bad=0; n=0
 for t in tests/*.forge; do
   build/forgec "$t" $T/t.s $FORGEC_FLAGS >/dev/null 2>&1 || continue
-  build/fas -o $T/t.o $T/t.s && ld -o $T/t.ld $T/t.o && $FLD -o $T/t.fld $T/t.o || { echo "  link: $t"; bad=1; continue; }
+  build/fas -o $T/t.o $T/t.s && ld -Ttext-segment=0x100000000000 -o $T/t.ld $T/t.o && $FLD --base 0x100000000000 -o $T/t.fld $T/t.o || { echo "  link: $t"; bad=1; continue; }
   python3 tests/fld/memimg.py $T/t.ld $T/t.fld | grep -q '^SAME' || { echo "  differs: $t"; bad=1; }
   n=$((n+1))
 done
@@ -29,7 +29,7 @@ for o in build/user/*.o; do
 done
 # kernel: GNU ld with the reference linker script + krel (tools/krel.forge; tests/krel checks it against krel.py)
 # two-pass table vs fld --format kernel
-build/forgec tools/krel.forge $T/krel.fs.s && build/fas -o $T/krel.fs.o $T/krel.fs.s && build/fld -o $T/krel $T/krel.fs.o || { echo "FAIL fld krel-build"; fail=1; }
+build/forgec tools/krel.forge $T/krel.fs.s && build/fas -o $T/krel.fs.o $T/krel.fs.s && build/fld --base 0x100000000000 -o $T/krel $T/krel.fs.o || { echo "FAIL fld krel-build"; fail=1; }
 for k in kernel kernel-next; do
   o=build/kernel/$k.o; [ -f $o ] || continue
   ld -n -q -T examples/kernel/linker.ld -o $T/k1.elf $o && $T/krel $T/k1.elf $T/krel.s >/dev/null &&
