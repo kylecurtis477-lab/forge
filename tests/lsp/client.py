@@ -67,17 +67,26 @@ def check(name, cond, detail=""):
         print("FAIL lsp/" + name + " " + str(detail)[:400])
 
 def pos_of(text, needle, nth=0, off=0):
+    # LSP position (UTF-16 code units) of the nth occurrence of needle, plus off characters
     i = -1
     for _ in range(nth + 1):
         i = text.index(needle, i + 1)
     i += off
     line = text.count("\n", 0, i)
-    return {"line": line, "character": i - (text.rfind("\n", 0, i) + 1)}
+    pre = text[text.rfind("\n", 0, i) + 1:i]
+    return {"line": line, "character": len(pre.encode("utf-16-le")) // 2}
+
+def rng(text, needle, nth=0, off=0, n=None):
+    a = pos_of(text, needle, nth, off)
+    return {"start": a, "end": {"line": a["line"], "character": a["character"] + (n if n is not None else len(needle) - off)}}
+
+def stats():
+    return request("forge/stats", None)["result"]["compiles"]
 
 try:
     r = request("initialize", {"processId": None, "rootUri": uri(proj), "capabilities": {}})
     caps = r.get("result", {}).get("capabilities", {})
-    check("initialize", caps.get("definitionProvider") and caps.get("hoverProvider") and caps.get("textDocumentSync", {}).get("change") == 1, r)
+    check("initialize", caps.get("definitionProvider") and caps.get("hoverProvider") and caps.get("textDocumentSync", {}).get("change") == 2 and caps.get("referencesProvider") and caps.get("renameProvider") and "." in caps.get("completionProvider", {}).get("triggerCharacters", []), r)
     notify("initialized", {})
     text = open(MAIN).read()
     notify("textDocument/didOpen", {"textDocument": {"uri": uri(MAIN), "languageId": "forge", "version": 1, "text": text}})
@@ -137,6 +146,90 @@ try:
     check("hover-imported-function", h and "def shout(s: str) -> str" in h and "Upper-case s" in h and "util.forge:1" in h, h)
     h = hover("a + b", 0, 0)
     check("hover-parameter-type", h and "(parameter) a: int" in h, h)
+
+    # attributes: self.x / self.m inside a class, obj.m on an annotated parameter or C() variable
+    r = defn("inc(2", 0, 1)
+    check("definition-attr-constructed-var", r and r["uri"] == uri(UTIL) and r["range"]["start"] == pos_of(ut, "inc("), r)
+    r = defn("inc(1", 0, 1)
+    check("definition-attr-annotated-param", r and r["uri"] == uri(UTIL) and r["range"]["start"] == pos_of(ut, "inc("), r)
+    h = hover("inc(2", 0, 1)
+    check("hover-method", h and "def inc(self, k: int) -> int" in h and "Add k and return" in h, h)
+    notify("textDocument/didOpen", {"textDocument": {"uri": uri(UTIL), "languageId": "forge", "version": 1, "text": ut}})
+    d = diags_for(uri(UTIL))
+    r = request("textDocument/definition", {"textDocument": {"uri": uri(UTIL)}, "position": pos_of(ut, "self.n + k", 0, 5)}).get("result")
+    check("definition-self-attribute", r and r["uri"] == uri(UTIL) and r["range"]["start"] == pos_of(ut, "n = 0"), r)
+
+    # UTF-16 positions: a name after non-ASCII text (é = 1 unit / 2 bytes, emoji = 2 units / 4 bytes)
+    r = defn("add(1, 2", 0, 1)
+    check("utf16-definition-after-emoji", r and r["range"]["start"] == pos_of(text, "add(a"), r)
+    r = request("textDocument/references", {"textDocument": {"uri": uri(MAIN)}, "position": pos_of(text, "greet,", 0, 1), "context": {"includeDeclaration": True}}).get("result")
+    check("utf16-reference-ranges", r and sorted(x["range"]["start"]["character"] for x in r) == [0, pos_of(text, "greet,")["character"]] and all(x["range"]["end"]["character"] - x["range"]["start"]["character"] == 5 for x in r), r)
+
+    # references and rename across modules
+    r = request("textDocument/references", {"textDocument": {"uri": uri(MAIN)}, "position": pos_of(text, "add(i", 0, 1), "context": {"includeDeclaration": True}}).get("result")
+    got = sorted((x["uri"], x["range"]["start"]["line"], x["range"]["start"]["character"]) for x in (r or []))
+    want = sorted((uri(MAIN), p["line"], p["character"]) for p in [pos_of(text, "add(a"), pos_of(text, "add(i"), pos_of(text, "add(1, 2")])
+    check("references-function", got == want, r)
+    r = request("textDocument/references", {"textDocument": {"uri": uri(MAIN)}, "position": pos_of(text, "add(i", 0, 1), "context": {"includeDeclaration": False}}).get("result")
+    check("references-exclude-declaration", r is not None and len(r) == 2, r)
+    r = request("textDocument/references", {"textDocument": {"uri": uri(MAIN)}, "position": pos_of(text, "inc(2", 0, 1), "context": {"includeDeclaration": True}}).get("result")
+    got = sorted((x["uri"], x["range"]["start"]["line"]) for x in (r or []))
+    want = sorted([(uri(UTIL), pos_of(ut, "inc(")["line"]), (uri(MAIN), pos_of(text, "inc(2")["line"]), (uri(MAIN), pos_of(text, "inc(1")["line"])])
+    check("references-method-cross-module", got == want, r)
+    r = request("textDocument/references", {"textDocument": {"uri": uri(MAIN)}, "position": pos_of(text, "a + b", 0, 0), "context": {"includeDeclaration": True}}).get("result")
+    check("references-parameter-scoped", r and sorted(x["range"]["start"]["line"] for x in r) == [pos_of(text, "a: int")["line"], pos_of(text, "a + b")["line"]], r)
+    r = request("textDocument/rename", {"textDocument": {"uri": uri(MAIN)}, "position": pos_of(text, "shout(\"hi", 0, 2), "newName": "yell"}).get("result")
+    ch = (r or {}).get("changes", {})
+    check("rename-cross-module", len(ch.get(uri(MAIN), [])) == 3 and len(ch.get(uri(UTIL), [])) == 1 and all(e["newText"] == "yell" for v in ch.values() for e in v) and {"range": rng(ut, "shout", 0, 0), "newText": "yell"} in ch.get(uri(UTIL), []), r)
+    r = request("textDocument/rename", {"textDocument": {"uri": uri(MAIN)}, "position": pos_of(text, "add(i", 0, 1), "newName": "9bad"})
+    check("rename-invalid-name-error", r.get("error", {}).get("code") == -32602, r)
+
+    # completion
+    def comp(needle, off):
+        r = request("textDocument/completion", {"textDocument": {"uri": uri(MAIN)}, "position": pos_of(text, needle, 0, off)}).get("result")
+        return [i["label"] for i in (r or {}).get("items", [])]
+    c = comp("util.shout(", 5)
+    check("completion-module-members", "shout" in c and "Counter" in c and "add" not in c, c)
+    c = comp("inc(2", 0)
+    check("completion-instance-members", "inc" in c and "n" in c and "__init__" in c, c)
+    c = comp("total = a", 2)
+    check("completion-scope-prefix", "total" in c and "to" not in c and all(x.startswith("to") for x in c), c)
+    c = comp("x.inc(1", 0)
+    check("completion-params-and-globals", "x" in c and "add" in c and "bump" in c and "util" in c and "print" in c, c)
+
+    # incremental sync: range edits; incremental re-check: unchanged text is not recompiled
+    n0 = stats()
+    notify("textDocument/didChange", {"textDocument": {"uri": uri(MAIN), "version": 6}, "contentChanges": [{"range": rng(text, "add(i, 1)", 0, 0, 3), "text": "addd"}]})
+    d = diags_for(uri(MAIN))
+    check("incremental-edit-diagnostic", len(d) == 1 and d[0]["code"] == "E0201" and d[0]["range"]["start"]["line"] == pos_of(text, "add(i")["line"], d)
+    t2 = text.replace("print(add(i, 1))", "print(addd(i, 1))")
+    e = pos_of(t2, "greet,")
+    notify("textDocument/didChange", {"textDocument": {"uri": uri(MAIN), "version": 7}, "contentChanges": [{"range": {"start": e, "end": {"line": e["line"], "character": e["character"] + 5}}, "text": "greet"}, {"range": rng(t2, "addd(i", 0, 0, 4), "text": "add"}]})
+    d = diags_for(uri(MAIN))
+    check("incremental-multi-edit-utf16", d == [], d)
+    n1 = stats()
+    check("recheck-once-per-changed-version", n1 - n0 == 2, (n0, n1))
+    notify("textDocument/didChange", {"textDocument": {"uri": uri(MAIN), "version": 8}, "contentChanges": [{"range": rng(text, "add(i", 0, 0, 3), "text": "add"}]})
+    d = diags_for(uri(MAIN))
+    check("recheck-skips-identical-text", d == [] and stats() == n1, (d, stats()))
+    notify("textDocument/didSave", {"textDocument": {"uri": uri(MAIN)}})
+    d = diags_for(uri(MAIN))
+    check("save-unchanged-no-recompile", d == [] and stats() == n1, stats())
+    r = defn("shout(\"x", 0, 2)
+    r = defn("Counter()", 0, 3)
+    check("module-ast-cached", stats() == n1, stats())
+    # saving an imported module rechecks its open importers
+    with open(UTIL, "w") as f:
+        f.write(ut.replace("def shout(", "def holler("))
+    notify("textDocument/didSave", {"textDocument": {"uri": uri(UTIL)}, "text": ut.replace("def shout(", "def holler(")})
+    seen = {}
+    while len(seen) < 2:
+        m = recv()
+        if m.get("method") == "textDocument/publishDiagnostics":
+            seen[m["params"]["uri"]] = m["params"]["diagnostics"]
+    check("dependent-rechecked-on-save", seen.get(uri(UTIL)) == [] and len(seen.get(uri(MAIN), [])) >= 1 and stats() == n1 + 2, (seen, stats()))
+    with open(UTIL, "w") as f:
+        f.write(ut)
 
     r = request("textDocument/formatting", {"textDocument": {"uri": uri(MAIN)}, "options": {}})
     check("unknown-method-error", r.get("error", {}).get("code") == -32601, r)

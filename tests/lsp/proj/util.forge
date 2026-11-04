@@ -5,3 +5,8 @@ def shout(s: str) -> str:
 class Counter:
     def __init__(self):
         self.n = 0
+
+    def inc(self, k: int) -> int:
+        "Add k and return the new count."
+        self.n = self.n + k
+        return self.n

@@ -1,19 +1,27 @@
 # forge lsp: Language Server Protocol server over stdio (JSON-RPC with Content-Length framing).
 # Built on the compiler's JSON outputs: `forgec --emit=ast-json` for the syntax tree and
-# `--diagnostics=json` for errors. Supports initialize/shutdown/exit, full-text
-# didOpen/didChange/didSave/didClose, publishDiagnostics, textDocument/definition (functions,
-# classes, parameters, loop variables and assignments in scope, including `from m import f`,
-# `import m` + `m.f` in sibling modules) and textDocument/hover (the definition's header line and
-# docstring, or a parameter's annotation).
+# `--diagnostics=json` for errors. Supports initialize/shutdown/exit, incremental (range) or
+# full-text didOpen/didChange/didSave/didClose, publishDiagnostics, textDocument/definition
+# (functions, classes, parameters, loop variables and assignments in scope, `from m import f`,
+# `import m` + `m.f` in sibling modules, and attributes: `self.x` / `self.m` in a class,
+# `obj.m` when obj is a parameter annotated with a class or a variable assigned `C(...)`),
+# textDocument/hover (the definition's header line and docstring, or a parameter's annotation),
+# textDocument/references, textDocument/rename and textDocument/completion (names in scope,
+# module members after `m.`, class members after `self.` / `obj.`), plus forge/stats (compile count).
 # usage: lsp FORGEC     (FORGEC = absolute path of the compiler; `forge lsp` passes build/forgec)
 # An unsaved buffer is compiled from a hidden sibling file (.<name>.lsp<pid>.forge, deleted right
-# after) so its imports resolve the same way as on disk. Positions assume ASCII (UTF-16 = bytes).
+# after) so its imports resolve the same way as on disk.
+# Incremental re-check: a document is recompiled only when its text changed since its last check
+# (or a module it imports was saved); sibling modules are parsed once per on-disk text and cached.
+# Positions on the wire are UTF-16 code units, converted to and from the byte offsets used inside.
 
 import sys
 
 FORGEC = [""]
 DOCS = {}
 PID = [0]
+MODS = {}
+STATS = {"compiles": 0}
 
 # ---------------- JSON ----------------
 def jskip(s, i):
@@ -282,6 +290,7 @@ def compile_doc(path, text):
         write_text(tmp, text)
         src = tmp
     T = "/tmp/forge-lsp-" + str(PID[0])
+    STATS["compiles"] = STATS["compiles"] + 1
     run_sh(shq(FORGEC[0]) + " " + shq(src) + " " + T + ".ast --emit=ast-json --diagnostics=json > " + T + ".d1 2>&1")
     d = file_text(T + ".d1")
     ast = None
@@ -308,9 +317,108 @@ def compile_doc(path, text):
             diags.append({"line": 1, "col": 1, "end_line": 1, "end_col": 1, "code": "E0000", "message": "compiler failed: " + l, "severity": "error"})
     return [ast, diags]
 
+# ---------------- positions: UTF-16 on the wire, bytes inside ----------------
+def u16_to_b(s, ch):
+# byte offset in line s of UTF-16 column ch
+    b = 0
+    u = 0
+    while b < len(s) and u < ch:
+        c = ord(s[b])
+        if c >= 240:
+            u += 2
+            b += 4
+        elif c >= 224:
+            u += 1
+            b += 3
+        elif c >= 192:
+            u += 1
+            b += 2
+        else:
+            u += 1
+            b += 1
+    if b > len(s):
+        b = len(s)
+    return b
+
+def b_to_u16(s, b):
+# UTF-16 column of byte offset b in line s
+    u = 0
+    i = 0
+    while i < b and i < len(s):
+        c = ord(s[i])
+        if c >= 240:
+            u += 2
+        elif c < 128 or c >= 192:
+            u += 1
+        i += 1
+    return u
+
+def line_of(text, n):
+    ls = text.split("\n")
+    if n < 0 or n >= len(ls):
+        return ""
+    return ls[n]
+
+def lsp_pos(text, line, b):
+# 0-based line and byte column -> LSP position
+    return {"line": line, "character": b_to_u16(line_of(text, line), b)}
+
+def offset_of(text, pos):
+# LSP position -> byte offset in text (clamped)
+    ls = text.split("\n")
+    ln = pos["line"]
+    if ln >= len(ls):
+        return len(text)
+    o = 0
+    i = 0
+    while i < ln:
+        o += len(ls[i]) + 1
+        i += 1
+    return o + u16_to_b(ls[ln], pos["character"])
+
+def apply_change(text, c):
+# one contentChanges entry: a range edit, or the full text when there is no range
+    if not ("range" in c) or c["range"] == None:
+        return c["text"]
+    a = offset_of(text, c["range"]["start"])
+    b = offset_of(text, c["range"]["end"])
+    if b < a:
+        b = a
+    return text[:a] + c["text"] + text[b:]
+
+def imports_of(ast):
+# module names imported at top level
+    r = []
+    if ast == None:
+        return r
+    for st in kids(ast):
+        if st["k"] == "ImportFrom":
+            r.append(st["v"])
+        elif st["k"] == "Import":
+            for a in kids(st):
+                if a["k"] == "Alias":
+                    r.append(a["v"])
+    return r
+
+def recheck_dependents(uri):
+# a saved module changes what its importers compile against: recheck the open ones
+    p = uri_path(uri)
+    mod = basename(p)
+    if mod.endswith(".forge"):
+        mod = mod[:len(mod) - 6]
+    for u in DOCS:
+        if u != uri and dirname(uri_path(u)) == dirname(p) and mod in imports_of(DOCS[u].get("ast", None)):
+            DOCS[u]["checked"] = None
+            publish(u)
+
 def publish(uri):
     doc = DOCS[uri]
+    if doc.get("checked", None) == doc["text"] and "diags" in doc:
+    # unchanged since the last check: republish without recompiling
+        send({"method": "textDocument/publishDiagnostics", "params": {"uri": uri, "diagnostics": doc["diags"]}})
+        return
     r = compile_doc(uri_path(uri), doc["text"])
+    doc["checked"] = doc["text"]
     if r[0] != None:
         doc["ast"] = r[0]
     out = []
@@ -323,7 +431,9 @@ def publish(uri):
         sev = 1
         if j["severity"] == "warning":
             sev = 2
-        out.append({"range": {"start": {"line": j["line"] - 1, "character": j["col"] - 1}, "end": {"line": el - 1, "character": ec - 1}}, "severity": sev, "code": j["code"], "source": "forgec", "message": j["message"]})
+        t = doc["text"]
+        out.append({"range": {"start": lsp_pos(t, j["line"] - 1, j["col"] - 1), "end": lsp_pos(t, el - 1, ec - 1)}, "severity": sev, "code": j["code"], "source": "forgec", "message": j["message"]})
+    doc["diags"] = out
     send({"method": "textDocument/publishDiagnostics", "params": {"uri": uri, "diagnostics": out}})
 
 # ---------------- AST queries ----------------
@@ -446,9 +556,12 @@ def module_ast(dir, mod):
     t = file_text(p)
     if t == None:
         return None
+    if p in MODS and MODS[p][0] == t:
+        return [p, MODS[p][1], t]
     r = compile_doc(p, t)
     if r[0] == None:
         return None
+    MODS[p] = [t, r[0]]
     return [p, r[0], t]
 
 def find_def(path, ast, text, line, word, qual, depth):
@@ -463,6 +576,11 @@ def find_def(path, ast, text, line, word, qual, depth):
                 m = module_ast(dirname(path), qual)
                 if m != None:
                     return find_def(m[0], m[1], m[2], 0, word, "", depth + 1)
+        c = class_of(path, ast, text, line, qual, depth)
+        if c != None:
+            o = class_member(c[3], word)
+            if o != None:
+                return finish(c[0], c[1], o, word, depth + 1)
         return None
     chain = []
     enclosing(kids(ast), line, chain)
@@ -501,6 +619,284 @@ def finish(path, text, o, word, depth):
     if k == "Def":
         after = text.split("\n")[o[2] - 1].find("def ")
     return [path, text, k, n, o[2], name_col(text, o[2], word, after)]
+
+def self_attrs(stmts, out):
+# `self.x = ...` assignments anywhere in a method body -> out gets [name, node]
+    for st in stmts:
+        k = st["k"]
+        if k == "Assign" or k == "AnnAssign" or k == "AugAssign":
+            t = kids(st)[0]
+            if t["k"] == "Attr" and kids(t)[0]["k"] == "Name" and kids(t)[0]["v"] == "self":
+                out.append([t["v"], st])
+        if k != "Def" and k != "Class":
+            for c in kids(st):
+                if c["k"] == "Block":
+                    self_attrs(kids(c), out)
+                elif c["k"] in ["If", "Elif", "Else", "Except", "Finally", "Try", "For", "While", "With"]:
+                    self_attrs([c], out)
+
+def class_members(cls):
+# [kind, name, node] for methods, class-level assignments and self attributes of a class
+    r = []
+    seen = []
+    for st in def_block(cls):
+        if st["k"] == "Def" and not (st["v"] in seen):
+            r.append(["Def", st["v"], st])
+            seen.append(st["v"])
+        elif st["k"] == "Assign" or st["k"] == "AnnAssign":
+            ts = []
+            bind_targets(kids(st)[0], ts)
+            for t in ts:
+                if not (t["v"] in seen):
+                    r.append(["Var", t["v"], st])
+                    seen.append(t["v"])
+    for st in def_block(cls):
+        if st["k"] == "Def":
+            out = []
+            self_attrs(def_block(st), out)
+            for o in out:
+                if not (o[0] in seen):
+                    r.append(["Var", o[0], o[1]])
+                    seen.append(o[0])
+    return r
+
+def class_member(cls, word):
+# -> [kind, node, line] as scope_defs gives, or None
+    for m in class_members(cls):
+        if m[1] == word:
+            return [m[0], m[2], m[2]["l"]]
+    return None
+
+def class_name_of(n):
+# the class named by a type annotation or a constructor call target: Name C or Attr m.C
+    if n["k"] == "Name":
+        return ["", n["v"]]
+    if n["k"] == "Attr" and kids(n)[0]["k"] == "Name":
+        return [kids(n)[0]["v"], n["v"]]
+    return None
+
+def class_of(path, ast, text, line, qual, depth):
+# the class a qualifier refers to: `self` in a method, a parameter annotated with a class, a
+# variable assigned `C(...)`, or the class itself -> find_def-style result with kind Class, or None
+    if depth > 4:
+        return None
+    if qual == "self":
+        chain = []
+        enclosing(kids(ast), line, chain)
+        i = len(chain) - 1
+        while i >= 0:
+            if chain[i]["k"] == "Class":
+                return [path, text, "Class", chain[i], chain[i]["l"], 0]
+            i -= 1
+        return None
+    r = find_def(path, ast, text, line, qual, "", depth + 1)
+    if r == None:
+        return None
+    if r[2] == "Class":
+        return r
+    cn = None
+    if r[2] == "Param":
+        ann = kids(r[3])[0]
+        if ann["k"] != "Empty":
+            cn = class_name_of(ann)
+    elif r[2] == "Var":
+        st = r[3]
+        if (st["k"] == "Assign" or st["k"] == "AnnAssign") and len(kids(st)) > 1:
+            v = kids(st)[len(kids(st)) - 1]
+            if v["k"] == "Call":
+                cn = class_name_of(kids(v)[0])
+    if cn == None:
+        return None
+    a2 = ast
+    if r[0] != path:
+        m = module_ast(dirname(r[0]), basename(r[0])[:len(basename(r[0])) - 6])
+        if m == None:
+            return None
+        a2 = m[1]
+    c = find_def(r[0], a2, r[1], r[4], cn[1], cn[0], depth + 1)
+    if c != None and c[2] == "Class":
+        return c
+    return None
+
+# ---------------- references, rename, completion ----------------
+def ident_ch(c):
+    return c.isalnum() or c == "_"
+
+def occurrences(text, word):
+# [line, byte col] of whole-word occurrences outside comments and string literals
+    r = []
+    ls = text.split("\n")
+    ln = 0
+    while ln < len(ls):
+        s = ls[ln]
+        i = 0
+        q = ""
+        while i < len(s):
+            c = s[i]
+            if q != "":
+                if c == "\\":
+                    i += 1
+                elif c == q:
+                    q = ""
+            elif c == "#":
+                break
+            elif c == "\"" or c == "'":
+                q = c
+            elif ident_ch(c) and (i == 0 or not ident_ch(s[i - 1])):
+                j = i
+                while j < len(s) and ident_ch(s[j]):
+                    j += 1
+                if s[i:j] == word:
+                    r.append([ln, i])
+                i = j - 1
+            i += 1
+        ln += 1
+    return r
+
+def doc_for(path):
+# [text, ast] of an open document or a cached sibling module
+    for u in DOCS:
+        if uri_path(u) == path and "ast" in DOCS[u]:
+            return [DOCS[u]["text"], DOCS[u]["ast"]]
+    m = module_ast(dirname(path), basename(path)[:len(basename(path)) - 6])
+    if m == None:
+        return None
+    return [m[2], m[1]]
+
+def project_files(path):
+# the .forge files next to path (open documents first), excluding hidden files
+    r = [path]
+    for u in DOCS:
+        p = uri_path(u)
+        if dirname(p) == dirname(path) and not (p in r):
+            r.append(p)
+    T = "/tmp/forge-lsp-" + str(PID[0]) + ".ls"
+    run_sh("ls " + shq(dirname(path)) + " > " + T + " 2>/dev/null")
+    l = file_text(T)
+    run_sh("rm -f " + T)
+    if l != None:
+        for f in l.split("\n"):
+            if f.endswith(".forge") and not f.startswith("."):
+                p = dirname(path) + "/" + f
+                if not (p in r):
+                    r.append(p)
+    return r
+
+def references(path, target, word):
+# every occurrence of word, in path and its sibling modules, that resolves to the target definition
+    out = []
+    for f in project_files(path):
+        d = doc_for(f)
+        if d != None:
+            for oc in occurrences(d[0], word):
+                w = word_at(d[0], oc[0], oc[1])
+                r = None
+                if f == target[0] and oc[0] + 1 == target[4] and oc[1] == target[5]:
+                # the declaration itself (a method name does not resolve from module scope)
+                    r = target
+                else:
+                    r = find_def(f, d[1], d[0], oc[0] + 1, w[0], w[1], 0)
+                if r != None and r[0] == target[0] and r[4] == target[4] and r[5] == target[5]:
+                    st = lsp_pos(d[0], oc[0], oc[1])
+                    en = lsp_pos(d[0], oc[0], oc[1] + len(word))
+                    out.append({"uri": path_uri(f), "range": {"start": st, "end": en}})
+    return out
+
+BUILTINS = ["print", "len", "range", "str", "int", "float", "bool", "list", "dict", "set", "tuple", "open", "isinstance", "min", "max", "abs", "sum", "sorted", "reversed", "enumerate", "zip", "map", "filter", "any", "all", "ord", "chr", "repr", "hash", "iter", "next", "input", "exit", "True", "False", "None"]
+
+def all_names(stmts, out):
+# [name, kind] for every binding among statements (blocks included, nested defs excluded)
+    for st in stmts:
+        k = st["k"]
+        if k == "Def" or k == "Class":
+            out.append([st["v"], k])
+        elif k == "Assign" or k == "AnnAssign" or k == "AugAssign" or k == "For":
+            ts = []
+            bind_targets(kids(st)[0], ts)
+            for t in ts:
+                out.append([t["v"], "Var"])
+        elif k == "Import":
+            for a in kids(st):
+                if a["k"] == "Alias":
+                    out.append([a["v"], "Module"])
+        elif k == "ImportFrom":
+            for a in kids(st):
+                if a["k"] == "Alias":
+                    out.append([a["v"], "Var"])
+        if k != "Def" and k != "Class":
+            for c in kids(st):
+                if c["k"] == "Block":
+                    all_names(kids(c), out)
+                elif c["k"] in ["If", "Elif", "Else", "Except", "Finally", "Try", "While", "With"]:
+                    all_names([c], out)
+
+KIND = {"Def": 3, "Class": 7, "Var": 6, "Module": 9, "Param": 6, "Method": 2, "Field": 5, "Builtin": 14}
+
+def completions(path, ast, text, line, ch):
+# items for the identifier prefix before byte column ch on 0-based line
+    s = line_of(text, line)
+    a = ch
+    while a > 0 and ident_ch(s[a - 1]):
+        a -= 1
+    pre = s[a:ch]
+    cand = []
+    if a > 0 and s[a - 1] == ".":
+        k = a - 1
+        while k > 0 and ident_ch(s[k - 1]):
+            k -= 1
+        q = s[k:a - 1]
+        top = []
+        scope_defs(kids(ast), q, top, True)
+        mod = None
+        for t in top:
+            if t[0] == "Import":
+                mod = module_ast(dirname(path), q)
+        if mod != None:
+            for st in kids(mod[1]):
+                if st["k"] == "Def" or st["k"] == "Class":
+                    cand.append([st["v"], st["k"]])
+                elif st["k"] == "Assign" or st["k"] == "AnnAssign":
+                    ts = []
+                    bind_targets(kids(st)[0], ts)
+                    for t in ts:
+                        cand.append([t["v"], "Var"])
+        else:
+            c = class_of(path, ast, text, line + 1, q, 0)
+            if c != None:
+                for m in class_members(c[3]):
+                    if m[0] == "Def":
+                        cand.append([m[1], "Method"])
+                    else:
+                        cand.append([m[1], "Field"])
+    else:
+        chain = []
+        enclosing(kids(ast), line + 1, chain)
+        i = len(chain) - 1
+        while i >= 0:
+            d = chain[i]
+            if d["k"] == "Def":
+                for p in params(d):
+                    cand.append([p["v"], "Param"])
+                all_names(def_block(d), cand)
+            i -= 1
+        all_names(kids(ast), cand)
+        for b in BUILTINS:
+            cand.append([b, "Builtin"])
+    items = []
+    seen = []
+    for c in cand:
+        if c[0].startswith(pre) and not (c[0] in seen) and c[0] != pre:
+            seen.append(c[0])
+            items.append({"label": c[0], "kind": KIND[c[1]]})
+    return items
+
+def valid_ident(n):
+    if len(n) == 0 or n[0].isdigit():
+        return False
+    for c in n:
+        if not ident_ch(c):
+            return False
+    return True
 
 def path_uri(p):
     return "file://" + p
@@ -546,7 +942,7 @@ def handle(m):
     mid = m.get("id", None)
     p = m.get("params", {})
     if meth == "initialize":
-        send({"id": mid, "result": {"capabilities": {"textDocumentSync": {"openClose": True, "change": 1, "save": {"includeText": True}}, "definitionProvider": True, "hoverProvider": True}, "serverInfo": {"name": "forge-lsp", "version": "0.1"}}})
+        send({"id": mid, "result": {"capabilities": {"textDocumentSync": {"openClose": True, "change": 2, "save": {"includeText": True}}, "definitionProvider": True, "hoverProvider": True, "referencesProvider": True, "renameProvider": True, "completionProvider": {"triggerCharacters": ["."]}, "positionEncoding": "utf-16"}, "serverInfo": {"name": "forge-lsp", "version": "0.2"}}})
     elif meth == "shutdown":
         send({"id": mid, "result": None})
     elif meth == "exit":
@@ -559,7 +955,10 @@ def handle(m):
         u = p["textDocument"]["uri"]
         ch = p["contentChanges"]
         if u in DOCS and len(ch) > 0:
-            DOCS[u]["text"] = ch[len(ch) - 1]["text"]
+            t = DOCS[u]["text"]
+            for c in ch:
+                t = apply_change(t, c)
+            DOCS[u]["text"] = t
             publish(u)
     elif meth == "textDocument/didSave":
         u = p["textDocument"]["uri"]
@@ -567,23 +966,69 @@ def handle(m):
             if "text" in p:
                 DOCS[u]["text"] = p["text"]
             publish(u)
+            recheck_dependents(u)
     elif meth == "textDocument/didClose":
         u = p["textDocument"]["uri"]
         if u in DOCS:
             DOCS.pop(u)
         send({"method": "textDocument/publishDiagnostics", "params": {"uri": u, "diagnostics": []}})
+    elif meth == "forge/stats":
+        send({"id": mid, "result": {"compiles": STATS["compiles"]}})
+    elif meth == "textDocument/completion":
+        u = p["textDocument"]["uri"]
+        pos = p["position"]
+        res = []
+        if u in DOCS and "ast" in DOCS[u]:
+            doc = DOCS[u]
+            b = u16_to_b(line_of(doc["text"], pos["line"]), pos["character"])
+            res = completions(uri_path(u), doc["ast"], doc["text"], pos["line"], b)
+        send({"id": mid, "result": {"isIncomplete": False, "items": res}})
+    elif meth == "textDocument/references" or meth == "textDocument/rename":
+        u = p["textDocument"]["uri"]
+        pos = p["position"]
+        res = None
+        err = None
+        if u in DOCS and "ast" in DOCS[u]:
+            doc = DOCS[u]
+            b = u16_to_b(line_of(doc["text"], pos["line"]), pos["character"])
+            w = word_at(doc["text"], pos["line"], b)
+            r = find_def(uri_path(u), doc["ast"], doc["text"], pos["line"] + 1, w[0], w[1], 0)
+            if r != None:
+                refs = references(uri_path(u), r, w[0])
+                if meth == "textDocument/references":
+                    if not p.get("context", {}).get("includeDeclaration", True):
+                        keep = []
+                        for x in refs:
+                            if not (x["uri"] == path_uri(r[0]) and x["range"]["start"]["line"] == r[4] - 1):
+                                keep.append(x)
+                        refs = keep
+                    res = refs
+                elif not valid_ident(p.get("newName", "")):
+                    err = "not a valid identifier: " + p.get("newName", "")
+                else:
+                    ch = {}
+                    for x in refs:
+                        if not (x["uri"] in ch):
+                            ch[x["uri"]] = []
+                        ch[x["uri"]].append({"range": x["range"], "newText": p["newName"]})
+                    res = {"changes": ch}
+        if err != None:
+            send({"id": mid, "error": {"code": -32602, "message": err}})
+        else:
+            send({"id": mid, "result": res})
     elif meth == "textDocument/definition" or meth == "textDocument/hover":
         u = p["textDocument"]["uri"]
         pos = p["position"]
         res = None
         if u in DOCS and "ast" in DOCS[u]:
             doc = DOCS[u]
-            w = word_at(doc["text"], pos["line"], pos["character"])
+            b = u16_to_b(line_of(doc["text"], pos["line"]), pos["character"])
+            w = word_at(doc["text"], pos["line"], b)
             r = find_def(uri_path(u), doc["ast"], doc["text"], pos["line"] + 1, w[0], w[1], 0)
             if r != None:
                 if meth == "textDocument/definition":
-                    st = {"line": r[4] - 1, "character": r[5]}
-                    en = {"line": r[4] - 1, "character": r[5] + len(w[0])}
+                    st = lsp_pos(r[1], r[4] - 1, r[5])
+                    en = lsp_pos(r[1], r[4] - 1, r[5] + len(w[0]))
                     res = {"uri": path_uri(r[0]), "range": {"start": st, "end": en}}
                 else:
                     if r[0] == uri_path(u):
