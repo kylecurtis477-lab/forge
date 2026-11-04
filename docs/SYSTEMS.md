@@ -247,11 +247,11 @@ A process holds exactly the capability bits its sealed manifest declares (fs=1, 
 
 ## Ed25519 seal (Phase 6 gap 1)
 - Trailer v2, 160 bytes: +0 "FORGEPRF", +8 version 2, +16 level, +24 unsafe ops, +32 caps, +40 ELF length, +48 own ops, +56 reserved, +64 SHA-256(ELF), +96 Ed25519 signature over trailer[0:96].
-- Build: `forgeseal.py --pub seal.key > seal.pub`; the kernel `.incbin`s seal.pub (uimg(4)). The private seed never leaves build/user.
+- Build: `forgeseal --pub seal.key > seal.pub` (`build/forgeseal` from tools/forgeseal.forge; forgeseal.py is the reference); the kernel `.incbin`s seal.pub (uimg(4)). The private seed never leaves build/user.
 - Kernel: `ed25519_verify(sig, pk, msg, n)` in ed25519.fsi; rejects S >= L and keys that are not curve points. One verification costs two 256-bit scalar multiplications (it adds about 15 s to the whole OS test run, which execs dozens of images).
 
 ## Seal v3 (plan v1.3)
-- Trailer v3, 384 bytes, the default from `tools/forgeseal.py` (`--v2` still writes the 160-byte v2 trailer, which the kernel still accepts): +0 "FORGEPRF", +8 version 3, +16..64 as v2 (level, unsafe ops, caps, ELF length, own ops), +64 SHA-256(ELF), +96..128 reserved proof slot (must be zero, else reason 10), +128 signature count 1..3, +136 zero, then 3 slots of 80 bytes at +144: algorithm ID (1 = Ed25519, the only one implemented; anything else is reason 9), 8-byte key ID, 64-byte signature.
+- Trailer v3, 384 bytes, the default from `tools/forgeseal.forge` / `tools/forgeseal.py` (`--v2` still writes the 160-byte v2 trailer, which the kernel still accepts): +0 "FORGEPRF", +8 version 3, +16..64 as v2 (level, unsafe ops, caps, ELF length, own ops), +64 SHA-256(ELF), +96..128 reserved proof slot (must be zero, else reason 10), +128 signature count 1..3, +136 zero, then 3 slots of 80 bytes at +144: algorithm ID (1 = Ed25519, the only one implemented; anything else is reason 9), 8-byte key ID, 64-byte signature.
 - Signed message (96 bytes, the verifier's limit): trailer[0:64] || SHA-256(trailer[64:144]). The kernel accepts the image if a slot whose key ID matches the built-in key verifies. One `SealTail` view covers v2 (+224) and v3 (+0); net unsafe ops go down by 1.
 - seal_test also checks: a v2 image accepted, an unknown algorithm ID refused (9), a set proof slot refused (10); cat carries a second signature by another key.
 

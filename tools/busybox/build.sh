@@ -47,4 +47,7 @@ cp $T/busybox.config .config
 make oldconfig </dev/null >/dev/null 2>&1
 make -j8 CC=$W/musl/bin/musl-gcc >build.log 2>&1 || { tail -20 build.log; exit 5; }
 python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[7]=3; open(sys.argv[2],'wb').write(d)" busybox "$OUT"
-python3 $T/../forgeseal.py --foreign "$OUT" "$KEY"
+# seal with tools/forgeseal.forge (tools/forgeseal.py is kept as the reference); built here if missing
+S=$T/../../build/forgeseal
+[ -x $S ] || { $T/../../build/forgec $T/../forgeseal.forge $S.s && $T/../../build/fas -o $S.o $S.s && $T/../../build/fld --base 0x100000000000 -o $S $S.o; }
+$S --foreign "$OUT" "$KEY"

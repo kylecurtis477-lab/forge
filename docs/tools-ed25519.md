@@ -22,8 +22,8 @@ The only `@unsafe` code reads argv and makes the syscalls.
 
 ## Status and tests
 
-`tools/ed25519.py` stays as the reference. `tools/forgeseal.py` still imports the Python version, and the seal tool
-has not been ported.
+`tools/ed25519.py` stays as the reference. The keypair step (`ed_key`) and `sc_muladd` live in `tools/ed25519sign.fsi`,
+shared with `tools/forgeseal.forge`, which signs seal trailers with the same code.
 
 tests/ed25519-tool/run.sh compares the output byte for byte with the Python version on 26 vectors and checks the
 RFC 8032 known answers. tests/ed25519 still checks the kernel verifier against `cryptography`.
