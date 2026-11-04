@@ -27,5 +27,7 @@ mcopy -i $B/esp.fat scripts/hello.sh ::/EFI/Forge/docs/hello.sh
 mmd -i $B/esp.fat ::/EFI/Forge/apps
 for a in ../apps/*.mf; do mcopy -i $B/esp.fat $a ::/EFI/Forge/apps/$(basename $a); done
 mcopy -i $B/esp.fat $B/forgex64.efi ::/EFI/BOOT/BOOTX64.EFI
-python3 mkgpt.py $B/disk.img $B/esp.fat 128
+# GPT disk: mkgpt.forge (byte-identical to mkgpt.py with FORGE_GUID_SEED, tests/mkgpt)
+../../build/forgec mkgpt.forge $B/mkgpt.s && ../../build/fas -o $B/mkgpt.o $B/mkgpt.s && ../../build/fld --base 0x100000000000 -o $B/mkgpt $B/mkgpt.o
+$B/mkgpt $B/disk.img $B/esp.fat 128
 echo "built $B/forgex64.efi and $B/disk.img"

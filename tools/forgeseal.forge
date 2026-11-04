@@ -1,0 +1,947 @@
+# forge: no-runtime
+# Seal proof manifests (Phase 6.1, Seal v3): Forge port of tools/forgeseal.py, byte-identical output.
+#   forgeseal [--module] [--v2] [--extra-key KEY2] [--alg-id N] [--proof-byte] SRC.forge IMAGE KEYFILE BASELINE
+#   forgeseal --foreign IMAGE KEYFILE        level-3 seal of a Linux-ABI (EI_OSABI = 3) foreign ELF
+#   forgeseal --pub KEYFILE                  32-byte Ed25519 public key on stdout
+# Runs build/forgec SRC /dev/null --unsafe-report in SRC's directory (the verifier), checks the counts
+# against the audited BASELINE, reads `# forge: caps(...)` and appends the 384-byte v3 trailer (or
+# the 160-byte v2 one) signed with Ed25519; trailer layout in the forgeseal.py docstring and
+# docs/tools-forgeseal.md. Freestanding Linux program: raw syscalls, forgec's output is captured
+# through memfds, the image is streamed (hashed in place, trailer appended), never held in memory.
+# The repo root is found from /proc/self/exe (this binary lives in ROOT/build/).
+include "../examples/kernel/ed25519.fsi"
+include "ed25519sign.fsi"
+include "sha256.fsi"
+
+struct Buf:
+    b: u8[65536]
+
+struct Big:
+    b: u8[4194304]
+
+struct Pth:
+    b: u8[4096]
+
+struct Stk:
+    v: u64[1024]
+
+struct Trl:
+    b: u8[384]
+
+struct Seed:
+    hk: B64
+    ok: u64
+
+iob: Buf
+outb: Big
+txt: Big
+cwd: Pth
+tmp: Pth
+absd: Pth
+root: Pth
+rel: Pth
+fcp: Pth
+stk: Stk
+stk2: Stk
+trl: Trl
+key: Seed
+xkey: Seed
+fstat: Pth
+args: Stk
+
+@naked
+@export
+@unsafe
+def _start():
+    asm("xor %rbp,%rbp", "mov %rsp,%rdi", "and $-16,%rsp", "call main", "mov %rax,%rdi", "mov $60,%eax", "syscall")
+
+@unsafe
+def sys3(n: u64, a: u64, b: u64, c: u64) -> i64:
+    asm("mov %rdi,%rax", "mov %rsi,%rdi", "mov %rdx,%rsi", "mov %rcx,%rdx", "syscall", "leave", "ret")
+    return 0
+
+@unsafe
+def sys4(n: u64, a: u64, b: u64, c: u64, d: u64) -> i64:
+    asm("mov %rdi,%rax", "mov %rsi,%rdi", "mov %rdx,%rsi", "mov %rcx,%rdx", "mov %r8,%r10", "syscall", "leave", "ret")
+    return 0
+
+@unsafe
+def pb(a: u64) -> ptr[u8]:
+    return ptr[u8](a)
+
+@unsafe
+def pq(a: u64) -> ptr[u64]:
+    return ptr[u64](a)
+
+@unsafe
+def slen(a: u64) -> u64:
+    p = pb(a)
+    i: u64 = 0
+    while p[i] != 0:
+        i += 1
+    return i
+
+@unsafe
+def streq(a: u64, b: ptr[u8]) -> u64:
+    p = pb(a)
+    i: u64 = 0
+    while p[i] == b[i]:
+        if p[i] == 0:
+            return 1
+        i += 1
+    return 0
+
+@unsafe
+def memeq(a: u64, b: u64, n: u64) -> u64:
+    i: u64 = 0
+    while i < n:
+        if pb(a)[i] != pb(b)[i]:
+            return 0
+        i += 1
+    return 1
+
+@unsafe
+def wr(fd: u64, a: u64, n: u64):
+    while n > 0:
+        w = sys3(1, fd, a, n)
+        if w <= 0:
+            return
+        a += u64(w)
+        n -= u64(w)
+
+@unsafe
+def ws(fd: u64, s: ptr[u8]):
+    wr(fd, u64(s), slen(u64(s)))
+
+@unsafe
+def wz(fd: u64, a: u64):
+    wr(fd, a, slen(a))
+
+@unsafe
+def wdec(fd: u64, v: u64):
+    b: B32
+    i: u64 = 32
+    while 1:
+        i -= 1
+        b.b[i] = u8(48 + v % 10)
+        v = v / 10
+        if v == 0:
+            break
+    wr(fd, u64(addr(b.b[i])), 32 - i)
+
+@unsafe
+def whex(fd: u64, v: u64):
+    b: B32
+    i: u64 = 32
+    while 1:
+        i -= 1
+        b.b[i] = "0123456789abcdef"[v & 15]
+        v = v >> 4
+        if v == 0:
+            break
+    wr(fd, u64(addr(b.b[i])), 32 - i)
+
+@unsafe
+def fail(a: u64, s: ptr[u8]) -> u64:
+# "forgeseal: A: S\n" on stderr (Python's sys.exit(msg)), exit status 1
+    ws(2, "forgeseal: ")
+    wz(2, a)
+    ws(2, s)
+    ws(2, "\n")
+    return 1
+
+@unsafe
+def basename(a: u64) -> u64:
+    p = pb(a)
+    i: u64 = 0
+    r = a
+    while p[i] != 0:
+        if p[i] == 47:
+            r = a + i + 1
+        i += 1
+    return r
+
+@unsafe
+def hash_seed(s: ptr[Seed], path: u64) -> u64:
+# SHA-512 of the whole seed file (any length, like ed25519.py); 0 if unreadable; s.ok = file non-empty
+    st: Sha5
+    s5_init(addr(st))
+    fd = sys3(2, path, 0, 0)
+    if fd < 0:
+        return 0
+    s.ok = 0
+    while 1:
+        n = sys3(0, u64(fd), u64(addr(iob.b[0])), 65536)
+        if n < 0:
+            sys3(3, u64(fd), 0, 0)
+            return 0
+        if n == 0:
+            break
+        s.ok = 1
+        i: u64 = 0
+        while i < u64(n):
+            s5_byte(addr(st), u64(iob.b[i]))
+            i += 1
+    sys3(3, u64(fd), 0, 0)
+    s5_final(addr(st), addr(s.hk))
+    return 1
+
+@unsafe
+def sign_mem(s: ptr[Seed], m: u64, n: u64, sig: u64, pkout: ptr[B32]):
+# 64-byte Ed25519 signature of m[0:n] at sig (= ed25519.sign(seed, m)); public key into pkout
+    a: B32
+    pre: B32
+    ed_key(addr(s.hk), addr(a), addr(pre), pkout)
+    st: Sha5
+    s5_init(addr(st))
+    i: u64 = 0
+    while i < 32:
+        s5_byte(addr(st), u64(pre.b[i]))
+        i += 1
+    i = 0
+    while i < n:
+        s5_byte(addr(st), u64(pb(m)[i]))
+        i += 1
+    hb: B64
+    s5_final(addr(st), addr(hb))
+    r: B32
+    sc_reduce(addr(r), addr(hb))
+    pt: Ge
+    ge_scalarbase(addr(pt), addr(r))
+    rr: B32
+    ge_pack(addr(rr), addr(pt))
+    s5_init(addr(st))
+    i = 0
+    while i < 32:
+        s5_byte(addr(st), u64(rr.b[i]))
+        i += 1
+    i = 0
+    while i < 32:
+        s5_byte(addr(st), u64(pkout.b[i]))
+        i += 1
+    i = 0
+    while i < n:
+        s5_byte(addr(st), u64(pb(m)[i]))
+        i += 1
+    s5_final(addr(st), addr(hb))
+    h: B32
+    sc_reduce(addr(h), addr(hb))
+    sv: B32
+    sc_muladd(addr(sv), addr(r), addr(h), addr(a))
+    i = 0
+    while i < 32:
+        pb(sig)[i] = rr.b[i]
+        pb(sig)[i + 32] = sv.b[i]
+        i += 1
+
+@unsafe
+def put64(o: u64, v: u64):
+    i: u64 = 0
+    while i < 8:
+        trl.b[o + i] = u8((v >> (8 * i)) & 255)
+        i += 1
+
+# --- image: length, sealed check, SHA-256, append ---------------------------------------------
+
+@unsafe
+def img_info(path: u64, dg: ptr[Dig]) -> i64:
+# file length (and SHA-256 into dg), -1 if unreadable; head 8 bytes into tmp.b[0..8], last 384 into tmp.b[16..400]
+    fd = sys3(2, path, 0, 0)
+    if fd < 0:
+        return 0 - 1
+    if sys3(5, u64(fd), u64(addr(fstat.b[0])), 0) < 0:
+        sys3(3, u64(fd), 0, 0)
+        return 0 - 1
+    n = pq(u64(addr(fstat.b[48])))[0]
+    i: u64 = 0
+    while i < 400:
+        tmp.b[i] = 0
+        i += 1
+    sys4(17, u64(fd), u64(addr(tmp.b[0])), 8, 0)
+    if n >= 384:
+        sys4(17, u64(fd), u64(addr(tmp.b[16])), 384, n - 384)
+    elif n > 0:
+        sys4(17, u64(fd), u64(addr(tmp.b[16 + 384 - n])), n, 0)
+    st: Sha
+    sha_init(addr(st))
+    while 1:
+        r = sys3(0, u64(fd), u64(addr(iob.b[0])), 65536)
+        if r < 0:
+            sys3(3, u64(fd), 0, 0)
+            return 0 - 1
+        if r == 0:
+            break
+        i = 0
+        while i < u64(r):
+            sha_byte(addr(st), u64(iob.b[i]))
+            i += 1
+    sys3(3, u64(fd), 0, 0)
+    sha_final(addr(st), dg)
+    return i64(n)
+
+@unsafe
+def is_sealed(n: u64) -> u64:
+# elf[-160:-152] == MAGIC or elf[-384:-376] == MAGIC (tail copy at tmp.b[16..400])
+    if n >= 160 and memeq(u64(addr(tmp.b[16 + 224])), u64("FORGEPRF"), 8):
+        return 1
+    if n >= 384 and memeq(u64(addr(tmp.b[16])), u64("FORGEPRF"), 8):
+        return 1
+    return 0
+
+@unsafe
+def append(path: u64, n: u64) -> u64:
+    fd = sys3(2, path, 1 | 1024, 0)
+    if fd < 0:
+        return 0
+    wr(u64(fd), u64(addr(trl.b[0])), n)
+    sys3(3, u64(fd), 0, 0)
+    return 1
+
+@unsafe
+def build_v3(h: ptr[Stk], dg: ptr[Dig], alg: u64, proof: u64):
+# trailer = MAGIC + 7Q head + digest + proof slot + (nkeys, 0) + per-key (alg, keyid, sig) + zero pad
+    i: u64 = 0
+    while i < 384:
+        trl.b[i] = 0
+        i += 1
+    i = 0
+    while i < 8:
+        trl.b[i] = "FORGEPRF"[i]
+        i += 1
+    i = 0
+    while i < 7:
+        put64(8 + 8 * i, h.v[i])
+        i += 1
+    i = 0
+    while i < 32:
+        trl.b[64 + i] = dg.b[i]
+        i += 1
+    if proof:
+        trl.b[96] = 1
+    nk: u64 = 1
+    if xkey.ok:
+        nk = 2
+    put64(128, nk)
+    st: Sha
+    sha_init(addr(st))
+    i = 64
+    while i < 144:
+        sha_byte(addr(st), u64(trl.b[i]))
+        i += 1
+    md: Dig
+    sha_final(addr(st), addr(md))
+    msg: Trl
+    i = 0
+    while i < 64:
+        msg.b[i] = trl.b[i]
+        i += 1
+    while i < 96:
+        msg.b[i] = md.b[i - 64]
+        i += 1
+    o: u64 = 144
+    pk: B32
+    k: u64 = 0
+    while k < nk:
+        s = addr(key)
+        if nk == 2 and k == 0:
+            s = addr(xkey)
+        put64(o, alg)
+        sign_mem(s, u64(addr(msg.b[0])), 96, u64(addr(trl.b[o + 16])), addr(pk))
+        i = 0
+        while i < 8:
+            trl.b[o + 8 + i] = pk.b[i]
+            i += 1
+        o += 80
+        k += 1
+
+# --- paths -------------------------------------------------------------------------------------
+
+@unsafe
+def split(src: ptr[Pth], n: u64, s: ptr[Stk]) -> u64:
+# normalised components of the absolute path src.b[0:n] as (start, len) pairs in s; returns count
+    c: u64 = 0
+    i: u64 = 0
+    while i < n:
+        while i < n and src.b[i] == 47:
+            i += 1
+        j = i
+        while j < n and src.b[j] != 47:
+            j += 1
+        l = j - i
+        if l == 1 and src.b[i] == 46:
+            l = 0
+        elif l == 2 and src.b[i] == 46 and src.b[i + 1] == 46:
+            if c > 0:
+                c -= 1
+            l = 0
+        if l > 0:
+            s.v[2 * c] = i
+            s.v[2 * c + 1] = l
+            c += 1
+        i = j
+    return c
+
+@unsafe
+def join(dst: ptr[Pth], src: ptr[Pth], s: ptr[Stk], c: u64) -> u64:
+# "/" + components[0:c] joined; NUL-terminated, returns length
+    o: u64 = 0
+    k: u64 = 0
+    while k < c:
+        dst.b[o] = 47
+        o += 1
+        i: u64 = 0
+        while i < s.v[2 * k + 1]:
+            dst.b[o] = src.b[s.v[2 * k] + i]
+            o += 1
+            i += 1
+        k += 1
+    if o == 0:
+        dst.b[0] = 47
+        o = 1
+    dst.b[o] = 0
+    return o
+
+@unsafe
+def comp_eq(a: ptr[Pth], sa: ptr[Stk], i: u64, b: ptr[Pth], sb: ptr[Stk], j: u64) -> u64:
+    if sa.v[2 * i + 1] != sb.v[2 * j + 1]:
+        return 0
+    return memeq(u64(addr(a.b[sa.v[2 * i]])), u64(addr(b.b[sb.v[2 * j]])), sa.v[2 * i + 1])
+
+# --- forgec --unsafe-report ----------------------------------------------------------------------
+
+@unsafe
+def run_forgec(f: u64, envp: u64, nout: ptr[Stk]) -> u64:
+# exit status of forgec; stdout + stderr concatenated in outb, nout.v[0] = stdout length, v[1] = total
+    m1 = sys3(319, u64("fso"), 0, 0)
+    m2 = sys3(319, u64("fse"), 0, 0)
+    if m1 < 0 or m2 < 0:
+        return 255
+    pid = sys3(57, 0, 0, 0)
+    if pid == 0:
+        sys3(33, u64(m1), 1, 0)
+        sys3(33, u64(m2), 2, 0)
+        sys3(80, u64(addr(absd.b[0])), 0, 0)
+        argv = pq(u64(addr(args.v[900])))
+        argv[0] = u64(addr(fcp.b[0]))
+        argv[1] = f
+        argv[2] = u64("/dev/null")
+        argv[3] = u64("--unsafe-report")
+        argv[4] = 0
+        sys3(59, u64(addr(fcp.b[0])), u64(argv), envp)
+        sys3(60, 127, 0, 0)
+    if pid < 0:
+        return 255
+    status: u64 = 0
+    sys4(61, u64(pid), u64(addr(status)), 0, 0)
+    a = sys3(8, u64(m1), 0, 2)
+    b = sys3(8, u64(m2), 0, 2)
+    if a < 0 or b < 0 or u64(a) + u64(b) > 4194304:
+        return 255
+    sys4(17, u64(m1), u64(addr(outb.b[0])), u64(a), 0)
+    sys4(17, u64(m2), u64(addr(outb.b[u64(a)])), u64(b), 0)
+    sys3(3, u64(m1), 0, 0)
+    sys3(3, u64(m2), 0, 0)
+    nout.v[0] = u64(a)
+    nout.v[1] = u64(a) + u64(b)
+    if status & 127:
+        return 255
+    return (status >> 8) & 255
+
+@unsafe
+def brk_ch(c: u64) -> u64:
+# str.splitlines() boundaries (ASCII part)
+    return c == 10 or c == 13 or c == 11 or c == 12 or c == 28 or c == 29 or c == 30
+
+@unsafe
+def lit(p: u64, e: u64, s: ptr[u8]) -> u64:
+# s matches at p (before e)? returns its length or 0
+    n = slen(u64(s))
+    if p + n > e:
+        return 0
+    if memeq(p, u64(s), n):
+        return n
+    return 0
+
+@unsafe
+def digits(p: u64, e: u64, v: ptr[Stk], k: u64) -> u64:
+# \d+ at p: value into v.v[k], returns length (0 = no match)
+    n: u64 = 0
+    x: u64 = 0
+    while p + n < e and pb(p)[n] >= 48 and pb(p)[n] <= 57:
+        x = x * 10 + u64(pb(p)[n]) - 48
+        n += 1
+    v.v[k] = x
+    return n
+
+@unsafe
+def count_line(p: u64, e: u64, v: ptr[Stk]) -> u64:
+# unsafe: (\d+) functions, (\d+) blocks, (\d+) ops, (\d+) top-level  -> v.v[0..4]
+    n = lit(p, e, "unsafe: ")
+    if n == 0:
+        return 0
+    p += n
+    k: u64 = 0
+    while k < 4:
+        n = digits(p, e, v, k)
+        if n == 0:
+            return 0
+        p += n
+        if k == 0:
+            n = lit(p, e, " functions, ")
+        elif k == 1:
+            n = lit(p, e, " blocks, ")
+        elif k == 2:
+            n = lit(p, e, " ops, ")
+        else:
+            n = lit(p, e, " top-level")
+        if n == 0:
+            return 0
+        p += n
+        k += 1
+    return 1
+
+@unsafe
+def own_line(p: u64, e: u64, f: u64, fl: u64, v: ptr[Stk]) -> u64:
+# unsafe: \S*{f}:\d+ .*ops=(\d+)  -> v.v[4] (the last ops= on the line)
+    n = lit(p, e, "unsafe: ")
+    if n == 0:
+        return 0
+    p += n
+    q = p
+    while q < e and pb(q)[0] != 32 and pb(q)[0] != 9 and pb(q)[0] != 10 and pb(q)[0] != 13 and pb(q)[0] != 11 and pb(q)[0] != 12:
+        q += 1
+    if q >= e or pb(q)[0] != 32:
+        return 0
+    d = q
+    while d > p and pb(d - 1)[0] >= 48 and pb(d - 1)[0] <= 57:
+        d -= 1
+    if d == q or d == p or pb(d - 1)[0] != 58:
+        return 0
+    if d - 1 - p < fl or memeq(d - 1 - fl, f, fl) == 0:
+        return 0
+    r = e
+    while r > q + 1:
+        r -= 1
+        if r + 5 <= e and lit(r, e, "ops=") and pb(r + 4)[0] >= 48 and pb(r + 4)[0] <= 57:
+            digits(r + 4, e, v, 4)
+            return 1
+    return 0
+
+@unsafe
+def is_ws(c: u64) -> u64:
+    return c == 32 or c == 9 or c == 10 or c == 11 or c == 12 or c == 13 or (c >= 28 and c <= 31)
+
+@unsafe
+def read_txt(path: u64) -> i64:
+    fd = sys3(2, path, 0, 0)
+    if fd < 0:
+        return 0 - 1
+    n: u64 = 0
+    while n < 4194303:
+        r = sys3(0, u64(fd), u64(addr(txt.b[n])), 4194303 - n)
+        if r < 0:
+            sys3(3, u64(fd), 0, 0)
+            return 0 - 1
+        if r == 0:
+            break
+        n += u64(r)
+    sys3(3, u64(fd), 0, 0)
+    txt.b[n] = 0
+    return i64(n)
+
+@unsafe
+def cap_bit(p: u64, n: u64) -> u64:
+    if n == 2 and memeq(p, u64("fs"), 2):
+        return 1
+    if n == 5 and memeq(p, u64("spawn"), 5):
+        return 2
+    if n == 3 and memeq(p, u64("ipc"), 3):
+        return 4
+    if n == 3 and memeq(p, u64("drv"), 3):
+        return 8
+    if n == 5 and memeq(p, u64("kexec"), 5):
+        return 16
+    if n == 5 and memeq(p, u64("probe"), 5):
+        return 32
+    if n == 5 and memeq(p, u64("ktest"), 5):
+        return 64
+    if n == 5 and memeq(p, u64("grant"), 5):
+        return 128
+    return 0
+
+@unsafe
+def wtuple(fd: u64, v: ptr[Stk]):
+    ws(fd, "(")
+    k: u64 = 0
+    while k < 4:
+        if k > 0:
+            ws(fd, ", ")
+        wdec(fd, v.v[k])
+        k += 1
+    ws(fd, ")")
+
+# --- the three modes ------------------------------------------------------------------------------
+
+@unsafe
+def do_pub(kf: u64) -> u64:
+    if hash_seed(addr(key), kf) == 0:
+        return fail(kf, ": cannot read key file")
+    a: B32
+    pre: B32
+    pk: B32
+    ed_key(addr(key.hk), addr(a), addr(pre), addr(pk))
+    wr(1, u64(addr(pk.b[0])), 32)
+    return 0
+
+@unsafe
+def do_foreign(img: u64, kf: u64) -> u64:
+    dg: Dig
+    n = img_info(img, addr(dg))
+    if n < 0:
+        return fail(img, ": cannot read image")
+    if u64(n) < 8 or memeq(u64(addr(tmp.b[0])), u64("\x7fELF"), 4) == 0 or tmp.b[7] != 3:
+        return fail(img, ": --foreign needs a Linux ABI ELF (EI_OSABI = 3)")
+    if is_sealed(u64(n)):
+        return fail(img, ": already sealed")
+    if hash_seed(addr(key), kf) == 0:
+        return fail(kf, ": cannot read key file")
+    xkey.ok = 0
+    h: Stk
+    h.v[0] = 3
+    h.v[1] = 3
+    h.v[2] = 0
+    h.v[3] = 0
+    h.v[4] = u64(n)
+    h.v[5] = 0
+    h.v[6] = 0
+    build_v3(addr(h), addr(dg), 1, 0)
+    if append(img, 384) == 0:
+        return fail(img, ": cannot write image")
+    ws(1, "sealed ")
+    wz(1, basename(img))
+    ws(1, ": level 3 (foreign), caps 0x0\n")
+    return 0
+
+@export
+@unsafe
+def main(sp: u64) -> u64:
+    argc = pq(sp)[0]
+    i: u64 = 0
+    while i < argc and i < 64:
+        args.v[i] = pq(sp)[i + 1]
+        i += 1
+    envp = sp + 8 * (argc + 2)
+    if argc == 3 and streq(args.v[1], "--pub"):
+        return do_pub(args.v[2])
+    if argc == 4 and streq(args.v[1], "--foreign"):
+        return do_foreign(args.v[2], args.v[3])
+    kind: u64 = 0
+    ver: u64 = 3
+    alg: u64 = 1
+    proof: u64 = 0
+    xkey.ok = 0
+    ai: u64 = 1
+    while ai < argc and pb(args.v[ai])[0] == 45 and pb(args.v[ai])[1] == 45:
+        opt = args.v[ai]
+        ai += 1
+        if streq(opt, "--module"):
+            kind = 1
+        elif streq(opt, "--v2"):
+            ver = 2
+        elif streq(opt, "--proof-byte"):
+            proof = 1
+        elif streq(opt, "--extra-key") and ai < argc:
+            if hash_seed(addr(xkey), args.v[ai]) == 0:
+                return fail(args.v[ai], ": cannot read key file")
+            ai += 1
+        elif streq(opt, "--alg-id") and ai < argc:
+            av: Stk
+            aq = args.v[ai]
+            ql = slen(aq)
+            if ql == 0 or digits(aq, aq + ql, addr(av), 0) != ql:
+                return fail(aq, ": --alg-id needs a decimal number")
+            alg = av.v[0]
+            ai += 1
+        elif streq(opt, "--extra-key") or streq(opt, "--alg-id"):
+            ws(2, "usage: forgeseal [--module] [--v2] [--extra-key KEY2] [--alg-id N] [--proof-byte] SRC.forge IMAGE KEYFILE BASELINE\n")
+            return 2
+        else:
+            ws(2, "forgeseal: unknown option ")
+            wz(2, opt)
+            ws(2, "\n")
+            return 1
+    if ai + 4 > argc:
+        ws(2, "usage: forgeseal [--module] [--v2] [--extra-key KEY2] [--alg-id N] [--proof-byte] SRC.forge IMAGE KEYFILE BASELINE\n       forgeseal --foreign IMAGE KEYFILE | forgeseal --pub KEYFILE\n")
+        return 2
+    src = args.v[ai]
+    img = args.v[ai + 1]
+    kf = args.v[ai + 2]
+    base = args.v[ai + 3]
+    # root = dirname(dirname(/proc/self/exe)); fc = root/build/forgec
+    n = sys4(89, u64("/proc/self/exe"), u64(addr(tmp.b[0])), 4000, 0)
+    if n <= 0:
+        return fail(u64("/proc/self/exe"), ": cannot read")
+    c = split(addr(tmp), u64(n), addr(stk2))
+    if c >= 2:
+        c -= 2
+    rl = join(addr(root), addr(tmp), addr(stk2), c)
+    i = 0
+    while i < rl:
+        fcp.b[i] = root.b[i]
+        i += 1
+    j: u64 = 0
+    while j < 13:
+        fcp.b[i + j] = "/build/forgec"[j]
+        j += 1
+    if rl == 1:
+        i = 0
+        while i < 13:
+            fcp.b[i] = "/build/forgec"[i]
+            i += 1
+        i = 0
+    fcp.b[i + 13] = 0
+    # d = dirname(abspath(src)), f = basename(src)
+    sl = slen(src)
+    o: u64 = 0
+    if pb(src)[0] != 47:
+        cn = sys3(79, u64(addr(cwd.b[0])), 4096, 0)
+        if cn <= 0:
+            return fail(src, ": cannot get the working directory")
+        o = slen(u64(addr(cwd.b[0])))
+        i = 0
+        while i < o:
+            tmp.b[i] = cwd.b[i]
+            i += 1
+        tmp.b[o] = 47
+        o += 1
+    i = 0
+    while i < sl and o < 4000:
+        tmp.b[o] = pb(src)[i]
+        o += 1
+        i += 1
+    c = split(addr(tmp), o, addr(stk))
+    if c > 0:
+        c -= 1
+    join(addr(absd), addr(tmp), addr(stk), c)
+    f = basename(src)
+    fl = slen(f)
+    nout: Stk
+    rc = run_forgec(f, envp, addr(nout))
+    if rc != 0:
+        ws(2, "forgeseal: ")
+        wz(2, src)
+        ws(2, ": verifier rejected the program:\n")
+        wr(2, u64(addr(outb.b[nout.v[0]])), nout.v[1] - nout.v[0])
+        ws(2, "\n")
+        return 1
+    # count line (last match) and own ops (sum over lines naming f)
+    cnt: Stk
+    v: Stk
+    found: u64 = 0
+    own: u64 = 0
+    p = u64(addr(outb.b[0]))
+    e = p + nout.v[1]
+    while p < e:
+        q = p
+        while q < e and brk_ch(u64(pb(q)[0])) == 0:
+            q += 1
+        if count_line(p, q, addr(v)):
+            found = 1
+            k: u64 = 0
+            while k < 4:
+                cnt.v[k] = v.v[k]
+                k += 1
+        if own_line(p, q, f, fl, addr(v)):
+            own += v.v[4]
+        if q < e and pb(q)[0] == 13 and q + 1 < e and pb(q + 1)[0] == 10:
+            q += 1
+        p = q + 1
+    if found == 0:
+        return fail(src, ": no unsafe report")
+    # rel = relpath(d, root)
+    ca = split(addr(absd), slen(u64(addr(absd.b[0]))), addr(stk))
+    cb = split(addr(root), rl, addr(stk2))
+    cm: u64 = 0
+    while cm < ca and cm < cb and comp_eq(addr(absd), addr(stk), cm, addr(root), addr(stk2), cm):
+        cm += 1
+    o = 0
+    i = cm
+    while i < cb:
+        if o > 0:
+            rel.b[o] = 47
+            o += 1
+        rel.b[o] = 46
+        rel.b[o + 1] = 46
+        o += 2
+        i += 1
+    i = cm
+    while i < ca:
+        if o > 0:
+            rel.b[o] = 47
+            o += 1
+        j = 0
+        while j < stk.v[2 * i + 1]:
+            rel.b[o] = absd.b[stk.v[2 * i] + j]
+            o += 1
+            j += 1
+        i += 1
+    if o == 0:
+        rel.b[0] = 46
+        o = 1
+    rel.b[o] = 0
+    # audited entry: the last 6-token line "REL FILE fn blk ops top"
+    tn = read_txt(base)
+    if tn < 0:
+        return fail(base, ": cannot read baseline")
+    aud: Stk
+    have: u64 = 0
+    p = u64(addr(txt.b[0]))
+    e = p + u64(tn)
+    while p < e:
+        q = p
+        while q < e and pb(q)[0] != 10 and pb(q)[0] != 13:
+            q += 1
+        tk: Stk
+        nt: u64 = 0
+        r = p
+        while r < q:
+            while r < q and is_ws(u64(pb(r)[0])):
+                r += 1
+            if r >= q:
+                break
+            s0 = r
+            while r < q and is_ws(u64(pb(r)[0])) == 0:
+                r += 1
+            if nt < 7:
+                tk.v[2 * nt] = s0
+                tk.v[2 * nt + 1] = r - s0
+            nt += 1
+        if nt == 6 and tk.v[1] == o and memeq(tk.v[0], u64(addr(rel.b[0])), o) and tk.v[3] == fl and memeq(tk.v[2], f, fl):
+            k = 0
+            ok: u64 = 1
+            while k < 4:
+                if digits(tk.v[4 + 2 * k], tk.v[4 + 2 * k] + tk.v[5 + 2 * k], addr(v), 0) != tk.v[5 + 2 * k]:
+                    ok = 0
+                aud.v[k] = v.v[0]
+                k += 1
+            if ok == 0:
+                return fail(base, ": malformed baseline entry")
+            have = 1
+        p = q + 1
+    level: u64 = 0
+    if cnt.v[0] == 0 and cnt.v[1] == 0 and cnt.v[2] == 0 and cnt.v[3] == 0:
+        level = 0
+    elif have and cnt.v[0] <= aud.v[0] and cnt.v[1] <= aud.v[1] and cnt.v[2] <= aud.v[2] and cnt.v[3] <= aud.v[3]:
+        level = 1
+        if own == 0:
+            level = 2
+    else:
+        ws(2, "forgeseal: ")
+        wz(2, src)
+        ws(2, ": unsafe counts ")
+        wtuple(2, addr(cnt))
+        ws(2, " are not in the audited baseline; refusing to seal\n")
+        return 1
+    # caps: every "# forge: caps(a, b)" line (re.match at line start, greedy up to the last ')')
+    tn = read_txt(src)
+    if tn < 0:
+        return fail(src, ": cannot read source")
+    caps: u64 = 0
+    p = u64(addr(txt.b[0]))
+    e = p + u64(tn)
+    while p < e:
+        q = p
+        while q < e and pb(q)[0] != 10 and pb(q)[0] != 13:
+            q += 1
+        r = p
+        if r < q and pb(r)[0] == 35:
+            r += 1
+            while r < q and is_ws(u64(pb(r)[0])):
+                r += 1
+            n1 = lit(r, q, "forge:")
+            if n1:
+                r += n1
+                while r < q and is_ws(u64(pb(r)[0])):
+                    r += 1
+                n1 = lit(r, q, "caps(")
+                if n1:
+                    r += n1
+                    z = q
+                    while z > r and pb(z - 1)[0] != 41:
+                        z -= 1
+                    if z > r:
+                        z -= 1
+                        while r <= z:
+                            ce = r
+                            while ce < z and pb(ce)[0] != 44:
+                                ce += 1
+                            a0 = r
+                            a1 = ce
+                            while a0 < a1 and is_ws(u64(pb(a0)[0])):
+                                a0 += 1
+                            while a1 > a0 and is_ws(u64(pb(a1 - 1)[0])):
+                                a1 -= 1
+                            if a1 > a0:
+                                bit = cap_bit(a0, a1 - a0)
+                                if bit == 0:
+                                    ws(2, "forgeseal: ")
+                                    wz(2, src)
+                                    ws(2, ": unknown capability '")
+                                    wr(2, a0, a1 - a0)
+                                    ws(2, "'\n")
+                                    return 1
+                                caps = caps | bit
+                            r = ce + 1
+        if q < e and pb(q)[0] == 13 and q + 1 < e and pb(q + 1)[0] == 10:
+            q += 1
+        p = q + 1
+    # the image
+    dg: Dig
+    ln = img_info(img, addr(dg))
+    if ln < 0:
+        return fail(img, ": cannot read image")
+    if is_sealed(u64(ln)):
+        return fail(img, ": already sealed")
+    if hash_seed(addr(key), kf) == 0:
+        return fail(kf, ": cannot read key file")
+    h: Stk
+    h.v[0] = ver
+    h.v[1] = level
+    h.v[2] = cnt.v[2]
+    h.v[3] = caps
+    h.v[4] = u64(ln)
+    h.v[5] = own
+    h.v[6] = kind
+    tl: u64 = 384
+    if ver == 2:
+        i = 0
+        while i < 8:
+            trl.b[i] = "FORGEPRF"[i]
+            i += 1
+        i = 0
+        while i < 7:
+            put64(8 + 8 * i, h.v[i])
+            i += 1
+        i = 0
+        while i < 32:
+            trl.b[64 + i] = dg.b[i]
+            i += 1
+        pk: B32
+        sign_mem(addr(key), u64(addr(trl.b[0])), 96, u64(addr(trl.b[96])), addr(pk))
+        tl = 160
+    else:
+        build_v3(addr(h), addr(dg), alg, proof)
+    if append(img, tl) == 0:
+        return fail(img, ": cannot write image")
+    ws(1, "sealed ")
+    wz(1, basename(img))
+    ws(1, " (v")
+    wdec(1, ver)
+    ws(1, "): level ")
+    wdec(1, level)
+    ws(1, ", ")
+    wdec(1, cnt.v[2])
+    ws(1, " unsafe ops, caps 0x")
+    whex(1, caps)
+    ws(1, "\n")
+    return 0

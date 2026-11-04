@@ -1,0 +1,570 @@
+# Grammar-based fuzzer for docs/GRAMMAR.md: Forge port of tools/grammar_fuzz.py.
+# Valid programs are generated from the grammar; each must parse (--emit=ast-json), and its
+# pretty-printed form must parse back to the same AST. Invalid programs are a valid program with
+# one top-level line broken in a way the grammar forbids; each must be rejected with a parse
+# diagnostic (E0100-E0105) and never crash or be accepted.
+# usage: grammar_fuzz [--seed N] [--n COUNT]   (COUNT programs, split valid/invalid; writes build/fuzz)
+# Byte-identical to the Python tool for the same seed: Python's random.Random (MT19937 seeded with
+# init_by_array, randrange/choice via getrandbits rejection sampling, random() as 53 bits) is
+# reimplemented exactly, every random draw is made in the same order, and random() is compared
+# against integer thresholds ceil(p * 2^53) (x / 2^53 < p for the 53-bit draw x, exact).
+
+import sys
+
+FORGEC = "build/forgec"
+NAMES = ["a", "b", "x", "y", "foo", "bar_2", "_t", "item"]
+BIN = ["+", "-", "*", "/", "//", "%", "|", "^", "&", "<<", ">>", "**"]
+CMP = ["<", ">", "==", "!=", "<=", ">=", "in", "not in", "is", "is not"]
+AUG = ["+=", "-=", "*=", "/=", "//=", "%=", "|=", "&=", "^=", "<<=", ">>=", "**="]
+
+# random() < p  <=>  53-bit draw < P_xx ; random() > .93  <=>  draw > G_93
+P_50 = 4503599627370496
+P_15 = 1351079888211149
+P_30 = 2702159776422298
+P_10 = 900719925474100
+P_05 = 450359962737050
+P_25 = 2251799813685248
+P_20 = 1801439850948199
+P_40 = 3602879701896397
+G_93 = 8376695306909123
+
+# ---------------- MT19937 as in CPython's _random ----------------
+MT = []
+MTI = [625]
+
+def mt_init(s: int):
+    MT.clear()
+    MT.append(s)
+    i: int = 1
+    while i < 624:
+        MT.append((1812433253 * (MT[i - 1] ^ (MT[i - 1] >> 30)) + i) & 0xFFFFFFFF)
+        i += 1
+    MTI[0] = 624
+
+def mt_seed(seed: int):
+# init_by_array with the 32-bit words of abs(seed), least significant first ([0] for 0)
+    if seed < 0:
+        seed = 0 - seed
+    key = []
+    while seed > 0:
+        key.append(seed & 0xFFFFFFFF)
+        seed = seed >> 32
+    if len(key) == 0:
+        key.append(0)
+    mt_init(19650218)
+    i: int = 1
+    j: int = 0
+    kl: int = len(key)
+    k: int = 624
+    if kl > 624:
+        k = kl
+    while k > 0:
+        MT[i] = ((MT[i] ^ ((MT[i - 1] ^ (MT[i - 1] >> 30)) * 1664525)) + key[j] + j) & 0xFFFFFFFF
+        i += 1
+        j += 1
+        if i >= 624:
+            MT[0] = MT[623]
+            i = 1
+        if j >= kl:
+            j = 0
+        k -= 1
+    k = 623
+    while k > 0:
+        MT[i] = ((MT[i] ^ ((MT[i - 1] ^ (MT[i - 1] >> 30)) * 1566083941)) - i) & 0xFFFFFFFF
+        i += 1
+        if i >= 624:
+            MT[0] = MT[623]
+            i = 1
+        k -= 1
+    MT[0] = 0x80000000
+
+def genrand() -> int:
+    if MTI[0] >= 624:
+        kk: int = 0
+        while kk < 624:
+            y: int = (MT[kk] & 0x80000000) | (MT[(kk + 1) % 624] & 0x7FFFFFFF)
+            v: int = MT[(kk + 397) % 624] ^ (y >> 1)
+            if y & 1:
+                v = v ^ 0x9908B0DF
+            MT[kk] = v
+            kk += 1
+        MTI[0] = 0
+    y: int = MT[MTI[0]]
+    MTI[0] += 1
+    y = y ^ (y >> 11)
+    y = y ^ ((y << 7) & 0x9D2C5680)
+    y = y ^ ((y << 15) & 0xEFC60000)
+    y = y ^ (y >> 18)
+    return y
+
+def below(n: int) -> int:
+# Random._randbelow_with_getrandbits (n < 2^32)
+    k: int = 0
+    while (n >> k) > 0:
+        k += 1
+    r: int = genrand() >> (32 - k)
+    while r >= n:
+        r = genrand() >> (32 - k)
+    return r
+
+def rr(a: int, b: int) -> int:
+    return a + below(b - a)
+
+def rn(n: int) -> int:
+    return below(n)
+
+def rnd53() -> int:
+    a: int = genrand() >> 5
+    b: int = genrand() >> 6
+    return a * 67108864 + b
+
+def choice(seq):
+    return seq[below(len(seq))]
+
+# ---------------- generator (same draw order as grammar_fuzz.py's Gen) ----------------
+def name():
+    return choice(NAMES)
+
+def tests_join(d: int, n: int):
+    parts = []
+    i: int = 0
+    while i < n:
+        parts.append(test(d))
+        i += 1
+    return ", ".join(parts)
+
+def atom(d: int):
+    r: int = 5
+    if d < 3:
+        r = 14
+    r = rn(r)
+    if r == 0:
+        return name()
+    if r == 1:
+        return str(rr(0, 100000))
+    if r == 2:
+        return choice(["\"s\"", "'t'", "\"a b\"", "\"\"", "0x1f", "1.5", "2e3"])
+    if r == 3:
+        return choice(["True", "False", "None"])
+    if r == 4:
+        return name()
+    if r == 5:
+        return "(" + test(d + 1) + ")"
+    if r == 6:
+        return "[" + tests_join(d + 1, rn(4)) + "]"
+    if r == 7:
+        return "(" + tests_join(d + 1, rr(2, 4)) + ")"
+    if r == 8:
+        n: int = rn(3)
+        parts = []
+        i: int = 0
+        while i < n:
+            kx = test(d + 1)
+            parts.append(kx + ": " + test(d + 1))
+            i += 1
+        return "{" + ", ".join(parts) + "}"
+    if r == 9:
+        e = "[" + test(d + 1)
+        e = e + " for " + name()
+        e = e + " in " + orx(d + 1)
+        tail = ""
+        if rnd53() < P_50:
+            tail = " if " + orx(d + 1)
+        return e + tail + "]"
+    if r == 10:
+        e = "{" + test(d + 1)
+        return e + ", " + test(d + 1) + "}"
+    if r == 11:
+        return "(" + test(d + 1) + ",)"
+    if r == 12:
+        e = "{" + name()
+        e = e + ": " + test(d + 1)
+        e = e + " for " + name()
+        return e + " in " + orx(d + 1) + "}"
+    return "()"
+
+def primary(d: int):
+    e = atom(d)
+    c: int = char_at(e, 0)
+    if c >= 48 and c <= 57:
+        e = "(" + e + ")"
+    n: int = 0
+    if d < 3:
+        n = rn(3)
+    i: int = 0
+    while i < n:
+        r: int = rn(4)
+        if r == 0:
+            e = e + "." + name()
+        elif r == 1:
+            m: int = rn(3)
+            parts = []
+            j: int = 0
+            while j < m:
+                parts.append(arg(d + 1))
+                j += 1
+            e = e + "(" + ", ".join(parts) + ")"
+        elif r == 2:
+            e = e + "[" + test(d + 1) + "]"
+        else:
+            lo = choice(["", test(d + 1)])
+            hi = choice(["", test(d + 1)])
+            e = e + "[" + lo + ":" + hi + "]"
+        i += 1
+    return e
+
+def arg(d: int):
+    r: int = rn(5)
+    if r == 0:
+        n = name()
+        return n + "=" + test(d)
+    if r == 1:
+        return "*" + test(d)
+    return test(d)
+
+def factor(d: int):
+    if rnd53() < P_15:
+        op = choice(["-", "+", "~"])
+        return op + factor(d + 1)
+    return primary(d)
+
+def orx(d: int):
+    e = factor(d)
+    n: int = 0
+    if d < 4:
+        n = rn(3)
+    i: int = 0
+    while i < n:
+        op = choice(BIN)
+        e = e + " " + op + " " + factor(d + 1)
+        i += 1
+    return e
+
+def cmp(d: int):
+    e = orx(d)
+    if d < 4 and rnd53() < P_30:
+        op = choice(CMP)
+        e = e + " " + op + " " + orx(d + 1)
+    return e
+
+def notx(d: int):
+    if rnd53() < P_10:
+        return "not " + notx(d + 1)
+    return cmp(d)
+
+def test(d: int):
+    if d > 4:
+        return name()
+    r: int = rnd53()
+    if r < P_05:
+        n: int = rn(3)
+        parts = []
+        i: int = 0
+        while i < n:
+            parts.append(name())
+            i += 1
+        return "lambda " + ", ".join(parts) + ": " + test(d + 1)
+    e = notx(d)
+    if d < 4 and r < P_25:
+        op = choice(["and", "or"])
+        e = e + " " + op + " " + notx(d + 1)
+    if d < 3 and r > G_93:
+        c = notx(d + 1)
+        e = e + " if " + c + " else " + test(d + 1)
+    return e
+
+def target():
+    r: int = rn(4)
+    if r == 0:
+        a = name()
+        return a + "." + name()
+    if r == 1:
+        a = name()
+        return a + "[" + test(2) + "]"
+    if r == 2:
+        a = name()
+        return a + ", " + name()
+    return name()
+
+def simple():
+    r: int = rn(14)
+    if r == 0:
+        return "pass"
+    if r == 1:
+        t = target()
+        return t + " = " + test(0)
+    if r == 2:
+        a = name()
+        op = choice(AUG)
+        return a + " " + op + " " + test(0)
+    if r == 3:
+        a = name()
+        ty = choice(["int", "list[int]", "dict[str, int]", "u64"])
+        return a + ": " + ty + " = " + test(0)
+    if r == 4:
+        return "assert " + test(0)
+    if r == 5:
+        return "del " + name()
+    if r == 6:
+        a = "import " + name()
+        if rnd53() < P_50:
+            a = a + "." + name()
+        return a
+    if r == 7:
+        a = "from " + name()
+        a = a + " import " + name()
+        return a + " as " + name()
+    if r == 8:
+        return "raise " + test(0)
+    return test(0)
+
+def block(ind: int, d: int):
+    if d > 2 or rnd53() < P_20:
+        return ": " + simple() + "\n"
+    n: int = rr(1, 4)
+    parts = []
+    i: int = 0
+    while i < n:
+        parts.append(stmt(ind + 1, d + 1))
+        i += 1
+    return ":\n" + "".join(parts)
+
+def cap(s):
+    c: int = char_at(s, 0)
+    if c >= 97 and c <= 122:
+        return chr(c - 32) + s[1:]
+    return s
+
+def stmt(ind: int, d: int):
+    p = "    " * ind
+    r: int = 1
+    if d < 3:
+        r = 12
+    r = rn(r)
+    if r == 1:
+        e = p + "if " + test(0)
+        e = e + block(ind, d)
+        if rnd53() < P_40:
+            t = test(0)
+            e = e + p + "elif " + t + block(ind, d)
+        if rnd53() < P_40:
+            e = e + p + "else" + block(ind, d)
+        return e
+    if r == 2:
+        e = p + "while " + test(0)
+        return e + block(ind, d)
+    if r == 3:
+        n1 = name()
+        n2 = name()
+        n3 = name()
+        v = choice([n1, n2 + ", " + n3])
+        e = p + "for " + v + " in " + test(0)
+        return e + block(ind, d)
+    if r == 4:
+        m: int = rn(3)
+        parts = []
+        i: int = 0
+        while i < m:
+            a = name()
+            parts.append(a + choice(["", ": int", "=" + test(3)]))
+            i += 1
+        e = p + "def " + name() + "(" + ", ".join(parts) + ")"
+        e = e + choice(["", " -> int"])
+        return e + block(ind, d)
+    if r == 5:
+        e = p + "class " + cap(name())
+        e = e + choice(["", "(" + name() + ")"])
+        return e + block(ind, d)
+    if r == 6:
+        e = p + "try" + block(ind, d)
+        e = e + p + "except " + name()
+        e = e + " as " + name()
+        e = e + block(ind, d)
+        if rnd53() < P_50:
+            e = e + p + "finally" + block(ind, d)
+        return e
+    if r == 7:
+        e = p + "with " + test(0)
+        e = e + " as " + name()
+        return e + block(ind, d)
+    return p + simple() + "\n"
+
+def program():
+    n: int = rr(3, 12)
+    parts = []
+    i: int = 0
+    while i < n:
+        parts.append(stmt(0, 0))
+        i += 1
+    return "".join(parts)
+
+# ---------------- invalid programs ----------------
+def is_word(c: int) -> bool:
+    return (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
+
+def header_kw(l) -> bool:
+# re.match(r"(if|while|for|def|class|try|with)\b", l)
+    for kw in ["if", "while", "for", "def", "class", "try", "with"]:
+        if l.startswith(kw):
+            if len(l) == len(kw) or not is_word(char_at(l, len(kw))):
+                return True
+    return False
+
+def break_program(src):
+# returns [broken source, kind]
+    lines = src.split("\n")
+    idx = []
+    i: int = 0
+    while i < len(lines):
+        l = lines[i]
+        if len(l) > 0 and not l.startswith(" "):
+            idx.append(i)
+        i += 1
+    i = choice(idx)
+    l = lines[i]
+    kinds = ["unbalanced", "dangling", "doubleeq", "badkw", "header"]
+    if l.endswith(":") and header_kw(l):
+        kinds.append("nocolon")
+    k = choice(kinds)
+    if k == "unbalanced":
+        if not l.endswith(":"):
+            l = l.rstrip(":") + " ("
+        else:
+            l = l[:len(l) - 1] + " (:"
+    elif k == "dangling":
+        if l.endswith(":"):
+            l = l[:len(l) - 1] + " +:"
+        else:
+            l = l + " *"
+    elif k == "doubleeq":
+        l = "a = = " + str(rn(9))
+    elif k == "badkw":
+        l = choice(["import", "global", "from", "del", "while", "class", "def", "lambda: =", "with"])
+    elif k == "header":
+        l = choice(["if x:", "while y:", "def f():", "else:", "except:", "finally:"])
+        out = lines[:i]
+        out.append(l)
+        out.append("x = 1")
+        return ["\n".join(out) + "\n", k]
+    elif k == "nocolon":
+        l = l[:len(l) - 1]
+        if l.strip() == "try":
+            l = l + " ="
+    lines[i] = l
+    return ["\n".join(lines), k]
+
+# ---------------- running the compiler ----------------
+ERRF = [""]
+
+def run(args):
+# [exit code, stderr] of `build/forgec args...` (stdout discarded)
+    argv = __new(64, 4, 64)
+    __st(argv, 0, "/bin/sh")
+    __st(argv, 1, "-c")
+    __st(argv, 2, FORGEC + " " + " ".join(args) + " >/dev/null 2>" + ERRF[0])
+    __st(argv, 3, 0)
+    envp = __new(16, 4, 16)
+    __st(envp, 0, 0)
+    pid: int = __syscall(57, 0, 0, 0)
+    if pid == 0:
+        __syscall(59, "/bin/sh", argv, envp)
+        __syscall(60, 127, 0, 0)
+    st = alloc(64)
+    __st(st, 0, 0)
+    __syscall(61, pid, st, 0)
+    w: int = __ld(st, 0)
+    e = read_file(ERRF[0])
+    if e is None:
+        e = ""
+    return [(w >> 8) & 255, e]
+
+def strip_lines(j):
+# the AST JSON without its "file" member and every "l" (line) member, as text
+    k = j.find("\"file\":\"")
+    if k >= 0:
+        q: int = k + 8
+        while char_at(j, q) != 34:
+            if char_at(j, q) == 92:
+                q += 1
+            q += 1
+        j = j[:k] + j[q + 2:]
+    out = []
+    i: int = 0
+    st: int = 0
+    n: int = len(j)
+    while i < n:
+        if char_at(j, i) == 44 and j[i:i + 5] == ",\"l\":":
+            out.append(j[st:i])
+            i += 5
+            while i < n and char_at(j, i) >= 48 and char_at(j, i) <= 57:
+                i += 1
+            st = i
+        else:
+            i += 1
+    out.append(j[st:])
+    return "".join(out)
+
+def has_parse_code(s) -> bool:
+    k: int = s.find("\"code\":\"E010")
+    while k >= 0:
+        c: int = char_at(s, k + 12)
+        if c >= 48 and c <= 53:
+            return True
+        k = s.find("\"code\":\"E010", k + 1)
+    return False
+
+def strip_ws(s):
+    return s.strip()
+
+def main():
+    seed: int = 1
+    n: int = 200
+    i: int = 1
+    while i < argc():
+        if argv(i) == "--seed" and i + 1 < argc():
+            seed = int(argv(i + 1))
+        if argv(i) == "--n" and i + 1 < argc():
+            n = int(argv(i + 1))
+        i += 1
+    mt_seed(seed)
+    __syscall(83, "build", 493, 0)
+    __syscall(83, "build/fuzz", 493, 0)
+    pid: int = __syscall(39, 0, 0, 0)
+    ERRF[0] = "/tmp/grammar_fuzz." + str(pid) + ".err"
+    bad: int = 0
+    nv: int = 0
+    ni: int = 0
+    k: int = 0
+    while k < n:
+        src = program()
+        f = "build/fuzz/v" + str(k) + ".forge"
+        if k % 2 == 0:
+            nv += 1
+            write_file(f, src)
+            r = run([f, "build/fuzz/a.json", "--emit=ast-json"])
+            if r[0] != 0:
+                sys.stdout.write("FAIL grammar-fuzz valid program rejected: " + f + ": " + strip_ws(r[1])[:300] + "\n")
+                bad += 1
+            else:
+                run([f, "build/fuzz/p.forge", "--emit=pretty"])
+                r2 = run(["build/fuzz/p.forge", "build/fuzz/b.json", "--emit=ast-json"])
+                if r2[0] != 0 or strip_lines(read_file("build/fuzz/a.json")) != strip_lines(read_file("build/fuzz/b.json")):
+                    sys.stdout.write("FAIL grammar-fuzz round trip differs: " + f + "\n")
+                    bad += 1
+        else:
+            ni += 1
+            b = break_program(src)
+            f = "build/fuzz/i" + str(k) + ".forge"
+            write_file(f, b[0])
+            r = run([f, "build/fuzz/a.json", "--emit=ast-json", "--diagnostics=json"])
+            if r[0] != 1 or not has_parse_code(r[1]):
+                sys.stdout.write("FAIL grammar-fuzz invalid program (" + b[1] + ") not rejected cleanly: " + f + " (exit " + str(r[0]) + ") " + r[1][:200] + "\n")
+                bad += 1
+        k += 1
+    __syscall(87, ERRF[0], 0, 0)
+    if bad == 0:
+        sys.stdout.write("PASS grammar-fuzz (seed " + str(seed) + ": " + str(nv) + " valid round-tripped, " + str(ni) + " invalid rejected)\n")
+        exit(0)
+    exit(1)
+
+main()

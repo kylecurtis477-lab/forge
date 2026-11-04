@@ -1,0 +1,217 @@
+# forge-part: Forge port of tools/forge-part.py (byte-identical disk images and output; tests/forge-part/run.sh).
+# USAGE is the Python tool's __doc__, printed verbatim. The image is read whole,
+# patched in memory and written back; only GPT structures and the new partition's first 4 KiB differ.
+import os
+import sys
+
+USAGE = "\n".join([
+    "Create the Forge FS partition on a GPT disk image, explicitly.",
+    "",
+    "usage: forge-part.py create DISK SIZE_MIB --yes-add-forge-partition",
+    "       forge-part.py read DISK NAME          (print a Forge FS file to stdout)",
+    "",
+    "'create' adds one partition with the Forge type GUID D0C2E3A1-6B7F-4F0A-9E11-466F72676546 in the",
+    "largest free gap, rewrites only the primary and backup GPT headers and entry arrays, and zeroes the",
+    "first 4 KiB of the new partition (so the kernel will format it). It refuses without the flag, on a",
+    "disk without a valid GPT, if a Forge partition already exists, or if no gap is large enough.",
+    "No existing partition and no byte outside the GPT structures and the new partition is changed.",
+    "FORGE_GUID_SEED=N (testing only): the new partition's unique GUID is bytes_le = pack('<QQ', N, 0)",
+    "instead of uuid4, so output is reproducible (tests/forge-part compares against tools/forge-part.forge).",
+])
+SEC = 512
+# D0C2E3A1-6B7F-4F0A-9E11-466F72676546 in GPT (mixed-endian) byte order
+FORGE = "\xa1\xe3\xc2\xd0\x7f\x6b\x0a\x4f\x9e\x11\x46\x6f\x72\x67\x65\x46"
+ZERO16 = "\x00" * 16
+CRCT = []
+
+def die(m):
+    eputs("forge-part: " + m)
+    exit(1)
+
+def crc32(s):
+    if len(CRCT) == 0:
+        for n in range(256):
+            c = n
+            for k in range(8):
+                if c & 1:
+                    c = 0xEDB88320 ^ (c >> 1)
+                else:
+                    c = c >> 1
+            CRCT.append(c)
+    c = 0xFFFFFFFF
+    for i in range(len(s)):
+        c = CRCT[(c ^ char_at(s, i)) & 255] ^ (c >> 8)
+    return c ^ 0xFFFFFFFF
+
+def rd(s, o, n):
+    v = 0
+    i = n - 1
+    while i >= 0:
+        v = v * 256 + char_at(s, o + i)
+        i -= 1
+    return v
+
+def le(v, n):
+    out = []
+    for i in range(n):
+        out.append(chr((v >> (8 * i)) & 255))
+    return "".join(out)
+
+def put(s, o, b):
+    return s[:o] + b + s[o + len(b):]
+
+# decimal FORGE_GUID_SEED as u64 little-endian (8 bytes), carried in 32-bit halves; out of range fails
+# like Python's struct.pack('<Q')
+def seed_le(s):
+    lo = 0
+    hi = 0
+    if len(s) == 0:
+        die("bad FORGE_GUID_SEED")
+    for i in range(len(s)):
+        dg = char_at(s, i) - 48
+        if dg < 0 or dg > 9:
+            die("bad FORGE_GUID_SEED")
+        lo = lo * 10 + dg
+        hi = hi * 10 + (lo >> 32)
+        lo = lo & 0xFFFFFFFF
+        if hi > 0xFFFFFFFF:
+            die("FORGE_GUID_SEED out of range")
+    return le(lo, 4) + le(hi, 4)
+
+def newguid(k):
+    seed = os.getenv("FORGE_GUID_SEED")
+    if seed is None:
+    # uuid4 (as the Python tool): 16 bytes from getrandom(2), version 4 and RFC 4122 variant bits,
+    # in GPT byte order (time_hi_and_version is little-endian at bytes 6..7)
+        b = "\x00" * (k + 16)
+        b = b[k:]
+        __syscall(318, b, 16, 0)
+        return b[:7] + chr((ord(b[7]) & 0x0F) | 0x40) + chr((ord(b[8]) & 0x3F) | 0x80) + b[9:]
+    return seed_le(seed) + le(k, 8)
+
+def load(d):
+    h = d[SEC:2 * SEC]
+    if h[:8] != "EFI PART":
+        die("no GPT header at LBA 1")
+    hs = rd(h, 12, 4)
+    c = rd(h, 16, 4)
+    if crc32(put(h[:hs], 16, "\x00\x00\x00\x00")) != c:
+        die("GPT header CRC mismatch")
+    elba = rd(h, 72, 8)
+    n = rd(h, 80, 4)
+    esz = rd(h, 84, 4)
+    if esz != 128:
+        die("unsupported entry size")
+    ents = d[elba * SEC:elba * SEC + n * esz]
+    if crc32(ents) != rd(h, 88, 4):
+        die("GPT entry CRC mismatch")
+    return [h, hs, rd(h, 40, 8), rd(h, 48, 8), elba, n, ents]
+
+def parts(ents, n):
+    r = []
+    for i in range(n):
+        e = ents[i * 128:(i + 1) * 128]
+        if e[:16] != ZERO16:
+            r.append([i, e[:16], rd(e, 32, 8), rd(e, 40, 8)])
+    return r
+
+def hdr(h, hs, my, alt, el, ecrc):
+    x = put(h[:hs], 24, le(my, 8) + le(alt, 8))
+    x = put(x, 72, le(el, 8))
+    x = put(x, 88, le(ecrc, 4))
+    x = put(x, 16, "\x00\x00\x00\x00")
+    x = put(x, 16, le(crc32(x), 4))
+    return x + "\x00" * (SEC - len(x))
+
+def create(disk, mib):
+    d = read_file(disk)
+    if d is None:
+        die("cannot read " + disk)
+    g = load(d)
+    h = g[0]
+    hs = g[1]
+    first = g[2]
+    last = g[3]
+    elba = g[4]
+    n = g[5]
+    ents = g[6]
+    ps = parts(ents, n)
+    used = sorted([[p[2], p[3]] for p in ps])
+    for p in ps:
+        if p[1] == FORGE:
+            die("a Forge partition already exists")
+    free = [i for i in range(n) if ents[i * 128:i * 128 + 16] == ZERO16]
+    if len(free) == 0:
+        die("no free GPT entry")
+    need = mib * 2048
+    gaps = []
+    cur = first
+    for u in used:
+        if u[0] > cur:
+            gaps.append([cur, u[0] - 1])
+        cur = max(cur, u[1] + 1)
+    gaps.append([cur, last])
+    best = None
+    for gp in gaps:
+        s = (gp[0] + 2047) // 2048 * 2048
+        e = gp[1]
+        if e - s + 1 >= need and (best is None or e - s > best[1] - best[0]):
+            best = [s, e]
+    if best is None:
+        die("no free gap of " + str(mib) + " MiB")
+    s = best[0]
+    e = best[0] + need - 1
+    i = free[0]
+    name = "F\x00o\x00r\x00g\x00e\x00 \x00F\x00S\x00"
+    ent = FORGE + newguid(0) + le(s, 8) + le(e, 8) + le(0, 8) + name + "\x00" * (72 - len(name))
+    ents = put(ents, i * 128, ent)
+    ecrc = crc32(ents)
+    nsec = len(d) // SEC
+    bel = nsec - 1 - (n * 128 + SEC - 1) // SEC
+    d = put(d, elba * SEC, ents)
+    d = put(d, SEC, hdr(h, hs, 1, nsec - 1, elba, ecrc))
+    d = put(d, bel * SEC, ents)
+    d = put(d, (nsec - 1) * SEC, hdr(h, hs, nsec - 1, 1, bel, ecrc))
+    d = put(d, s * SEC, "\x00" * 4096)
+    write_file(disk, d)
+    print("forge-part: created Forge FS partition " + str(i + 1) + ": LBA " + str(s) + ".." + str(e) + " (" + str(mib) + " MiB)")
+
+def read(disk, name):
+    d = read_file(disk)
+    if d is None:
+        die("cannot read " + disk)
+    g = load(d)
+    p = [q for q in parts(g[6], g[5]) if q[1] == FORGE]
+    if len(p) != 1:
+        die("need exactly one Forge partition")
+    lo = p[0][2]
+    sb = d[lo * SEC:lo * SEC + 4096]
+    it = d[lo * SEC + 4096:lo * SEC + 8192]
+    if sb[:8] != "FORGEFS1":
+        die("not formatted")
+    for k in range(64):
+        e = it[k * 64:(k + 1) * 64]
+        nm = e[:40]
+        j = len(nm)
+        while j > 0 and nm[j - 1] == "\x00":
+            j -= 1
+        if nm[:j] == name and len(e) > 0 and e[0] != "\x00":
+            size = rd(e, 40, 8)
+            st = rd(e, 48, 8)
+            o = lo * SEC + st * 4096
+            sys.stdout.write(d[o:o + size])
+            return
+    die("no such file")
+
+def main():
+    if argc() == 5 and argv(1) == "create":
+        if argv(4) != "--yes-add-forge-partition":
+            die("refusing without --yes-add-forge-partition")
+        create(argv(2), int(argv(3)))
+    elif argc() == 4 and argv(1) == "read":
+        read(argv(2), argv(3))
+    else:
+        print(USAGE)
+        exit(2)
+
+main()

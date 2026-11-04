@@ -1,0 +1,1298 @@
+# mkfont: Forge port of tools/mkfont.py (byte-identical font.fsi and stdout; tests/mkfont/run.sh).
+# usage: mkfont font.ttf out.fsi -- render ASCII 32..126 of DejaVu Sans Mono at 13 px into an 8x16
+# 1-bpp bitmap font (u8[1520], 16 bytes per glyph, MSB = leftmost pixel), then preview 'F' and 'g'.
+# The Python tool uses PIL, i.e. FreeType with default (hinted) loading and the smooth rasterizer.
+# Matching it bit for bit needs the same three stages, all in integer arithmetic:
+#  1. glyf/loca/hmtx/cmap(4)/cvt/fpgm/prep parsing and scaling (FT_MulFix, x_scale = 13*64/upem).
+#  2. A TrueType bytecode interpreter for the opcodes this font uses, with FreeType's v40
+#     "backward compatibility" semantics: x moves only set the touch flag, y moves stop once both
+#     IUP[x] and IUP[y] ran, SHPIX/DELTAP only move y-touched points. IUP[x] still interpolates x.
+#  3. ftgrays: 26.6 coordinates upscaled to 24.8 cells, conics by the DDA, area/cover sweep with
+#     the non-zero fill (coverage = area >> 9, ~ if negative, clamp 255); a pixel is set when >= 110.
+# The baseline is ceil(hhea.ascender * scale) pixels from the top, as PIL places text at (0, 0).
+import sys
+
+DATA = [""]
+TB = {}
+FI = {}
+CVT0 = []
+CVT = []
+STORE = []
+FDEF = {}
+G = {}
+# glyph zone: unscaled (orus), original scaled (org), current, touch tags, contour ends
+UX = []
+UY = []
+OX = []
+OY = []
+CX = []
+CY = []
+TAGS = []
+ENDS = []
+ST = []
+TOUCH_X = 8
+TOUCH_Y = 16
+# raster cells, offset by ROFF in both axes
+ROFF = 32
+RW = 128
+CCOV = []
+CAREA = []
+RS = [0, 0, 0, 0]
+
+def die(m):
+    eputs("mkfont: " + m)
+    exit(1)
+
+def b8(o):
+    return char_at(DATA[0], o)
+
+def u16(o):
+    return b8(o) * 256 + b8(o + 1)
+
+def s16(o):
+    v = u16(o)
+    if v >= 32768:
+        v -= 65536
+    return v
+
+def u32(o):
+    return u16(o) * 65536 + u16(o + 2)
+
+# ---------------- FreeType fixed-point helpers (exact) ----------------
+def muldiv(a, b, c):
+    s = 1
+    if a < 0:
+        a = 0 - a
+        s = 0 - s
+    if b < 0:
+        b = 0 - b
+        s = 0 - s
+    if c < 0:
+        c = 0 - c
+        s = 0 - s
+    d = 2147483647
+    if c > 0:
+        d = (a * b + (c >> 1)) // c
+    if s < 0:
+        return 0 - d
+    return d
+
+def muldiv_nr(a, b, c):
+    s = 1
+    if a < 0:
+        a = 0 - a
+        s = 0 - s
+    if b < 0:
+        b = 0 - b
+        s = 0 - s
+    if c < 0:
+        c = 0 - c
+        s = 0 - s
+    d = 2147483647
+    if c > 0:
+        d = (a * b) // c
+    if s < 0:
+        return 0 - d
+    return d
+
+def divfix(a, b):
+    s = 1
+    if a < 0:
+        a = 0 - a
+        s = 0 - s
+    if b < 0:
+        b = 0 - b
+        s = 0 - s
+    q = 2147483647
+    if b > 0:
+        q = (a * 65536 + (b >> 1)) // b
+    if s < 0:
+        return 0 - q
+    return q
+
+def mulfix(a, b):
+    r = a * b
+    if r < 0:
+        r -= 1
+    return (r + 32768) >> 16
+
+def mulfix14(a, b):
+    r = a * b
+    if r < 0:
+        r -= 1
+    return (r + 8192) >> 14
+
+def dotfix14(ax, ay, bx, by):
+    t = ax * bx + ay * by
+    if t < 0:
+        t -= 1
+    return (t + 8192) >> 14
+
+def i32(v):
+    v = v & 0xFFFFFFFF
+    if v >= 2147483648:
+        v -= 4294967296
+    return v
+
+def tdiv(a, b):
+    q = abs(a) // abs(b)
+    if (a >= 0) == (b >= 0):
+        return q
+    return 0 - q
+
+def bitlen(v):
+    n = 0
+    while v > 0:
+        v = v >> 1
+        n += 1
+    return n
+
+def normlen(x0, y0):
+# FT_Vector_NormLen (ftcalc.c), returns the unit vector in 16.16
+    sx = 1
+    sy = 1
+    x = x0
+    y = y0
+    if x < 0:
+        x = 0 - x
+        sx = -1
+    if y < 0:
+        y = 0 - y
+        sy = -1
+    if x == 0:
+        if y > 0:
+            return 0, sy * 65536
+        return 0, y0
+    if y == 0:
+        if x > 0:
+            return sx * 65536, 0
+        return x0, 0
+    l = y + (x >> 1)
+    if x > y:
+        l = x + (y >> 1)
+    shift = 31 - (bitlen(l) - 1)
+    adj = 0
+    if l >= (0xAAAAAAAA >> shift):
+        adj = 1
+    shift = shift - 15 - adj
+    if shift > 0:
+        x = (x << shift) & 0xFFFFFFFF
+        y = (y << shift) & 0xFFFFFFFF
+    else:
+        x = x >> (0 - shift)
+        y = y >> (0 - shift)
+    l = y + (x >> 1)
+    if x > y:
+        l = x + (y >> 1)
+    b = 65536 - i32(l)
+    xs = i32(x)
+    ys = i32(y)
+    u = 0
+    v = 0
+    while True:
+        u = (xs + (i32(xs * b) >> 16)) & 0xFFFFFFFF
+        v = (ys + (i32(ys * b) >> 16)) & 0xFFFFFFFF
+        z = tdiv(0 - i32(u * u + v * v), 512)
+        z = tdiv(i32(z * ((65536 + b) >> 8)), 65536)
+        b += z
+        if z <= 0:
+            break
+    if sx < 0:
+        u = 0 - u
+    if sy < 0:
+        v = 0 - v
+    return u, v
+
+# ---------------- font tables ----------------
+def load_font(path):
+    d = read_file(path)
+    if d is None or len(d) < 12:
+        die("cannot read " + path)
+    DATA[0] = d
+    n = u16(4)
+    for i in range(n):
+        o = 12 + 16 * i
+        TB[d[o:o + 4]] = u32(o + 8)
+    for t in ["head", "maxp", "hhea", "hmtx", "OS/2", "cvt ", "fpgm", "prep", "glyf", "loca", "cmap"]:
+        if not (t in TB):
+            die("missing table " + t)
+    h = TB["head"]
+    FI["upem"] = u16(h + 18)
+    FI["locfmt"] = s16(h + 50)
+    FI["nhm"] = u16(TB["hhea"] + 34)
+    FI["asc"] = s16(TB["hhea"] + 4)
+    FI["typoAsc"] = s16(TB["OS/2"] + 68)
+    FI["typoDesc"] = s16(TB["OS/2"] + 70)
+    for i in range(u16(TB["maxp"] + 18)):
+        STORE.append(0)
+    co = TB["cvt "]
+    cl = table_len("cvt ")
+    for i in range(cl // 2):
+        CVT0.append(s16(co + 2 * i))
+
+def table_len(t):
+    d = DATA[0]
+    for i in range(u16(4)):
+        o = 12 + 16 * i
+        if d[o:o + 4] == t:
+            return u32(o + 12)
+    return 0
+
+def cmap_glyph(ch):
+    c = TB["cmap"]
+    st = -1
+    for i in range(u16(c + 2)):
+        pid = u16(c + 4 + 8 * i)
+        eid = u16(c + 6 + 8 * i)
+        if pid == 3 and eid == 1:
+            st = c + u32(c + 8 + 8 * i)
+    if st < 0 or u16(st) != 4:
+        die("no format 4 (3,1) cmap")
+    segx2 = u16(st + 6)
+    ends = st + 14
+    starts = ends + segx2 + 2
+    deltas = starts + segx2
+    ros = deltas + segx2
+    for i in range(segx2 // 2):
+        if ch <= u16(ends + 2 * i):
+            sc = u16(starts + 2 * i)
+            if ch < sc:
+                return 0
+            ro = u16(ros + 2 * i)
+            de = s16(deltas + 2 * i)
+            if ro == 0:
+                return (ch + de) & 0xFFFF
+            g = u16(ros + 2 * i + ro + 2 * (ch - sc))
+            if g != 0:
+                g = (g + de) & 0xFFFF
+            return g
+    return 0
+
+def loca(g):
+    lo = TB["loca"]
+    if FI["locfmt"] != 0:
+        return u32(lo + 4 * g), u32(lo + 4 * g + 4)
+    return 2 * u16(lo + 2 * g), 2 * u16(lo + 2 * g + 2)
+
+def hmtx(g):
+    ho = TB["hmtx"]
+    nhm = FI["nhm"]
+    if g < nhm:
+        return u16(ho + 4 * g), s16(ho + 4 * g + 2)
+    return u16(ho + 4 * (nhm - 1)), s16(ho + 4 * nhm + 2 * (g - nhm))
+
+# ---------------- interpreter ----------------
+def compute_funcs():
+    fx = G["fx"]
+    fy = G["fy"]
+    px = G["px"]
+    py = G["py"]
+    f = (px * fx + py * fy) >> 14
+    if fx == 16384:
+        f = px
+    elif fy == 16384:
+        f = py
+    if abs(f) < 1024:
+        f = 16384
+    G["fdp"] = f
+
+def project(ax, ay, bx, by):
+    if G["px"] == 16384:
+        return ax - bx
+    if G["py"] == 16384:
+        return ay - by
+    return dotfix14(ax - bx, ay - by, G["px"], G["py"])
+
+def dualproj(ax, ay, bx, by):
+    if G["dx"] == 16384:
+        return ax - bx
+    if G["dy"] == 16384:
+        return ay - by
+    return dotfix14(ax - bx, ay - by, G["dx"], G["dy"])
+
+def frozen():
+    return G["iupx"] != 0 and G["iupy"] != 0
+
+def move(p, d):
+# Direct_Move, v40 backward compatibility: x is never moved, only flagged
+    fx = G["fx"]
+    fy = G["fy"]
+    if fx != 0:
+        TAGS[p] = TAGS[p] | TOUCH_X
+    if fy != 0:
+        if not frozen():
+            CY[p] = CY[p] + muldiv(d, fy, G["fdp"])
+        TAGS[p] = TAGS[p] | TOUCH_Y
+
+def move_zp2(p, dy):
+    if G["fx"] != 0:
+        TAGS[p] = TAGS[p] | TOUCH_X
+    if G["fy"] != 0:
+        if not frozen():
+            CY[p] = CY[p] + dy
+        TAGS[p] = TAGS[p] | TOUCH_Y
+
+def rnd(d):
+    r = G["round"]
+    if r == 0:
+        if d >= 0:
+            v = (d & ~63) + 32
+            if v < 0:
+                return 32
+            return v
+        v = 0 - (((0 - d) & ~63) + 32)
+        if v > 0:
+            return -32
+        return v
+    if r == 1:
+        if d >= 0:
+            v = (d + 32) & ~63
+            if v < 0:
+                return 0
+            return v
+        v = 0 - (((0 - d) + 32) & ~63)
+        if v > 0:
+            return 0
+        return v
+    if r == 2:
+        if d >= 0:
+            return (d + 16) & ~31
+        return 0 - (((0 - d) + 16) & ~31)
+    if r == 3:
+        if d >= 0:
+            return d & ~63
+        return 0 - ((0 - d) & ~63)
+    if r == 4:
+        if d >= 0:
+            return (d + 63) & ~63
+        return 0 - (((0 - d) + 63) & ~63)
+    if r == 5:
+        return d
+    die("unsupported round state " + str(r))
+    return 0
+
+def spop():
+    if len(ST) == 0:
+        return 0
+    return ST.pop()
+
+def oplen(c, ip):
+    o = char_at(c, ip)
+    if o == 0x40:
+        return 2 + char_at(c, ip + 1)
+    if o == 0x41:
+        return 2 + 2 * char_at(c, ip + 1)
+    if o >= 0xB0 and o <= 0xB7:
+        return o - 0xAE
+    if o >= 0xB8 and o <= 0xBF:
+        return 1 + 2 * (o - 0xB7)
+    return 1
+
+def w16(c, ip):
+    v = char_at(c, ip) * 256 + char_at(c, ip + 1)
+    if v >= 32768:
+        v -= 65536
+    return v
+
+def skip_if(c, ip, stop_else):
+# ip is at the IF/ELSE opcode; returns the ip just past the matching ELSE (if stop_else) or EIF
+    nifs = 1
+    while True:
+        ip += oplen(c, ip)
+        if ip >= len(c):
+            die("unterminated IF")
+        o = char_at(c, ip)
+        if o == 0x58:
+            nifs += 1
+        elif o == 0x1B and stop_else and nifs == 1:
+            return ip + 1
+        elif o == 0x59:
+            nifs -= 1
+            if nifs == 0:
+                return ip + 1
+    return ip
+
+def run(code):
+    compute_funcs()
+    G["iupx"] = 0
+    G["iupy"] = 0
+    ST.clear()
+    calls = []
+    cur = code
+    ip = 0
+    while True:
+        if ip >= len(cur):
+            if len(calls) > 0:
+                die("function without ENDF")
+            break
+        op = char_at(cur, ip)
+        ip += 1
+        if op == 0x40:
+            k = char_at(cur, ip)
+            ip += 1
+            for i in range(k):
+                ST.append(char_at(cur, ip))
+                ip += 1
+        elif op == 0x41:
+            k = char_at(cur, ip)
+            ip += 1
+            for i in range(k):
+                ST.append(w16(cur, ip))
+                ip += 2
+        elif op >= 0xB0 and op <= 0xB7:
+            for i in range(op - 0xAF):
+                ST.append(char_at(cur, ip))
+                ip += 1
+        elif op >= 0xB8 and op <= 0xBF:
+            for i in range(op - 0xB7):
+                ST.append(w16(cur, ip))
+                ip += 2
+        elif op == 0x2C:
+            fn = spop()
+            start = ip
+            while char_at(cur, ip) != 0x2D:
+                ip += oplen(cur, ip)
+                if ip >= len(cur):
+                    die("FDEF without ENDF")
+            FDEF[fn] = [cur, start]
+            ip += 1
+        elif op == 0x2D:
+            fr = calls.pop()
+            cur = fr[0]
+            ip = fr[1]
+        elif op == 0x2B:
+            fn = spop()
+            if not (fn in FDEF):
+                die("CALL of undefined function " + str(fn))
+            calls.append([cur, ip])
+            cur = FDEF[fn][0]
+            ip = FDEF[fn][1]
+        elif op == 0x58:
+            if spop() == 0:
+                ip = skip_if(cur, ip - 1, True)
+        elif op == 0x1B:
+            ip = skip_if(cur, ip - 1, False)
+        elif op == 0x59:
+            ip = ip
+        elif op == 0x1C:
+            off = spop()
+            ip = ip - 1 + off
+        elif op == 0x78 or op == 0x79:
+            e = spop()
+            off = spop()
+            if (op == 0x79 and e == 0) or (op == 0x78 and e != 0):
+                ip = ip - 1 + off
+        elif op == 0x20:
+            v = spop()
+            ST.append(v)
+            ST.append(v)
+        elif op == 0x21:
+            spop()
+        elif op == 0x22:
+            ST.clear()
+        elif op == 0x23:
+            a = spop()
+            b = spop()
+            ST.append(a)
+            ST.append(b)
+        elif op == 0x24:
+            ST.append(len(ST))
+        elif op == 0x25:
+            l = spop()
+            if l > 0 and l <= len(ST):
+                ST.append(ST[len(ST) - l])
+            else:
+                ST.append(0)
+        elif op == 0x8A:
+            a = spop()
+            b = spop()
+            c = spop()
+            ST.append(b)
+            ST.append(a)
+            ST.append(c)
+        elif op >= 0x50 and op <= 0x55:
+            b = spop()
+            a = spop()
+            r = False
+            if op == 0x50:
+                r = a < b
+            elif op == 0x51:
+                r = a <= b
+            elif op == 0x52:
+                r = a > b
+            elif op == 0x53:
+                r = a >= b
+            elif op == 0x54:
+                r = a == b
+            else:
+                r = a != b
+            if r:
+                ST.append(1)
+            else:
+                ST.append(0)
+        elif op == 0x5A or op == 0x5B:
+            b = spop()
+            a = spop()
+            r = 0
+            if op == 0x5A and a != 0 and b != 0:
+                r = 1
+            if op == 0x5B and (a != 0 or b != 0):
+                r = 1
+            ST.append(r)
+        elif op == 0x5C:
+            if spop() == 0:
+                ST.append(1)
+            else:
+                ST.append(0)
+        elif op == 0x60:
+            b = spop()
+            a = spop()
+            ST.append(a + b)
+        elif op == 0x61:
+            b = spop()
+            a = spop()
+            ST.append(a - b)
+        elif op == 0x62:
+            b = spop()
+            a = spop()
+            if b == 0:
+                die("DIV by zero")
+            ST.append(muldiv_nr(a, 64, b))
+        elif op == 0x63:
+            b = spop()
+            a = spop()
+            ST.append(muldiv(a, b, 64))
+        elif op == 0x64:
+            ST.append(abs(spop()))
+        elif op == 0x65:
+            ST.append(0 - spop())
+        elif op == 0x66:
+            ST.append(spop() & ~63)
+        elif op == 0x67:
+            ST.append((spop() + 63) & ~63)
+        elif op >= 0x68 and op <= 0x6B:
+            ST.append(rnd(spop()))
+        elif op == 0x4B or op == 0x4C:
+            ST.append(G["ppem"])
+        elif op == 0x43:
+            ST.append(STORE[spop()])
+        elif op == 0x42:
+            v = spop()
+            STORE[spop()] = v
+        elif op == 0x44:
+            v = spop()
+            i = spop()
+            if i >= 0 and i < len(CVT):
+                CVT[i] = v
+        elif op == 0x70:
+            v = spop()
+            i = spop()
+            if i >= 0 and i < len(CVT):
+                CVT[i] = mulfix(v, G["scale"])
+        elif op == 0x45:
+            i = spop()
+            if i >= 0 and i < len(CVT):
+                ST.append(CVT[i])
+            else:
+                ST.append(0)
+        elif op == 0x1D:
+            G["cvci"] = spop()
+        elif op == 0x1E:
+            G["swci"] = spop()
+        elif op == 0x1F:
+            G["swv"] = mulfix(spop(), G["scale"])
+        elif op == 0x1A:
+            G["mindist"] = spop()
+        elif op == 0x5E:
+            G["dbase"] = spop()
+        elif op == 0x5F:
+            G["dshift"] = spop()
+        elif op == 0x4D:
+            G["autoflip"] = 1
+        elif op == 0x4E:
+            G["autoflip"] = 0
+        elif op == 0x18:
+            G["round"] = 1
+        elif op == 0x19:
+            G["round"] = 0
+        elif op == 0x3D:
+            G["round"] = 2
+        elif op == 0x7C:
+            G["round"] = 4
+        elif op == 0x7D:
+            G["round"] = 3
+        elif op == 0x7A:
+            G["round"] = 5
+        elif op == 0x85 or op == 0x8D:
+            spop()
+        elif op == 0x17:
+            G["loop"] = spop()
+        elif op == 0x10:
+            G["rp0"] = spop()
+        elif op == 0x11:
+            G["rp1"] = spop()
+        elif op == 0x12:
+            G["rp2"] = spop()
+        elif op <= 0x05:
+            aa = (op & 1) << 14
+            bb = aa ^ 16384
+            if op < 4:
+                G["px"] = aa
+                G["py"] = bb
+                G["dx"] = aa
+                G["dy"] = bb
+            if (op & 2) == 0:
+                G["fx"] = aa
+                G["fy"] = bb
+            compute_funcs()
+        elif op >= 0x06 and op <= 0x09:
+            p2 = spop()
+            p1 = spop()
+            a = CX[p2] - CX[p1]
+            b = CY[p2] - CY[p1]
+            o = op
+            if a == 0 and b == 0:
+                a = 16384
+                o = 0
+            if (o & 1) != 0:
+                t = b
+                b = a
+                a = 0 - t
+            vx, vy = normlen(a, b)
+            vx = tdiv(vx, 4)
+            vy = tdiv(vy, 4)
+            if op <= 0x07:
+                G["px"] = vx
+                G["py"] = vy
+                G["dx"] = vx
+                G["dy"] = vy
+            else:
+                G["fx"] = vx
+                G["fy"] = vy
+            compute_funcs()
+        elif op == 0x0E:
+            G["fx"] = G["px"]
+            G["fy"] = G["py"]
+            compute_funcs()
+        elif op == 0x49 or op == 0x4A:
+            k = spop()
+            l = spop()
+            if op == 0x4A:
+                ST.append(project(CX[l], CY[l], CX[k], CY[k]))
+            else:
+                ST.append(mulfix(dualproj(UX[l], UY[l], UX[k], UY[k]), G["scale"]))
+        elif op == 0x30 or op == 0x31:
+            iup(op)
+        elif op == 0x32 or op == 0x33:
+            p = G["rp2"]
+            if op == 0x33:
+                p = G["rp1"]
+            d = project(CX[p], CY[p], OX[p], OY[p])
+            dy = muldiv(d, G["fy"], G["fdp"])
+            while G["loop"] > 0:
+                move_zp2(spop(), dy)
+                G["loop"] = G["loop"] - 1
+            G["loop"] = 1
+        elif op == 0x38:
+            dy = mulfix14(spop(), G["fy"])
+            while G["loop"] > 0:
+                pt = spop()
+                if not frozen() and (TAGS[pt] & TOUCH_Y) != 0:
+                    move_zp2(pt, dy)
+                G["loop"] = G["loop"] - 1
+            G["loop"] = 1
+        elif op == 0x3A or op == 0x3B:
+            dist = spop()
+            pt = spop()
+            r0 = G["rp0"]
+            move(pt, dist - project(CX[pt], CY[pt], CX[r0], CY[r0]))
+            G["rp1"] = r0
+            G["rp2"] = pt
+            if op == 0x3B:
+                G["rp0"] = pt
+        elif op == 0x2E or op == 0x2F:
+            pt = spop()
+            d = 0
+            if op == 0x2F:
+                cd = project(CX[pt], CY[pt], 0, 0)
+                d = rnd(cd) - cd
+            move(pt, d)
+            G["rp0"] = pt
+            G["rp1"] = pt
+        elif op == 0x39:
+            r1 = G["rp1"]
+            r2 = G["rp2"]
+            old = dualproj(UX[r2], UY[r2], UX[r1], UY[r1])
+            cr = project(CX[r2], CY[r2], CX[r1], CY[r1])
+            while G["loop"] > 0:
+                pt = spop()
+                od = dualproj(UX[pt], UY[pt], UX[r1], UY[r1])
+                cd = project(CX[pt], CY[pt], CX[r1], CY[r1])
+                nd = 0
+                if od != 0:
+                    nd = od
+                    if old != 0:
+                        nd = muldiv(od, cr, old)
+                move(pt, nd - cd)
+                G["loop"] = G["loop"] - 1
+            G["loop"] = 1
+        elif op == 0x3C:
+            r0 = G["rp0"]
+            while G["loop"] > 0:
+                pt = spop()
+                move(pt, 0 - project(CX[pt], CY[pt], CX[r0], CY[r0]))
+                G["loop"] = G["loop"] - 1
+            G["loop"] = 1
+        elif op == 0x5D or op == 0x71 or op == 0x72:
+            nump = spop()
+            base = 0
+            if op == 0x71:
+                base = 16
+            if op == 0x72:
+                base = 32
+            for k in range(nump):
+                a = spop()
+                b = spop()
+                if G["ppem"] == ((b & 0xF0) >> 4) + base + G["dbase"]:
+                    b = (b & 0xF) - 8
+                    if b >= 0:
+                        b += 1
+                    b = b * (1 << (6 - G["dshift"]))
+                    if not frozen() and (TAGS[a] & TOUCH_Y) != 0:
+                        move(a, b)
+        elif op >= 0xC0 and op <= 0xDF:
+            mdrp(op, spop())
+        elif op >= 0xE0:
+            c = spop()
+            p = spop()
+            mirp(op, p, c)
+        else:
+            die("unsupported TrueType opcode " + str(op))
+
+def min_dist(od, dist):
+    md = G["mindist"]
+    if od >= 0:
+        if dist < md:
+            return md
+    elif dist > 0 - md:
+        return 0 - md
+    return dist
+
+def mdrp(op, pt):
+    r0 = G["rp0"]
+    od = mulfix(dualproj(UX[pt], UY[pt], UX[r0], UY[r0]), G["scale"])
+    swv = G["swv"]
+    if G["swci"] > 0 and od < swv + G["swci"] and od > swv - G["swci"]:
+        od = swv
+        if od < 0:
+            od = 0 - swv
+    dist = od
+    if (op & 4) != 0:
+        dist = rnd(od)
+    if (op & 8) != 0:
+        dist = min_dist(od, dist)
+    move(pt, dist - project(CX[pt], CY[pt], CX[r0], CY[r0]))
+    G["rp1"] = r0
+    G["rp2"] = pt
+    if (op & 16) != 0:
+        G["rp0"] = pt
+
+def mirp(op, pt, ce):
+    r0 = G["rp0"]
+    cvt = 0
+    if ce >= 0:
+        cvt = CVT[ce]
+    if abs(cvt - G["swv"]) < G["swci"]:
+        if cvt >= 0:
+            cvt = G["swv"]
+        else:
+            cvt = 0 - G["swv"]
+    od = dualproj(OX[pt], OY[pt], OX[r0], OY[r0])
+    cd = project(CX[pt], CY[pt], CX[r0], CY[r0])
+    if G["autoflip"] != 0 and (od ^ cvt) < 0:
+        cvt = 0 - cvt
+    dist = cvt
+    if (op & 4) != 0:
+        if abs(cvt - od) > G["cvci"]:
+            cvt = od
+        dist = rnd(cvt)
+    if (op & 8) != 0:
+        dist = min_dist(od, dist)
+    move(pt, dist - cd)
+    G["rp1"] = r0
+    if (op & 16) != 0:
+        G["rp0"] = pt
+    G["rp2"] = pt
+
+def iup_interp(org, cur, orus, p1, p2, r1, r2):
+    if p1 > p2:
+        return
+    o1 = orus[r1]
+    o2 = orus[r2]
+    if o1 > o2:
+        t = o1
+        o1 = o2
+        o2 = t
+        t = r1
+        r1 = r2
+        r2 = t
+    g1 = org[r1]
+    g2 = org[r2]
+    c1 = cur[r1]
+    c2 = cur[r2]
+    d1 = c1 - g1
+    d2 = c2 - g2
+    sc = 0
+    have = False
+    i = p1
+    while i <= p2:
+        x = org[i]
+        if x <= g1:
+            x = x + d1
+        elif x >= g2:
+            x = x + d2
+        elif c1 == c2 or o1 == o2:
+            x = c1
+        else:
+            if not have:
+                have = True
+                sc = divfix(c2 - c1, o2 - o1)
+            x = c1 + mulfix(orus[i] - o1, sc)
+        cur[i] = x
+        i += 1
+
+def iup_shift(org, cur, p1, p2, p):
+    dx = cur[p] - org[p]
+    if dx != 0:
+        i = p1
+        while i <= p2:
+            if i != p:
+                cur[i] = cur[i] + dx
+            i += 1
+
+def iup(op):
+    if frozen():
+        return
+    mask = TOUCH_Y
+    org = OY
+    cur = CY
+    orus = UY
+    if (op & 1) != 0:
+        G["iupx"] = 1
+        mask = TOUCH_X
+        org = OX
+        cur = CX
+        orus = UX
+    else:
+        G["iupy"] = 1
+    point = 0
+    for e in ENDS:
+        first = point
+        while point <= e and (TAGS[point] & mask) == 0:
+            point += 1
+        if point <= e:
+            ft = point
+            ct = point
+            point += 1
+            while point <= e:
+                if (TAGS[point] & mask) != 0:
+                    iup_interp(org, cur, orus, ct + 1, point - 1, ct, point)
+                    ct = point
+                point += 1
+            if ct == ft:
+                iup_shift(org, cur, first, e, ct)
+            else:
+                iup_interp(org, cur, orus, ct + 1, e, ct, ft)
+                if ft > 0:
+                    iup_interp(org, cur, orus, first, ft - 1, ct, ft)
+
+def gs_default():
+    G["rp0"] = 0
+    G["rp1"] = 0
+    G["rp2"] = 0
+    G["dx"] = 16384
+    G["dy"] = 0
+    G["px"] = 16384
+    G["py"] = 0
+    G["fx"] = 16384
+    G["fy"] = 0
+    G["loop"] = 1
+    G["round"] = 1
+
+def setup_size(ppem):
+# tt_size_init + fpgm + prep (cvt program), as tt_size_run_fpgm / tt_size_run_prep
+    G["scale"] = divfix(ppem * 64, FI["upem"])
+    gs_default()
+    G["mindist"] = 64
+    G["autoflip"] = 1
+    G["cvci"] = 68
+    G["swci"] = 0
+    G["swv"] = 0
+    G["dbase"] = 9
+    G["dshift"] = 3
+    G["ppem"] = 0
+    run(DATA[0][TB["fpgm"]:TB["fpgm"] + table_len("fpgm")])
+    sc = G["scale"] >> 6
+    for v in CVT0:
+        CVT.append(mulfix(v * 64, sc))
+    G["ppem"] = ppem
+    run(DATA[0][TB["prep"]:TB["prep"] + table_len("prep")])
+    gs_default()
+
+def hint_glyph(g):
+# Loads glyph g into the zone (TT_Load_Simple_Glyph + phantoms), runs its program; returns the point flags ([] if no outline).
+    UX.clear()
+    UY.clear()
+    OX.clear()
+    OY.clear()
+    CX.clear()
+    CY.clear()
+    TAGS.clear()
+    ENDS.clear()
+    a, b = loca(g)
+    if a == b:
+        return []
+    go = TB["glyf"] + a
+    nc = s16(go)
+    if nc < 0:
+        die("composite glyph " + str(g) + " not supported")
+    xmin = s16(go + 2)
+    ymax = s16(go + 8)
+    for i in range(nc):
+        ENDS.append(u16(go + 10 + 2 * i))
+    p = go + 10 + 2 * nc
+    il = u16(p)
+    ins = DATA[0][p + 2:p + 2 + il]
+    p += 2 + il
+    n = 0
+    if nc > 0:
+        n = ENDS[nc - 1] + 1
+    fl = []
+    while len(fl) < n:
+        f = b8(p)
+        p += 1
+        fl.append(f)
+        if (f & 8) != 0:
+            r = b8(p)
+            p += 1
+            for i in range(r):
+                fl.append(f)
+    v = 0
+    for f in fl:
+        if (f & 2) != 0:
+            if (f & 16) != 0:
+                v += b8(p)
+            else:
+                v -= b8(p)
+            p += 1
+        elif (f & 16) == 0:
+            v += s16(p)
+            p += 2
+        UX.append(v)
+    v = 0
+    for f in fl:
+        if (f & 4) != 0:
+            if (f & 32) != 0:
+                v += b8(p)
+            else:
+                v -= b8(p)
+            p += 1
+        elif (f & 32) == 0:
+            v += s16(p)
+            p += 2
+        UY.append(v)
+    adv, lsb = hmtx(g)
+    pp1x = xmin - lsb
+    pp3y = FI["typoAsc"]
+    UX.append(pp1x)
+    UY.append(0)
+    UX.append(pp1x + adv)
+    UY.append(0)
+    UX.append(0)
+    UY.append(pp3y)
+    UX.append(0)
+    UY.append(pp3y - abs(FI["typoAsc"] - FI["typoDesc"]))
+    sc = G["scale"]
+    for i in range(n + 4):
+        CX.append(mulfix(UX[i], sc))
+        CY.append(mulfix(UY[i], sc))
+        OX.append(CX[i])
+        OY.append(CY[i])
+        TAGS.append(0)
+    shift = CX[n]
+    CX[n] = (CX[n] + 32) & ~63
+    CX[n + 1] = (CX[n + 1] + 32) & ~63
+    CY[n + 2] = (CY[n + 2] + 32) & ~63
+    CY[n + 3] = (CY[n + 3] + 32) & ~63
+    if il > 0:
+        gs_default()
+        run(ins)
+    for i in range(n):
+        CX[i] = CX[i] - shift
+    return fl
+
+# ---------------- ftgrays (smooth rasterizer) ----------------
+def setcell(ex, ey):
+    RS[0] = ex
+    RS[1] = ey
+
+def integ(a, b):
+    k = (RS[1] + ROFF) * RW + RS[0] + ROFF
+    CCOV[k] = CCOV[k] + a
+    CAREA[k] = CAREA[k] + a * b
+
+def r_move(x, y):
+    x = x * 4
+    y = y * 4
+    setcell(x >> 8, y >> 8)
+    RS[2] = x
+    RS[3] = y
+
+def udiv(a, r):
+    return (a * r) >> 32
+
+def r_line(tx, ty):
+    x0 = RS[2]
+    y0 = RS[3]
+    ey1 = y0 >> 8
+    ey2 = ty >> 8
+    ex1 = x0 >> 8
+    ex2 = tx >> 8
+    fx1 = x0 & 255
+    fy1 = y0 & 255
+    dx = tx - x0
+    dy = ty - y0
+    if ex1 == ex2 and ey1 == ey2:
+        ex1 = ex1
+    elif dy == 0:
+        setcell(ex2, ey2)
+        RS[2] = tx
+        RS[3] = ty
+        return
+    elif dx == 0:
+        if dy > 0:
+            while True:
+                integ(256 - fy1, fx1 * 2)
+                fy1 = 0
+                ey1 += 1
+                setcell(ex1, ey1)
+                if ey1 == ey2:
+                    break
+        else:
+            while True:
+                integ(0 - fy1, fx1 * 2)
+                fy1 = 256
+                ey1 -= 1
+                setcell(ex1, ey1)
+                if ey1 == ey2:
+                    break
+    else:
+        prod = dx * fy1 - dy * fx1
+        dxr = 0
+        dyr = 0
+        if ex1 != ex2:
+            dxr = 0xFFFFFFFF // abs(dx)
+        if ey1 != ey2:
+            dyr = 0xFFFFFFFF // abs(dy)
+        while True:
+            fx2 = 0
+            fy2 = 0
+            if prod - dx * 256 > 0 and prod <= 0:
+                fx2 = 0
+                fy2 = udiv(0 - prod, dxr)
+                prod -= dy * 256
+                integ(fy2 - fy1, fx1 + fx2)
+                fx1 = 256
+                fy1 = fy2
+                ex1 -= 1
+            elif prod - dx * 256 + dy * 256 > 0 and prod - dx * 256 <= 0:
+                prod -= dx * 256
+                fx2 = udiv(0 - prod, dyr)
+                fy2 = 256
+                integ(fy2 - fy1, fx1 + fx2)
+                fx1 = fx2
+                fy1 = 0
+                ey1 += 1
+            elif prod + dy * 256 >= 0 and prod - dx * 256 + dy * 256 <= 0:
+                prod += dy * 256
+                fx2 = 256
+                fy2 = udiv(prod, dxr)
+                integ(fy2 - fy1, fx1 + fx2)
+                fx1 = 0
+                fy1 = fy2
+                ex1 += 1
+            else:
+                fx2 = udiv(prod, dyr)
+                fy2 = 0
+                prod += dx * 256
+                integ(fy2 - fy1, fx1 + fx2)
+                fx1 = fx2
+                fy1 = 256
+                ey1 -= 1
+            setcell(ex1, ey1)
+            if ex1 == ex2 and ey1 == ey2:
+                break
+    integ((ty & 255) - fy1, fx1 + (tx & 255))
+    RS[2] = tx
+    RS[3] = ty
+
+def r_conic(cx, cy, tx, ty):
+# gray_render_conic, DDA variant (all values fit in 64 bits for these sizes)
+    p0x = RS[2]
+    p0y = RS[3]
+    p1x = cx * 4
+    p1y = cy * 4
+    p2x = tx * 4
+    p2y = ty * 4
+    bx = p1x - p0x
+    by = p1y - p0y
+    ax = p2x - p1x - bx
+    ay = p2y - p1y - by
+    d = max(abs(ax), abs(ay))
+    if d <= 64:
+        r_line(p2x, p2y)
+        return
+    sh = 0
+    while True:
+        d = d >> 2
+        sh += 1
+        if d <= 64:
+            break
+    rx = ax * (1 << (33 - 2 * sh))
+    ry = ay * (1 << (33 - 2 * sh))
+    qx = bx * (1 << (33 - sh)) + ax * (1 << (32 - 2 * sh))
+    qy = by * (1 << (33 - sh)) + ay * (1 << (32 - 2 * sh))
+    px = p0x * 4294967296
+    py = p0y * 4294967296
+    for i in range(1 << sh):
+        px += qx
+        py += qy
+        qx += rx
+        qy += ry
+        r_line(px >> 32, py >> 32)
+
+def half(a):
+    return tdiv(a, 2)
+
+def raster(fl, yoff):
+# FT_Outline_Decompose + ftgrays cell accumulation into CCOV/CAREA (RW x RW cells, offset ROFF)
+    for i in range(RW * RW):
+        CCOV[i] = 0
+        CAREA[i] = 0
+    st = 0
+    for e in ENDS:
+        fo = fl[st] & 1
+        lo = fl[e] & 1
+        sx = 0
+        sy = 0
+        a = st
+        b = e + 1
+        if fo != 0:
+            sx = CX[st]
+            sy = CY[st] + yoff
+            a = st + 1
+        elif lo != 0:
+            sx = CX[e]
+            sy = CY[e] + yoff
+            b = e
+        else:
+            sx = half(CX[st] + CX[e])
+            sy = half(CY[st] + yoff + CY[e] + yoff)
+        r_move(sx, sy)
+        hc = False
+        kx = 0
+        ky = 0
+        i = a
+        while i < b:
+            x = CX[i]
+            y = CY[i] + yoff
+            if (fl[i] & 1) != 0:
+                if hc:
+                    r_conic(kx, ky, x, y)
+                    hc = False
+                else:
+                    r_line(x * 4, y * 4)
+            else:
+                if hc:
+                    r_conic(kx, ky, half(kx + x), half(ky + y))
+                hc = True
+                kx = x
+                ky = y
+            i += 1
+        if hc:
+            r_conic(kx, ky, sx, sy)
+        else:
+            r_line(sx * 4, sy * 4)
+        st = e + 1
+
+def fill(a):
+    c = a >> 9
+    if c < 0:
+        c = ~c
+    if c > 255:
+        c = 255
+    return c
+
+def coverage_row(ey, out):
+# out[x] for x in 0..7: the sweep of row ey (cells left of x=0 still contribute cover)
+    cover = 0
+    for x in range(0 - ROFF, 8):
+        k = (ey + ROFF) * RW + x + ROFF
+        cv = 0
+        if CCOV[k] != 0 or CAREA[k] != 0:
+            cover += CCOV[k] * 512
+            area = cover - CAREA[k]
+            if area != 0:
+                cv = fill(area)
+        elif cover != 0:
+            cv = fill(cover)
+        if x >= 0:
+            out[x] = cv
+
+def main():
+    if argc() != 3:
+        eputs("mkfont: usage: mkfont font.ttf out.fsi")
+        exit(2)
+    load_font(argv(1))
+    for i in range(RW * RW):
+        CCOV.append(0)
+        CAREA.append(0)
+    setup_size(13)
+    asc = 0 - ((0 - mulfix(FI["asc"], G["scale"])) // 64)
+    rows = []
+    out = [0, 0, 0, 0, 0, 0, 0, 0]
+    yoff = 5 * 64
+    for c in range(32, 127):
+        fl = hint_glyph(cmap_glyph(c))
+        if len(fl) > 0:
+            raster(fl, yoff)
+        for y in range(16):
+            bits = 0
+            if len(fl) > 0:
+                coverage_row(asc - 1 - y + 5, out)
+                for x in range(8):
+                    if out[x] >= 110:
+                        bits = bits | (0x80 >> x)
+            rows.append(bits)
+    s = []
+    s.append("# 8x16 bitmap font, ASCII 32..126, generated by tools/mkfont.py from DejaVu Sans Mono\n")
+    s.append("# (Bitstream Vera Fonts license, DejaVu changes public domain). Glyph g at font8x16[(g-32)*16].\n")
+    s.append("font8x16: u8[1520] = [")
+    vals = []
+    for b in rows:
+        vals.append(str(b))
+    s.append(", ".join(vals))
+    s.append("]\n")
+    write_file(argv(2), "".join(s))
+    for ch in [70, 103]:
+        i = (ch - 32) * 16
+        for y in range(16):
+            line = []
+            for x in range(8):
+                if (rows[i + y] & (0x80 >> x)) != 0:
+                    line.append("#")
+                else:
+                    line.append(".")
+            print("".join(line))
+
+main()

@@ -39,7 +39,7 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
   - **Paging:** the kernel builds its own 4-level tables: HHDM at `0xFFFF800000000000` (2 MiB pages, NX, PCD on the IOAPIC/LAPIC pages), kernel `.text` RX / `.rodata` R+NX / `.data/.bss` RW+NX in 4 KiB global pages, a 64 KiB kernel stack plus two IST stacks each with an unmapped guard page. The identity map is dropped (verified by a page walk). EFER.NXE and CR4.PGE are enabled.
   - **Heap:** `kmalloc/kfree` with 8 slab size classes (32–4096 bytes incl. header) and page-backed large blocks in their own virtual range; frees return frames (the test checks for leaks over three rounds).
   - **Demand paging:** #PF on the `0xFFFF900000000000` region maps a zeroed frame and resumes.
-  - **Console:** COM1 + framebuffer text with an 8×16 font (`tools/mkfont.py` → `font.fsi`, rendered from DejaVu Sans Mono), from the GOP (Forge loader) or the Multiboot2 framebuffer tag (GRUB, BIOS VBE or UEFI GOP); VGA text as fallback.
+  - **Console:** COM1 + framebuffer text with an 8×16 font (`tools/mkfont.forge`, byte-identical to the reference `tools/mkfont.py` → `font.fsi`, rendered from DejaVu Sans Mono), from the GOP (Forge loader) or the Multiboot2 framebuffer tag (GRUB, BIOS VBE or UEFI GOP); VGA text as fallback.
   - **CPU:** GDT with a 64-bit TSS (`ltr`), IST1 for #DF and IST2 for NMI/#MC. The test overflows the kernel stack into its guard page; the #DF arrives on IST1, prints, and `iretq`s into a recovery continuation on a fresh stack.
   - **ACPI/APIC:** RSDP → XSDT/RSDT (checksums) → MADT (CPUs, LAPIC, IOAPIC, interrupt source overrides). The 8259 PIC is remapped and masked; the LAPIC timer is calibrated against PIT channel 2 and runs periodically at 100 Hz; the PIT's IRQ0 is routed through the IOAPIC using the override (GSI 2) and delivered once.
   - **Memory reclaim:** after ACPI is parsed, loader-owned (EFI loader code/data) and ACPI-reclaimable regions plus the boot-info copy are returned to the frame allocator (e.g. 6.2 MiB under the Forge loader).
@@ -59,7 +59,7 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
   - LoadedImage → SimpleFileSystem reads `\EFI\Forge\kernel.elf` from its own volume. It then loads the PT_LOAD segments at a 2 MiB-congruent base below 1 GiB and finds the entry through the `FORGEKRN` header.
   - It picks GOP 1024×768 when offered, finds the ACPI 2.0 RSDP in the configuration table, and builds identity (0–4 GiB) plus −2 GiB tables.
   - It runs GetMemoryMap → ExitBootServices (retried when the map key is stale), converts the map into BootInfo, switches CR3 and jumps to `kentry64`.
-  - It is linked directly by `ld -m i386pep --subsystem 10`. `mkgpt.py` builds a GPT disk with an ESP plus placeholder Microsoft basic data and Linux partitions.
+  - It is linked directly by `ld -m i386pep --subsystem 10`. `mkgpt.forge` (Forge port of `mkgpt.py`, byte-identical) builds a GPT disk with an ESP plus placeholder Microsoft basic data and Linux partitions.
 - **Tests:** `tests/os/boot.py` boots each path headless, checks the serial markers, takes a QEMU monitor `screendump` after `KERNEL OK`, decodes every framebuffer text row against the font (KERNEL OK must be on screen, so console scrolling is checked), and then sends `q` on COM1 so the kernel exits. The three paths are BIOS+GRUB, OVMF+GRUB, and OVMF+forgex64.efi on GPT, all with `-smp 4` and a read-only virtio-blk copy of the GPT disk (its removable-media fallback loader removed so firmware never boots it).
 
 ## Compiler tooling (Phase 3)
@@ -152,7 +152,7 @@ Generic defs/structs are recorded at prescan and skipped; an instance is created
 
 ### Grammar freeze
 - docs/GRAMMAR.md is the frozen grammar (v1); the strict `a_*` parser behind `--emit=ast-json` is its reference implementation, and changing either needs a version bump of both.
-- tests/grammar/{valid,invalid} plus tools/grammar_fuzz.py (`--seed N --n COUNT`, writes to build/fuzz) check it; see BUILD_PLAN Phase 3 item 3.
+- tests/grammar/{valid,invalid} plus tools/grammar_fuzz.forge (reference: grammar_fuzz.py; `--seed N --n COUNT`, writes to build/fuzz) check it; see BUILD_PLAN Phase 3 item 3.
 
 ### AST export (`--emit=ast-json`, `--emit=pretty`)
 - Entry: `forge_main` sees the flag and calls `ast_main`, which lexes only the named file with `ast_raw=1` (`add_id` then skips std-module renaming), parses it with `ast_parse` into flat node arrays (`ak` kind, `av` value, `al` line, `acs`/`acn` child slice into `akid`), and writes JSON (`ast_json`) or source (`pp_s`/`pp_e`).
@@ -247,11 +247,11 @@ A process holds exactly the capability bits its sealed manifest declares (fs=1, 
 
 ## Ed25519 seal (Phase 6 gap 1)
 - Trailer v2, 160 bytes: +0 "FORGEPRF", +8 version 2, +16 level, +24 unsafe ops, +32 caps, +40 ELF length, +48 own ops, +56 reserved, +64 SHA-256(ELF), +96 Ed25519 signature over trailer[0:96].
-- Build: `forgeseal.py --pub seal.key > seal.pub`; the kernel `.incbin`s seal.pub (uimg(4)). The private seed never leaves build/user.
+- Build: `forgeseal --pub seal.key > seal.pub` (`build/forgeseal` from tools/forgeseal.forge; forgeseal.py is the reference); the kernel `.incbin`s seal.pub (uimg(4)). The private seed never leaves build/user.
 - Kernel: `ed25519_verify(sig, pk, msg, n)` in ed25519.fsi; rejects S >= L and keys that are not curve points. One verification costs two 256-bit scalar multiplications (it adds about 15 s to the whole OS test run, which execs dozens of images).
 
 ## Seal v3 (plan v1.3)
-- Trailer v3, 384 bytes, the default from `tools/forgeseal.py` (`--v2` still writes the 160-byte v2 trailer, which the kernel still accepts): +0 "FORGEPRF", +8 version 3, +16..64 as v2 (level, unsafe ops, caps, ELF length, own ops), +64 SHA-256(ELF), +96..128 reserved proof slot (must be zero, else reason 10), +128 signature count 1..3, +136 zero, then 3 slots of 80 bytes at +144: algorithm ID (1 = Ed25519, the only one implemented; anything else is reason 9), 8-byte key ID, 64-byte signature.
+- Trailer v3, 384 bytes, the default from `tools/forgeseal.forge` / `tools/forgeseal.py` (`--v2` still writes the 160-byte v2 trailer, which the kernel still accepts): +0 "FORGEPRF", +8 version 3, +16..64 as v2 (level, unsafe ops, caps, ELF length, own ops), +64 SHA-256(ELF), +96..128 reserved proof slot (must be zero, else reason 10), +128 signature count 1..3, +136 zero, then 3 slots of 80 bytes at +144: algorithm ID (1 = Ed25519, the only one implemented; anything else is reason 9), 8-byte key ID, 64-byte signature.
 - Signed message (96 bytes, the verifier's limit): trailer[0:64] || SHA-256(trailer[64:144]). The kernel accepts the image if a slot whose key ID matches the built-in key verifies. One `SealTail` view covers v2 (+224) and v3 (+0); net unsafe ops go down by 1.
 - seal_test also checks: a v2 image accepted, an unknown algorithm ID refused (9), a set proof slot refused (10); cat carries a second signature by another key.
 
@@ -321,6 +321,6 @@ until the process exits. chan_recv reserves its fd slot before dequeuing. Boot t
 Not changed: drv 403 still returns the DMA physical address, because the user-mode virtio driver
 programs bus addresses directly and there is no IOMMU yet; an IOVA handle needs IOMMU support.
 ## Forge FS (Phase 8)
-The only writable filesystem. It exists only on a GPT partition with the Forge type GUID, created explicitly with `tools/forge-part.py ... --yes-add-forge-partition`. The kernel validates the GPT, claims only that LBA range on NVMe, and every write outside it is refused. Tested by `tests/os/forgefs.sh`: no partition means no writes; with one, files persist across reboots and every byte outside the partition stays identical.
+The only writable filesystem. It exists only on a GPT partition with the Forge type GUID, created explicitly with `tools/forge-part.forge` (`create ... --yes-add-forge-partition`; forge-part.py is the reference). The kernel validates the GPT, claims only that LBA range on NVMe, and every write outside it is refused. Tested by `tests/os/forgefs.sh`: no partition means no writes; with one, files persist across reboots and every byte outside the partition stays identical.
 
 **Syscall pointer validation (9.0):** every syscall taking a user pointer returns EFAULT for pointers outside [0, USER_TOP) or straddling USER_TOP, without consuming state (messages, zombies). `chan_send` returns EINVAL for n==0 or n>CH_MSG and EFAULT for a bad buffer. Covered by `badptr` in tests/os.

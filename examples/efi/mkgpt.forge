@@ -1,0 +1,122 @@
+# mkgpt: Forge port of examples/efi/mkgpt.py (byte-identical images with FORGE_GUID_SEED; tests/mkgpt/run.sh).
+# Build a GPT disk image: protective MBR + primary/backup GPT with
+#   1: EFI System Partition (FAT image given on the command line)
+#   2: Microsoft basic data (empty placeholder, simulates an existing Windows install)
+#   3: Linux filesystem   (empty placeholder, simulates an existing Linux install)
+# Used to test that the Forge EFI app / kernel boot from a shared ESP without owning the disk.
+# usage: mkgpt out.img esp.fat [size_mib]
+# FORGE_GUID_SEED=N (testing only): GUID k (k = 0..2 partitions, 3 disk) is bytes_le = pack('<QQ', N, k)
+# instead of a random uuid4. The image is assembled front to back in memory and written once.
+import os
+
+SEC = 512
+# type GUIDs in GPT (mixed-endian) byte order
+ESP = "\x28\x73\x2a\xc1\x1f\xf8\xd2\x11\xba\x4b\x00\xa0\xc9\x3e\xc9\x3b"  # C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+MSDATA = "\xa2\xa0\xd0\xeb\xe5\xb9\x33\x44\x87\xc0\x68\xb6\xb7\x26\x99\xc7"  # EBD0A0A2-B9E5-4433-87C0-68B6B72699C7
+LINUX = "\xaf\x3d\xc6\x0f\x83\x84\x72\x47\x8e\x79\x3d\x69\xd8\x47\x7d\xe4"  # 0FC63DAF-8483-4772-8E79-3D69D8477DE4
+CRCT = []
+
+def die(m):
+    eputs("mkgpt: " + m)
+    exit(1)
+
+def crc32(s):
+    if len(CRCT) == 0:
+        for n in range(256):
+            c = n
+            for k in range(8):
+                if c & 1:
+                    c = 0xEDB88320 ^ (c >> 1)
+                else:
+                    c = c >> 1
+            CRCT.append(c)
+    c = 0xFFFFFFFF
+    for i in range(len(s)):
+        c = CRCT[(c ^ char_at(s, i)) & 255] ^ (c >> 8)
+    return c ^ 0xFFFFFFFF
+
+def le(v, n):
+    out = []
+    for i in range(n):
+        out.append(chr((v >> (8 * i)) & 255))
+    return "".join(out)
+
+def zeros(n):
+    return "\x00" * n
+
+# decimal FORGE_GUID_SEED as u64 little-endian (8 bytes), carried in 32-bit halves; out of range fails
+# like Python's struct.pack('<Q')
+def seed_le(s):
+    lo = 0
+    hi = 0
+    if len(s) == 0:
+        die("bad FORGE_GUID_SEED")
+    for i in range(len(s)):
+        dg = char_at(s, i) - 48
+        if dg < 0 or dg > 9:
+            die("bad FORGE_GUID_SEED")
+        lo = lo * 10 + dg
+        hi = hi * 10 + (lo >> 32)
+        lo = lo & 0xFFFFFFFF
+        if hi > 0xFFFFFFFF:
+            die("FORGE_GUID_SEED out of range")
+    return le(lo, 4) + le(hi, 4)
+
+def newguid(k):
+    seed = os.getenv("FORGE_GUID_SEED")
+    if seed is None:
+    # uuid4: getrandom(2) bytes with version 4 / RFC 4122 variant, in GPT byte order
+        b = zeros(k + 16)
+        b = b[k:]
+        __syscall(318, b, 16, 0)
+        return b[:7] + chr((ord(b[7]) & 0x0F) | 0x40) + chr((ord(b[8]) & 0x3F) | 0x80) + b[9:]
+    return seed_le(seed) + le(k, 8)
+
+def utf16(s):
+    out = []
+    for i in range(len(s)):
+        out.append(s[i] + "\x00")
+    return "".join(out)
+
+def main():
+    if argc() < 3:
+        die("usage: mkgpt out.img esp.fat [size_mib]")
+    out = argv(1)
+    size = 128
+    if argc() > 3:
+        size = int(argv(3))
+    nsec = size * 1024 * 1024 // SEC
+    espdata = read_file(argv(2))
+    if espdata is None:
+        die("cannot read " + argv(2))
+    esp_secs = (len(espdata) + SEC - 1) // SEC
+    first = 2048
+    lba = first
+    specs = [[ESP, "EFI system partition", esp_secs], [MSDATA, "Basic data partition", 16 * 2048], [LINUX, "linux-root", 16 * 2048]]
+    ents = []
+    for k in range(3):
+        sp = specs[k]
+        n = sp[2]
+        nm = utf16(sp[1])
+        ents.append(sp[0] + newguid(k) + le(lba, 8) + le(lba + n - 1, 8) + le(0, 8) + nm + zeros(72 - len(nm)))
+        lba += (n + 2047) // 2048 * 2048
+    last_usable = nsec - 34
+    if lba > last_usable:
+        die("partitions do not fit")
+    ents = "".join(ents)
+    ents = ents + zeros(128 * 128 - len(ents))
+    ecrc = crc32(ents)
+    disk_guid = newguid(3)
+
+    def hdr(my, alt, entlba):
+        h = "EFI PART" + le(0x10000, 4) + le(92, 4) + le(0, 4) + le(0, 4) + le(my, 8) + le(alt, 8) + le(34, 8) + le(last_usable, 8) + disk_guid + le(entlba, 8) + le(128, 4) + le(128, 4) + le(ecrc, 4)
+        h = h[:16] + le(crc32(h), 4) + h[20:]
+        return h + zeros(SEC - len(h))
+
+    m = min(nsec - 1, 0xFFFFFFFF)
+    mbr = zeros(446) + "\x00\x00\x02\x00\xee\xff\xff\xff" + le(1, 4) + le(m, 4) + zeros(48) + "\x55\xaa"
+    s = first * SEC
+    img = [mbr, hdr(1, nsec - 1, 2), ents, zeros(s - 34 * SEC), espdata, zeros((nsec - 33) * SEC - s - len(espdata)), ents, hdr(nsec - 1, 1, nsec - 33)]
+    write_file(out, "".join(img))
+
+main()

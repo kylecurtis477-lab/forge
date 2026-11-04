@@ -1,0 +1,20 @@
+# Regression: read_file on a path that can't be opened returns None (it used to return a raw 0 that
+# was neither None nor an object, so `is None` was False and len()/indexing segfaulted).
+d = read_file("build/no/such/dir/missing.bin")
+print(d is None, d == None, not d)
+if d is None:
+    print("missing: None")
+d2 = read_file("")
+print(d2 is None)
+write_file("build/rf_present.txt", "abc")
+p = read_file("build/rf_present.txt")
+print(p is None, len(p), p)
+write_file("build/rf_empty.txt", "")
+q = read_file("build/rf_empty.txt")
+print(q is None, len(q), repr(q))
+def load(path):
+    s = read_file(path)
+    if s is None:
+        return "none:" + path
+    return "ok:" + str(len(s))
+print(load("build/rf_present.txt"), load("/nonexistent/x"))

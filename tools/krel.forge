@@ -1,0 +1,102 @@
+# krel: Forge port of tools/krel.py (byte-identical output; checked by tests/krel/run.sh).
+# usage: krel KERNEL.ELF OUT.s -- build the kernel's self-relocation table for image KASLR.
+# Reference implementation only: the build uses tools/fld --format kernel; tests/fld/run.sh checks they agree.
+# Input: a kernel linked with `ld -q` (relocations kept). Every place in the high half (-2 GiB) image that
+# encodes an absolute high-half address, or a PC-relative reference from the high half to the low boot stub,
+# becomes one u64 entry: (offset from KBASE) | (kind << 56). At boot the kernel adds its slide s:
+#   kind 1: u64 += s (R_X86_64_64)   kind 2: u32 += s (R_X86_64_32S)   kind 3: i32 -= s (PC32/PLT32 to low)
+# 64-bit fields are read as signed values, so "unsigned >= KBASE" is "KBASE <= v < 0".
+KBASE = 0 - 2147483648
+
+def rd(s, o, n):
+    if n == 8:
+        return rds(s, o + 4, 4) * 4294967296 + rd(s, o, 4)
+    v = 0
+    i = n - 1
+    while i >= 0:
+        v = v * 256 + ord(s[o + i])
+        i -= 1
+    return v
+
+def rds(s, o, n):
+    if n == 8:
+        return rd(s, o, 8)
+    v = rd(s, o, n)
+    if v >= 1 << (8 * n - 1):
+        v -= 1 << (8 * n)
+    return v
+
+def high(v):
+    return v >= KBASE and v < 0
+
+def uhex(v):
+    hi = (v >> 32) & 0xFFFFFFFF
+    lo = hex(v & 0xFFFFFFFF)[2:]
+    if hi == 0:
+        return lo
+    return hex(hi)[2:] + "0" * (8 - len(lo)) + lo
+
+def main():
+    d = read_file(argv(1))
+    if d is None:
+        eputs("krel: cannot read " + argv(1))
+        exit(1)
+    shoff = rd(d, 0x28, 8)
+    shentsize = rd(d, 0x3A, 2)
+    shnum = rd(d, 0x3C, 2)
+    ents = []
+    bad = 0
+    i = 0
+    while i < shnum:
+        b = shoff + i * shentsize
+        i += 1
+        if rd(d, b + 4, 4) != 4:  # SHT_RELA
+            continue
+        tgt = shoff + rd(d, b + 44, 4) * shentsize
+        if not (rd(d, tgt + 8, 8) & 2):  # target not SHF_ALLOC
+            continue
+        symoff = rd(d, shoff + rd(d, b + 40, 4) * shentsize + 24, 8)
+        off = rd(d, b + 24, 8)
+        end = off + rd(d, b + 32, 8)
+        while off < end:
+            loc = rd(d, off, 8)  # ET_EXEC: r_offset is the virtual address
+            typ = rd(d, off + 8, 4)
+            si = rd(d, off + 12, 4)
+            add = rd(d, off + 16, 8)
+            off += 24
+            sym = symoff + si * 24
+            shndx = rd(d, sym + 6, 2)
+            val = rd(d, sym + 8, 8)
+            if not high(loc) or shndx == 0xFFF1:
+                continue  # boot stub runs unslid; absolute symbols never move
+            t = val + add
+            if t >= 1 << 63:
+                t -= 1 << 64
+            elif t < 0 - (1 << 63):
+                t += 1 << 64
+            if typ == 1:
+                if high(t):
+                    ents.append((loc - KBASE) | 1 << 56)
+            elif typ == 11:
+                if high(t):
+                    ents.append((loc - KBASE) | 2 << 56)
+            elif typ == 2 or typ == 4:
+                if not high(t):
+                    ents.append((loc - KBASE) | 3 << 56)
+            elif typ == 10:
+                if high(t):
+                    print("krel: R_X86_64_32 to high half at " + uhex(loc))
+                    bad += 1
+            else:
+                print("krel: unsupported relocation type " + str(typ) + " at " + uhex(loc))
+                bad += 1
+    if bad:
+        exit(1)
+    ents = sorted(ents)
+    out = [".section .krel,\"a\"\n.p2align 3\n"]
+    for e in ents:
+        out.append(".quad 0x" + uhex(e) + "\n")
+    write_file(argv(2), "".join(out))
+    print("krel: " + str(len(ents)) + " relocations")
+
+main()

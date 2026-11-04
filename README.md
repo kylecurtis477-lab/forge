@@ -144,3 +144,17 @@ Subsystem docs (design, formats, APIs, tests, limits):
 - **Still missing:** there is no SSA/linear IR and no linear-scan allocator (locals still go to rbx/r12-r15 first-come). List elements are not typed, so `lists` still uses tag-checked adds and bounds checks. The compiler still uses as/ld; it does not emit ELF itself. Explicit `Base.__init__(self, ...)` calls are not supported, and Optional types are not narrowed by control flow.
 
 Benchmarks (best of 5): see bench/results.md.
+
+## All-Forge tooling
+
+Policy: every tool that can be written in Forge is written in Forge (one language to build, debug and troubleshoot). Python tools are ported one per commit and must reproduce the Python original byte-for-byte on representative inputs before any script switches over.
+
+| tool | Forge source | status | verified by |
+|---|---|---|---|
+| krel (kernel .krel table, KASLR reference) | `tools/krel.forge` | ported; tests/fld uses it; `tools/krel.py` kept as the reference for tests/krel | `tests/krel/run.sh` ([docs/tools-krel.md](docs/tools-krel.md)) |
+| forge-part (create / read the Forge FS GPT partition) | `tools/forge-part.forge` | ported; tests/os/forgefs.sh uses it; `tools/forge-part.py` kept as the reference for tests/forge-part | `tests/forge-part/run.sh` ([docs/tools-forge-part.md](docs/tools-forge-part.md)) |
+| mkgpt (GPT test disk: ESP + Windows/Linux placeholders) | `examples/efi/mkgpt.forge` | ported; examples/efi/build.sh uses it; `mkgpt.py` kept as the reference for tests/mkgpt | `tests/mkgpt/run.sh` ([docs/tools-mkgpt.md](docs/tools-mkgpt.md)) |
+| ed25519 (build-time signing: public key / signature) | `tools/ed25519.forge` | ported; `ed25519.py` kept as the reference (forgeseal.forge shares its signing code via `tools/ed25519sign.fsi`) | `tests/ed25519-tool/run.sh` ([docs/tools-ed25519.md](docs/tools-ed25519.md)) |
+| grammar_fuzz (grammar fuzzer for docs/GRAMMAR.md) | `tools/grammar_fuzz.forge` | ported; tests/grammar/run.sh uses it; `grammar_fuzz.py` kept as the reference | `tests/grammar-fuzz/run.sh` ([docs/tools-grammar_fuzz.md](docs/tools-grammar_fuzz.md)) |
+| mkfont (8x16 kernel console font from a TrueType font) | `tools/mkfont.forge` | ported (own TrueType hinter + rasterizer, byte-identical to PIL/FreeType); `mkfont.py` kept as the reference | `tests/mkfont/run.sh` ([docs/tools-mkfont.md](docs/tools-mkfont.md)) |
+| forgeseal (Seal v3/v2 proof manifests, `--module`, `--foreign`, `--pub`) | `tools/forgeseal.forge` | ported; examples/user, examples/modules and tools/busybox build scripts use it; `forgeseal.py` kept as the reference | `tests/forgeseal/run.sh` ([docs/tools-forgeseal.md](docs/tools-forgeseal.md)) |

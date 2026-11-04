@@ -585,7 +585,9 @@ def lex(src, line, inner):
         elif is_digit(c):
             v = 0
             isf = 0
+            hx = 0
             if c == 48 and i + 1 < n and (char_at(src, i + 1) == ord("x") or char_at(src, i + 1) == ord("X")):
+                hx = 1
                 i += 2
                 while i < n and (is_hex(char_at(src, i)) or char_at(src, i) == 95):
                     if char_at(src, i) != 95:
@@ -620,6 +622,12 @@ def lex(src, line, inner):
                 add_tok(K_ID, "__bigparse", line)
                 add_tok(K_OP, "(", line)
                 add_tok(K_STR, substr(src, st, i), line)
+                add_tok(K_OP, ")", line)
+            elif hx and (v > 9223372036854775807 or (v >= 4611686018427387904 and v <= 4611686018427387907)):
+            # hex literals past int64 or on the bool/None band become bigints too (decimal text of the value)
+                add_tok(K_ID, "__bigparse", line)
+                add_tok(K_OP, "(", line)
+                add_tok(K_STR, str(v), line)
                 add_tok(K_OP, ")", line)
             else:
                 add_tok(K_NUM, v, line)
@@ -2342,9 +2350,13 @@ def shift_expr():
         if is_op("<<"):
             ins = "shl"
         pos += 1
+        lt = ety
         mark = nout
         e("push %rax")
         add_expr()
+        if not (lt == T_INT and ety == T_INT):
+            dyn_shift(ins, start, mark)
+            continue
         src = 0
         if nout == mark + 2:
             src = simple_src(out[mark + 1])
@@ -2357,6 +2369,41 @@ def shift_expr():
         if str_eq(ins, "shl"):
             band_line(cur_line())
         ety = T_INT
+
+def dyn_shift(ins, start, mark):
+# << >> with an untyped operand: inline while both are small non-negative ints and the
+# result stays below the pointer range, else __shift (bigints, negatives, overflow)
+    global ety
+    lr(start, mark)
+    e("mov %rax, %rdx")
+    e("or %rcx, %rdx")
+    e("cmp rt_dlov(%rip), %rdx")
+    e("jae 1f")
+    e("cmp $63, %rcx")
+    e("ja 1f")
+    if str_eq(ins, "sar"):
+        e("sar %cl, %rax")
+    else:
+        e("mov %rax, %rdx")
+        e("shl %cl, %rdx")
+        e("mov %rdx, %rsi")
+        e("sar %cl, %rsi")
+        e("cmp %rax, %rsi")
+        e("jne 1f")
+        e("cmp rt_dlov(%rip), %rdx")
+        e("jae 1f")
+        e("mov %rdx, %rax")
+    e("jmp 2f")
+    emit_raw("1:\n")
+    e("push %rax")
+    e("push %rcx")
+    if str_eq(ins, "sar"):
+        e("push $1")
+    else:
+        e("push $0")
+    call_internal("__shift", 3)
+    emit_raw("2:\n")
+    ety = 0
 
 def add_expr():
     global pos, ety
@@ -4668,6 +4715,9 @@ def apply_binary(op, start, mark, lt, rt, line):
         ins = "sar"
         if str_eq(op, "<<"):
             ins = "shl"
+        if not (lt == T_INT and rt == T_INT):
+            dyn_shift(ins, start, mark)
+            return 0
         lr(start, mark)
         e2(ins, " %cl, %rax")
         if str_eq(ins, "shl"):
@@ -6169,11 +6219,9 @@ def load_mod(name, dir):
     if str_eq(name, "math") or std_mod(name):
         return 0
     ms = read_file(concat(concat(dir, name), ".forge"))
-    if ms:
-        ms = test_desugar(ms, 0)
-    mi: int = ms
-    if mi == 0:
+    if ms is None:
         return 0
+    ms = test_desugar(ms, 0)
     if nlm < 256:
         lmods[nlm] = name
         nlm += 1
@@ -14845,8 +14893,7 @@ def ast_main():
 # forgec in.forge out --emit=ast-json | --emit=pretty
     global ast_raw, lex_fname, main_sid
     src = read_file(argv(1))
-    srci: int = src
-    if srci == 0:
+    if src is None:
         diag_file_err(concat("cannot read input file ", argv(1)))
         exit(1)
     ast_raw = 1
@@ -15229,8 +15276,7 @@ def forge_main():
     if emit_mode:
         return ast_main()
     src = read_file(argv(1))
-    srci: int = src
-    if srci == 0:
+    if src is None:
         diag_file_err(concat("cannot read input file ", argv(1)))
         exit(1)
     src = test_desugar(src, test_mode)
@@ -16259,6 +16305,8 @@ def fs_rv():
 def fs_conv(to):
 # convert rax (type fs_ety) for assignment/passing to type to
     global fs_ety
+    if fsk[to] == 1 and fsk[fs_ety] == 1 and ftel[to] != ftel[fs_ety]:
+        fs_pmis(fs_ety, to)
     if (fsk[to] == 6 or fsk[fs_ety] == 6) and fs_ety != to and fsk[to] != 4:
         if fsk[to] == 6 and fs_ety == FT_LIT:
             fs_i2f(to, "%rax")
@@ -16281,6 +16329,22 @@ def fs_conv(to):
         if not (fsk[fs_ety] == 0 and ftsz[fs_ety] <= ftsz[to] and ft_sg(fs_ety) == ftsg[to] and fs_ety != FT_LIT and to != FT_BOOL):
             fs_norm(to)
     fs_ety = to
+
+def fs_tfull(t):
+# full spelling of a type for diagnostics: ptr[ptr[B32]]
+    if fsk[t] == 1:
+        return c4(ftname[t], "[", fs_tfull(ftel[t]), "]")
+    return ftname[t]
+
+def fs_pmis(s, to):
+# implicit pointer conversion between different element types (e.g. addr(p) of a ptr[T] gives
+# ptr[ptr[T]], which used to pass silently where a ptr[T] was expected); reinterpret with ptr[T](x)
+    m = c4("pointer type mismatch: got ", fs_tfull(s), ", expected ", fs_tfull(to))
+    if fsk[ftel[s]] == 1 and ftel[ftel[s]] == ftel[to]:
+        m = concat(m, " (addr() of a pointer gives a pointer to the pointer: pass the pointer itself)")
+    else:
+        m = concat(m, " (use an explicit ptr[T](x) cast to reinterpret)")
+    fs_die(m)
 
 def fs_bconv(to):
 # pointer conversions involving own/ref/mut
@@ -19600,8 +19664,7 @@ def fs_include(src, dir, depth):
                 if char_at(f, 0) != 47:
                     f = concat(dir, f)
                 sub = read_file(f)
-                subi: int = sub
-                if subi == 0:
+                if sub is None:
                     diag_file_err(concat("cannot read include file ", f))
                     exit(1)
                 sl = len(f) - 1

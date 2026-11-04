@@ -1,0 +1,23 @@
+# Regression: untyped (dynamic) & | ^ << >> on values past 2**31, on the bool/None band (2**62..2**62+3),
+# past int64 and on bigints must follow Python (hex literals on the band or past int64 are bigints).
+x = 0x4000000000000000
+print(x ^ 1, x | 2, x & x, x)
+L = [0x7FFFFFFF, 0x80000000, 0x3FFFFFFFFFFFFFFF, 0x4000000000000000, 0x4000000000000003, 0xFFFFFFFFFFFFFFFF, 2**64 + 5, -(2**70) - 3]
+for v in L:
+    print(v ^ 1, v & 0xFFFFFFFF, v | 0x10, v ^ -1)
+a = [1812433253][0]
+b = 3000000000
+p = a * b * 7
+print(p, p & 0xFFFFFFFF, p ^ (p >> 30), (p ^ 0x5555) & 0xFFFF)
+print(-5 ^ 3, -(2**64) & 0xFF, (2**100) & (2**100 - 1), (2**100) | 1, -(2**100) ^ -(2**99))
+print(pow(2, 255, 2**255 - 19), pow(3, 2**200, 2**255 - 19))
+print(4611686018427387904 ^ 3, (4611686018427387904 ^ 3) == 4611686018427387907, True ^ True, True & 1)
+y = 4611686018427387905 - 1
+print(y, y == x, 0x4000000000000001 - 1 == x)
+p = [38061098313000000000][0]
+z1 = [1][0]
+print(p >> 30, p >> 1, p << 3, (2**200) >> 199, -(2**70) >> 3, -7 >> 1, -7 >> 100, z1 << 64, z1 << 62, (z1 << 62) | 1, 5 << 0)
+z = [3][0]
+z <<= 70
+z >>= 3
+print(z, True << 2, 2**64 >> 64)
