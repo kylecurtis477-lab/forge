@@ -1,0 +1,8 @@
+# Integer literals whose decimal digits pass through the GC heap address range (0x200000000000...):
+# the compiler used to crash with "unsupported operand type(s) for -" while lexing them.
+b = 35184372088832
+print(b)
+print(b - 1)
+print(8192 | 35184372088832)
+print(4611686018427387904)
+print(1_000_000)

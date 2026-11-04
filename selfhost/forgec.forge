@@ -586,6 +586,7 @@ def lex(src, line, inner):
             v = 0
             isf = 0
             hx = 0
+            dv: int = 0
             if c == 48 and i + 1 < n and (char_at(src, i + 1) == ord("x") or char_at(src, i + 1) == ord("X")):
                 hx = 1
                 i += 2
@@ -595,10 +596,14 @@ def lex(src, line, inner):
                     i += 1
             else:
                 st = i
+                # typed accumulator: an untyped partial value can land in the GC heap's address range and
+                # be read as a heap object (e.g. 35184372088832 = 0x200000000000 failed with "unsupported
+                # operand type(s) for -"); wraps past 2**63 like before, caught by the dv < 0 check below
                 while i < n and (is_digit(char_at(src, i)) or char_at(src, i) == 95):
                     if char_at(src, i) != 95:
-                        v = v * 10 + char_at(src, i) - 48
+                        dv = dv * 10 + char_at(src, i) - 48
                     i += 1
+                v = dv
                 isf = 0
                 if i < n and char_at(src, i) == 46 and not (i + 1 < n and char_at(src, i + 1) == 46):
                     isf = 1
@@ -618,7 +623,8 @@ def lex(src, line, inner):
                     v = flt_text(substr(src, st, i))
             if isf:
                 add_tok(K_FLT, v, line)
-            elif c != 48 and (i - st > 19 or (i - st == 19 and v < 0) or (v >= 4611686018427387904 and v <= 4611686018427387907)):
+            elif c != 48 and (i - st > 19 or (i - st == 19 and dv < 0) or (dv >> 2) == 1152921504606846976):
+            # tested on the typed dv: as an untyped value the bool/None band (2**62 .. 2**62+3, i.e. dv >> 2 == 2**60) reads as True/False/None
                 add_tok(K_ID, "__bigparse", line)
                 add_tok(K_OP, "(", line)
                 add_tok(K_STR, substr(src, st, i), line)
