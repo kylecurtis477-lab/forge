@@ -8,7 +8,8 @@ cp tests/fmt/messy.forge.in $T/m.forge; $FMT $T/m.forge >/dev/null
 cmp -s $T/m.forge tests/fmt/messy.forge.expected && echo "PASS fmt-golden" || { echo "FAIL fmt-golden"; fail=1; }
 $FMT --check $T/m.forge >/dev/null && echo "PASS fmt-idempotent-golden" || { echo "FAIL fmt-idempotent-golden"; fail=1; }
 cp tests/fmt/messy.forge.in $T/n.forge; $FMT --check $T/n.forge >/dev/null && { echo "FAIL fmt-check-detects"; fail=1; } || echo "PASS fmt-check-detects"
-FILES=$(tools/fmt_files.sh)
+FILES=$($FMT --list)
+[ -n "$FILES" ] && [ "$FILES" = "$(tools/fmt_files.sh)" ] && echo "PASS fmt-list-matches-sh" || { echo "FAIL fmt-list-matches-sh"; fail=1; }
 $FMT --check $FILES && echo "PASS fmt-repo-clean" || { echo "FAIL fmt-repo-clean"; fail=1; }
 bad=0
 for f in $FILES; do mkdir -p $T/c/$(dirname $f); cp $f $T/c/$f; done

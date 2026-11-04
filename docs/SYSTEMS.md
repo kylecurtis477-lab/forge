@@ -169,7 +169,7 @@ Generic defs/structs are recorded at prescan and skipped; an instance is created
 
 ### forge fmt
 
-`forge fmt [--check] [files]` runs tools/fmt.forge (token-level, comment-preserving, AST- and line-number-preserving). `--check` exits 1 and prints `would reformat F` for any file not in canonical form. The CI file set is tools/fmt_files.sh; tests in tests/fmt/run.sh.
+`forge fmt [--check] [files]` runs tools/fmt.forge (token-level, comment-preserving, AST- and line-number-preserving). `--check` exits 1 and prints `would reformat F` for any file not in canonical form. The CI file set is `build/fmt --list` (a Forge walk of the repo; tools/fmt_files.sh is kept as the reference and tests/fmt/run.sh checks the two lists are identical); tests in tests/fmt/run.sh.
 
 ### Grammar freeze
 - docs/GRAMMAR.md is the frozen grammar (v1); the strict `a_*` parser behind `--emit=ast-json` is its reference implementation, and changing either needs a version bump of both.

@@ -1,5 +1,6 @@
 #!/bin/sh
-# Sources kept canonically formatted by `forge fmt` (CI: tests/fmt/run.sh). Excluded: the
+# Reference for `fmt --list` (tools/fmt.forge, which tests/fmt/run.sh checks against this). Sources kept
+# canonically formatted by `forge fmt`. Excluded: the
 # generated selfhost/forgec.forge and the intentionally malformed / column-sensitive
 # error fixtures (tests/diag, tests/errors, tests/typeerrors, tests/grammar/invalid).
 cd "$(dirname "$0")/.."

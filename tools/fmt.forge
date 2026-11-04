@@ -12,6 +12,7 @@
 # usage: fmt [--check] files...   (--check: list files that would change, exit 1 if any)
 
 import sys
+import os
 
 OPS3 = ["**=", "//=", ">>=", "<<=", "..."]
 OPS2 = ["**", "//", ">>", "<<", "<=", ">=", "==", "!=", "->", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", ":="]
@@ -244,8 +245,43 @@ def fmt_text(src):
         res.append(l)
     return "\n".join(res) + "\n"
 
+# The repo file set (`fmt --list`, and `forge fmt` with no files): every *.forge / *.fsi under selfhost, tools,
+# tests and examples, byte-sorted, minus the generated selfhost/forgec.forge, the column-sensitive error
+# fixtures (tests/diag, errors, typeerrors, grammar/invalid), the tests/fmt goldens and .pp_ scratch files.
+# Same list as the old tools/fmt_files.sh (kept as the reference; tests/fmt/run.sh compares them), except
+# that a symlinked directory would be followed.
+def walk(d, out):
+    for n in os.listdir(d):
+        p = d + "/" + n
+        if os.path.isdir(p):
+            walk(p, out)
+        elif n.endswith(".forge") or n.endswith(".fsi"):
+            out.append(p)
+
+def excluded(p):
+    if p == "selfhost/forgec.forge" or p.find("/.pp_") >= 0:
+        return True
+    for pre in ["tests/diag/", "tests/errors/", "tests/typeerrors/", "tests/grammar/invalid/", "tests/fmt/"]:
+        if p.startswith(pre):
+            return True
+    return False
+
+def repo_files():
+    out = []
+    for d in ["selfhost", "tools", "tests", "examples"]:
+        walk(d, out)
+    keep = []
+    for p in sorted(out):
+        if not excluded(p):
+            keep.append(p)
+    return keep
+
 def main():
     args = sys.argv[1:]
+    if len(args) > 0 and args[0] == "--list":
+        for p in repo_files():
+            print(p)
+        return 0
     check = False
     changed = 0
     for f in args:
