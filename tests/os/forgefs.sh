@@ -1,5 +1,5 @@
 #!/bin/bash
-# Phase 8.9: writable Forge FS only on an explicitly created Forge-type GPT partition (tools/forge-part.py).
+# Phase 8.9: writable Forge FS only on an explicitly created Forge-type GPT partition (tools/forge-part.forge).
 # A shared GPT disk (ESP + Windows + Linux placeholders filled with data) is attached as NVMe:
 #   boot 0: no Forge partition -> the kernel writes nothing, disk byte-identical
 #   create the partition (host, explicit flag); boot 1 formats + writes; boot 2 finds the files again; boot 3 checks the 9.4 rewind persisted
@@ -8,6 +8,8 @@
 # After every boot, every byte outside the Forge partition (ESP, other partitions, GPT) must be unchanged.
 cd "$(dirname "$0")/../.."
 T=$(mktemp -d /tmp/forge-ffs.XXXXXX)
+# the Forge build of the partition tool (tools/forge-part.forge; byte-identical to forge-part.py per tests/forge-part)
+build/forgec tools/forge-part.forge $T/fp.s && build/fas -o $T/fp.o $T/fp.s && build/fld -o $T/forge-part $T/fp.o || { echo "FAIL os/forgefs-tool-build"; exit 1; }
 cp build/efi/disk.img $T/nv.img
 python3 - $T/nv.img <<'P'
 import sys,struct,hashlib
@@ -49,8 +51,8 @@ S0=$(snap $T/nv.img); D0=$(sha256sum < $T/nv.img)
 boot
 if grep -aq "Forge FS: no Forge partition on nvme0, nothing written" $T/s.log && [ "$(sha256sum < $T/nv.img)" = "$D0" ]; then
   echo "PASS os/forgefs-no-partition-no-write"; else echo "FAIL os/forgefs-no-partition-no-write"; fi
-python3 tools/forge-part.py create $T/nv.img 16 >/dev/null 2>&1 && echo "FAIL os/forgefs-tool-needs-flag" || echo "PASS os/forgefs-tool-needs-flag"
-python3 tools/forge-part.py create $T/nv.img 16 --yes-add-forge-partition > $T/tool.out
+$T/forge-part create $T/nv.img 16 >/dev/null 2>&1 && echo "FAIL os/forgefs-tool-needs-flag" || echo "PASS os/forgefs-tool-needs-flag"
+$T/forge-part create $T/nv.img 16 --yes-add-forge-partition > $T/tool.out
 S1=$(snap $T/nv.img)
 P1=$(echo "$S1" | cut -d' ' -f2-); P0=$(echo "$S0" | cut -d' ' -f2-)
 [ "$P1" = "$P0" ] && echo "PASS os/forgefs-tool-keeps-partitions" || echo "FAIL os/forgefs-tool-keeps-partitions ($S0 / $S1)"
@@ -81,7 +83,7 @@ if grep -aq "objfs: after reboot /obj lists 2 files, /obj/motd is 200 bytes" $T/
 # Phase 10.1: objects encrypted at rest. The image must hold no object plaintext, no key material in the
 # clear, and look random where the log was written; a wrong key or no key leaves the store locked and untouched.
 grep -aq "objstore: encrypted at rest (ChaCha20, encrypt-then-MAC HMAC-SHA256), uid 1000 data key created, wrapped by the platform key (no TPM)" $T/b1.log && grep -aq "data key unwrapped with the platform key" $T/b3.log && echo "PASS os/objstore-key-wrap" || echo "FAIL os/objstore-key-wrap: $(grep -a 'objstore: \(enc\|lock\)' $T/b1.log $T/b3.log | tail -2)"
-python3 tools/forge-part.py read $T/nv.img objects.log > $T/olog.bin; python3 tools/forge-part.py read $T/nv.img objects.key > $T/okey.bin
+$T/forge-part read $T/nv.img objects.log > $T/olog.bin; $T/forge-part read $T/nv.img objects.key > $T/okey.bin
 PT=$(python3 - $T/nv.img $T/olog.bin $KEY <<'P'
 import sys,zlib,struct
 import uuid
@@ -103,7 +105,7 @@ P
 case "$PT" in BAD*) echo "FAIL os/objstore-no-plaintext: $PT";; *) echo "PASS os/objstore-no-plaintext ($PT)";; esac
 # every slot ever written has its own counter (= nonce with the block number), and objects.ctr's
 # durable high-water mark covers all of them, so no counter can be handed out again after a reboot
-python3 tools/forge-part.py read $T/nv.img objects.ctr > $T/octr.bin
+$T/forge-part read $T/nv.img objects.ctr > $T/octr.bin
 NC=$(python3 - $T/olog.bin $T/octr.bin <<'P'
 import sys,struct
 L=open(sys.argv[1],'rb').read(); C=open(sys.argv[2],'rb').read()
@@ -116,7 +118,7 @@ case "$NC" in BAD*|"") echo "FAIL os/objstore-nonce-unique: $NC";; *) echo "PASS
 O0=$(cat $T/olog.bin $T/okey.bin | sha256sum)
 boot wrong-passphrase-for-uid1000; cp $T/s.log $T/b4.log
 boot; cp $T/s.log $T/b5.log
-python3 tools/forge-part.py read $T/nv.img objects.log > $T/olog.bin; python3 tools/forge-part.py read $T/nv.img objects.key > $T/okey.bin
+$T/forge-part read $T/nv.img objects.log > $T/olog.bin; $T/forge-part read $T/nv.img objects.key > $T/okey.bin
 if grep -aq "objstore: locked: wrong user key for uid 1000, nothing decrypted or written" $T/b4.log && grep -aq "objstore: locked: no user key" $T/b5.log && [ "$(cat $T/olog.bin $T/okey.bin | sha256sum)" = "$O0" ]; then
   echo "PASS os/objstore-wrong-key-locked"; else echo "FAIL os/objstore-wrong-key-locked: $(grep -a 'objstore: lock\|PANIC' $T/b4.log $T/b5.log | tail -2)"; fi
 # tamper: flip one ciphertext bit of the newest slot in a copy of the image; HMAC must reject that slot
@@ -134,6 +136,6 @@ R3=$(grep -ao "[0-9]* never written or superseded-and-torn slots rejected" $T/b3
 R6=$(grep -ao "[0-9]* never written or superseded-and-torn slots rejected" $T/b6.log | cut -d' ' -f1)
 [ -n "$R3" ] && [ "$R6" = "$((R3 + 1))" ] && echo "PASS os/objstore-tamper-rejected (rejected slots $R3 -> $R6)" || echo "FAIL os/objstore-tamper-rejected: '$R3' -> '$R6' $(grep -a PANIC $T/b6.log)"
 cp $T/nv.good $T/nv.img
-python3 tools/forge-part.py read $T/nv.img hello.txt | grep -q "written by the Forge kernel on its own GPT partition" && echo "PASS os/forgefs-host-read" || echo "FAIL os/forgefs-host-read"
+$T/forge-part read $T/nv.img hello.txt | grep -q "written by the Forge kernel on its own GPT partition" && echo "PASS os/forgefs-host-read" || echo "FAIL os/forgefs-host-read"
 grep -ah "Forge FS: remount" $T/b2.log
 [ -n "${FORGEFS_KEEP:-}" ] && cp -a $T /tmp/ffkeep; rm -rf $T
