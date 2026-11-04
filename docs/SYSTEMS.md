@@ -76,6 +76,11 @@ The kills seen so far (g11 bios, g52 bios-smp1, g64 uefi) were all of this secon
 stops mid-boot at different points (after the blkd restart, after the Linux personality line, inside the
 module load/unload cycles) and nothing follows for minutes, while the same boot alone takes 65-85 s and
 no OOM was logged. That is an intermittent guest stall, not slow emulation; the dumps are for finding it.
+The g67 bios-smp1 HANG stopped after the kexec handoff: the shell printed `sh$ ` but `kexec_resume` never
+printed "kexec: input service state carried", so the boot thread was stuck inside `kbd_service_start_from`
+(two sleeping virtio-blk reads of kbdd/kbdd2, then `kbd_start_l`). On the carried path it now prints
+`kexec: input service: reading kbdd` / `reading kbdd2` / `starting kbdd` / `kbdd started`, so the next
+such HANG's serial log plus its per-vCPU stacks show which step stalls (suspect: a lost virtio-blk completion).
 
 ## Compiler tooling (Phase 3)
 - `--diagnostics=json`: one schema-v1 JSON object per error (file/line/col span, code, message, fix-its); goldens in `tests/diag`.

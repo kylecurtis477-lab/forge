@@ -231,7 +231,12 @@ def kbd_service_start():
 
 def kbd_service_start_from(carried: u64):
 # carried = 1: journal, state word, version and counters were set from a kexec handoff (kxd_adopt)
+# diagnostics (carried only): pinpoint where a post-kexec boot stalls (disk read vs driver start)
+    if carried != 0:
+        puts("kexec: input service: reading kbdd\n")
     kb_img[1] = fs_read_file("EFI/Forge/bin/kbdd", addr(kb_sz[1]))
+    if carried != 0:
+        puts("kexec: input service: reading kbdd2\n")
     kb_img[2] = fs_read_file("EFI/Forge/bin/kbdd2", addr(kb_sz[2]))
     if kb_img[1] == 0 or kb_img[2] == 0:
         panic("input service images missing")
@@ -244,7 +249,11 @@ def kbd_service_start_from(carried: u64):
         kb_take = 0
         kb_state = KB_STATE_MAGIC << 8
     kb_stop = 0
+    if carried != 0:
+        puts("kexec: input service: starting kbdd\n")
     kbd_start_l(v)
+    if carried != 0:
+        puts("kexec: input service: kbdd started\n")
     kb_svc = 1
     kb_sup = thread_spawn(u64(kbd_supervisor), 0)
     kb_swapper = thread_spawn(u64(kbd_swapper), 0)
