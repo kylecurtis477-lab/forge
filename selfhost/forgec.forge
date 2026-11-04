@@ -15374,6 +15374,9 @@ FT_U32 = 7
 FT_U64 = 8
 FT_BOOL = 9
 FT_LIT = 10
+# floats (11.2): IEEE bit patterns in rax (f32 in the low 32 bits), xmm registers at SysV boundaries
+FT_F64 = 11
+FT_F32 = 12
 FTMAX = 4096
 fsk = list(FTMAX)
 ftel = list(FTMAX)
@@ -15760,6 +15763,8 @@ def ft_init():
     ft_add(0, 0, 8, 8, 0, 0, "u64")
     ft_add(0, 0, 1, 1, 0, 0, "bool")
     ft_add(0, 0, 8, 8, 1, 0, "int")
+    ft_add(6, 0, 8, 8, 0, 0, "f64")
+    ft_add(6, 0, 4, 4, 0, 0, "f32")
 
 def ft_ptr(t):
     i = 0
@@ -15834,6 +15839,10 @@ def ft_prim(nm):
         return FT_U64
     if str_eq(nm, "byte") or str_eq(nm, "char"):
         return FT_U8
+    if str_eq(nm, "f64"):
+        return FT_F64
+    if str_eq(nm, "f32"):
+        return FT_F32
     i = 0
     while i < 10:
         if str_eq(ftname[i], nm):
@@ -16232,6 +16241,12 @@ def fs_rv():
 def fs_conv(to):
 # convert rax (type fs_ety) for assignment/passing to type to
     global fs_ety
+    if (fsk[to] == 6 or fsk[fs_ety] == 6) and fs_ety != to and fsk[to] != 4:
+        if fsk[to] == 6 and fs_ety == FT_LIT:
+            fs_i2f(to, "%rax")
+            fs_ety = to
+            return 0
+        fs_die("implicit float conversion: use f64(x), f32(x) or i64(x)")
     if (fsk[to] == 5 or fsk[fs_ety] == 5) and fs_ety != to:
         fs_die("slice type mismatch (slices convert only to the same slice[T])")
     if ft_isnn(to) and fs_ety != to:
@@ -16515,6 +16530,149 @@ def fs_ldw(base, off, rem):
         b -= 1
     return 0
 
+def fs_fx(t, r, x):
+# move float rax-style register r (64-bit name) into xmm x
+    if t == FT_F32:
+        e(c4("movd ", fs_r32(r), ",%xmm", str(x)))
+    else:
+        e(c4("movq ", r, ",%xmm", str(x)))
+
+def fs_xf(t, x, r):
+# move xmm x into register r (f32 zero-extended)
+    if t == FT_F32:
+        e(c4("movd %xmm", str(x), ",", fs_r32(r)))
+    else:
+        e(c4("movq %xmm", str(x), ",", r))
+
+def fs_r32(r):
+    if str_eq(r, "%rax"):
+        return "%eax"
+    if str_eq(r, "%rcx"):
+        return "%ecx"
+    return "%edx"
+
+def fs_i2f(t, r):
+# signed integer in r -> float t in r
+    if t == FT_F32:
+        e(c3("cvtsi2ssq ", r, ",%xmm2"))
+    else:
+        e(c3("cvtsi2sdq ", r, ",%xmm2"))
+    fs_xf(t, 2, r)
+
+def fs_fsfx(t):
+    if t == FT_F32:
+        return "ss"
+    return "sd"
+
+def fs_hasflt(t):
+# does a struct/array contain a float anywhere (SysV would class it SSE)
+    if fsk[t] == 6:
+        return 1
+    if fsk[t] == 3:
+        return fs_hasflt(ftel[t])
+    if fsk[t] == 2:
+        i = ftf0[t]
+        while i < ftf0[t] + ftfn[t]:
+            if fs_hasflt(fft[i]):
+                return 1
+            i += 1
+    return 0
+
+def fs_fbin(o, lt, rt):
+# float + - * / : left in rax, right in rcx
+    global fs_ety
+    t = lt
+    if fsk[lt] != 6:
+        t = rt
+    if lt != t:
+        if lt != FT_LIT:
+            fs_die("mixed float/integer arithmetic: convert with f64(x) / f32(x)")
+        fs_i2f(t, "%rax")
+    if rt != t:
+        if rt != FT_LIT:
+            fs_die("mixed float arithmetic: f32 and f64 (or an integer) need an explicit conversion")
+        fs_i2f(t, "%rcx")
+    op = ""
+    if str_eq(o, "+"):
+        op = "add"
+    elif str_eq(o, "-"):
+        op = "sub"
+    elif str_eq(o, "*"):
+        op = "mul"
+    elif str_eq(o, "/"):
+        op = "div"
+    else:
+        fs_die(c3("operator ", o, " is not defined on floats"))
+    fs_fx(t, "%rax", 0)
+    fs_fx(t, "%rcx", 1)
+    e(c3(op, fs_fsfx(t), " %xmm1,%xmm0"))
+    fs_xf(t, 0, "%rax")
+    fs_ety = t
+
+def fs_fcmp(k, lt, rt):
+# float comparison (false when unordered, except !=)
+    global fs_ety
+    t = lt
+    if fsk[lt] != 6:
+        t = rt
+    if lt != t:
+        if lt != FT_LIT:
+            fs_die("comparing a float with a non-literal integer: convert with f64(x) / f32(x)")
+        fs_i2f(t, "%rax")
+    if rt != t:
+        if rt != FT_LIT:
+            fs_die("comparing different float types: convert explicitly")
+        fs_i2f(t, "%rcx")
+    fs_fx(t, "%rax", 0)
+    fs_fx(t, "%rcx", 1)
+    u = concat("ucomi", fs_fsfx(t))
+    if k == 2 or k == 3:
+        e(concat(u, " %xmm0,%xmm1"))
+    else:
+        e(concat(u, " %xmm1,%xmm0"))
+    if k == 0:
+        e("sete %al")
+        e("setnp %cl")
+        e("and %cl,%al")
+    elif k == 1:
+        e("setne %al")
+        e("setp %cl")
+        e("or %cl,%al")
+    elif k == 2 or k == 4:
+        e("seta %al")
+    else:
+        e("setae %al")
+    e("movzbl %al,%eax")
+    fs_ety = FT_BOOL
+
+def fs_fcast(src, t):
+# explicit conversions with floats; returns 1 when handled
+    global fs_ety
+    if fsk[t] == 6:
+        if fsk[src] == 6:
+            if src != t:
+                fs_fx(src, "%rax", 0)
+                if t == FT_F32:
+                    e("cvtsd2ss %xmm0,%xmm0")
+                else:
+                    e("cvtss2sd %xmm0,%xmm0")
+                fs_xf(t, 0, "%rax")
+        elif fsk[src] == 0:
+            fs_i2f(t, "%rax")
+        else:
+            fs_die("only integers and floats convert to a float")
+        fs_ety = t
+        return 1
+    if fsk[src] == 6:
+        if fsk[t] != 0:
+            fs_die("a float converts only to an integer or a float")
+        fs_fx(src, "%rax", 0)
+        e(c3("cvtt", fs_fsfx(src), "2si %xmm0,%rax"))
+        fs_norm(t)
+        fs_ety = t
+        return 1
+    return 0
+
 def fs_pwords(t):
 # argument words of a parameter of type t: slice 2, struct ceil(size / 8), else 1
     if fsk[t] == 5:
@@ -16532,6 +16690,7 @@ def fs_layout(f):
     r = 0
     w = 0
     s = 0
+    x = 0
     if fs_smem(fsf_ret[f]):
         fs_wd[0] = 0
         r = 1
@@ -16541,7 +16700,14 @@ def fs_layout(f):
         t = fsp_t[fsf_p0[f] + i]
         nw = fs_pwords(t)
         j = 0
-        if not fs_smem(t) and r + nw <= 6:
+        if fsk[t] == 6 and x < 8:
+        # SysV class SSE: xmm0..xmm7 (destinations 50..57)
+            fs_wd[w] = 50 + x
+            x += 1
+        elif fsk[t] == 6:
+            fs_wd[w] = 100 + s
+            s += 1
+        elif not fs_smem(t) and r + nw <= 6:
             while j < nw:
                 fs_wd[w + j] = r + j
                 j += 1
@@ -16572,6 +16738,8 @@ def fs_fcall(f, target):
     fs_sysv_call(n, target, 1)
     fs_ety = rt
     fs_mode = 0
+    if fsk[rt] == 6:
+        fs_xf(rt, 0, "%rax")
     if tmp >= 0:
         if not fs_smem(rt):
             e(c3("mov %rax,", str(fsl_o[tmp]), "(%rbp)"))
@@ -16579,7 +16747,7 @@ def fs_fcall(f, target):
                 e(c3("mov %rdx,", str(fsl_o[tmp] + 8), "(%rbp)"))
         e(c3("lea ", str(fsl_o[tmp]), "(%rbp),%rax"))
         fs_sretv = 1
-    else:
+    elif fsk[rt] != 6:
     # SysV leaves upper bits of narrow return values unspecified
         fs_norm(fs_ety)
     return 0
@@ -16622,10 +16790,17 @@ def fs_sysv_call(n, target, lay):
             e(c3("mov %rax,", str(8 * (fs_wd[i] - 100)), "(%rsp)"))
         i += 1
     i = 0
+    nx = 0
     while i < n:
-        if fs_wd[i] < 100:
+        if fs_wd[i] >= 50 and fs_wd[i] < 100:
+            e(c4("movq ", str(sz + 8 * (n - 1 - i)), "(%rsp),%xmm", str(fs_wd[i] - 50)))
+            nx += 1
+        elif fs_wd[i] < 100:
             e(c4("mov ", str(sz + 8 * (n - 1 - i)), "(%rsp),", FS_AREG[fs_wd[i]]))
         i += 1
+    if nx > 0:
+    # al = vector registers used (needed by variadic callees, harmless otherwise)
+        e(c3("mov $", str(nx), ",%eax"))
     e(concat("call ", target))
     e(c3("add $", str(sz + 8 * n), ",%rsp"))
     fs_dep -= n
@@ -17338,6 +17513,19 @@ def fs_primary():
         fs_imm(tv[fp])
         fp += 1
         return 0
+    if tk[fp] == K_FLT:
+    # an f64 literal: its IEEE bits, built from two 32-bit halves
+        bits: int = __fbits(float(tv[fp]))
+        hi = (bits >> 32) & 4294967295
+        lo = bits & 4294967295
+        e(c3("mov $", str(hi), ",%eax"))
+        e("shl $32,%rax")
+        e(c3("mov $", str(lo), ",%ecx"))
+        e("or %rcx,%rax")
+        fs_ety = FT_F64
+        fs_mode = 0
+        fp += 1
+        return 0
     if tk[fp] == K_STR:
         fs_strlit(tv[fp])
         fp += 1
@@ -17397,6 +17585,8 @@ def fs_primary():
             fs_expr()
             fs_rv()
             fs_expect(")")
+            if fs_fcast(fs_ety, t):
+                return 0
             fs_norm(t)
             fs_ety = t
             return 0
@@ -17734,7 +17924,13 @@ def fs_unary():
         fp += 1
         fs_unary()
         fs_rv()
-        if str_eq(o, "-"):
+        if str_eq(o, "-") and fs_ety == FT_F64:
+            e("mov $1,%ecx")
+            e("shl $63,%rcx")
+            e("xor %rcx,%rax")
+        elif str_eq(o, "-") and fs_ety == FT_F32:
+            e("xor $-2147483648,%eax")
+        elif str_eq(o, "-"):
             e("neg %rax")
             fs_norm(fs_ety)
         elif str_eq(o, "~"):
@@ -17768,6 +17964,9 @@ def fs_ovf(t, op):
 def fs_binop(o, lt, rt):
 # left in rax, right in rcx
     global fs_ety
+    if fsk[lt] == 6 or fsk[rt] == 6:
+        fs_fbin(o, lt, rt)
+        return 0
     if fsk[lt] == 1 and (str_eq(o, "+") or str_eq(o, "-")):
         sz = ftsz[ftel[lt]]
         if fsk[rt] == 1:
@@ -17882,6 +18081,9 @@ def fs_cmp():
     rt = fs_ety
     e("mov %rax,%rcx")
     fs_pop("%rax")
+    if fsk[lt] == 6 or fsk[rt] == 6:
+        fs_fcmp(k, lt, rt)
+        return 0
     e("cmp %rcx,%rax")
     t = ft_join(lt, rt)
     cc = FS_UCC[k]
@@ -18725,6 +18927,10 @@ def fs_sig(ext):
     i = 0
     while i < n:
         nr += fs_pwords(fsp_t[fsf_p0[f] + i])
+        if fsk[fsp_t[fsf_p0[f] + i]] == 2 and fs_hasflt(fsp_t[fsf_p0[f] + i]):
+            fs_die("a struct with float fields cannot be passed by value yet (pass a pointer)")
+        if fsk[fsp_t[fsf_p0[f] + i]] == 6 and fs_bop(fs_datt, 22, 0):
+            fs_die("float parameters are not supported with @efiapi / @interrupt")
         if fsk[fsp_t[fsf_p0[f] + i]] == 2 and fs_bop(fs_datt, 22, 0):
             fs_die("struct parameters by value are not supported with @efiapi / @interrupt (pass a pointer)")
         i += 1
@@ -18742,6 +18948,10 @@ def fs_sig(ext):
             fsf_ret[f] = fs_type()
             if fsk[fsf_ret[f]] == 1 and ftsg[fsf_ret[f]] >= 3:
                 fs_die("a function cannot return a borrow (ref[T]/mut[T])")
+            if fsk[fsf_ret[f]] == 2 and fs_hasflt(fsf_ret[f]):
+                fs_die("a struct with float fields cannot be returned by value yet")
+            if fsk[fsf_ret[f]] == 6 and fs_bop(fs_datt, 22, 0):
+                fs_die("@efiapi / @interrupt functions cannot return a float")
             if fsk[fsf_ret[f]] == 2 and fs_bop(fs_datt, 22, 0):
                 fs_die("@efiapi / @interrupt functions cannot return a struct")
             if ft_agg(fsf_ret[f]) and fsk[fsf_ret[f]] != 2:
@@ -19002,6 +19212,8 @@ def fs_function2(f):
             if d >= 100:
             # SysV stack word s at 16 + 8 * s above the frame pointer
                 e(c3("mov ", str(16 + 8 * (d - 100)), "(%rbp),%rax"))
+            elif d >= 50:
+                fs_xf(t, d - 50, "%rax")
             else:
                 e(c3("mov ", FS_AREG[d], ",%rax"))
             if fsk[t] == 2 or fsk[t] == 5:
@@ -19033,6 +19245,8 @@ def fs_function2(f):
         fp = fp1
     e("xor %eax,%eax")
     emit_raw(concat(fs_ret, ":\n"))
+    if fsk[fs_rty] == 6:
+        fs_fx(fs_rty, "%rax", 0)
     if fsk[fs_rty] == 2:
         e(c3("mov ", str(fsl_o[fs_rslot]), "(%rbp),%rax"))
         if ftsz[fs_rty] > 8 and not fs_smem(fs_rty):

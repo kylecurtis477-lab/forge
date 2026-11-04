@@ -1,0 +1,32 @@
+# forge: no-runtime
+# C ABI floats (11.2): f64/f32 in xmm registers, both directions
+include "linux.fsi"
+
+extern def c_mix(a: i64, x: f64, b: i64, y: f32) -> f64
+extern def c_nine(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64) -> f64
+extern def c_half(x: f32) -> f32
+extern def c_calls() -> i64
+
+@export
+def forge_scale(x: f64, n: i64, y: f32) -> f64:
+    return x * f64(n) + f64(y)
+
+def main() -> i64:
+    put_i64(i64(c_mix(3, 2.5, 7, f32(0.5)) * 1000.0))
+    nl()
+    put_i64(i64(c_nine(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5) * 1000.0))
+    nl()
+    put_i64(i64(f64(c_half(f32(5.0))) * 1000.0))
+    nl()
+    put_i64(c_calls())
+    nl()
+    a: f64 = 7.0
+    b: f64 = 2.0
+    put_i64(i64((a / b - b) * 1000.0))
+    nl()
+    if a > b and not (a < b):
+        put_i64(1)
+    nl()
+    put_i64(i64(-a))
+    nl()
+    return 0
