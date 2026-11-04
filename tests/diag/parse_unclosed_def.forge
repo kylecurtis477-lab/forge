@@ -1,0 +1,5 @@
+# regression: an unclosed "(" in a def header crashed the type checker (list index out of range)
+def f(:
+    return 1
+
+print(f())

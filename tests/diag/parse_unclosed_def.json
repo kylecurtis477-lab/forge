@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0105","file":"tests/diag/parse_unclosed_def.forge","line":2,"col":6,"end_line":2,"end_col":7,"message":"expected ')' to close '(' (never closed)","fixits":[]}

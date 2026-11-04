@@ -7523,14 +7523,20 @@ def tc_atom(p):
 def tc_colon(p):
     while tk[p] != K_NL and tk[p] != K_EOF:
         if tk[p] == K_OP and (tok_is_op(p, "(") or tok_is_op(p, "[") or tok_is_op(p, "{")):
-            p = tc_match(p) + 1
+            p = tc_match(p)
+            if tk[p] == K_EOF:
+            # unclosed bracket (e.g. `def f(:`): stop at EOF, the parser reports it
+                return p
+            p += 1
         elif tok_is_op(p, ":"):
             return p
         elif tok_is_id(p, "lambda"):
         # skip the lambda's own ':'
             p += 1
-            while not tok_is_op(p, ":") and tk[p] != K_NL:
+            while not tok_is_op(p, ":") and tk[p] != K_NL and tk[p] != K_EOF:
                 p += 1
+            if tk[p] == K_EOF:
+                return p
             p += 1
         else:
             p += 1
@@ -8187,6 +8193,35 @@ def strip_attr_ann():
             w += 1
             p += 1
     ntok = w
+
+def check_unclosed(p):
+# an opening bracket never closed before EOF (e.g. `def f(:`) is reported here, at the bracket,
+# before the type checker (which skips bracketed spans) or the parser can run off the token array
+    global pos
+    st = list(4096)
+    n = 0
+    while tk[p] != K_EOF:
+        if tk[p] == K_OP:
+            v = tv[p]
+            if str_eq(v, "(") or str_eq(v, "[") or str_eq(v, "{"):
+                if n < 4096:
+                    st[n] = p
+                n += 1
+            elif (str_eq(v, ")") or str_eq(v, "]") or str_eq(v, "}")) and n > 0:
+                n -= 1
+        p += 1
+    if n > 0:
+        q = st[0]
+        if n <= 4096:
+            q = st[n - 1]
+        c = ")"
+        if str_eq(tv[q], "["):
+            c = "]"
+        elif str_eq(tv[q], "{"):
+            c = "}"
+        set_lphase(2)
+        pos = q
+        die(tl[q], concat(concat(concat(concat("expected '", c), "' to close '"), tv[q]), "' (never closed)"))
 
 def typecheck():
     global tc_mode, tc_skipdefs
@@ -15316,6 +15351,7 @@ def forge_main():
     lex(src, 1, 0)
     main_sid = cur_sid
     add_tok(K_EOF, 0, 0)
+    check_unclosed(PRETOK)
     typecheck()
     strip_attr_ann()
     rewrite_tokens()
