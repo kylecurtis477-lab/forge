@@ -2,8 +2,13 @@
 # forge <file.forge> [-o out] : compile with the self-hosted compiler, then assemble+link (tools/fas + tools/fld)
 set -e
 D="$(cd "$(dirname "$0")" && pwd)"
-# forge test [files] / forge verify [files] : JSON reports (tools/forge_test.sh, tools/forge_verify.sh)
-[ "$1" = "test" ] && { shift; exec "$D/tools/forge_test.sh" "$@"; }
+# forge test [files] / forge verify [files] : JSON reports (tools/forge_test.forge, tools/forge_verify.sh;
+# tools/forge_test.sh is kept as the reference)
+if [ "$1" = "test" ]; then
+  shift
+  [ "$D/build/forge_test" -nt "$D/tools/forge_test.forge" ] || "$0" "$D/tools/forge_test.forge" -o "$D/build/forge_test" >&2
+  exec "$D/build/forge_test" "$@"
+fi
 [ "$1" = "verify" ] && { shift; exec "$D/tools/forge_verify.sh" "$@"; }
 # forge pkg [--registry DIR] lock | build [-o OUT] | sha256 FILE... : package manager (tools/pkg.forge).
 # Run in a project directory (forge.toml). Registry: --registry, else $FORGE_REGISTRY, else ./registry.

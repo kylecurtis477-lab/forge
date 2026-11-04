@@ -1,0 +1,124 @@
+# forge test [files...]: Forge port of tools/forge_test.sh (kept as the reference; tests/testblocks/run.sh
+# compares them). Builds each file with `forgec --test` (plus $FORGEC_FLAGS), runs every `test "name":`
+# block in its own process (10 s timeout, from the file's directory) and prints one JSON report on stdout.
+# Exit 1 if any test fails or a file does not build. Default file set: tests/unit/*.forge.
+# Exit codes of a test killed by signal N are reported as 128+N (what the shell reported).
+import os
+import sys
+import time
+
+def esc(s):
+# the shell's esc(): escape \ " and tab, drop CR/LF
+    s = s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\t", "\\t")
+    return s.replace("\r", "").replace("\n", "")
+
+def first_line(s):
+    i = s.find("\n")
+    if i < 0:
+        return s
+    return s[:i]
+
+def shell_rc(rc):
+    if rc < 0:
+        return 128 - rc
+    return rc
+
+def repo_root():
+    me = sys.argv[0]
+    here = os.getcwd()
+    if me.find("/") >= 0:
+        os.chdir(os.path.dirname(me) + "/..")
+    else:
+        os.chdir("..")
+    d = os.getcwd()
+    os.chdir(here)
+    return d
+
+def main():
+    D = repo_root()
+    files = sys.argv[1:]
+    if len(files) == 0:
+        for n in sorted(os.listdir(D + "/tests/unit")):
+            if n.endswith(".forge"):
+                files.append(D + "/tests/unit/" + n)
+    flags = []
+    for w in os.getenv("FORGEC_FLAGS", "").split(" "):
+        if w != "":
+            flags.append(w)
+    # scratch: build/forge_test.tmp (kept, emptied after the run; the library has no rmdir)
+    T = D + "/build/forge_test.tmp"
+    if not os.path.isdir(T):
+        os.mkdir(T)
+    exe = T + "/t"
+    np = 0
+    nf = 0
+    out = "{\"forge_test\":1,\"files\":["
+    first = True
+    for f in files:
+        if not first:
+            out += ","
+        first = False
+        fe = esc(f)
+        err = ""
+        ok = False
+        r = os.run([D + "/build/forgec", f, T + "/t.s", "--test"] + flags)
+        sys.stdout.write(r[1])
+        err = r[2]
+        if r[0] == 0:
+            r = os.run([D + "/build/fas", "-o", T + "/t.o", T + "/t.s"])
+            sys.stdout.write(r[1])
+            err += r[2]
+            if r[0] == 0:
+                r = os.run([D + "/build/fld", "--base", "0x100000000000", "-o", exe, T + "/t.o"])
+                sys.stdout.write(r[1])
+                err += r[2]
+                ok = r[0] == 0
+        if not ok:
+            nf += 1
+            out += "{\"file\":\"" + fe + "\",\"build\":\"fail\",\"message\":\"" + esc(first_line(err)) + "\",\"tests\":[]}"
+            continue
+        # the program's own top-level output comes first, then the marker line, then one name per line
+        wd = os.path.dirname(f)
+        if wd == "":
+            wd = "."
+        lst = os.run([exe, "--forge-test-list"], cwd=wd, timeout=10)[1]
+        names = []
+        seen = False
+        lines = lst.split("\n")
+        k = 0
+        while k < len(lines) - 1:
+            if seen:
+                names.append(lines[k])
+            elif lines[k] == "--forge-tests--":
+                seen = True
+            k += 1
+        out += "{\"file\":\"" + fe + "\",\"build\":\"ok\",\"tests\":["
+        i = 0
+        while i < len(names):
+            name = esc(names[i])
+            s = time.perf_counter_ns()
+            r = os.run([exe, "--forge-test-run", str(i)], cwd=wd, timeout=10)
+            ms = (time.perf_counter_ns() - s) // 1000000
+            if i > 0:
+                out += ","
+            if r[0] == 0:
+                np += 1
+                out += "{\"name\":\"" + name + "\",\"status\":\"pass\",\"ms\":" + str(ms) + "}"
+            else:
+                nf += 1
+                rc = shell_rc(r[0])
+                m = esc(first_line(r[2]))
+                if rc == 124:
+                    m = "timeout"
+                out += "{\"name\":\"" + name + "\",\"status\":\"fail\",\"exit\":" + str(rc) + ",\"message\":\"" + m + "\",\"ms\":" + str(ms) + "}"
+            i += 1
+        out += "]}"
+    out += "],\"passed\":" + str(np) + ",\"failed\":" + str(nf) + "}"
+    print(out)
+    for n in os.listdir(T):
+        os.remove(T + "/" + n)
+    if nf == 0:
+        return 0
+    return 1
+
+exit(main())

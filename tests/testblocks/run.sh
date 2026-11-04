@@ -19,4 +19,17 @@ printf 'x  =  1\nprint(x)\n' > $T/ugly.forge
 ./forge verify $T/ugly.forge > $T/v2.json && no verify-catches-fmt || python3 -c 'import json,sys;c=json.load(open(sys.argv[1]))["files"][0]["checks"];assert c["fmt"]["status"]=="fail" and c["build"]["status"]=="ok" and c["test"]["status"]=="skip"' $T/v2.json && ok verify-catches-fmt || no verify-catches-fmt
 printf 'def f(:\n' > $T/bad.forge
 ./forge verify $T/bad.forge > $T/v3.json && no verify-catches-parse || python3 -c 'import json,sys;c=json.load(open(sys.argv[1]))["files"][0]["checks"];assert c["parse"]["status"]=="fail" and c["build"]["status"]=="fail"' $T/v3.json && ok verify-catches-parse || no verify-catches-parse
+# build/forge_test (tools/forge_test.forge) must match tools/forge_test.sh (the reference): same JSON with
+# the "ms" timings zeroed, same exit code; default set, a failing test, a build failure, a 10 s timeout
+same() { # name files...
+  n=$1; shift
+  build/forge_test "$@" > $T/f1; r1=$?; tools/forge_test.sh "$@" > $T/s1; r2=$?
+  sed -i 's/"ms":[0-9]*/"ms":0/g' $T/f1 $T/s1
+  [ $r1 = $r2 ] && cmp -s $T/f1 $T/s1 && ok "forge-test-matches-sh-$n" || no "forge-test-matches-sh-$n"
+}
+printf 'test "spins":\n    while True:\n        pass\n\ntest "ok":\n    assert 1 == 1\n' > $T/spin.forge
+same default
+same failing tests/testblocks/failing.forge
+same build-fail $T/bad.forge
+same timeout $T/spin.forge
 rm -rf $T; exit $fail
