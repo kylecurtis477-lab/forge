@@ -179,7 +179,7 @@ def od_key_new() -> u64:
         j: u64 = 0
         while j < (t0 & 15):
             j += 1
-        sh_u64(rdtsc() - t0)
+        sh_u64(nd_rand(4, rdtsc() - t0))
         sh_u64(t0)
         i += 1
     sh_fin()

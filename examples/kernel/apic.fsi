@@ -89,6 +89,7 @@ def pic_disable():
 
 @interrupt
 def on_lapic_timer(frame: ptr[u64]):
+    nd_hook(ND_TIMER, lapic_cpu(), lapic_ticks)
     if lapic_cpu() == 0:
         atomic_fetch_add(addr(lapic_ticks), 1, acq_rel)
     lapic_eoi()

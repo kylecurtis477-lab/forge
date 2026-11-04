@@ -7,6 +7,7 @@ include "boot.fsi"
 include "bootinfo.fsi"
 include "console.fsi"
 include "sync.fsi"
+include "nondet.fsi"
 include "mm.fsi"
 include "mmio.fsi"
 include "cpu.fsi"
@@ -231,7 +232,7 @@ def kaslr_pick():
     kmin = img / 0x200000 + 1
     slots = (0x3FE00000 - img) / 0x200000 - kmin
     t = rdtsc()
-    v = (t ^ (t >> 17) ^ kdelta) * 0x9E3779B97F4A7C15
+    v = nd_rand(1, (t ^ (t >> 17) ^ kdelta) * 0x9E3779B97F4A7C15)
     kslide = (kmin + (v >> 40) % slots) * 0x200000
     if krel_count == 0:
         kslide = 0
@@ -784,7 +785,7 @@ smash_pat: u8[256]
 def canary_init():
 # no buffer locals here, so this frame carries no canary of its own; nothing protected is live yet
     t = rdtsc()
-    v = (t ^ (t << 29) ^ u64(addr(bi))) * 0x9E3779B97F4A7C15
+    v = nd_rand(2, (t ^ (t << 29) ^ u64(addr(bi))) * 0x9E3779B97F4A7C15)
     stack_canary = (v ^ (v >> 31)) & ~u64(255)  # low byte 0 stops string over-reads too
     # KASLR for the dynamic kernel regions: big heap and thread stacks start at a random 2 MiB slot
     # (16 bits each, inside their PML4 slot); the image itself stays at KBASE
@@ -1550,6 +1551,7 @@ def shell_test():
     tsw_thread = u64(thread_spawn(u64(tty_swapper), 0))
     kbd_service_start()
     ktest_hooks = 1
+    nd_window_begin()
     sz: u64 = 0
     img = fs_read_file("/EFI/Forge/bin/sh", addr(sz))
     if img == 0:
@@ -1559,6 +1561,7 @@ def shell_test():
     if u64(t) == 0:
         panic("sh rejected by ELF loader")
     code = proc_reap(t)
+    nd_window_end()
     orph = proc_reap_orphans()
     kbd_service_stop()
     input_off()

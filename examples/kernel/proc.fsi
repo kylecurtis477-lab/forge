@@ -1501,8 +1501,12 @@ def con_write_user(p: u64, n: u64) -> u64:
     return n
 
 @export
-@unsafe
 def syscall_dispatch(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64:
+# the syscall entry stubs call this; every native syscall result passes the nondeterminism hook (nondet.fsi)
+    return nd_hook(ND_SYSCALL, nr, syscall_do(nr, a, b, c, d, frame))
+
+@unsafe
+def syscall_do(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64:
 # entered with interrupts off (FMASK); the asm exit path disables them again before sysret
     atomic_fetch_add(addr(syscalls), 1, acq_rel)
     sti()

@@ -99,8 +99,8 @@ def lx_stack(p: ptr[Proc], entry: u64, pa: slice[u8]) -> u64:
     while k < 127 and pa[128 + k] != 0:
         st[128 + k] = pa[128 + k]
         k += 1
-    r = lx_mix(rdtsc() ^ (p.pid << 32))
-    r2 = lx_mix(r ^ rdtsc())
+    r = nd_rand(3, lx_mix(rdtsc() ^ (p.pid << 32)))
+    r2 = nd_rand(3, lx_mix(r ^ rdtsc()))
     k = 0
     while k < 8:
         st[256 + k] = u8((r >> (k * 8)) & 0xFF)

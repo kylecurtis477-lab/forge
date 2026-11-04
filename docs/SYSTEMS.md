@@ -234,6 +234,26 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
 - FORGEKRN header: entry, phys start, phys end, krel start, krel end. The Forge UEFI loader and kexec refuse a kernel whose table is empty; kexec'd kernels pick a fresh slide.
 - Limits: slide granularity 2 MiB, about 9 bits of entropy; the low boot stub at 1 MiB (phys) is not randomized; physical placement (kdelta) only varies under kexec.
 
+## Nondeterminism hook (plan v1.3 item 6)
+`examples/kernel/nondet.fsi`. Every nondeterministic input the kernel takes goes through one function,
+`nd_hook(kind, a, v) -> v`:
+- `ND_SYSCALL`: `syscall_dispatch` is a thin wrapper around `syscall_do`, so every syscall result
+  (native and Linux personality) passes the hook (a = number, v = result).
+- `ND_TIMER`: `on_lapic_timer`, on every CPU (a = cpu, v = `lapic_ticks`).
+- `ND_SCHED`: `schedule_l`, after the next thread is chosen (a = cpu, v = the thread).
+- `ND_RNG`: `nd_rand(site, v)` at every random site: KASLR slide (1), stack canary and heap/stack
+  KASLR (2), Linux AT_RANDOM (3), object-store key entropy (4).
+
+The hook returns v unchanged; it is the single point where a later replay mode can substitute recorded
+values. Recording (`nd_rec`) is **off by default**: the hook then reads one global and returns. When on, it
+counts events per kind and appends (kind, a, v) to a fixed 256-entry ring (slot taken with an atomic
+fetch-add, so CPUs never share a slot). Nothing is persisted or exported yet.
+
+Boot self-test (`shell_test`): nothing may be recorded before the shell session (`nondet: recording off by
+default`); the shell session (which also runs the Linux-ABI programs) is recorded and must contain all
+four kinds, the ring may only hold known kinds, and nothing is recorded after recording is switched off
+(`nondet hook OK`). No unsafe code was added (the new file is safe Forge; unsafe counts unchanged).
+
 ## Proof manifests (Phase 6.1)
 Every user ELF is sealed at build time by `tools/forgeseal.py`, which is the verifier gate: it compiles the program with `--unsafe-report` and refuses to seal unless the program has no unsafe code or its counts are within the audited `tests/unsafe/baseline.txt` entry. It appends a 128-byte trailer: `FORGEPRF`, version 1, safety level (0 none, 1 audited, 2 audited ulib only), unsafe ops, declared caps (`# forge: caps(fs, spawn, ipc, drv, kexec, probe, ktest)`), ELF length, own-file unsafe ops, SHA-256 of the ELF and HMAC-SHA256(key, trailer[0:96]). The key is 32 random bytes per build tree (`build/user/seal.key`, never committed) and is `.incbin`'d into the kernel. The kernel (`seal.fsi`, safe SHA-256/HMAC; 3 new casts offset by moving `elf_load` onto `Ehdr`/`Phdr` struct views) refuses any image that fails, in `sys_exec` (ENOEXEC, logged `verify: PATH refused: REASON`) and `proc_spawn_args`. The W^X self-test loads its crafted images with `elf_try` directly. Limits: MAC not signature; modules unsealed.
 

@@ -217,6 +217,7 @@ def schedule_l(exiting: u64):
         rq_push(cur)
     if nxt.state != T_IDLE:
         nxt.state = T_RUNNING
+    nd_hook(ND_SCHED, cpu, u64(nxt))
     nxt.cpus_seen = nxt.cpus_seen | (u64(1) << cpu)
     nxt.switches += 1
     ctx_switches += 1
