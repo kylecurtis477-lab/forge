@@ -1,0 +1,5 @@
+# grammar v1.2 reserves effect annotations (`uses` + Phase 6 capability names): the checker rejects them
+def read_cfg(path: str) -> str uses fs, ipc:
+    return path
+
+print(read_cfg("x"))

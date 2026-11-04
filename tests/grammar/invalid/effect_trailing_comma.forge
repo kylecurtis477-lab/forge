@@ -1,0 +1,3 @@
+# a trailing comma after the last effect is not allowed
+def f() uses fs,:
+    pass

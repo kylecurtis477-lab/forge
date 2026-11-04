@@ -1,0 +1,4 @@
+# effect annotations on a method are rejected the same way
+class Dev:
+    def poke(self) uses drv:
+        pass

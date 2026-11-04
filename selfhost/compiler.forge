@@ -8223,6 +8223,24 @@ def check_unclosed(p):
         pos = q
         die(tl[q], concat(concat(concat(concat("expected '", c), "' to close '"), tv[q]), "' (never closed)"))
 
+def reject_effects(p):
+# grammar v1.2 reserves `def f(...) [-> T] uses fs, ipc:` (effects = Phase 6 capability names);
+# the AST parser accepts it, but the checker and code generation do not implement effects yet
+    while tk[p] != K_EOF:
+        if tok_is_id(p, "def"):
+            q = p + 1
+            d = 0
+            while tk[q] != K_EOF and tk[q] != K_NL and not (d == 0 and tok_is_op(q, ":")):
+                if tk[q] == K_OP and (tok_is_op(q, "(") or tok_is_op(q, "[") or tok_is_op(q, "{")):
+                    d += 1
+                elif tk[q] == K_OP and (tok_is_op(q, ")") or tok_is_op(q, "]") or tok_is_op(q, "}")):
+                    d -= 1
+                elif d == 0 and tok_is_id(q, "uses") and tk[q + 1] == K_ID:
+                    src_err(q, "effect annotations are reserved (grammar v1.2) but not supported yet: remove `uses ...`")
+                    exit(1)
+                q += 1
+        p += 1
+
 def typecheck():
     global tc_mode, tc_skipdefs
     tc_collect_classes()
@@ -14290,8 +14308,42 @@ def a_def(decos, ext):
     if ext:
         a_endstmt()
         return a_mk("ExternDef", nm, line, 3)
+    ef = a_effects()
     a_push(a_block())
-    return a_mk("Def", nm, line, 4)
+    if ef < 0:
+        return a_mk("Def", nm, line, 4)
+    a_push(ef)
+    return a_mk("Def", nm, line, 5)
+
+EFFECT_NAMES = ["fs", "spawn", "ipc", "drv", "ktest", "kexec", "probe"]
+
+def is_effect_name(v):
+    i = 0
+    while i < len(EFFECT_NAMES):
+        if str_eq(v, EFFECT_NAMES[i]):
+            return 1
+        i += 1
+    return 0
+
+def a_effects():
+# grammar v1.2 (reserved): effects = 'uses' EFFECT (',' EFFECT)*, soft keyword after the header's
+# ')' / return annotation; EFFECT is one of the Phase 6 capability names. Returns an Effects node
+# (children: Effect leaves, v = the name) or -1 when absent. The checker rejects it for now.
+    global ap
+    if not (a_kw("uses") and tk[ap + 1] == K_ID):
+        return -1
+    line = tl[ap]
+    ap += 1
+    n = 0
+    while 1:
+        if tk[ap] != K_ID or not is_effect_name(tv[ap]):
+            a_fail("an effect name (fs, spawn, ipc, drv, ktest, kexec, probe)")
+        a_push(a_leaf("Effect", tv[ap], tl[ap]))
+        ap += 1
+        n += 1
+        if not a_eat(","):
+            break
+    return a_mk("Effects", 0, line, n)
 
 def a_stmt():
     global ap
@@ -14835,6 +14887,16 @@ def pp_s(n, d):
         s = concat(concat(concat(concat("def ", av[n]), "("), pp_params(a_kid(n, 1), 1)), ")")
         if not str_eq(ak[a_kid(n, 2)], "Empty"):
             s = concat(concat(s, " -> "), pp_e(a_kid(n, 2), 1))
+        if acn[n] > 4:
+            ef = a_kid(n, 4)
+            j = 0
+            while j < acn[ef]:
+                if j == 0:
+                    s = concat(s, " uses ")
+                else:
+                    s = concat(s, ", ")
+                s = concat(s, av[a_kid(ef, j)])
+                j += 1
         if str_eq(k, "ExternDef"):
             pp_line(d, concat("extern ", s))
         else:
@@ -14995,9 +15057,9 @@ lex_fname = ""
 dg_off = -1
 dg_ind = -1
 main_sid = -1
-DG_PFX = ["unexpected character", "unterminated string", "inconsistent indentation", "newline in f-string", "cannot read input file", "cannot read include file", "include nesting too deep", "undefined function", "undefined name", "unknown method", "argument ", "incompatible types in assignment", "unsupported operand types", "missing argument", "missing return statement", "incompatible return value type", "invalid index type", "integer literal does not fit", "unexpected keyword argument", "bad operand type for unary", "list indices must be integers", "string indices must be integers", "return value expected", "default for parameter", "expected "]
-DG_CODE = ["E0101", "E0102", "E0103", "E0104", "E0001", "E0002", "E0003", "E0201", "E0202", "E0203", "E0301", "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0309", "E0310", "E0311", "E0312", "E0313", "E0314", "E0105"]
-NDG = 25
+DG_PFX = ["unexpected character", "unterminated string", "inconsistent indentation", "newline in f-string", "cannot read input file", "cannot read include file", "include nesting too deep", "undefined function", "undefined name", "unknown method", "argument ", "incompatible types in assignment", "unsupported operand types", "missing argument", "missing return statement", "incompatible return value type", "invalid index type", "integer literal does not fit", "unexpected keyword argument", "bad operand type for unary", "list indices must be integers", "string indices must be integers", "return value expected", "default for parameter", "expected ", "effect annotations are reserved"]
+DG_CODE = ["E0101", "E0102", "E0103", "E0104", "E0001", "E0002", "E0003", "E0201", "E0202", "E0203", "E0301", "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0309", "E0310", "E0311", "E0312", "E0313", "E0314", "E0105", "E0106"]
+NDG = 26
 
 def dg_sw(s, p):
     return len(p) <= len(s) and str_eq(substr(s, 0, len(p)), p)
@@ -15333,6 +15395,7 @@ def forge_main():
         main_sid = cur_sid
         add_tok(K_EOF, 0, 0)
         add_tok(K_EOF, 0, 0)
+        reject_effects(0)
         fs_main(src)
         return 0
     pre = prelude_text()
@@ -15352,6 +15415,7 @@ def forge_main():
     main_sid = cur_sid
     add_tok(K_EOF, 0, 0)
     check_unclosed(PRETOK)
+    reject_effects(PRETOK)
     typecheck()
     strip_attr_ann()
     rewrite_tokens()

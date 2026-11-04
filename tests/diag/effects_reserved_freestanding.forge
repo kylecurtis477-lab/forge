@@ -1,0 +1,4 @@
+# forge: no-runtime
+# effect annotations are rejected in freestanding mode too
+def f() uses fs:
+    pass

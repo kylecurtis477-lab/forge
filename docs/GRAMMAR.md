@@ -1,4 +1,4 @@
-# Forge grammar (frozen, version 1)
+# Forge grammar (frozen, version 1; additive v1.1 test blocks, v1.2 reserved effects)
 
 This is the normative grammar of Forge source. It is the grammar accepted by the strict
 AST parser (`forgec F out --emit=ast-json`, the `a_*` functions in selfhost/compiler.forge);
@@ -38,7 +38,11 @@ stmt        = decorated | test_block | if_stmt | while_stmt | for_stmt | try_stm
 test_block  = 'test' STRING ':' suite     (v1.1, soft keyword: only when followed by STRING ':';
                                            code generation accepts it only at column 0, top level)
 decorated   = ('@' test NEWLINE)* (funcdef | externdef | classdef)
-funcdef     = 'def' NAME '(' params(typed) ')' ['->' test] block      (a_def)
+funcdef     = 'def' NAME '(' params(typed) ')' ['->' test] [effects] block   (a_def)
+effects     = 'uses' EFFECT (',' EFFECT)*   (v1.2, reserved; soft keyword: only right before the
+                                           header's ':' and followed by a NAME)   (a_effects)
+EFFECT      = 'fs' | 'spawn' | 'ipc' | 'drv' | 'ktest' | 'kexec' | 'probe'
+                                          (the Phase 6 capability names; any other NAME is E0105)
 externdef   = 'extern' 'def' NAME '(' params(typed) ')' ['->' test] end
 suite       = block
 classdef    = 'class' NAME ['(' args ')'] block
@@ -143,3 +147,14 @@ compiler: `skip_arg` stops at a mismatched closer at depth 0, and the argument l
 `error: line N: expected ')', found '<tok>'` and stops. Regression tests: `tests/errors/call_stray_*.forge`.
 `run_tests.sh` also runs every error test under `timeout 20`, so a future hang fails the test instead of
 stalling the suite.
+
+## Reserved: effects (v1.2)
+
+`def f(...) [-> T] uses fs, ipc:` declares the capabilities (Phase 6 names: fs, spawn, ipc, drv,
+ktest, kexec, probe) a function may use. Only the syntax is reserved: the AST parser accepts it and
+the tree gets an optional fifth `Def` child `Effects` (children `Effect` leaves with `"v"` = the
+name; absent when there is no clause, so existing trees and child indices are unchanged, and
+`"forge_ast"` stays 1), and `--emit=pretty` prints it back. The checker and code generation reject
+it (hosted and freestanding) with E0106 `effect annotations are reserved ... not supported yet`.
+`uses` remains an ordinary name everywhere else. Tests: tests/grammar/valid/effects.forge,
+tests/grammar/invalid/effect_*.forge, tests/diag/effects_reserved*.forge.

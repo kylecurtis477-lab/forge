@@ -1,0 +1,1 @@
+{"version":1,"severity":"error","code":"E0106","file":"tests/diag/effects_reserved_method.forge","line":3,"col":20,"end_line":3,"end_col":24,"message":"effect annotations are reserved (grammar v1.2) but not supported yet: remove `uses ...`","fixits":[]}

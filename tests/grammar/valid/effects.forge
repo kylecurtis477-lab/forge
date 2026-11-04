@@ -1,0 +1,16 @@
+# effects: every Phase 6 capability name parses (grammar v1.2, reserved; rejected by the checker)
+def a() uses fs:
+    pass
+
+def b(x: int) -> int uses spawn, ipc, drv:
+    return x
+
+class C:
+    @staticmethod
+    def c() uses ktest, kexec, probe:
+        pass
+
+# `uses` stays an ordinary name everywhere else
+uses = 1
+def d(uses: int) -> int:
+    return uses
