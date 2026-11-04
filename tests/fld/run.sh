@@ -8,8 +8,9 @@ cd "$(dirname "$0")/../.."
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
 FLD=build/fld
+build/forgec tests/fld/memimg.forge $T/mi.s && build/fas -o $T/mi.o $T/mi.s && $FLD --base 0x100000000000 -o $T/memimg $T/mi.o || { echo "FAIL fld memimg build"; exit 1; }
 same() { # name ref.elf fld.elf
-  if python3 tests/fld/memimg.py "$2" "$3" | grep -q '^SAME'; then echo "PASS fld $1"; else echo "FAIL fld $1"; fail=1; fi
+  if $T/memimg "$2" "$3" | grep -q '^SAME'; then echo "PASS fld $1"; else echo "FAIL fld $1"; fail=1; fi
 }
 command -v ld >/dev/null || { echo "SKIP fld reference comparisons (no GNU ld)"; exit 0; }
 # hosted: the compiler itself and every tests/*.forge program
@@ -19,7 +20,7 @@ bad=0; n=0
 for t in tests/*.forge; do
   build/forgec "$t" $T/t.s $FORGEC_FLAGS >/dev/null 2>&1 || continue
   build/fas -o $T/t.o $T/t.s && ld -Ttext-segment=0x100000000000 -o $T/t.ld $T/t.o && $FLD --base 0x100000000000 -o $T/t.fld $T/t.o || { echo "  link: $t"; bad=1; continue; }
-  python3 tests/fld/memimg.py $T/t.ld $T/t.fld | grep -q '^SAME' || { echo "  differs: $t"; bad=1; }
+  $T/memimg $T/t.ld $T/t.fld | grep -q '^SAME' || { echo "  differs: $t"; bad=1; }
   n=$((n+1))
 done
 [ $bad = 0 ] && echo "PASS fld tests-corpus ($n programs)" || { echo "FAIL fld tests-corpus"; fail=1; }

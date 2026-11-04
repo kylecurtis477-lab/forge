@@ -14,7 +14,8 @@ fail() { echo "FAIL dwarf/$1"; pkill -f "qemu-system.*$D/forge-g.iso" 2>/dev/nul
 build/fas -I build/user -o $D/kernel.o $D/kernel.s || fail "build (fas)"
 build/fld --format kernel -o $D/kernel.elf $D/kernel.o || fail "build (fld)"
 # -g changes only the debug sections: the loaded image equals the normal build's
-python3 tests/fld/memimg.py $D/kernel.elf build/kernel/kernel.elf > /dev/null && echo "PASS dwarf/image-unchanged-by-g" || echo "FAIL dwarf/image-unchanged-by-g"
+{ build/forgec tests/fld/memimg.forge $D/memimg.s && build/fas -o $D/memimg.o $D/memimg.s && build/fld --base 0x100000000000 -o $D/memimg $D/memimg.o; } || fail "build (memimg)"
+$D/memimg $D/kernel.elf build/kernel/kernel.elf > /dev/null && echo "PASS dwarf/image-unchanged-by-g" || echo "FAIL dwarf/image-unchanged-by-g"
 readelf --debug-dump=decodedline $D/kernel.elf 2>&1 | grep -q "^sched.fsi  *157 " && echo "PASS dwarf/line-table (readelf decodes sched.fsi:157)" || echo "FAIL dwarf/line-table"
 cp $D/kernel.elf $D/iso/boot/kernel.elf && cp examples/kernel/grub.cfg $D/iso/boot/grub/grub.cfg
 grub-mkrescue -o $D/forge-g.iso $D/iso >/dev/null 2>&1 || fail "iso"

@@ -1,0 +1,105 @@
+# memimg: Forge port of tests/fld/memimg.py (kept as the reference; tests/memimg/run.sh compares them).
+# usage: memimg A.elf B.elf -- the two executables load identical bytes at identical addresses (PT_LOAD by
+# PT_LOAD: vaddr, size, flags, contents with .bss zero-fill) and have the same entry point.
+# Prints exactly what the Python prints (SAME/DIFF line, SEGS differ / bytes differ details); always exit 0.
+
+def rd(s, o, n):
+    v = 0
+    i = n - 1
+    while i >= 0:
+        v = v * 256 + ord(s[o + i])
+        i -= 1
+    return v
+
+def h8(v):
+    h = hex(v)[2:]
+    return "0" * (8 - len(h)) + h
+
+def a64(s, o, add):
+# a 64-bit field as 16 hex digits (unsigned order = string order; no int64 overflow), plus a small offset
+    lo = rd(s, o, 4) + add
+    hi = rd(s, o + 4, 4) + lo // 4294967296
+    return h8(hi % 4294967296) + h8(lo % 4294967296)
+
+def ahex(k):
+# Python's hex() of the 64-bit value k (16 hex digits)
+    i = 0
+    while i < 15 and k[i] == "0":
+        i += 1
+    return "0x" + k[i:]
+
+def segs(p):
+    d = read_file(p)
+    if d is None:
+        eputs("memimg: cannot read " + p)
+        exit(1)
+    phoff = rd(d, 0x20, 8)
+    n = rd(d, 0x38, 2)
+    ent = a64(d, 0x18, 0)
+    m = {}
+    i = 0
+    while i < n:
+        b = phoff + 56 * i
+        i += 1
+        t = rd(d, b, 4)
+        f = rd(d, b + 4, 4)
+        off = rd(d, b + 8, 8)
+        va = a64(d, b + 16, 0)
+        fs = rd(d, b + 32, 8)
+        ms = rd(d, b + 40, 8)
+        if t != 1 or off == 0:
+            continue
+        c = d[off:off + fs]
+        if ms > fs:
+            c = c + chr(0) * (ms - fs)
+        m[va] = [c, f, d[b:b + 56]]
+    out = []
+    for va in sorted(keys(m)):
+        out.append([va, m[va][0], m[va][1], m[va][2]])
+    return [ent, out]
+
+def seglist(ia):
+    s = "["
+    k = 0
+    for x in ia:
+        if k > 0:
+            s = s + ", "
+        k += 1
+        s = s + "(" + repr(ahex(x[0])) + ", " + repr(hex(len(x[1]))) + ", " + str(x[2]) + ")"
+    return s + "]"
+
+def main():
+    ra = segs(argv(1))
+    rb = segs(argv(2))
+    e1 = ra[0]
+    e2 = rb[0]
+    ia = ra[1]
+    ib = rb[1]
+    ok = e1 == e2
+    same = len(ia) == len(ib)
+    j = 0
+    while same and j < len(ia):
+        if ia[j][0] != ib[j][0] or len(ia[j][1]) != len(ib[j][1]) or ia[j][2] != ib[j][2]:
+            same = False
+        j += 1
+    if not same:
+        print("SEGS differ " + seglist(ia) + " " + seglist(ib))
+        ok = False
+    else:
+        j = 0
+        while j < len(ia):
+            x = ia[j][1]
+            y = ib[j][1]
+            if x != y:
+                i = 0
+                while x[i] == y[i]:
+                    i += 1
+                print("bytes differ at " + ahex(a64(ia[j][3], 16, i)))
+                ok = False
+            j += 1
+    r = "DIFF"
+    if ok:
+        r = "SAME"
+    print(r + " " + ahex(e1) + " " + ahex(e2))
+
+main()
