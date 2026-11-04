@@ -1,0 +1,6 @@
+# forge: no-runtime
+# implicit conversion between pointers to different element types is a compile error (cast explicitly)
+def h() -> u64:
+    w: u32 = 1
+    y: ptr[u64] = addr(w)
+    return 0

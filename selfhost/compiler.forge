@@ -16305,6 +16305,8 @@ def fs_rv():
 def fs_conv(to):
 # convert rax (type fs_ety) for assignment/passing to type to
     global fs_ety
+    if fsk[to] == 1 and fsk[fs_ety] == 1 and ftel[to] != ftel[fs_ety]:
+        fs_pmis(fs_ety, to)
     if (fsk[to] == 6 or fsk[fs_ety] == 6) and fs_ety != to and fsk[to] != 4:
         if fsk[to] == 6 and fs_ety == FT_LIT:
             fs_i2f(to, "%rax")
@@ -16327,6 +16329,22 @@ def fs_conv(to):
         if not (fsk[fs_ety] == 0 and ftsz[fs_ety] <= ftsz[to] and ft_sg(fs_ety) == ftsg[to] and fs_ety != FT_LIT and to != FT_BOOL):
             fs_norm(to)
     fs_ety = to
+
+def fs_tfull(t):
+# full spelling of a type for diagnostics: ptr[ptr[B32]]
+    if fsk[t] == 1:
+        return c4(ftname[t], "[", fs_tfull(ftel[t]), "]")
+    return ftname[t]
+
+def fs_pmis(s, to):
+# implicit pointer conversion between different element types (e.g. addr(p) of a ptr[T] gives
+# ptr[ptr[T]], which used to pass silently where a ptr[T] was expected); reinterpret with ptr[T](x)
+    m = c4("pointer type mismatch: got ", fs_tfull(s), ", expected ", fs_tfull(to))
+    if fsk[ftel[s]] == 1 and ftel[ftel[s]] == ftel[to]:
+        m = concat(m, " (addr() of a pointer gives a pointer to the pointer: pass the pointer itself)")
+    else:
+        m = concat(m, " (use an explicit ptr[T](x) cast to reinterpret)")
+    fs_die(m)
 
 def fs_bconv(to):
 # pointer conversions involving own/ref/mut

@@ -1,0 +1,13 @@
+# forge: no-runtime
+# addr(p) of a pointer parameter is a ptr[ptr[T]]; passing it where a ptr[T] is expected must be a
+# compile error (it used to be accepted silently and produced a wrong Ed25519 public key in forgeseal)
+class B32:
+    b: u8[32]
+
+@unsafe
+def g(q: ptr[B32]) -> u8:
+    return q[0].b[0]
+
+@unsafe
+def f(a: ptr[B32]) -> u8:
+    return g(addr(a))
