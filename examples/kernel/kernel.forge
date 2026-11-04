@@ -1709,6 +1709,9 @@ def after_overflow():
     idt_set(VEC_TIMER, u64(on_lapic_timer), 0)
     idt_set(VEC_PIT, u64(on_pit), 0)
     idt_set(VEC_SPURIOUS, u64(on_spurious), 0)
+    # the shootdown vector must have a gate before the first sti: after kexec the LAPIC (not reset by
+    # the handoff) can still hold a latched VEC_TLB from the previous kernel (#GP err=0x782 otherwise)
+    idt_set(VEC_TLB, u64(on_tlb_ipi), 0)
     # IOAPIC: ISA IRQ0 (PIT channel 0) via its interrupt source override, one-shot ~1 ms
     ioapic_route(0, VEC_PIT)
     outb(0x43, 0x30)
@@ -1745,8 +1748,8 @@ def after_overflow():
     puts(" irq(s)\n")
     if pit_irqs == 0:
         panic("no IOAPIC interrupt")
+    tlb_stray_report()
     cpu_features_init()
-    idt_set(VEC_TLB, u64(on_tlb_ipi), 0)
     cpu_syscall_init(0)
     smp_init()
     puts("SMP: ")

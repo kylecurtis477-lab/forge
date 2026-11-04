@@ -341,10 +341,24 @@ def tlb_poll():
                 cpu_relax()
             cpuid4(0, 0)
 
+tlb_stray: u64  # shootdown IPIs taken with no shootdown in progress (stale, e.g. latched across kexec)
+
 @interrupt
 def on_tlb_ipi(frame: ptr[u64]):
+    if atomic_load(addr(tlb_active), acquire) == 0:
+        tlb_stray += 1
     tlb_poll()
     lapic_eoi()
+
+def tlb_self_ipi():
+    lapic_ipi(u64(lapic_rd(0x20) >> 24), u32(VEC_TLB))
+
+def tlb_stray_report():
+# before SMP the only possible source of a shootdown IPI is a previous kernel (kexec)
+    if tlb_stray != 0:
+        puts("TLB IPI: ")
+        put_u64(tlb_stray)
+        puts(" stale shootdown IPI(s) from the previous kernel handled before SMP\n")
 
 def tlb_shootdown(cr3: u64, va: u64, n: u64):
 # cr3 = 0: kernel (global) mapping, flush everywhere; otherwise only CPUs running that address space

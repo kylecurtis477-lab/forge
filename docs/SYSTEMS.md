@@ -286,6 +286,8 @@ Per-order free bitmaps (4 KiB..4 MiB) on top of the authoritative `frame_bits` m
 Big-heap VA comes from a coalescing first-fit free list of ranges (each with a top guard page); freed ranges are reused. `vmalloc_test` runs 2000 alloc/free cycles with bounded VA growth and no frame leaks. The bounds-overhead benchmark in `tests/bounds/run.sh` now interleaves checked/unchecked runs (best of 7) so load drift cannot fail it.
 
 ## PCID (Phase 8)
+The shootdown vector (VEC_TLB 0xF0) gets its IDT gate before the first `sti`, together with the timer, PIT and spurious gates: after kexec the successor's LAPIC can still hold a VEC_TLB latched while the previous kernel had interrupts off (answered by `tlb_poll`, never delivered). `sys_kexec` latches one on purpose so the boot tests check that the new kernel handles it (`TLB IPI: 1 stale shootdown IPI(s) ...`).
+
 Per-CPU PCID slots (1..63, from the PML4 frame) let a context switch keep TLB entries when the slot still belongs to the incoming address space; any user shootdown, `user_unmap` or address-space teardown forgets the slot on all CPUs. Enabled only when CPUID reports PCID; not exercised under QEMU TCG (no PCID), so only the bookkeeping is boot-tested.
 
 ## x2APIC (Phase 8)

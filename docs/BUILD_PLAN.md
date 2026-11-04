@@ -305,6 +305,8 @@ Each phase is finished, tested, and committed before the next one starts. The si
 - Security fix 2: wrap-safe ELF bounds, 64 MiB load cap with soft OOM, sys_wait/drv-recv/chan_recv
   error paths, pinned DMA vs munmap; ELF-bounds boot test. Done. (drv 403 PA exposure: needs IOMMU.)
 
+- Bug fix (kexec stale TLB IPI): an intermittent O0 `os/kernel-bios` panic (#GP err=0x782 = IDT vector 0xF0 right after the IOAPIC came up, in the generation-1 kernel). A shootdown IPI that reaches a CPU while its interrupts are off is answered by `tlb_poll` but stays latched in the LAPIC IRR; the kexec CPU never re-enables interrupts, the handoff does not reset its LAPIC, and the successor installed the VEC_TLB gate only after its first `sti`. Fix: the gate is installed with the timer/PIT/spurious gates before the first `sti`; `on_tlb_ipi` counts stray IPIs. Made deterministic: `sys_kexec` latches one self-IPI on purpose after stop-machine, and every boot test requires `TLB IPI: 1 stale shootdown IPI(s) from the previous kernel handled before SMP` (without the fix it panics every time). Unsafe counts unchanged. Done.
+
 ### 9.0 carry-overs (done)
 - UEFI OS-test load timeout raised 180s -> 360s (tests/os/run.sh).
 - New ring-3 `examples/user/badptr.forge`: probes every pointer-taking syscall with 4 bad pointers (HHDM, kernel text, USER_TOP-straddling, USER_TOP); 56 probes, all EFAULT; verifies queued message survives failed recv and zombie survives failed wait. Found and fixed: `sys_chan_send` returned EINVAL for a bad buffer, now EFAULT.

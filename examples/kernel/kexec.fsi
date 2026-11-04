@@ -535,6 +535,10 @@ def sys_kexec(frame: u64, which: u64) -> u64:
         i += 1
     tlb_halt = 1
     stop_machine_begin()
+    # regression check for a lost-IPI race: a shootdown IPI that reaches this CPU while its interrupts
+    # are off is answered by tlb_poll but stays latched in the LAPIC IRR, and the LAPIC is not reset
+    # across the handoff. Latch one on purpose so the successor must handle it before its first sti.
+    tlb_self_ipi()
     if kb_svc != 0:
     # a shift press + release arriving during the handoff: nobody decodes it in this kernel
         kb_j[kb_head & (KB_JN - 1)] = 0x2A
