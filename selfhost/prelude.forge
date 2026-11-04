@@ -3506,6 +3506,194 @@ def __os_getcwd():
         return "."
     return substr(buf, 0, __find(buf, chr(0), 0))
 
+# ---- directories and processes (raw Linux syscalls; Python os-module names) ----
+# os.listdir returns names in kernel order without "." and "..": sort the result for stable output.
+def __os_oserr(r, what, p):
+    if r == -2:
+        raise FileNotFoundError(concat(concat(what, ": No such file or directory: "), __repr(p)))
+    raise OSError(concat(concat(concat(what, ": errno "), str(0 - r)), concat(": ", __repr(p))))
+
+def __os_listdir(p="."):
+    fd: int = __syscall(2, p, 0x90000, 0)
+    if fd < 0:
+        __os_oserr(fd, "listdir", p)
+    out = []
+    buf = alloc(8192)
+    while True:
+        n: int = __syscall(217, fd, buf, 8192)
+        if n < 0:
+            __syscall(3, fd, 0, 0)
+            __os_oserr(n, "listdir", p)
+        if n == 0:
+            break
+        i: int = 0
+        while i < n:
+            rl: int = char_at(buf, i + 16) + char_at(buf, i + 17) * 256
+            nm = substr(buf, i + 19, __find(buf, chr(0), i + 19))
+            if not str_eq(nm, ".") and not str_eq(nm, ".."):
+                append(out, nm)
+            i += rl
+    __syscall(3, fd, 0, 0)
+    return out
+
+def __os_path_isdir(p) -> bool:
+    fd: int = __syscall(2, p, 0x90000, 0)
+    if fd < 0:
+        return False
+    __syscall(3, fd, 0, 0)
+    return True
+
+def __os_path_isfile(p) -> bool:
+    return __syscall(21, p, 0, 0) == 0 and not __os_path_isdir(p)
+
+def __os_mkdir(p, mode=511):
+    r: int = __syscall(83, p, mode, 0)
+    if r < 0:
+        __os_oserr(r, "mkdir", p)
+    return None
+
+def __os_chmod(p, mode):
+    r: int = __syscall(90, p, mode, 0)
+    if r < 0:
+        __os_oserr(r, "chmod", p)
+    return None
+
+def __os_chdir(p):
+    r: int = __syscall(80, p, 0, 0)
+    if r < 0:
+        __os_oserr(r, "chdir", p)
+    return None
+
+def __os_getpid() -> int:
+    return __syscall(39, 0, 0, 0)
+
+def __os_fork() -> int:
+    __flushout()
+    r: int = __syscall(57, 0, 0, 0)
+    if r < 0:
+        __os_oserr(r, "fork", "")
+    return r
+
+def __os_pipe():
+    fds = __new(8, 4, 8)
+    r: int = __syscall(293, fds, 0x80000, 0)
+    if r < 0:
+        __os_oserr(r, "pipe", "")
+    w: int = __ld(fds, 0)
+    return [w & 0xffffffff, w >> 32]
+
+def __os_dup2(a, b) -> int:
+    return __syscall(33, a, b, 0)
+
+def __os_close(fd):
+    __syscall(3, fd, 0, 0)
+    return None
+
+def __os_read(fd, n):
+    buf = alloc(n)
+    r: int = __syscall(0, fd, buf, n)
+    if r < 0:
+        __os_oserr(r, "read", "")
+    return substr(buf, 0, r)
+
+def __os_write(fd, s) -> int:
+    return __syscall(1, fd, s, __aux(s))
+
+def __os__exit(n):
+    __syscall(60, n, 0, 0)
+    return None
+
+def __os_cvec(xs):
+# NUL-terminated char* vector for execve (strings are already NUL-terminated)
+    n: int = len(xs)
+    v = __new(n * 8 + 8, 4, n * 8 + 8)
+    i: int = 0
+    while i < n:
+        __st(v, i, xs[i])
+        i += 1
+    return v
+
+def __os_environ_vec():
+    xs = []
+    i: int = 0
+    while True:
+        e = __env(i)
+        if __tag(e) != 1:
+            return __os_cvec(xs)
+        append(xs, e)
+        i += 1
+
+def __os_execv(path, args):
+# path containing no "/" is searched in $PATH like execvp
+    env = __os_environ_vec()
+    av = __os_cvec(args)
+    if __find(path, "/", 0) >= 0:
+        r: int = __syscall(59, path, av, env)
+        __os_oserr(r, "execv", path)
+    for d in split(__os_getenv("PATH", "/usr/bin:/bin"), ":"):
+        __syscall(59, __os_path_join(d, path), av, env)
+    __os_oserr(-2, "execv", path)
+    return None
+
+def __os_waitpid(pid, opts=0):
+    st = __new(8, 4, 8)
+    r: int = __syscall(61, pid, st, opts)
+    if r < 0:
+        __os_oserr(r, "waitpid", "")
+    return [r, __ld(st, 0) & 0xffffffff]
+
+def __os_waitstatus_to_exitcode(st) -> int:
+    if (st & 0x7f) == 0:
+        return (st >> 8) & 0xff
+    return 0 - (st & 0x7f)
+
+def __os_drain(fd):
+    parts = []
+    while True:
+        s = __os_read(fd, 65536)
+        if __aux(s) == 0:
+            break
+        append(parts, s)
+    __syscall(3, fd, 0, 0)
+    return "".join(parts)
+
+def __os_run(args, cwd=None, merge=False, timeout=0):
+# Forge extension (no Python equivalent): run argv, return [exit code, stdout, stderr]; stdin is /dev/null.
+# timeout=N (whole seconds) arms alarm(N) in the child (it survives execve); a child killed by that
+# SIGALRM reports 124 like timeout(1).
+# merge=True sends stderr into stdout. stderr is drained after stdout, so a child writing >64 KiB to
+# stderr before closing stdout can stall; tools that need that use merge=True.
+    po = __os_pipe()
+    pe = __os_pipe()
+    pid: int = __os_fork()
+    if pid == 0:
+        nul: int = __syscall(2, "/dev/null", 0, 0)
+        __syscall(33, nul, 0, 0)
+        __syscall(33, po[1], 1, 0)
+        if merge:
+            __syscall(33, po[1], 2, 0)
+        else:
+            __syscall(33, pe[1], 2, 0)
+        if cwd is not None:
+            if __syscall(80, cwd, 0, 0) < 0:
+                __syscall(60, 126, 0, 0)
+        if timeout > 0:
+            __syscall(37, timeout, 0, 0)
+        try:
+            __os_execv(args[0], args)
+        except OSError:
+            pass
+        __syscall(60, 127, 0, 0)
+    __syscall(3, po[1], 0, 0)
+    __syscall(3, pe[1], 0, 0)
+    out = __os_drain(po[0])
+    err = __os_drain(pe[0])
+    w = __os_waitpid(pid)
+    rc: int = __os_waitstatus_to_exitcode(w[1])
+    if timeout > 0 and rc == -14:
+        rc = 124
+    return [rc, out, err]
+
 def __time_time():
     return __clock(0) / 1000000000
 

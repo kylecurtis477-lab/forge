@@ -1,0 +1,88 @@
+# tests/oslib/oslib.forge: exercises the hosted os-library directory and process calls (os.listdir,
+# os.path.isdir/isfile, os.mkdir, os.chmod, os.chdir, os.fork/execv/waitpid, os.pipe/dup2/read/write, os.run incl. timeout).
+# Run by tests/oslib/run.sh with a scratch directory as argv[1]; prints one "ok"/"bad" line per check.
+import os
+import sys
+
+def check(name, cond):
+    if cond:
+        print("ok " + name)
+    else:
+        print("bad " + name)
+
+def main():
+    d = sys.argv[1]
+    os.mkdir(os.path.join(d, "sub"))
+    for n in ["b.txt", "a.txt", "c.txt"]:
+        f = open(os.path.join(d, n), "w")
+        f.write(n)
+        f.close()
+    names = sorted(os.listdir(d))
+    check("listdir", ",".join(names) == "a.txt,b.txt,c.txt,sub")
+    check("listdir-empty", len(os.listdir(os.path.join(d, "sub"))) == 0)
+    many = os.path.join(d, "sub")
+    i = 0
+    while i < 300:
+        f = open(os.path.join(many, "file-with-a-longish-name-" + str(i)), "w")
+        f.close()
+        i += 1
+    check("listdir-many", len(os.listdir(many)) == 300)
+    try:
+        os.listdir(os.path.join(d, "nope"))
+        check("listdir-missing", False)
+    except FileNotFoundError:
+        check("listdir-missing", True)
+    try:
+        os.listdir(os.path.join(d, "a.txt"))
+        check("listdir-notdir", False)
+    except OSError:
+        check("listdir-notdir", True)
+    check("isdir", os.path.isdir(d) and not os.path.isdir(os.path.join(d, "a.txt")))
+    check("isfile", os.path.isfile(os.path.join(d, "a.txt")) and not os.path.isfile(d))
+    r = os.run(["echo", "hello", "world"])
+    check("run-stdout", r[0] == 0 and r[1] == "hello world\n" and r[2] == "")
+    r = os.run(["sh", "-c", "echo err >&2; exit 3"])
+    check("run-stderr-rc", r[0] == 3 and r[1] == "" and r[2] == "err\n")
+    r = os.run(["sh", "-c", "echo a; echo b >&2"], merge=True)
+    check("run-merge", r[1] == "a\nb\n")
+    r = os.run(["ls"], cwd=d)
+    check("run-cwd", r[1] == "a.txt\nb.txt\nc.txt\nsub\n")
+    r = os.run(["sh", "-c", "head -c 200000 /dev/zero | tr '\\0' x"])
+    check("run-big", len(r[1]) == 200000)
+    r = os.run(["sleep", "5"], timeout=1)
+    check("run-timeout", r[0] == 124)
+    r = os.run(["true"], timeout=5)
+    check("run-timeout-ok", r[0] == 0)
+    r = os.run(["/no/such/prog"])
+    check("run-noexec", r[0] == 127)
+    r = os.run(["sh", "-c", "kill -9 $$"])
+    check("run-signal", r[0] == -9)
+    p = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(p[0])
+        os.dup2(p[1], 1)
+        os.execv("/bin/sh", ["sh", "-c", "printf piped; exit 5"])
+    os.close(p[1])
+    got = os.read(p[0], 100)
+    os.close(p[0])
+    w = os.waitpid(pid, 0)
+    check("fork-exec-pipe", w[0] == pid and os.waitstatus_to_exitcode(w[1]) == 5 and got == "piped")
+    p = os.pipe()
+    os.write(p[1], "abc")
+    os.close(p[1])
+    check("pipe-rw", os.read(p[0], 10) == "abc" and os.read(p[0], 10) == "")
+    sh = os.path.join(d, "x.sh")
+    f = open(sh, "w")
+    f.write("#!/bin/sh\necho exe\n")
+    f.close()
+    os.chmod(sh, 493)
+    r = os.run([sh])
+    check("chmod", r[1] == "exe\n")
+    here = os.getcwd()
+    os.chdir(d)
+    check("chdir", os.path.isfile("a.txt"))
+    os.chdir(here)
+    check("getpid", os.getpid() > 1)
+
+main()
