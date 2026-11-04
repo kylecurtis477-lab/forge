@@ -128,6 +128,7 @@ Subsystem docs (design, formats, APIs, tests, limits):
 - docs/services.md: isolated driver services (kbdd, nvmed) and kexec driver state
 - docs/livepatch.md: live patching of kernel functions
 - docs/GRAMMAR.md, docs/SYSTEMS.md, docs/BUILD_PLAN.md: the language grammar (v1.2; effect annotations `def f() uses fs, ipc:` are reserved syntax that the checker rejects with E0106), systems features and the plan
+- docs/kernel-core.md: kernel core interface spec v1 (scheduler, IPC channels, capabilities)
 - docs/SYSTEMS.md "Process-state format": process-state v1 (examples/kernel/pstate.fsi), the single versioned per-process record; the kexec handoff (format v5) carries exactly these
 - docs/SYSTEMS.md "Nondeterminism hook": the kernel's single hook point for syscall results, timer interrupts, scheduler choices and random values (examples/kernel/nondet.fsi), recording off by default
 - docs/rfc/incremental.md: RFC (proposed, design only) for a query-based incremental compiler: module/function queries, dependency graph with early cutoff, content-addressed cache, LSP integration, byte-identical output (FIXPOINT, seals unaffected) and the test plan

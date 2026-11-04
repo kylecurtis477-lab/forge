@@ -234,6 +234,10 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
 - FORGEKRN header: entry, phys start, phys end, krel start, krel end. The Forge UEFI loader and kexec refuse a kernel whose table is empty; kexec'd kernels pick a fresh slide.
 - Limits: slide granularity 2 MiB, about 9 bits of entropy; the low boot stub at 1 MiB (phys) is not randomized; physical placement (kdelta) only varies under kexec.
 
+## Kernel core interface (plan v1.3 item 8)
+The contract of the scheduler, IPC channels and the two capability layers is specified in
+[kernel-core.md](kernel-core.md) (spec v1); changing any of it bumps that version.
+
 ## Process-state format (plan v1.3 item 7)
 `examples/kernel/pstate.fsi` defines the single versioned record of one user process, **process-state
 v1**. The kexec handoff (format v5) writes one record per process and adopts nothing else; checkpointing,
