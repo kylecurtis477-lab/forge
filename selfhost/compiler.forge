@@ -15405,6 +15405,7 @@ fsf_pos = list(8192)
 fsf_at = list(8192)
 fsf_sec = list(8192)
 fsf_ln = list(8192)
+fsf_ext = list(8192)
 nfsf = 0
 fsp_n = list(65536)
 fsp_t = list(65536)
@@ -15447,6 +15448,10 @@ fs_bstats = 0
 fs_unsafe = 0
 fs_urep = 0
 fs_ufix = 0
+# provenance lint (v1.3): --provenance-lint lists every integer-to-pointer site; any outside an @unsafe function fails
+fs_prov = 0
+fs_pbad = 0
+fs_pn = 0
 fs_uops = 0
 fs_utot = 0
 fs_ufn = 0
@@ -15689,6 +15694,19 @@ def fs_unsafe_op(what):
             eputs(c3("unsafe-fix: ", fs_where(fsf_ln[fs_ucur]), concat(" ", fsf_n[fs_ucur])))
         return 0
     fs_die(concat(what, " is unsafe: put it in a `with unsafe:` block or mark the function @unsafe"))
+
+def fs_provsite():
+# provenance rule: a pointer made from an integer must come from an @unsafe function (not a `with unsafe:` block)
+    global fs_pbad, fs_pn
+    if not fs_prov:
+        return 0
+    fs_pn += 1
+    ok = fs_bop(fsf_at[fs_ucur], 136, 0)
+    k = "ok"
+    if not ok:
+        k = "OUTSIDE @unsafe"
+        fs_pbad += 1
+    eputs(c4("prov: ", fs_where(tl[fp]), c3(" ", fsf_n[fs_ucur], " int->ptr "), k))
 
 def fs_die(msg):
 # report the original file/line (fs_include splices included files into one token stream)
@@ -16258,6 +16276,7 @@ def fs_conv(to):
         fs_bconv(to)
     if fsk[to] == 1 and fsk[fs_ety] == 0 and not (fs_ety == FT_LIT and fs_lastimm == 0):
         fs_unsafe_op("an integer-to-pointer conversion")
+        fs_provsite()
     if fsk[to] == 0 and fs_ety != to:
         if not (fsk[fs_ety] == 0 and ftsz[fs_ety] <= ftsz[to] and ft_sg(fs_ety) == ftsg[to] and fs_ety != FT_LIT and to != FT_BOOL):
             fs_norm(to)
@@ -16476,6 +16495,8 @@ def fs_args(maxn, ptys):
         fs_rexpr()
         fs_sretv = 0
         sl = 0
+        if ptys >= 0 and pi < fsf_np[ptys] and fsf_ext[ptys] and fsk[fs_ety] == 1 and fsk[fsp_t[fsf_p0[ptys] + pi]] == 0:
+            fs_die("a pointer passed to C keeps its provenance: declare the extern parameter ptr[T] or nptr[T], not an integer")
         if ptys >= 0 and pi < fsf_np[ptys]:
             fs_conv(fsp_t[fsf_p0[ptys] + pi])
             sl = fsk[fsp_t[fsf_p0[ptys] + pi]] == 5
@@ -17607,6 +17628,7 @@ def fs_primary():
                 fs_die("ptr[T](0) would be a null ptr[T]: use nptr[T] (0 converts to nptr[T] without a cast)")
         elif fsk[src] == 0:
             fs_unsafe_op("an integer-to-pointer cast")
+            fs_provsite()
         elif fsk[src] == 1:
             if ftsg[src] != ftsg[t] and (ftsg[src] >= 2 or ftsg[t] >= 2):
                 fs_unsafe_op("a cast to or from own/ref/mut")
@@ -18907,6 +18929,7 @@ def fs_sig(ext):
     fsf_ln[f] = tl[fp - 1]
     fsf_p0[f] = nfsp
     fsf_at[f] = fs_datt
+    fsf_ext[f] = ext
     fsf_sec[f] = fs_dsec
     fs_expect("(")
     n = 0
@@ -19330,7 +19353,7 @@ def fs_wrapper(f, nm, body):
     e("iretq")
 
 def fs_main(src):
-    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_ufix, fs_ubare, fs_safe, fs_sp, fs_g
+    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_prov, fs_ufix, fs_ubare, fs_safe, fs_sp, fs_g
     if contains(src, concat("# forge: ", "checked-ints")):
         fs_chk = 1
     if contains(src, concat("# forge: ", "no-bounds-checks")):
@@ -19347,6 +19370,8 @@ def fs_main(src):
             fs_bstats = 1
         if str_eq(argv(ai), "--unsafe-report"):
             fs_urep = 1
+        if str_eq(argv(ai), "--provenance-lint"):
+            fs_prov = 1
         if str_eq(argv(ai), "--unsafe-fix"):
             fs_ufix = 1
         if str_eq(argv(ai), "-g"):
@@ -19401,6 +19426,10 @@ def fs_main(src):
     if fs_bstats:
         eputs(c4("bounds: ", str(fs_nbc + fs_nbe), c3(" sites, ", str(fs_nbc), " checked, "), concat(str(fs_nbe), " elided")))
     write_file(argv(2), join(out, nout))
+    if fs_prov:
+        eputs(c4("provenance: ", str(fs_pn), " int->ptr sites, ", concat(str(fs_pbad), " outside @unsafe")))
+        if fs_pbad > 0:
+            fs_die("provenance lint failed: integer-to-pointer conversions belong in @unsafe functions")
 
 FS_MIN = -9223372036854775807 - 1
 

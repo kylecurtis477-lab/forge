@@ -1,0 +1,8 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+# expect: a pointer passed to C keeps its provenance
+extern def c_take(x: u64) -> u64
+
+def main() -> u64:
+    a: u64 = 5
+    return c_take(addr(a))

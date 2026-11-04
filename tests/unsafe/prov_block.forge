@@ -1,0 +1,8 @@
+# forge: no-runtime
+# provenance lint: an integer-to-pointer cast in a `with unsafe:` block (not an @unsafe function) fails the lint
+include "../fs/linux.fsi"
+
+def main() -> u64:
+    with unsafe:
+        p: ptr[u64] = ptr[u64](4096)
+    return 0

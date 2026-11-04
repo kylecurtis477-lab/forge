@@ -30,5 +30,21 @@ while read d f bf bb bo ba; do
         echo "FAIL unsafe-baseline-$f: now '$s', baseline '$bf $bb $bo $ba'"; fail=1
     fi
 done < baseline.txt
+# provenance (v1.3): integer-to-pointer only inside @unsafe functions (--provenance-lint)
+out=$($FC prov_block.forge $T/p.s --provenance-lint 2>&1)
+if [ $? -ne 0 ] && echo "$out" | grep -qF "provenance lint failed"; then
+    echo "PASS unsafe-prov-block"
+else
+    echo "FAIL unsafe-prov-block: $out"; fail=1
+fi
+while read d f bf bb bo ba; do
+    [ -z "$d" ] || [ "${d:0:1}" = "#" ] && continue
+    s=$(cd ../../$d && $FC $f $T/r.s --provenance-lint 2>&1 | grep '^provenance:')
+    if echo "$s" | grep -q ', 0 outside @unsafe'; then
+        echo "PASS unsafe-prov-$f ($s)"
+    else
+        echo "FAIL unsafe-prov-$f: $s"; fail=1
+    fi
+done < baseline.txt
 rm -rf $T
 exit $fail

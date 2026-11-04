@@ -82,6 +82,7 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
 
 - State: `fs_unsafe` (depth; function-level from decorator bit 128 or naked bit 8 in the `fs_function` wrapper around `fs_function1`, block-level from `with unsafe:` in `fs_stmt`). `fs_unsafe_op(what)` counts an op when inside, else dies (or, with `--unsafe-fix`, prints `unsafe-fix: FILE:LINE fn` once per function via `fsf_ln`).
 - Gate points: start of `fs_intrin` (list `FS_UNSAFE_FNS`), int→ptr in `fs_conv`, explicit pointer casts, non-`[0]` ptr indexing. `ptr[T](0)` is rejected before the unsafe check.
+- Provenance (plan v1.3): `fs_provsite` marks every integer-to-pointer site (fs_conv and `ptr[T](n)` casts); `--provenance-lint` prints `prov: FILE:LINE fn int->ptr ok|OUTSIDE @unsafe` and a `provenance: N int->ptr sites, M outside @unsafe` summary, and fails when M > 0, so a `with unsafe:` block cannot mint pointers from integers. At an extern call a pointer argument for an integer parameter is rejected (`fsf_ext`): pointers given to C stay pointers. Run over all baseline programs by tests/unsafe/run.sh.
 - Report: `--unsafe-report` per region + summary (`fs_ufn`, `fs_ublk`, `fs_utot`, `fs_ubare`); baseline in tests/unsafe/baseline.txt.
 
 ### Typed atomics (Phase 4.6)
