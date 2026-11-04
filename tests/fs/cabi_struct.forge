@@ -1,0 +1,91 @@
+# forge: no-runtime
+# C ABI structs by value and struct returns (11.2), both directions
+include "linux.fsi"
+
+struct P:
+    x: i64
+    y: i64
+
+struct Q:
+    a: u8
+    b: u32
+    c: u16
+
+struct S3:
+    a: u8
+    b: u8
+    c: u8
+
+struct B:
+    a: i64
+    b: i64
+    c: i64
+
+extern def c_pbyval(p: P) -> i64
+extern def c_qbyval(z: i64, q: Q, s: S3) -> i64
+extern def c_bbyval(a: i64, b: B, c: i64) -> i64
+extern def c_spill(a: i64, b: i64, c: i64, d: i64, e: i64, p: P, f: i64) -> i64
+extern def c_pret(a: i64) -> P
+extern def c_qret() -> Q
+extern def c_bret(a: i64) -> B
+extern def c_calls() -> i64
+
+@export
+def forge_pbyval(p: P) -> i64:
+    return p.x * 10 + p.y
+
+@export
+def forge_pret(a: i64) -> P:
+    r: P
+    r.x = a
+    r.y = a + 1
+    return r
+
+@export
+def forge_bret(k: i64, b: B) -> B:
+    r: B
+    r.a = b.a + k
+    r.b = b.b + k
+    r.c = b.c + k
+    return r
+
+def main() -> i64:
+    p: P
+    p.x = 4
+    p.y = 2
+    put_i64(c_pbyval(p))
+    nl()
+    q: Q
+    q.a = 9
+    q.b = 123
+    q.c = 7
+    s: S3
+    s.a = 1
+    s.b = 2
+    s.c = 3
+    put_i64(c_qbyval(5, q, s))
+    nl()
+    b: B
+    b.a = 1
+    b.b = 2
+    b.c = 3
+    put_i64(c_bbyval(7, b, 4))
+    nl()
+    put_i64(c_spill(1, 2, 3, 4, 5, p, 6))
+    nl()
+    r = c_pret(20)
+    put_i64(r.x * 100 + r.y)
+    nl()
+    t = c_qret()
+    put_i64(i64(t.a) + i64(t.b) + i64(t.c))
+    nl()
+    u: B
+    u = c_bret(3)
+    put_i64(u.a * 100 + u.b * 10 + u.c)
+    nl()
+    put_i64(c_calls())
+    nl()
+    v = forge_bret(1, c_bret(1))
+    put_i64(v.a * 100 + v.b * 10 + v.c)
+    nl()
+    return 0

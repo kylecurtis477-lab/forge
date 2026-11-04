@@ -15465,6 +15465,11 @@ fs_tbk = list(4096)
 fs_bpk = 0
 nfstb = 0
 fs_argd = 0
+# SysV argument layout of the current call/prologue: fs_wd[w] is the destination of argument word w
+# (0..5 a register, 100 + s stack slot s); fs_sretv marks rax as the address of a struct call result
+fs_wd = list(64)
+fs_sretv = 0
+fs_rslot = -1
 fs_bpend = -1
 fs_rsrc = -1
 fs_term = 0
@@ -16190,12 +16195,21 @@ def fs_parse_int(s):
 
 def fs_store(t, m):
 # value in rax -> memory operand m; m == "(%rcx)" or slot/label
+    global fs_sretv
     if fsk[t] == 5:
     # slice header copy: rax = address of the source header
         e("mov (%rax),%rdx")
         e(concat("mov %rdx,", m))
         e("mov 8(%rax),%rdx")
         e(concat("mov %rdx,", fs_m8(m)))
+        return 0
+    if fsk[t] == 2 and fs_sretv:
+    # a struct-returning call's result (a frame temporary) is copied into place
+        fs_sretv = 0
+        e(c3("lea ", m, ",%rdi"))
+        e("mov %rax,%rsi")
+        e(c3("mov $", str(ftsz[t]), ",%rcx"))
+        e("rep movsb")
         return 0
     if ft_agg(t):
         fs_die("cannot assign a whole struct/array (use memcpy)")
@@ -16437,7 +16451,7 @@ def fs_strlit(s):
 
 def fs_args(maxn, ptys):
 # evaluate comma-separated args to the stack; returns count
-    global fp, fs_argd, nfstb
+    global fp, fs_argd, nfstb, fs_sretv
     fs_expect("(")
     n = 0
     pi = 0
@@ -16445,11 +16459,24 @@ def fs_args(maxn, ptys):
     m0 = nfstb
     while not fs_isop(")"):
         fs_rexpr()
+        fs_sretv = 0
         sl = 0
         if ptys >= 0 and pi < fsf_np[ptys]:
             fs_conv(fsp_t[fsf_p0[ptys] + pi])
             sl = fsk[fsp_t[fsf_p0[ptys] + pi]] == 5
-        if sl:
+        st = ptys >= 0 and pi < fsf_np[ptys] and fsk[fsp_t[fsf_p0[ptys] + pi]] == 2
+        if st:
+        # SysV struct by value: its 8-byte words in order (exact loads, no read past the end)
+            t = fsp_t[fsf_p0[ptys] + pi]
+            nw = (ftsz[t] + 7) // 8
+            e("mov %rax,%rsi")
+            w = 0
+            while w < nw:
+                fs_ldw("%rsi", 8 * w, ftsz[t] - 8 * w)
+                fs_push()
+                w += 1
+            n += nw
+        elif sl:
         # a slice argument travels in two registers: ptr, len
             e("mov 8(%rax),%rcx")
             e("mov (%rax),%rax")
@@ -16471,35 +16498,133 @@ def fs_args(maxn, ptys):
     if ptys >= 0 and pi != fsf_np[ptys]:
         fs_die(concat("wrong argument count for ", fsf_n[ptys]))
     if n > maxn:
-        fs_die("too many arguments (max 6 register args)")
+        fs_die("too many argument words (max 16)")
     return n
+
+def fs_ldw(base, off, rem):
+# rax = the word at off(base), reading only rem bytes when rem < 8 (zero-extended); clobbers rdx
+    if rem >= 8:
+        e(c3("mov ", concat(str(off), c3("(", base, ")")), ",%rax"))
+        return 0
+    e("xor %eax,%eax")
+    b = rem - 1
+    while b >= 0:
+        e("shl $8,%rax")
+        e(c3("movzbl ", concat(str(off + b), c3("(", base, ")")), ",%edx"))
+        e("or %rdx,%rax")
+        b -= 1
+    return 0
+
+def fs_pwords(t):
+# argument words of a parameter of type t: slice 2, struct ceil(size / 8), else 1
+    if fsk[t] == 5:
+        return 2
+    if fsk[t] == 2:
+        return (ftsz[t] + 7) // 8
+    return 1
+
+def fs_smem(t):
+# SysV class MEMORY: a struct over 16 bytes travels on the stack (and is returned via a hidden pointer)
+    return fsk[t] == 2 and ftsz[t] > 16
+
+def fs_layout(f):
+# fill fs_wd for f's parameters (after a hidden struct-return pointer in rdi); returns the word count
+    r = 0
+    w = 0
+    s = 0
+    if fs_smem(fsf_ret[f]):
+        fs_wd[0] = 0
+        r = 1
+        w = 1
+    i = 0
+    while i < fsf_np[f]:
+        t = fsp_t[fsf_p0[f] + i]
+        nw = fs_pwords(t)
+        j = 0
+        if not fs_smem(t) and r + nw <= 6:
+            while j < nw:
+                fs_wd[w + j] = r + j
+                j += 1
+            r += nw
+        else:
+            while j < nw:
+                fs_wd[w + j] = 100 + s + j
+                j += 1
+            s += nw
+        w += nw
+        i += 1
+    return w
+
+def fs_fcall(f, target):
+# a direct call of f: SysV layout, struct results land in a frame temporary whose address ends in rax
+    global fs_ety, fs_mode, fs_sretv
+    rt = fsf_ret[f]
+    tmp = -1
+    h = 0
+    if fsk[rt] == 2:
+        tmp = fs_newlocal("", rt)
+        if fs_smem(rt):
+            e(c3("lea ", str(fsl_o[tmp]), "(%rbp),%rax"))
+            fs_push()
+            h = 1
+    n = fs_args(16, f) + h
+    fs_layout(f)
+    fs_sysv_call(n, target, 1)
+    fs_ety = rt
+    fs_mode = 0
+    if tmp >= 0:
+        if not fs_smem(rt):
+            e(c3("mov %rax,", str(fsl_o[tmp]), "(%rbp)"))
+            if ftsz[rt] > 8:
+                e(c3("mov %rdx,", str(fsl_o[tmp] + 8), "(%rbp)"))
+        e(c3("lea ", str(fsl_o[tmp]), "(%rbp),%rax"))
+        fs_sretv = 1
+    else:
+    # SysV leaves upper bits of narrow return values unspecified
+        fs_norm(fs_ety)
+    return 0
 
 FS_AREG = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]
 FS_WREG = ["%rcx", "%rdx", "%r8", "%r9"]
-def fs_sysv_call(n, target):
+def fs_sysv_call(n, target, lay):
 # the n argument words are on the stack (word 0 deepest); SysV: words 0-5 in registers, 6.. on the
 # stack with word 6 lowest, rsp 16-aligned at the call
     global fs_dep
-    if n <= 6:
+    if not lay:
+        i = 0
+        while i < n:
+            fs_wd[i] = i
+            if i >= 6:
+                fs_wd[i] = 94 + i
+            i += 1
+    k = 0
+    i = 0
+    while i < n:
+        if fs_wd[i] >= 100:
+            k += 1
+        i += 1
+    if k == 0 and n <= 6 and not lay:
         i = n - 1
         while i >= 0:
             fs_pop(FS_AREG[i])
             i -= 1
         fs_callsite(target)
         return 0
-    k = n - 6
     sz = 8 * k
     if (fs_dep + k) % 2:
         sz += 8
-    e(c3("sub $", str(sz), ",%rsp"))
-    j = 0
-    while j < k:
-        e(c3("mov ", str(sz + 8 * (k - 1 - j)), "(%rsp),%rax"))
-        e(c3("mov %rax,", str(8 * j), "(%rsp)"))
-        j += 1
+    if sz > 0:
+        e(c3("sub $", str(sz), ",%rsp"))
     i = 0
-    while i < 6:
-        e(c4("mov ", str(sz + 8 * (n - 1 - i)), "(%rsp),", FS_AREG[i]))
+    while i < n:
+        if fs_wd[i] >= 100:
+            e(c3("mov ", str(sz + 8 * (n - 1 - i)), "(%rsp),%rax"))
+            e(c3("mov %rax,", str(8 * (fs_wd[i] - 100)), "(%rsp)"))
+        i += 1
+    i = 0
+    while i < n:
+        if fs_wd[i] < 100:
+            e(c4("mov ", str(sz + 8 * (n - 1 - i)), "(%rsp),", FS_AREG[fs_wd[i]]))
         i += 1
     e(concat("call ", target))
     e(c3("add $", str(sz + 8 * n), ",%rsp"))
@@ -16628,11 +16753,7 @@ def fs_atyped(nm):
 
 def fs_callf(f):
     global fs_ety, fs_mode
-    n = fs_args(16, f)
-    fs_sysv_call(n, fsf_n[f])
-    fs_ety = fsf_ret[f]
-    fs_norm(fs_ety)
-    fs_mode = 0
+    fs_fcall(f, fsf_n[f])
 
 def fs_gfind(nm, k):
     i = 0
@@ -17282,12 +17403,7 @@ def fs_primary():
         f = fs_func(nm)
         if f < 0:
             fs_die(concat("unknown function ", nm))
-        n = fs_args(16, f)
-        fs_sysv_call(n, nm)
-        fs_ety = fsf_ret[f]
-        # SysV leaves upper bits of narrow return values unspecified
-        fs_norm(fs_ety)
-        fs_mode = 0
+        fs_fcall(f, nm)
         return 0
     if (str_eq(nm, "ptr") or str_eq(nm, "nptr") or fs_isbname(nm)) and fs_isop("[") and fs_local(nm) < 0:
         fp -= 1
@@ -18061,7 +18177,7 @@ def fs_lhs_store(vt):
         t = vt
         if t == FT_LIT:
             t = FT_I64
-        if t == FT_VOID or (ft_agg(t) and fsk[t] != 5):
+        if t == FT_VOID or (ft_agg(t) and fsk[t] != 5 and not (fsk[t] == 2 and fs_sretv)):
             fs_die("cannot copy a void/struct/array value into a new local")
         l = fs_newlocal(tv[fp], t)
         fs_store(t, concat(str(fsl_o[l]), "(%rbp)"))
@@ -18124,6 +18240,17 @@ def fs_stmt1():
         if tk[fp] != K_NL and tk[fp] != K_DED:
             fs_rexpr()
             fs_conv(fs_rty)
+            if fsk[fs_rty] == 2:
+            # struct result: copy into the return slot (rax:rdx) or the caller's hidden-pointer buffer
+                e("mov %rax,%rsi")
+                if fs_smem(fs_rty):
+                    e(c3("mov ", str(fsl_o[fs_rslot]), "(%rbp),%rdi"))
+                else:
+                    e(c3("lea ", str(fsl_o[fs_rslot]), "(%rbp),%rdi"))
+                e(c3("mov $", str(ftsz[fs_rty]), ",%rcx"))
+                e("rep movsb")
+        elif fsk[fs_rty] == 2:
+            fs_die("a function returning a struct must return a value")
         fs_rundefers()
         e(concat("jmp ", fs_ret))
         fs_eol()
@@ -18597,22 +18724,15 @@ def fs_sig(ext):
     nr = 0
     i = 0
     while i < n:
-        nr += 1
-        if fsk[fsp_t[fsf_p0[f] + i]] == 5:
-            nr += 1
+        nr += fs_pwords(fsp_t[fsf_p0[f] + i])
+        if fsk[fsp_t[fsf_p0[f] + i]] == 2 and fs_bop(fs_datt, 22, 0):
+            fs_die("struct parameters by value are not supported with @efiapi / @interrupt (pass a pointer)")
         i += 1
     # SysV: words 7..16 travel on the stack (11.2); a slice (2 words) must still fit in registers
     if nr > 16:
         fs_die("more than 16 parameter words are not supported (a slice uses 2)")
     if nr > 6 and fs_bop(fs_datt, 22, 0):
         fs_die("stack parameters (more than 6 words) are not supported with @efiapi / @interrupt")
-    r = 0
-    i = 0
-    while i < n:
-        if fsk[fsp_t[fsf_p0[f] + i]] == 5 and r + 2 > 6:
-            fs_die("a slice parameter must fit in the first 6 parameter registers")
-        r += 1 + (fsk[fsp_t[fsf_p0[f] + i]] == 5)
-        i += 1
     fsf_ret[f] = FT_VOID
     if fs_isop("->"):
         fp += 1
@@ -18622,8 +18742,12 @@ def fs_sig(ext):
             fsf_ret[f] = fs_type()
             if fsk[fsf_ret[f]] == 1 and ftsg[fsf_ret[f]] >= 3:
                 fs_die("a function cannot return a borrow (ref[T]/mut[T])")
-            if ft_agg(fsf_ret[f]):
-                fs_die("functions cannot return a struct, array or slice yet (pass a pointer or slice out-parameter)")
+            if fsk[fsf_ret[f]] == 2 and fs_bop(fs_datt, 22, 0):
+                fs_die("@efiapi / @interrupt functions cannot return a struct")
+            if ft_agg(fsf_ret[f]) and fsk[fsf_ret[f]] != 2:
+                fs_die("functions cannot return an array or slice yet (pass a pointer or slice out-parameter)")
+            if fs_smem(fsf_ret[f]) and nr > 15:
+                fs_die("more than 15 parameter words with a hidden struct-return pointer")
     fsf_pos[f] = fp
     if ext:
         fsf_pos[f] = -1
@@ -18812,7 +18936,7 @@ def fs_function1(f):
     fs_genv_pop(old)
 
 def fs_function2(f):
-    global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop, nfsdf, fs_sdep, fs_term, fs_spn, fs_gon, nfsgf
+    global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop, nfsdf, fs_sdep, fs_term, fs_spn, fs_gon, nfsgf, fs_rslot
     at = fsf_at[f]
     nm = fsf_n[f]
     sec = fsf_sec[f]
@@ -18855,32 +18979,45 @@ def fs_function2(f):
     fs_rty = fsf_ret[f]
     nfsdf = 0
     fs_sdep = 0
+    nw = fs_layout(f)
     i = 0
-    r = 0
+    w = 0
     while i < fsf_np[f]:
         l = fs_newlocal(fsp_n[fsf_p0[f] + i], fsp_t[fsf_p0[f] + i])
-        if r >= 6:
-        # SysV stack parameter: word r at 16 + 8 * (r - 6) above the frame pointer
-            e(c3("mov ", str(16 + 8 * (r - 6)), "(%rbp),%rax"))
-            fs_norm(fsp_t[fsf_p0[f] + i])
-            e(c3("mov %rax,", str(fsl_o[l]), "(%rbp)"))
-            r += 1
-        elif fsk[fsp_t[fsf_p0[f] + i]] == 5:
-            e(c4("mov ", FS_AREG[r], ",", concat(str(fsl_o[l]), "(%rbp)")))
-            e(c4("mov ", FS_AREG[r + 1], ",", concat(str(fsl_o[l] + 8), "(%rbp)")))
-            r += 2
-        else:
-        # SysV leaves upper bits of narrow args unspecified: normalize on entry
-            e(c3("mov ", FS_AREG[r], ",%rax"))
-            fs_norm(fsp_t[fsf_p0[f] + i])
-            e(c3("mov %rax,", str(fsl_o[l]), "(%rbp)"))
-            r += 1
         i += 1
-    # array and struct parameters are passed by address and are copies: once every argument register is
-    # spilled, copy each one into its own frame slot (the slot's first word holds the caller's address)
+    if fsk[fs_rty] == 2:
+        fs_rslot = fs_newlocal("", fs_rty)
+        if fs_smem(fs_rty):
+        # the hidden struct-return pointer (rdi) is kept in the slot's first word
+            e(c3("mov %rdi,", str(fsl_o[fs_rslot]), "(%rbp)"))
+            w = 1
     i = 0
     while i < fsf_np[f]:
-        if fsk[fsl_t[i]] == 2 or fsk[fsl_t[i]] == 3:
+        t = fsp_t[fsf_p0[f] + i]
+        o = fsl_o[i]
+        j = 0
+        while j < fs_pwords(t):
+            d = fs_wd[w + j]
+            src = ""
+            if d >= 100:
+            # SysV stack word s at 16 + 8 * s above the frame pointer
+                e(c3("mov ", str(16 + 8 * (d - 100)), "(%rbp),%rax"))
+            else:
+                e(c3("mov ", FS_AREG[d], ",%rax"))
+            if fsk[t] == 2 or fsk[t] == 5:
+                e(c3("mov %rax,", str(o + 8 * j), "(%rbp)"))
+            else:
+            # SysV leaves upper bits of narrow args unspecified: normalize on entry
+                fs_norm(t)
+                e(c3("mov %rax,", str(o), "(%rbp)"))
+            j += 1
+        w += fs_pwords(t)
+        i += 1
+    # array parameters are passed by address and are copies: once every argument is spilled, copy each
+    # one into its own frame slot (the slot's first word holds the caller's address)
+    i = 0
+    while i < fsf_np[f]:
+        if fsk[fsl_t[i]] == 3:
             e(c3("mov ", str(fsl_o[i]), "(%rbp),%rsi"))
             e(c3("lea ", str(fsl_o[i]), "(%rbp),%rdi"))
             e(c3("mov $", str(ftsz[fsl_t[i]]), ",%rcx"))
@@ -18896,6 +19033,10 @@ def fs_function2(f):
         fp = fp1
     e("xor %eax,%eax")
     emit_raw(concat(fs_ret, ":\n"))
+    if fsk[fs_rty] == 2:
+        e(c3("mov ", str(fsl_o[fs_rslot]), "(%rbp),%rax"))
+        if ftsz[fs_rty] > 8 and not fs_smem(fs_rty):
+            e(c3("mov ", str(fsl_o[fs_rslot] + 8), "(%rbp),%rdx"))
     guard = fs_sp and not str_eq(nm, "stack_smashed") and fs_hasbuf()
     if guard:
         ok = fs_newlab()
