@@ -27,8 +27,11 @@ The build needs no Rust and no GNU binutils. Three checked-in x86-64 Linux binar
 ## Reseeding
 Any commit that changes the compiler, fas or fld has to reseed:
 1. Run `./build.sh` and check that FIXPOINT is green.
-2. Run `tools/reseed.sh`. It requires `stage2.s == stage4.s`, copies build/forgec, fas and fld into
-   `seed/`, and rewrites `seed.sha256`.
+2. Run `./forge reseed` (tools/reseed.forge, built to build/reseed). It requires `stage2.s == stage4.s`,
+   copies build/forgec, fas and fld into `seed/` (mode 755), and rewrites `seed.sha256` with its own
+   SHA-256. `tools/reseed.sh` is kept as the reference; tests/reseed/run.sh checks both give the same
+   output, exit code and seed files. Neither works for a prelude change, where stage2 still carries the
+   seed's old prelude: then check `stage3.s == stage4.s`, copy the three files and rewrite seed.sha256 by hand.
 3. Run `./build.sh` again. It must print SEED OK and SEED TOOLS OK.
 4. Commit the seed files with the source change.
 

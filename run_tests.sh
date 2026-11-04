@@ -52,6 +52,7 @@ tests/rtport/run.sh || fail=1
 tests/pecheck/run.sh || fail=1
 tests/memimg/run.sh || fail=1
 tests/oslib/run.sh || fail=1
+tests/reseed/run.sh || fail=1
 tests/pkg/run.sh || fail=1
 tests/lsp/run.sh || fail=1
 tests/testblocks/run.sh || fail=1

@@ -1,0 +1,153 @@
+# reseed: Forge port of tools/reseed.sh (kept as the reference). Refresh the checked-in seed from a green
+# build (run ./build.sh first; commit the result): require build/stage2.s == build/stage4.s (a mismatch
+# prints cmp's message, "differ" on stdout and "EOF on" on stderr, and exits 1), copy build/forgec, fas and fld to
+# seed/forgec-seed, fas-seed and fld-seed (mode 0755), write seed/seed.sha256 in sha256sum format and
+# print it. Run from anywhere: paths are relative to the repo root (the parent of this tool's directory,
+# found from argv[0], or the current directory when argv[0] has no "/").
+import os
+import sys
+
+K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+
+def rotr(x: int, n: int) -> int:
+    return ((x >> n) | (x << (32 - n))) & 0xffffffff
+
+def sha256_hex(s):
+# SHA-256 of the bytes of s (s[i] is one byte; files are read whole), as 64 lowercase hex digits
+    n: int = len(s)
+    tail = []
+    i: int = n - n % 64
+    while i < n:
+        tail.append(ord(s[i]))
+        i += 1
+    tail.append(0x80)
+    while len(tail) % 64 != 56:
+        tail.append(0)
+    bits: int = n * 8
+    i = 7
+    while i >= 0:
+        tail.append((bits >> (i * 8)) & 255)
+        i -= 1
+    h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+    w = [0] * 64
+    full: int = n - n % 64
+    total: int = full + len(tail)
+    off: int = 0
+    while off < total:
+        t: int = 0
+        while t < 16:
+            p: int = off + t * 4
+            v: int = 0
+            j: int = 0
+            while j < 4:
+                if p + j < full:
+                    v = (v << 8) | ord(s[p + j])
+                else:
+                    v = (v << 8) | tail[p + j - full]
+                j += 1
+            w[t] = v
+            t += 1
+        while t < 64:
+            a15: int = w[t - 15]
+            a2: int = w[t - 2]
+            s0: int = rotr(a15, 7) ^ rotr(a15, 18) ^ (a15 >> 3)
+            s1: int = rotr(a2, 17) ^ rotr(a2, 19) ^ (a2 >> 10)
+            w[t] = (w[t - 16] + s0 + w[t - 7] + s1) & 0xffffffff
+            t += 1
+        a: int = h[0]
+        b: int = h[1]
+        c: int = h[2]
+        d: int = h[3]
+        e: int = h[4]
+        f: int = h[5]
+        g: int = h[6]
+        hh: int = h[7]
+        t = 0
+        while t < 64:
+            S1: int = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+            ch: int = (e & f) ^ ((e ^ 0xffffffff) & g)
+            t1: int = (hh + S1 + ch + K[t] + w[t]) & 0xffffffff
+            S0: int = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+            mj: int = (a & b) ^ (a & c) ^ (b & c)
+            t2: int = (S0 + mj) & 0xffffffff
+            hh = g
+            g = f
+            f = e
+            e = (d + t1) & 0xffffffff
+            d = c
+            c = b
+            b = a
+            a = (t1 + t2) & 0xffffffff
+            t += 1
+        h[0] = (h[0] + a) & 0xffffffff
+        h[1] = (h[1] + b) & 0xffffffff
+        h[2] = (h[2] + c) & 0xffffffff
+        h[3] = (h[3] + d) & 0xffffffff
+        h[4] = (h[4] + e) & 0xffffffff
+        h[5] = (h[5] + f) & 0xffffffff
+        h[6] = (h[6] + g) & 0xffffffff
+        h[7] = (h[7] + hh) & 0xffffffff
+        off += 64
+    out = ""
+    for x in h:
+        hx = hex(x)[2:]
+        out += "0" * (8 - len(hx)) + hx
+    return out
+
+def need(p):
+    d = read_file(p)
+    if d is None:
+        eputs("reseed: cannot read " + p)
+        exit(1)
+    return d
+
+def cmp_msg(a, b, x, y):
+# cmp(1)'s first-difference message (byte and line are 1-based), or "" when equal
+    n: int = min(len(x), len(y))
+    i: int = 0
+    line: int = 1
+    while i < n:
+        if x[i] != y[i]:
+            return a + " " + b + " differ: byte " + str(i + 1) + ", line " + str(line)
+        if x[i] == "\n":
+            line += 1
+        i += 1
+    if len(x) == len(y):
+        return ""
+    short = a if len(x) < len(y) else b
+    z = x if len(x) < len(y) else y
+    if n > 0 and z[n - 1] == "\n":
+        return "cmp: EOF on " + short + " after byte " + str(n) + ", line " + str(line - 1)
+    return "cmp: EOF on " + short + " after byte " + str(n) + ", in line " + str(line)
+
+def main():
+    me = sys.argv[0]
+    if me.find("/") >= 0:
+        os.chdir(os.path.dirname(me) + "/..")
+    m = cmp_msg("build/stage2.s", "build/stage4.s", need("build/stage2.s"), need("build/stage4.s"))
+    if m.startswith("cmp: "):
+        eputs(m)
+        return 1
+    if m != "":
+        print(m)
+        return 1
+    lines = ""
+    for pair in [["forgec", "forgec-seed"], ["fas", "fas-seed"], ["fld", "fld-seed"]]:
+        d = need("build/" + pair[0])
+        dst = "seed/" + pair[1]
+        write_file(dst, d)
+        os.chmod(dst, 493)
+        lines += sha256_hex(d) + "  " + pair[1] + "\n"
+    write_file("seed/seed.sha256", lines)
+    print(lines, end="")
+    return 0
+
+exit(main())
