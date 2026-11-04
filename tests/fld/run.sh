@@ -1,7 +1,8 @@
 #!/bin/bash
 # Phase 7.2 tools/fld: images linked by fld must load the same bytes at the same addresses as GNU ld's
 # (user programs, the compiler, the tests corpus, and the kernel against examples/kernel/linker.ld +
-# tools/krel.forge, the reference layout); the PE32+ loader is checked structurally (it boots in tests/os);
+# tools/krel.forge, the reference layout); the PE32+ loader is checked structurally by tests/fld/pecheck.forge
+# (it boots in tests/os);
 # link errors are diagnosed. GNU ld is only the reference here: no build step uses it past the seed.
 cd "$(dirname "$0")/../.."
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
@@ -36,7 +37,7 @@ for k in kernel kernel-next; do
     as -o $T/krel.o $T/krel.s && ld -n -T examples/kernel/linker.ld -o $T/k.ld $o $T/krel.o &&
     $FLD --format kernel -o $T/k.fld $o && same kernel/$k $T/k.ld $T/k.fld
 done
-[ -f build/efi/loader.o ] && { $FLD --format pe --subsystem 10 --image-base 0x10000000 -e efi_main -o $T/l.efi build/efi/loader.o && python3 tests/fld/pecheck.py $T/l.efi || { echo "FAIL fld/pe-structure"; fail=1; }; }
+[ -f build/efi/loader.o ] && { $FLD --format pe --subsystem 10 --image-base 0x10000000 -e efi_main -o $T/l.efi build/efi/loader.o && build/forgec tests/fld/pecheck.forge $T/pc.s && build/fas -o $T/pc.o $T/pc.s && $FLD --base 0x100000000000 -o $T/pecheck $T/pc.o && $T/pecheck $T/l.efi || { echo "FAIL fld/pe-structure"; fail=1; }; }
 # diagnostics
 printf '.globl _start\n_start: call nowhere\n' > $T/u.s; build/fas -o $T/u.o $T/u.s
 $FLD -o $T/u $T/u.o 2>$T/e; [ $? = 1 ] && grep -q "undefined symbol nowhere" $T/e && echo "PASS fld undefined-symbol" || { echo "FAIL fld undefined-symbol"; fail=1; }

@@ -1,0 +1,64 @@
+# pecheck: Forge port of tests/fld/pecheck.py (kept as the reference; tests/pecheck/run.sh compares them).
+# usage: pecheck IMAGE.efi -- structural checks on the fld PE32+ image (what UEFI firmware relies on).
+# On success prints the same PASS line as the Python; a failed check prints `pecheck: MSG` and exits 1
+# (Python exits 1 with an AssertionError traceback).
+
+def rd(s, o, n):
+    v = 0
+    i = n - 1
+    while i >= 0:
+        v = v * 256 + ord(s[o + i])
+        i -= 1
+    return v
+
+def need(c, msg):
+    if not c:
+        eputs("pecheck: " + msg)
+        exit(1)
+
+def main():
+    d = read_file(argv(1))
+    if d is None:
+        eputs("pecheck: cannot read " + argv(1))
+        exit(1)
+    need(len(d) >= 0x40 and d[0:2] == "MZ", "no MZ header")
+    pe = rd(d, 0x3c, 4)
+    need(len(d) >= pe + 24 and d[pe:pe + 4] == "PE\0\0", "no PE signature")
+    mach = rd(d, pe + 4, 2)
+    nsec = rd(d, pe + 6, 2)
+    optsz = rd(d, pe + 20, 2)
+    o = pe + 24
+    need(len(d) >= o + 72, "short optional header")
+    magic = rd(d, o, 2)
+    entry = rd(d, o + 16, 4)
+    base = rd(d, o + 24, 8)
+    salign = rd(d, o + 32, 4)
+    falign = rd(d, o + 36, 4)
+    imgsz = rd(d, o + 56, 4)
+    subsys = rd(d, o + 68, 2)
+    dllch = rd(d, o + 70, 2)
+    need(mach == 0x8664 and magic == 0x20b and subsys == 10 and base == 0x10000000, "machine/magic/subsystem/base")
+    need(salign == 0x1000 and falign == 0x200 and (dllch & 0x100) != 0, "NX_COMPAT")
+    sh = o + optsz
+    ok_entry = False
+    i = 0
+    while i < nsec:
+        b = sh + 40 * i
+        i += 1
+        need(len(d) >= b + 40, "short section table")
+        vs = rd(d, b + 8, 4)
+        va = rd(d, b + 12, 4)
+        raw = rd(d, b + 16, 4)
+        ptr = rd(d, b + 20, 4)
+        c = rd(d, b + 36, 4)
+        need(not ((c & 0x20000000) != 0 and (c & 0x80000000) != 0), "W^X: section both writable and executable")
+        m = vs
+        if raw > m:
+            m = raw
+        need(va % salign == 0 and ptr % falign == 0 and va + m <= imgsz, "section alignment/extent")
+        if (c & 0x20000000) != 0 and va <= entry and entry < va + vs:
+            ok_entry = True
+    need(ok_entry, "entry point not in an executable section")
+    print("PASS fld/pe-structure (" + str(nsec) + " sections, entry 0x" + hex(entry)[2:] + ")")
+
+main()

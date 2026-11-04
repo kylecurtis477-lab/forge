@@ -49,6 +49,7 @@ tests/grammar-fuzz/run.sh || fail=1
 tests/mkfont/run.sh || fail=1
 tests/forgeseal/run.sh || fail=1
 tests/rtport/run.sh || fail=1
+tests/pecheck/run.sh || fail=1
 tests/pkg/run.sh || fail=1
 tests/lsp/run.sh || fail=1
 tests/testblocks/run.sh || fail=1
