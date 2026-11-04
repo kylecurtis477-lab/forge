@@ -246,8 +246,9 @@ Each driver gets its own boot test, and none of them writes to disks it does not
      7. kexec handoff record = the single versioned process-state format.
      8. Interface spec for the kernel core (scheduler, IPC, capabilities).
      9. All-Forge tooling (Kyle's standing direction: anything that can be written in Forge should be). Port the Python tools to Forge, one tool per commit, each checked byte-for-byte against the Python output before the .py is removed: tools/forgeseal.py (the sealer; seal v3 is where it starts), tools/ed25519.py, tools/forge-part.py, tools/krel.py, tools/mkfont.py, tools/grammar_fuzz.py, examples/efi/mkgpt.py. Replace selfhost/runtime.s with Forge inline asm where possible, and move the build/test shell scripts to Forge where practical. Stays C: BusyBox (the Linux test program) and the C FFI test files. One item per commit with the full checks.
-3. C-to-Forge translator (approved). Written in Forge, for a C subset: functions, structs, pointers, integer and float types, control flow. Output is `@unsafe` Forge, made safe over time. Placed after 11.2 (it needs the C ABI types, floats included) and after the v1.3 queue. First test: translate one small real C library (a compression or crypto routine) and compare the translated program's output against the C build. Plan entry only; no code yet.
-4. Python FFI: embed or extend CPython (hosted mode). Test: call a Forge function from Python and back.
+3. Forge language server (approved). Written in Forge: diagnostics, go-to-definition, incremental re-check of changed files. Placed right after 11.2 C FFI. Plan entry only; no code yet.
+4. C-to-Forge translator (approved). Written in Forge, for a C subset: functions, structs, pointers, integer and float types, control flow. Output is `@unsafe` Forge, made safe over time. Placed after 11.2 (it needs the C ABI types, floats included) and after the v1.3 queue. First test: translate one small real C library (a compression or crypto routine) and compare the translated program's output against the C build. Plan entry only; no code yet.
+5. Python FFI: embed or extend CPython (hosted mode). Test: call a Forge function from Python and back.
 
 ## Phase 12 — Parallelism and performance
 *Pillar: E. Also the compiler perf list.*
