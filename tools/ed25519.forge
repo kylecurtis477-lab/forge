@@ -1,0 +1,189 @@
+# forge: no-runtime
+# Ed25519 signing CLI (RFC 8032): Forge port of tools/ed25519.py (sign side), reusing the kernel's
+# verified field/group/SHA-512 code from examples/kernel/ed25519.fsi (TweetNaCl crypto_sign).
+#   ed25519 public SEEDFILE          32-byte public key on stdout   (= ed25519.public(seed))
+#   ed25519 sign SEEDFILE MSGFILE    64-byte signature on stdout    (= ed25519.sign(seed, msg))
+# The seed is hashed as-is (any length, like the Python). Freestanding Linux program: its own
+# _start, raw syscalls; the message file is streamed twice instead of being held in memory.
+include "../examples/kernel/ed25519.fsi"
+
+struct Buf:
+    b: u8[65536]
+
+iob: Buf
+
+@naked
+@export
+def _start():
+    asm("xor %rbp,%rbp", "mov %rsp,%rdi", "and $-16,%rsp", "call main", "mov %rax,%rdi", "mov $60,%eax", "syscall")
+
+@unsafe
+def sys3(n: u64, a: u64, b: u64, c: u64) -> i64:
+    asm("mov %rdi,%rax", "mov %rsi,%rdi", "mov %rdx,%rsi", "mov %rcx,%rdx", "syscall", "leave", "ret")
+    return 0
+
+@unsafe
+def arg(sp: u64, i: u64) -> u64:
+# argv[i] as a C string address (sp points at argc)
+    p = ptr[u64](sp)
+    return p[i + 1]
+
+@unsafe
+def cstr_eq(a: u64, b: ptr[u8]) -> u64:
+    p = ptr[u8](a)
+    i: u64 = 0
+    while p[i] == b[i]:
+        if p[i] == 0:
+            return 1
+        i += 1
+    return 0
+
+def die(msg: ptr[u8], n: u64, code: u64) -> u64:
+    sys3(1, 2, u64(msg), n)
+    return code
+
+def hash_file(s: ptr[Sha5], path: u64) -> u64:
+# feed the whole file into s; 0 on failure
+    fd = sys3(2, path, 0, 0)
+    if fd < 0:
+        return 0
+    while 1:
+        n = sys3(0, u64(fd), u64(addr(iob.b[0])), 65536)
+        if n < 0:
+            sys3(3, u64(fd), 0, 0)
+            return 0
+        if n == 0:
+            break
+        i: u64 = 0
+        while i < u64(n):
+            s5_byte(s, u64(iob.b[i]))
+            i += 1
+    sys3(3, u64(fd), 0, 0)
+    return 1
+
+def put32(s: ptr[Sha5], b: ptr[B32]):
+    i: u64 = 0
+    while i < 32:
+        s5_byte(s, u64(b.b[i]))
+        i += 1
+
+def write_all(p: u64, n: u64):
+    while n > 0:
+        w = sys3(1, 1, p, n)
+        if w <= 0:
+            return
+        p += u64(w)
+        n -= u64(w)
+
+def sc_muladd(out: ptr[B32], r: ptr[B32], h: ptr[B32], a: ptr[B32]):
+# out = (r + h * a) mod L  (TweetNaCl crypto_sign + modL)
+    x: I64x64
+    i: u64 = 0
+    while i < 64:
+        x.v[i] = 0
+        i += 1
+    i = 0
+    while i < 32:
+        x.v[i] = i64(r.b[i])
+        i += 1
+    i = 0
+    while i < 32:
+        j: u64 = 0
+        while j < 32:
+            x.v[i + j] = x.v[i + j] + i64(h.b[i]) * i64(a.b[j])
+            j += 1
+        i += 1
+    i = 63
+    while i >= 32:
+        carry: i64 = 0
+        j = i - 32
+        while j < i - 12:
+            x.v[j] = x.v[j] + carry - 16 * x.v[i] * ed_l[j - (i - 32)]
+            carry = (x.v[j] + 128) >> 8
+            x.v[j] = x.v[j] - (carry << 8)
+            j += 1
+        x.v[j] = x.v[j] + carry
+        x.v[i] = 0
+        i -= 1
+    carry2: i64 = 0
+    j2: u64 = 0
+    while j2 < 32:
+        x.v[j2] = x.v[j2] + carry2 - (x.v[31] >> 4) * ed_l[j2]
+        carry2 = x.v[j2] >> 8
+        x.v[j2] = x.v[j2] & 255
+        j2 += 1
+    j2 = 0
+    while j2 < 32:
+        x.v[j2] = x.v[j2] - carry2 * ed_l[j2]
+        j2 += 1
+    i = 0
+    while i < 32:
+        x.v[i + 1] = x.v[i + 1] + (x.v[i] >> 8)
+        out.b[i] = u8(x.v[i] & 255)
+        i += 1
+
+
+@export
+def main(sp: u64) -> u64:
+    argc = arg(sp, 0 - 1)
+    signing: u64 = 0
+    if argc == 3 and cstr_eq(arg(sp, 1), "public"):
+        signing = 0
+    elif argc == 4 and cstr_eq(arg(sp, 1), "sign"):
+        signing = 1
+    else:
+        return die("usage: ed25519 public SEEDFILE | ed25519 sign SEEDFILE MSGFILE\n", 63, 2)
+    # keypair: h = sha512(seed); a = clamp(h[0:32]); prefix = h[32:64]; A = enc(a * B)
+    st: Sha5
+    s5_init(addr(st))
+    if hash_file(addr(st), arg(sp, 2)) == 0:
+        return die("ed25519: cannot read seed file\n", 31, 1)
+    hk: B64
+    s5_final(addr(st), addr(hk))
+    a: B32
+    pre: B32
+    i: u64 = 0
+    while i < 32:
+        a.b[i] = hk.b[i]
+        pre.b[i] = hk.b[i + 32]
+        i += 1
+    a.b[0] = u8(u64(a.b[0]) & 248)
+    a.b[31] = u8((u64(a.b[31]) & 127) | 64)
+    pt: Ge
+    ge_scalarbase(addr(pt), addr(a))
+    pk: B32
+    ge_pack(addr(pk), addr(pt))
+    if signing == 0:
+        write_all(u64(addr(pk.b[0])), 32)
+        return 0
+    # r = H(prefix + m) mod L; R = enc(r * B)
+    s5_init(addr(st))
+    put32(addr(st), addr(pre))
+    if hash_file(addr(st), arg(sp, 3)) == 0:
+        return die("ed25519: cannot read message file\n", 34, 1)
+    hb: B64
+    s5_final(addr(st), addr(hb))
+    r: B32
+    sc_reduce(addr(r), addr(hb))
+    ge_scalarbase(addr(pt), addr(r))
+    sig: B64
+    rr: B32
+    ge_pack(addr(rr), addr(pt))
+    # S = (r + H(R + A + m) * a) mod L
+    s5_init(addr(st))
+    put32(addr(st), addr(rr))
+    put32(addr(st), addr(pk))
+    if hash_file(addr(st), arg(sp, 3)) == 0:
+        return die("ed25519: cannot read message file\n", 34, 1)
+    s5_final(addr(st), addr(hb))
+    h: B32
+    sc_reduce(addr(h), addr(hb))
+    s: B32
+    sc_muladd(addr(s), addr(r), addr(h), addr(a))
+    i = 0
+    while i < 32:
+        sig.b[i] = rr.b[i]
+        sig.b[i + 32] = s.b[i]
+        i += 1
+    write_all(u64(addr(sig.b[0])), 64)
+    return 0
