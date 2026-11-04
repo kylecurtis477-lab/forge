@@ -234,6 +234,23 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
 - FORGEKRN header: entry, phys start, phys end, krel start, krel end. The Forge UEFI loader and kexec refuse a kernel whose table is empty; kexec'd kernels pick a fresh slide.
 - Limits: slide granularity 2 MiB, about 9 bits of entropy; the low boot stub at 1 MiB (phys) is not randomized; physical placement (kdelta) only varies under kexec.
 
+## Process-state format (plan v1.3 item 7)
+`examples/kernel/pstate.fsi` defines the single versioned record of one user process, **process-state
+v1**. The kexec handoff (format v5) writes one record per process and adopts nothing else; checkpointing,
+migration or record/replay must reuse it and bump `PS_VERSION` instead of defining another format.
+- Two pages: the record page and the FPU page (fxsave/xsave image; the container records its size).
+- Record words: pid, ppid, state, exit code, brk_base, brk, mmap_next, flags (is-caller | caps << 8 |
+  abi << 40), user page count and first page, the syscall in progress (5 words), FS base, 16 fd slots
+  ((file index + 1) | rights << 32), args (128 B), syscall frame (128 B). Offsets are the `PS_*` constants.
+- Header word at +512: `PS_MAGIC << 32 | PS_VERSION` ("FPST", v1). `ps_hdr_ok` accepts
+  `PS_MIN_VERSION..PS_VERSION`; kexec panics on a record that fails it rather than adopting a misread
+  process (the container header itself is still versioned separately: `KXH_VERSION` 5).
+- User pages, the page index and the shared file table belong to the container (the handoff region) and
+  are referenced by index.
+- Boot check: `ps_selftest` (run before the kexec session) prints `process-state: format v1 (adopts
+  v1..v1), header checks OK` after checking that its own header passes and wrong-magic, version-0 and
+  newer-version headers are refused.
+
 ## Nondeterminism hook (plan v1.3 item 6)
 `examples/kernel/nondet.fsi`. Every nondeterministic input the kernel takes goes through one function,
 `nd_hook(kind, a, v) -> v`:

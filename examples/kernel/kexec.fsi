@@ -9,15 +9,14 @@
 # the new kernel sees as a MEM_HANDOFF entry in its BootInfo. The caller's syscall returns 1 there; a
 # parked process re-issues its interrupted syscall (wait, read, yield, ...) in the new kernel. Pids are
 # kept unless one is already taken in the new kernel.
-# Handoff format v2 (pages):
+# Handoff format v5 (pages):
 #   0 header | 1-2 BootInfo | 3-10 boot page tables | 11 jump stub | 12.. two pages per process
 #   (record, FPU) | file table (64 B per File) | page index (va, pte flags) | data pages
 # header: +0 magic +8 version +16 header bytes +24 total pages +32 nproc +40 nfile +48 npg +56 caller
 #   +64 fpu size +72 data hash +80 metadata hash +88 proc page +96 file page +104 index page
 #   +112 data page +128 sender's kernel version (64 B) +384 RSDP copy (64 B)
-# process record: +0 pid +8 ppid +16 state +24 exit code +32 brk_base +40 brk +48 mmap_next
-#   +56 is caller | caps << 8 | abi << 40 (v4) +64 npg +72 first page +80 syscall (nr, a, b, c, d) +120 FS base (v4) +128 fds (file index + 1) x16
-#   +256 args (128 B) +384 syscall frame (128 B since v4: the argument registers are saved too)
+# process record (v5): one process-state record per process, the single versioned format defined in
+#   pstate.fsi (record page + FPU page; +512 header word PS_MAGIC << 32 | PS_VERSION, checked on adoption)
 # file record: +0 type +8 first cluster +16 size +24 position +32 fds referring to it
 # driver state (no-restart gap 4; header page, past KXH_BYTES, so a receiver that ignores it still
 # adopts v4): +1016 hash of +1024..+2048 | +1024 magic KXD_MAGIC +1032 records (0 or 1)
@@ -27,8 +26,8 @@
 # Driver processes themselves are not carried; the new kernel starts a fresh driver that restores
 # the carried state word and replays the uncommitted entries.
 KXH_MAGIC = 0x464F48584B475246
-KXH_VERSION = 4  # format written by this kernel (v4: 128-byte syscall frame, abi bit)
-KXH_MIN_VERSION = 4  # oldest format this kernel can adopt
+KXH_VERSION = 5  # format written by this kernel (v5: process records are process-state v1, pstate.fsi)
+KXH_MIN_VERSION = 5  # oldest format this kernel can adopt
 KXH_BYTES = 448
 KX_FIXED_PAGES = 12
 EBUSY = 0xFFFFFFFFFFFFFFF0
@@ -377,37 +376,44 @@ def sys_kexec(frame: u64, which: u64) -> u64:
         q = ptr[Proc](procs[i])
         if kx_kept(q, p):
             qt = ptr[Thread](q.thread)
-            r = h + (pproc + 2 * k) * PAGE
-            vstore64(r, q.pid)
-            vstore64(r + 8, q.ppid)
-            vstore64(r + 16, q.state)
-            vstore64(r + 24, q.exit_code)
-            vstore64(r + 32, q.brk_base)
-            vstore64(r + 40, q.brk)
-            vstore64(r + 48, q.mmap_next)
-            vstore64(r + 56, u64(u64(q) == u64(p)) | (q.caps << 8) | (q.abi << 40))
+            r = h + (pproc + PS_PAGES * k) * PAGE
+            # one process-state record (pstate.fsi): pid .. flags are the words at PS_PID .. PS_FLAGS
+            pw: u64[8]
+            pw[0] = q.pid
+            pw[1] = q.ppid
+            pw[2] = q.state
+            pw[3] = q.exit_code
+            pw[4] = q.brk_base
+            pw[5] = q.brk
+            pw[6] = q.mmap_next
+            pw[7] = u64(u64(q) == u64(p)) | (q.caps << 8) | (q.abi << 40)
+            j = 0
+            while j < 8:
+                vstore64(r + PS_PID + j * 8, pw[j])
+                j += 1
+            vstore64(r + PS_HDR, ps_hdr_word())
             n = 0
             if q.state == P_ALIVE:
                 n = kx_walk(q.pml4, h + pidx * PAGE + pg * 16, h + (pdata + pg) * PAGE)
-            vstore64(r + 64, n)
-            vstore64(r + 72, pg)
+            vstore64(r + PS_NPG, n)
+            vstore64(r + PS_FIRST_PG, pg)
             pg += n
             j = 0
             while j < 5:
-                vstore64(r + 80 + j * 8, qt.sc[j])
+                vstore64(r + PS_SYSCALL + j * 8, qt.sc[j])
                 j += 1
-            vstore64(r + 120, qt.fsbase)
+            vstore64(r + PS_FSBASE, qt.fsbase)
             j = 0
             while j < NFD:
                 if q.fds[j] != 0:
-                    vstore64(r + 128 + j * 8, (kx_file_index(q.fds[j]) + 1) | (q.fdr[j] << 32))
+                    vstore64(r + PS_FDS + j * 8, (kx_file_index(q.fds[j]) + 1) | (q.fdr[j] << 32))
                 j += 1
-            memcpy(r + 256, u64(addr(q.args[0])), 128)
+            memcpy(r + PS_ARGS, u64(addr(q.args[0])), 128)
             if u64(q) == u64(p):
-                memcpy(r + 384, frame, SF_SIZE)
+                memcpy(r + PS_FRAME, frame, SF_SIZE)
                 fpu_save(r + PAGE)
             elif q.state == P_ALIVE:
-                memcpy(r + 384, qt.kstack_top - SF_SIZE, SF_SIZE)
+                memcpy(r + PS_FRAME, qt.kstack_top - SF_SIZE, SF_SIZE)
                 memcpy(r + PAGE, qt.fpu, fpu_size)
             k += 1
         i += 1
@@ -611,8 +617,8 @@ def kx_restore() -> nptr[Thread]:
     maxpid: u64 = 0
     i = 0
     while i < nproc:
-        if vload64(h + (pproc + 2 * i) * PAGE) > maxpid:
-            maxpid = vload64(h + (pproc + 2 * i) * PAGE)
+        if vload64(h + (pproc + PS_PAGES * i) * PAGE) > maxpid:
+            maxpid = vload64(h + (pproc + PS_PAGES * i) * PAGE)
         i += 1
     if next_tid < maxpid:
         next_tid = maxpid
@@ -622,11 +628,13 @@ def kx_restore() -> nptr[Thread]:
     pg_total: u64 = 0
     i = 0
     while i < nproc:
-        r = h + (pproc + 2 * i) * PAGE
+        r = h + (pproc + PS_PAGES * i) * PAGE
         c = proc_new(0)
         c.pml4 = as_new()
-        n = vload64(r + 64)
-        first = vload64(r + 72)
+        if ps_hdr_ok(vload64(r + PS_HDR)) == 0:
+            panic("kexec: process record is not a supported process-state version")
+        n = vload64(r + PS_NPG)
+        first = vload64(r + PS_FIRST_PG)
         j = 0
         while j < n:
             e = h + pidx * PAGE + (first + j) * 16
@@ -637,20 +645,20 @@ def kx_restore() -> nptr[Thread]:
         if kx_walk(c.pml4, 0, 0) != n:
             panic("kexec: page count mismatch")
         pg_total += n
-        c.state = vload64(r + 16)
-        c.exit_code = vload64(r + 24)
-        c.brk_base = vload64(r + 32)
-        c.brk = vload64(r + 40)
-        c.mmap_next = vload64(r + 48)
-        memcpy(u64(addr(c.args[0])), r + 256, 128)
+        c.state = vload64(r + PS_STATE)
+        c.exit_code = vload64(r + PS_EXIT)
+        c.brk_base = vload64(r + PS_BRK_BASE)
+        c.brk = vload64(r + PS_BRK)
+        c.mmap_next = vload64(r + PS_MMAP_NEXT)
+        memcpy(u64(addr(c.args[0])), r + PS_ARGS, 128)
         j = 0
         while j < NFD:
-            fi = vload64(r + 128 + j * 8)
+            fi = vload64(r + PS_FDS + j * 8)
             if fi != 0:
                 c.fds[j] = file_get(kx_files[(fi & 0xFFFFFFFF) - 1])
                 c.fdr[j] = fi >> 32
             j += 1
-        isc = vload64(r + 56)
+        isc = vload64(r + PS_FLAGS)
         c.caps = (isc >> 8) & CAPB_ALL
         c.abi = (isc >> 40) & 1
         if isc & 1:
@@ -664,21 +672,21 @@ def kx_restore() -> nptr[Thread]:
         while j < 9:
             vstore64(sp + j * 8, vload64(ct.kstack_top - 72 + j * 8))
             j += 1
-        memcpy(cf, r + 384, SF_SIZE)
+        memcpy(cf, r + PS_FRAME, SF_SIZE)
         j = 0
         while j < 5:
-            vstore64(cf - 40 + j * 8, vload64(r + 80 + j * 8))
+            vstore64(cf - 40 + j * 8, vload64(r + PS_SYSCALL + j * 8))
             j += 1
         vstore64(sp + 16, cf)
         ct.rsp = sp
         ct.cr3 = c.pml4
-        ct.fsbase = vload64(r + 120)
+        ct.fsbase = vload64(r + PS_FSBASE)
         ct.user = 1
         ct.proc = u64(c)
         if vload64(h + 64) == fpu_size:
             memcpy(ct.fpu, r + PAGE, fpu_size)
-        c.pid = vload64(r)
-        c.ppid = vload64(r + 8)
+        c.pid = vload64(r + PS_PID)
+        c.ppid = vload64(r + PS_PPID)
         if kx_pid_taken(c.pid):
             c.pid = ct.id
         c.thread = u64(ct)
@@ -694,7 +702,7 @@ def kx_restore() -> nptr[Thread]:
     i = 0
     while i < nproc:
         c = ptr[Proc](newp[i])
-        oldpid = vload64(h + (pproc + 2 * i) * PAGE)
+        oldpid = vload64(h + (pproc + PS_PAGES * i) * PAGE)
         if c.pid != oldpid:
             j = 0
             while j < nproc:
@@ -710,7 +718,7 @@ def kx_restore() -> nptr[Thread]:
     i = 0
     while i < nproc:
         putc(32)
-        put_u64(vload64(h + (pproc + 2 * i) * PAGE))
+        put_u64(vload64(h + (pproc + PS_PAGES * i) * PAGE))
         puts("->")
         put_u64(ptr[Proc](newp[i]).pid)
         i += 1

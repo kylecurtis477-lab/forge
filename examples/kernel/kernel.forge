@@ -49,6 +49,7 @@ include "drv.fsi"
 include "kbd.fsi"
 include "nvsvc.fsi"
 include "livepatch.fsi"
+include "pstate.fsi"
 include "kexec.fsi"
 include "ed25519.fsi"
 include "seal.fsi"
@@ -1641,6 +1642,7 @@ def shell_test():
 
 def kexec_test():
 # a second shell session that replaces the kernel under itself (sh builtin `kexec`, syscall 409)
+    ps_selftest()
     input_init()
     kbd_service_start()
     ktest_hooks = 1

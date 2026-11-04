@@ -73,7 +73,7 @@ Errno values are Linux's: Forge's error codes were already the negated Linux err
 The Linux ABI preserves every register except rax, rcx and r11 across `syscall`. Since 11.1a the
 kernel's syscall frame (`examples/kernel/user.fsi`, `SF_SIZE = 128`) saves rdi, rsi, rdx, r10, r8 and
 r9 and restores them on return, for Forge programs too (previously they were zeroed). A fresh exec
-still starts with all registers zero. The kexec handoff carries the bigger frame (format v4) and the
+still starts with all registers zero. The kexec handoff carries the bigger frame (format v4; since v5 inside a process-state v1 record, pstate.fsi) and the
 process's ABI (record word +56, bit 40).
 
 ## Thread-local storage (11.1b)
