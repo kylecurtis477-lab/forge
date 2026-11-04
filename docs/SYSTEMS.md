@@ -62,6 +62,21 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
   - It is linked directly by `ld -m i386pep --subsystem 10`. `mkgpt.forge` (Forge port of `mkgpt.py`, byte-identical) builds a GPT disk with an ESP plus placeholder Microsoft basic data and Linux partitions.
 - **Tests:** `tests/os/boot.py` boots each path headless, checks the serial markers, takes a QEMU monitor `screendump` after `KERNEL OK`, decodes every framebuffer text row against the font (KERNEL OK must be on screen, so console scrolling is checked), and then sends `q` on COM1 so the kernel exits. The three paths are BIOS+GRUB, OVMF+GRUB, and OVMF+forgex64.efi on GPT, all with `-smp 4` and a read-only virtio-blk copy of the GPT disk (its removable-media fallback loader removed so firmware never boots it).
 
+### Boot timeouts (tests/os/boot.py)
+Every boot line reports its wall time (`[76s]`). A boot that reaches its timeout is classified instead of
+being reported as a bare `qemu rc=-9` (which was just the harness's own SIGKILL):
+- **SLOW**: serial output was still arriving, so the deadline is extended (up to 2x the timeout) and the
+  line says SLOW with the time used.
+- **HANG**: no serial output for 60 s (`FORGE_BOOT_STALL`). The vCPU state (`info cpus`,
+  `info registers -a`, 64 words at each rsp) is saved to `LOG.hangN`. A HANG is always a FAIL: the boot
+  is retried once only for information (`FLAKY os/NAME ... informational retry PASS`, `[retry PASS; a HANG
+  always fails, dump kept ...]`), so a real hang can never be hidden by a lucky second boot.
+  `FORGE_BOOT_NO_RETRY=1` skips the retry.
+The kills seen so far (g11 bios, g52 bios-smp1, g64 uefi) were all of this second kind: the serial log
+stops mid-boot at different points (after the blkd restart, after the Linux personality line, inside the
+module load/unload cycles) and nothing follows for minutes, while the same boot alone takes 65-85 s and
+no OOM was logged. That is an intermittent guest stall, not slow emulation; the dumps are for finding it.
+
 ## Compiler tooling (Phase 3)
 - `--diagnostics=json`: one schema-v1 JSON object per error (file/line/col span, code, message, fix-its); goldens in `tests/diag`.
 

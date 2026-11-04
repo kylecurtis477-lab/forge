@@ -5,8 +5,20 @@ usage: boot.py NAME LOG TIMEOUT 'marker|marker|...' FBTEXT -- qemu args...
 FBTEXT ('' to skip): text expected at the start of row 0 of the 8x16 framebuffer console. After
 'KERNEL OK' appears on serial the harness takes a QEMU monitor screendump, decodes the first row
 cell by cell against examples/kernel/font.fsi, then sends 'q' on COM1 so the kernel exits with 0x10.
-Prints PASS/FAIL os/NAME like run_tests.sh."""
+Prints PASS/FAIL os/NAME like run_tests.sh, with the boot's wall time.
+
+Timeouts (the old bare "qemu rc=-9"): a boot that runs out of TIMEOUT is classified by its serial output.
+  - slow: output was still arriving in the last STALL seconds. The deadline is extended while output keeps
+    coming, up to 2 x TIMEOUT, and the PASS/FAIL line says "SLOW" with the extra time used.
+  - hang: no output for STALL seconds (the guest stopped making progress; load alone does not do that).
+    The harness dumps the vCPU state ('info cpus', 'info registers -a') from the QEMU monitor into
+    LOG.hangN (plus 64 words at each vCPU's rsp for a frame walk), then boots ONCE more for information.
+    A hang is ALWAYS a FAIL, even when the retry passes: the line says "HANG", names the dump, the time
+    the output stopped, the last line printed and the retry's result ("retry PASS"/"retry FAIL").
+FORGE_BOOT_NO_RETRY=1 skips the informational retry."""
 import os, re, socket, subprocess, sys, time
+
+STALL = float(os.environ.get('FORGE_BOOT_STALL', '60'))  # seconds of serial silence that count as a hang
 
 name, log, tmo, markers, fbtext = sys.argv[1:6]
 qargs = sys.argv[sys.argv.index('--') + 1:]
@@ -66,18 +78,53 @@ def type_keys(line):
         s.sendall(f'sendkey {k}\n'.encode()); time.sleep(0.03)
     time.sleep(0.2); s.close()
 
-def main():
+def monitor(cmd, wait=1.0):
+    try:
+        s = socket.socket(socket.AF_UNIX); s.settimeout(wait); s.connect(mon)
+        s.sendall(cmd.encode() + b'\n'); out, t = b'', time.time()
+        while time.time() - t < wait:
+            try:
+                c = s.recv(65536)
+                if not c: break
+                out += c
+            except socket.timeout:
+                break
+        s.close()
+        t = re.sub(r'\x1b\[[0-9]*[A-Za-z]', '', out.decode('latin-1'))
+        return '\n'.join(l for l in t.splitlines() if not l.startswith('(qemu) i'))
+    except Exception as ex:
+        return f'[monitor {cmd!r} failed: {ex}]'
+
+def last_line(text):
+    ls = [l for l in text.splitlines() if l.strip()]
+    return ls[-1][:120] if ls else ''
+
+def boot(attempt):
     p = subprocess.Popen(['qemu-system-x86_64'] + qargs + ['-monitor', f'unix:{mon},server,nowait'],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     os.set_blocking(p.stdout.fileno(), False)
     buf, t0, shot_ok, fbmsg, sent = b'', time.time(), False, '', 0
-    while p.poll() is None and time.time() - t0 < float(tmo):
+    tlast, deadline, kind, dump = t0, t0 + float(tmo), '', ''
+    while p.poll() is None:
+        now = time.time()
+        if now >= deadline:
+            if now - tlast < STALL and now < t0 + 2 * float(tmo):
+                deadline = min(now + STALL, t0 + 2 * float(tmo)); kind = 'slow'  # still progressing
+            else:
+                if now - tlast >= STALL:
+                    kind = 'hang'
+                    dump = f'{log}.hang{attempt}'
+                    open(dump, 'w').write(f'hang: no serial output for {now - tlast:.0f}s (stopped at +{tlast - t0:.0f}s), '
+                        f'load {open("/proc/loadavg").read().split()[0]}\nlast line: {last_line(buf.decode("latin-1"))}\n\n'
+                        + monitor('info cpus') + '\n' + monitor('info registers -a', 2.0)
+                        + '\n' + monitor('x/64gx $rsp', 1.0))
+                break
         try:
             chunk = p.stdout.read()
         except Exception:
             chunk = None
         if chunk:
-            buf += chunk
+            buf += chunk; tlast = time.time()
         # a third element holds the line back until that text has appeared (a background program's progress)
         if buf.count(b'sh$ ') > sent and sent < len(SCRIPT) and (len(SCRIPT[sent]) < 3 or SCRIPT[sent][2].encode() in buf):
             how, line = SCRIPT[sent][:2]; sent += 1
@@ -116,15 +163,37 @@ def main():
     except Exception:
         pass
     rc = p.returncode
+    el = time.time() - t0
     text = buf.decode('latin-1')
-    open(log, 'w').write(text + f'\n[fb] {fbmsg}\nrc={rc}\n')
+    why = ''
+    if kind == 'hang':
+        why = f'HANG: killed after {el:.0f}s, no serial output after +{tlast - t0:.0f}s, last line "{last_line(text)}", vCPU dump {dump}'
+    elif rc == -9:
+        why = f'SLOW: killed at the 2x limit ({el:.0f}s of {tmo}s), output still arriving'
+    open(log, 'w').write(text + f'\n[fb] {fbmsg}\nrc={rc}\n[harness] {el:.1f}s {why}\n')
+    if kind == 'hang':  # the retry rewrites LOG, so the hung boot's serial output goes into the dump too
+        open(dump, 'a').write('\n---- serial output of the hung boot ----\n' + text)
+    res = ''
     for m in [m for m in markers.split('|') if m]:
         if m not in text:
-            print(f'FAIL os/{name} (missing: {m}, qemu rc={rc})'); return
-    if fbtext and f'="{fbtext.split("^")[-1]}"' not in fbmsg:
-        print(f'FAIL os/{name} (framebuffer: {fbmsg})'); return
-    if rc != 33:
-        print(f'FAIL os/{name} (qemu rc={rc})'); return
-    print(f'PASS os/{name}' + (f' [fb {fbmsg}]' if fbtext else ''))
+            res = f'FAIL os/{name} (missing: {m}, qemu rc={rc}; {el:.0f}s{"; " + why if why else ""})'; break
+    if not res and fbtext and f'="{fbtext.split("^")[-1]}"' not in fbmsg:
+        res = f'FAIL os/{name} (framebuffer: {fbmsg})'
+    if not res and rc != 33:
+        res = f'FAIL os/{name} (qemu rc={rc}; {el:.0f}s{"; " + why if why else ""})'
+    if not res:
+        slow = f' SLOW {el:.0f}s > {tmo}s timeout' if el > float(tmo) else f' {el:.0f}s'
+        res = f'PASS os/{name}' + (f' [fb {fbmsg}]' if fbtext else '') + f' [{slow.strip()}]'
+    return res, kind, why
+
+def main():
+    res, kind, why = boot(1)
+    if kind == 'hang' and os.environ.get('FORGE_BOOT_NO_RETRY') != '1':
+        res2, kind2, why2 = boot(2)
+        r2 = 'PASS' if res2.startswith('PASS') else 'FAIL'
+        print(f'FLAKY os/{name}: first boot {why}; informational retry {r2}')
+        assert res.startswith('FAIL')  # the hang result itself, whatever the retry did
+        res += f' [retry {r2}; a HANG always fails, dump kept in {log}.hang1]'
+    print(res)
 
 main()
