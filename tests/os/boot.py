@@ -12,7 +12,8 @@ Timeouts (the old bare "qemu rc=-9"): a boot that runs out of TIMEOUT is classif
     coming, up to 2 x TIMEOUT, and the PASS/FAIL line says "SLOW" with the extra time used.
   - hang: no output for STALL seconds (the guest stopped making progress; load alone does not do that).
     The harness dumps the vCPU state ('info cpus', 'info registers -a') from the QEMU monitor into
-    LOG.hangN (plus 64 words at each vCPU's rsp for a frame walk), then boots ONCE more for information.
+    LOG.hangN (plus 64 words at each vCPU's rsp for a frame walk: RSP, or ESP before long mode, is read
+    from 'info registers -a' and dumped with 'cpu N' + 'x/64gx 0xADDR', since HMP has no $rsp), then boots ONCE more for information.
     A hang is ALWAYS a FAIL, even when the retry passes: the line says "HANG", names the dump, the time
     the output stopped, the last line printed and the retry's result ("retry PASS"/"retry FAIL").
 FORGE_BOOT_NO_RETRY=1 skips the informational retry."""
@@ -95,6 +96,16 @@ def monitor(cmd, wait=1.0):
     except Exception as ex:
         return f'[monitor {cmd!r} failed: {ex}]'
 
+def stack_dump(regs):
+    """64 words at each vCPU's rsp, parsed from 'info registers -a' (QEMU's HMP has no $rsp register
+    name: 'x/64gx $rsp' only printed "unknown register"). 'cpu N' selects the vCPU (its CR3) first."""
+    out = []
+    for cpu, rsp in re.findall(r'CPU#(\d+)\n(?:.*\n){0,2}?.*?(?:RSP|ESP)=([0-9a-f]{8,16})', regs):
+        out.append(f'---- CPU#{cpu} stack at rsp=0x{rsp} ----\n' 
+                   + '\n'.join(l for l in monitor(f'cpu {cpu}\nx/64gx 0x{rsp}', 1.0).splitlines()
+                                if re.match(r'[0-9a-f]+: ', l)))
+    return '\n'.join(out) if out else '[no RSP found in info registers -a]'
+
 def last_line(text):
     ls = [l for l in text.splitlines() if l.strip()]
     return ls[-1][:120] if ls else ''
@@ -116,8 +127,8 @@ def boot(attempt):
                     dump = f'{log}.hang{attempt}'
                     open(dump, 'w').write(f'hang: no serial output for {now - tlast:.0f}s (stopped at +{tlast - t0:.0f}s), '
                         f'load {open("/proc/loadavg").read().split()[0]}\nlast line: {last_line(buf.decode("latin-1"))}\n\n'
-                        + monitor('info cpus') + '\n' + monitor('info registers -a', 2.0)
-                        + '\n' + monitor('x/64gx $rsp', 1.0))
+                        + monitor('info cpus') + '\n' + (regs := monitor('info registers -a', 2.0))
+                        + '\n' + stack_dump(regs))
                 break
         try:
             chunk = p.stdout.read()
