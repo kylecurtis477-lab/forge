@@ -91,6 +91,8 @@ LSYM = {}  # linker-defined: name -> [outsec or None, value]
 
 def load(path):
     d = read_file(path)
+    if d is None:
+        die("cannot read " + path)
     if d[0:4] != "\x7fELF" or ord(d[4]) != 2 or rd(d, 16, 2) != 1 or rd(d, 18, 2) != 62:
         die(path + ": not an x86-64 ELF64 relocatable object")
     o = Obj(path)

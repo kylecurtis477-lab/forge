@@ -2328,7 +2328,11 @@ def main():
     sec_get(".data", SHF_A | SHF_W, 1)
     sec_get(".bss", SHF_A | SHF_W, 8)
     CUR = 0
-    assemble(read_file(inp))
+    text = read_file(inp)
+    if text is None:
+        eputs("fas: cannot read " + inp)
+        exit(1)
+    assemble(text)
     for si in range(len(SECS)):
         SECS[si].st = layout(si)
     for si in range(len(SECS)):

@@ -42,4 +42,9 @@ printf '.globl _start\n_start: call nowhere\n' > $T/u.s; build/fas -o $T/u.o $T/
 $FLD -o $T/u $T/u.o 2>$T/e; [ $? = 1 ] && grep -q "undefined symbol nowhere" $T/e && echo "PASS fld undefined-symbol" || { echo "FAIL fld undefined-symbol"; fail=1; }
 printf '.globl _start\n_start: ret\n' > $T/d.s; build/fas -o $T/d.o $T/d.s
 $FLD -o $T/d $T/d.o $T/d.o 2>$T/e; [ $? = 1 ] && grep -q "duplicate symbol _start" $T/e && echo "PASS fld duplicate-symbol" || { echo "FAIL fld duplicate-symbol"; fail=1; }
+# missing input: clean "fld: cannot read PATH" on stderr, exit 1, no output file (also after a good object)
+$FLD -o $T/m $T/no_such.o >$T/mo 2>$T/e; rc=$?
+[ $rc = 1 ] && [ "$(cat $T/e)" = "fld: cannot read $T/no_such.o" ] && [ ! -s $T/mo ] && [ ! -e $T/m ] && echo "PASS fld missing-input" || { echo "FAIL fld missing-input (rc=$rc)"; fail=1; }
+$FLD -o $T/m $T/d.o $T/no_such.o 2>$T/e; rc=$?
+[ $rc = 1 ] && [ "$(cat $T/e)" = "fld: cannot read $T/no_such.o" ] && [ ! -e $T/m ] && echo "PASS fld missing-second-input" || { echo "FAIL fld missing-second-input (rc=$rc)"; fail=1; }
 exit $fail

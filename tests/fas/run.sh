@@ -23,4 +23,7 @@ for f in build/user/*.s build/efi/*.s build/modules/*.s build/os/*.s build/kerne
   [ -f "$f" ] && chk "$f" "$f" -I build/user
 done
 printf 'mov $-9223372036854775808, %%rax\n.bss\n.space 2147483648\n' > $T/e.s; chk edge $T/e.s
+# missing input: clean "fas: cannot read PATH" on stderr, exit 1, no output file
+build/fas -o $T/m.o $T/no_such.s >$T/mo 2>$T/me; rc=$?
+[ $rc = 1 ] && [ "$(cat $T/me)" = "fas: cannot read $T/no_such.s" ] && [ ! -s $T/mo ] && [ ! -e $T/m.o ] && echo "PASS fas missing-input" || { echo "FAIL fas missing-input (rc=$rc)"; fail=1; }
 rm -rf $T; exit $fail
