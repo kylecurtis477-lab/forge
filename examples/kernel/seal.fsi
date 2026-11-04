@@ -5,7 +5,10 @@
 # (seal.pub), so holding the kernel image no longer lets anyone forge a seal. The kernel refuses
 # to start a user image whose trailer is missing, malformed, or fails the hash or signature.
 SEAL_MAGIC = 0x4652504547524F46
-SEAL_SIZE = 160
+SEAL_SIZE = 160  # v2 trailer (still accepted)
+SEAL3_SIZE = 384  # v3 trailer (plan v1.3): version, algorithm IDs, 3 signature slots, reserved proof slot
+SEAL3_NSIG = 3
+SEAL_ALG_ED25519 = 1  # the only signature algorithm implemented
 SEAL_OK = 0x8000000000000000
 SEAL_USER = 0
 SEAL_MODULE = 1  # trailer word +56: what the image is for (forgeseal.py --module)
@@ -18,17 +21,9 @@ struct Blk64:
 struct Dig:
     b: u8[32]
 
-struct Seal:
-    magic: u64
-    version: u64
-    level: u64
-    unsafe_ops: u64
-    caps: u64
-    elf_len: u64
-    own_ops: u64
-    rsvd: u64
-    hash: u8[32]
-    sig: EdSig
+struct SealTail:
+# the last SEAL3_SIZE bytes of an image: a v3 trailer at +0, or a v2 trailer at +224
+    b: u8[384]
 
 struct Sha:
     h: u64[8]
@@ -138,19 +133,28 @@ def sha_final(s: ptr[Sha], out: ptr[Dig]):
         out.b[i] = u8((s.h[i / 4] >> (24 - (i % 4) * 8)) & 255)
         i += 1
 
-def seal_eq(a: ptr[Dig], t: ptr[Seal]) -> u64:
-# compare a digest against the trailer's image hash
-    d: u64 = 0
+def tail64(r: ptr[SealTail], o: u64) -> u64:
+# little-endian u64 at trailer offset o
+    v: u64 = 0
+    i: u64 = 0
+    while i < 8:
+        v = v | (u64(r.b[o + i]) << (8 * i))
+        i += 1
+    return v
+
+def tail_sig(r: ptr[SealTail], o: u64, sig: ptr[EdSig]):
     i: u64 = 0
     while i < 32:
-        d = d | (u64(a.b[i]) ^ u64(t.hash[i]))
+        sig.r.b[i] = r.b[o + i]
+        sig.s.b[i] = r.b[o + 32 + i]
         i += 1
-    return d == 0
 
 seal_ok_count: u64
 seal_refused: u64
 compat_sandbox_ready: u64  # 6.4: set by lx_init (linux.fsi, 11.1) once the Linux ABI layer is up
 seal_why: u64  # reason code of the last refusal
+seal_tlen: u64  # trailer length of the last accepted image (160 for v2, 384 for v3)
+seal_v2_count: u64
 
 def seal_reason(code: u64) -> ptr[u8]:
     if code == 1:
@@ -167,6 +171,10 @@ def seal_reason(code: u64) -> ptr[u8]:
         return "wrong image kind (user program vs kernel module)"
     if code == 8:
         return "foreign image must be a Linux ABI image with no capabilities"
+    if code == 9:
+        return "unsupported signature algorithm or signature count"
+    if code == 10:
+        return "proof slot is reserved (must be empty)"
     if code == 6:
         return "Linux ABI image needs the compatibility sandbox (a sandboxed launch: sh run app)"
     return "?"
@@ -208,33 +216,99 @@ def seal_fail(code: u64) -> u64:
 
 @unsafe
 def image_verify(img: u64, len: u64, kind: u64) -> u64:
-# returns SEAL_OK | declared caps, or 0 (reason in seal_why); kind = SEAL_USER or SEAL_MODULE
-    if len < SEAL_SIZE + 64:
+# returns SEAL_OK | declared caps, or 0 (reason in seal_why); kind = SEAL_USER or SEAL_MODULE.
+# Reads a v3 trailer (384 bytes) or a v2 one (160 bytes, still accepted); both are viewed through
+# one SealTail over the last 384 bytes (a v2 trailer sits at +224).
+    if len < SEAL3_SIZE + 64:
         return seal_fail(1)
-    t = ptr[Seal](img + len - SEAL_SIZE)
-    if t.magic != SEAL_MAGIC:
-        return seal_fail(1)
-    if t.version != 2:
-        return seal_fail(2)
-    if t.elf_len != len - SEAL_SIZE:
-        return seal_fail(3)
-    # signed message = trailer[0:96]; public key embedded in the kernel image. A trailer whose
-    # signed bytes equal one already verified is authentic, so the Ed25519 step is skipped for it
-    # (the image hash below is still recomputed every time).
-    msg = ptr[EdMsg](t)
-    if seal_cache_hit(msg) == 0:
-        if ed25519_verify(addr(t.sig), ptr[B32](uimg(4)), msg, 96) == 0:
+    r = ptr[SealTail](img + len - SEAL3_SIZE)
+    pk = ptr[B32](uimg(4))
+    msg: EdMsg
+    sig: EdSig
+    b: u64 = 0
+    tl: u64 = 0
+    i: u64 = 0
+    if tail64(r, 224) == SEAL_MAGIC and tail64(r, 232) == 2:
+        b = 224
+        tl = SEAL_SIZE
+        while i < 96:
+            msg.b[i] = r.b[224 + i]
+            i += 1
+        tail_sig(r, 320, addr(sig))
+        if seal_cache_hit(addr(msg)) == 0:
+            if ed25519_verify(addr(sig), pk, addr(msg), 96) == 0:
+                return seal_fail(4)
+            seal_cache_put(addr(msg))
+    elif tail64(r, 0) == SEAL_MAGIC and tail64(r, 8) == 3:
+        tl = SEAL3_SIZE
+        # reserved proof slot (+96..+128): must be empty until proofs are defined
+        z: u64 = 0
+        while i < 32:
+            z = z | u64(r.b[96 + i])
+            i += 1
+        if z != 0:
+            return seal_fail(10)
+        ns = tail64(r, 128)
+        if ns == 0 or ns > SEAL3_NSIG or tail64(r, 136) != 0:
+            return seal_fail(9)
+        # signed message: header (+0..+64) || SHA-256(+64..+144: image hash, proof slot, signature count)
+        i = 0
+        while i < 64:
+            msg.b[i] = r.b[i]
+            i += 1
+        ctx3: Sha
+        sha_init(addr(ctx3))
+        while i < 144:
+            sha_byte(addr(ctx3), u64(r.b[i]))
+            i += 1
+        md: Dig
+        sha_final(addr(ctx3), addr(md))
+        i = 0
+        while i < 32:
+            msg.b[64 + i] = md.b[i]
+            i += 1
+        good: u64 = 0
+        k: u64 = 0
+        while k < ns:
+            o = 144 + 80 * k
+            if tail64(r, o) != SEAL_ALG_ED25519:
+                return seal_fail(9)
+            kd: u64 = 0
+            i = 0
+            while i < 8:
+                kd = kd | (u64(r.b[o + 8 + i]) ^ u64(pk.b[i]))
+                i += 1
+            if kd == 0 and good == 0:
+                tail_sig(r, o + 16, addr(sig))
+                if seal_cache_hit(addr(msg)) == 0:
+                    if ed25519_verify(addr(sig), pk, addr(msg), 96) == 0:
+                        return seal_fail(4)
+                    seal_cache_put(addr(msg))
+                good = 1
+            k += 1
+        if good == 0:
             return seal_fail(4)
-        seal_cache_put(msg)
-    if t.rsvd != (kind & 0xFF):
+    else:
+        if tail64(r, 224) == SEAL_MAGIC or tail64(r, 0) == SEAL_MAGIC:
+            return seal_fail(2)
+        return seal_fail(1)
+    seal_tlen = tl
+    if tail64(r, b + 40) != len - tl:
+        return seal_fail(3)
+    if tail64(r, b + 56) != (kind & 0xFF):
         return seal_fail(7)
     ctx: Sha
     s = addr(ctx)
     inner: Dig
     sha_init(s)
-    sha_mem(s, img, len - SEAL_SIZE)
+    sha_mem(s, img, len - tl)
     sha_final(s, addr(inner))
-    if seal_eq(addr(inner), t) == 0:
+    d: u64 = 0
+    i = 0
+    while i < 32:
+        d = d | (u64(inner.b[i]) ^ u64(r.b[b + 64 + i]))
+        i += 1
+    if d != 0:
         return seal_fail(5)
     # 6.4: Linux-ABI images (EI_OSABI = 3) run only inside the explicit compat sandbox: the Linux
     # layer must be up (compat_sandbox_ready, linux.fsi) and the caller must be a sandboxed launch
@@ -245,10 +319,13 @@ def image_verify(img: u64, len: u64, kind: u64) -> u64:
     # 11.1e: level 3 = a foreign program (BusyBox built from verified source by tools/busybox), not
     # checked by the Forge verifier: only as a Linux ABI image (so only in the compat sandbox) and
     # declaring no capabilities.
-    if t.level == SEAL_FOREIGN and (osabi != 3 or t.caps != 0):
+    caps = tail64(r, b + 32)
+    if tail64(r, b + 16) == SEAL_FOREIGN and (osabi != 3 or caps != 0):
         return seal_fail(8)
     seal_ok_count += 1
-    return SEAL_OK | (t.caps & 0xFFFFFFFF)
+    if tl == SEAL_SIZE:
+        seal_v2_count += 1
+    return SEAL_OK | (caps & 0xFFFFFFFF)
 
 def seal_log(what: ptr[u8]):
     puts("verify: ")
@@ -285,9 +362,18 @@ def seal_test():
         panic("forged manifest refused for the wrong reason")
     if seal_check("EFI/Forge/bin/linuxabi", 0) != 6:
         panic("Linux ABI image refused for the wrong reason")
-    if seal_refused - n0 != 4:
+    v0 = seal_v2_count
+    seal_check("EFI/Forge/bin/hellov2", SEAL_OK)
+    if seal_v2_count - v0 != 1:
+        panic("v2 seal not read as v2")
+    if seal_check("EFI/Forge/bin/algbad", 0) != 9:
+        panic("unknown signature algorithm refused for the wrong reason")
+    if seal_check("EFI/Forge/bin/proofset", 0) != 10:
+        panic("filled proof slot refused for the wrong reason")
+    if seal_refused - n0 != 6:
         panic("seal refusals not counted")
     puts("proof manifest (Ed25519): 3 sealed images accepted with their declared caps; unsealed, tampered and forged images refused; Linux ABI image confined to compat sandbox\n")
+    puts("seal v3: Ed25519 (algorithm 1), 3 signature slots, reserved proof slot; v2 seal still accepted, 2-signature seal accepted, unknown algorithm and filled proof slot refused\n")
 
 # ---- Phase 6.2: the kernel grants exactly the declared capabilities ----
 CAPB_FS = 1
