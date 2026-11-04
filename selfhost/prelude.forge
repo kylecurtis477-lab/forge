@@ -3582,6 +3582,58 @@ def __os_pipe():
     w: int = __ld(fds, 0)
     return [w & 0xffffffff, w >> 32]
 
+def __os_mkfifo(p, mode=438):
+# mknod(2) with S_IFIFO; mode is masked by the umask like Python's os.mkfifo
+    r: int = __syscall(133, p, 4096 | mode, 0)
+    if r < 0:
+        __os_oserr(r, "mkfifo", p)
+
+def __os_open(p, flags, mode=438) -> int:
+# raw open(2) (O_CLOEXEC added); flags are the Linux values: 0 read, 1 write, 2 read-write, 2048 O_NONBLOCK
+    r: int = __syscall(2, p, flags | 0x80000, mode)
+    if r < 0:
+        __os_oserr(r, "open", p)
+    return r
+
+def __os_set_blocking(fd, blocking):
+# fcntl F_GETFL/F_SETFL toggling O_NONBLOCK; a non-blocking read with no data raises OSError errno 11
+    fl: int = __syscall(72, fd, 3, 0)
+    if fl < 0:
+        __os_oserr(fl, "set_blocking", "")
+    if blocking:
+        fl = fl & ~2048
+    else:
+        fl = fl | 2048
+    __syscall(72, fd, 4, fl)
+
+def __os_poll(fds, timeout=-1):
+# fds: list of [fd, events] (1 POLLIN, 4 POLLOUT); timeout in ms, -1 blocks. Returns [fd, revents] for every
+# entry with revents != 0 (8 POLLERR, 16 POLLHUP, 32 POLLNVAL), in input order; [] on timeout. EINTR retries.
+    n: int = len(fds)
+    if n == 0:
+        return []
+    buf = __new(8 * n, 4, 8 * n)
+    i: int = 0
+    while i < n:
+        fd: int = fds[i][0]
+        ev: int = fds[i][1]
+        __st(buf, i, (fd & 0xffffffff) | ((ev & 0xffff) << 32))
+        i += 1
+    r: int = __syscall(7, buf, n, timeout)
+    while r == -4:
+        r = __syscall(7, buf, n, timeout)
+    if r < 0:
+        __os_oserr(r, "poll", "")
+    out = []
+    i = 0
+    while i < n:
+        w: int = __ld(buf, i)
+        rv: int = (w >> 48) & 0xffff
+        if rv != 0:
+            out.append([w & 0xffffffff, rv])
+        i += 1
+    return out
+
 def __os_dup2(a, b) -> int:
     return __syscall(33, a, b, 0)
 

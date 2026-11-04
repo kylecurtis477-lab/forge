@@ -11,5 +11,5 @@ while read -r s n; do
   if [ "$s" = ok ]; then echo "PASS oslib $n"; else echo "FAIL oslib $s $n"; fail=1; fi
 done < $T/out
 [ $r = 0 ] || { echo "FAIL oslib exit $r"; fail=1; }
-[ $(grep -c '^ok ' $T/out) = 21 ] || { echo "FAIL oslib count"; fail=1; }
+[ $(grep -c '^ok ' $T/out) = 28 ] || { echo "FAIL oslib count"; fail=1; }
 exit $fail

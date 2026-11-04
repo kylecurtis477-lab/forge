@@ -84,5 +84,38 @@ def main():
     check("chdir", os.path.isfile("a.txt"))
     os.chdir(here)
     check("getpid", os.getpid() > 1)
+    p = os.pipe()
+    check("poll-timeout", os.poll([[p[0], 1]], 0) == [])
+    os.write(p[1], "x")
+    check("poll-readable", os.poll([[p[0], 1], [p[1], 4]], 100) == [[p[0], 1], [p[1], 4]])
+    os.close(p[1])
+    os.read(p[0], 10)
+    check("poll-hup", os.poll([[p[0], 1]], 100) == [[p[0], 16]])
+    os.close(p[0])
+    p = os.pipe()
+    os.set_blocking(p[0], False)
+    eagain = False
+    try:
+        os.read(p[0], 10)
+    except OSError as e:
+        eagain = "errno 11" in str(e)
+    check("set-blocking", eagain)
+    os.close(p[0])
+    os.close(p[1])
+    ff = os.path.join(d, "fifo")
+    os.mkfifo(ff)
+    check("mkfifo", os.path.exists(ff))
+    rfd = os.open(ff, 2048)
+    wfd = os.open(ff, 1)
+    os.write(wfd, "via fifo")
+    check("fifo-poll-read", os.poll([[rfd, 1]], 1000) == [[rfd, 1]] and os.read(rfd, 100) == "via fifo")
+    os.close(wfd)
+    os.close(rfd)
+    nf = False
+    try:
+        os.open(os.path.join(d, "nope"), 0)
+    except FileNotFoundError:
+        nf = True
+    check("open-missing", nf)
 
 main()
