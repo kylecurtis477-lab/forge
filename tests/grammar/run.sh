@@ -12,7 +12,7 @@ done
 [ $fail = 0 ] && echo "PASS grammar-conformance ($nv valid, $ni invalid)"
 # the Forge fuzzer (tools/grammar_fuzz.py stays as the reference; tests/grammar-fuzz checks they match)
 mkdir -p build/grammar-fuzz
-if build/forgec tools/grammar_fuzz.forge build/grammar-fuzz/gf.s && build/fas -o build/grammar-fuzz/gf.o build/grammar-fuzz/gf.s && build/fld -o build/grammar-fuzz/grammar_fuzz build/grammar-fuzz/gf.o; then
+if build/forgec tools/grammar_fuzz.forge build/grammar-fuzz/gf.s && build/fas -o build/grammar-fuzz/gf.o build/grammar-fuzz/gf.s && build/fld --base 0x100000000000 -o build/grammar-fuzz/grammar_fuzz build/grammar-fuzz/gf.o; then
   build/grammar-fuzz/grammar_fuzz --seed 1 --n 160 || fail=1
 else echo "FAIL grammar-fuzz build"; fail=1; fi
 exit $fail

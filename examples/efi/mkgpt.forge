@@ -30,10 +30,9 @@ def crc32(s):
                 else:
                     c = c >> 1
             CRCT.append(c)
-    c: int = 0xFFFFFFFF
+    c = 0xFFFFFFFF
     for i in range(len(s)):
-        t: int = CRCT[(c ^ char_at(s, i)) & 255]
-        c = t ^ (c >> 8)
+        c = CRCT[(c ^ char_at(s, i)) & 255] ^ (c >> 8)
     return c ^ 0xFFFFFFFF
 
 def le(v, n):

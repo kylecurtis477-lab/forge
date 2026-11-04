@@ -585,7 +585,9 @@ def lex(src, line, inner):
         elif is_digit(c):
             v = 0
             isf = 0
+            hx = 0
             if c == 48 and i + 1 < n and (char_at(src, i + 1) == ord("x") or char_at(src, i + 1) == ord("X")):
+                hx = 1
                 i += 2
                 while i < n and (is_hex(char_at(src, i)) or char_at(src, i) == 95):
                     if char_at(src, i) != 95:
@@ -620,6 +622,12 @@ def lex(src, line, inner):
                 add_tok(K_ID, "__bigparse", line)
                 add_tok(K_OP, "(", line)
                 add_tok(K_STR, substr(src, st, i), line)
+                add_tok(K_OP, ")", line)
+            elif hx and (v > 9223372036854775807 or (v >= 4611686018427387904 and v <= 4611686018427387907)):
+            # hex literals past int64 or on the bool/None band become bigints too (decimal text of the value)
+                add_tok(K_ID, "__bigparse", line)
+                add_tok(K_OP, "(", line)
+                add_tok(K_STR, str(v), line)
                 add_tok(K_OP, ")", line)
             else:
                 add_tok(K_NUM, v, line)
@@ -2342,9 +2350,13 @@ def shift_expr():
         if is_op("<<"):
             ins = "shl"
         pos += 1
+        lt = ety
         mark = nout
         e("push %rax")
         add_expr()
+        if not (lt == T_INT and ety == T_INT):
+            dyn_shift(ins, start, mark)
+            continue
         src = 0
         if nout == mark + 2:
             src = simple_src(out[mark + 1])
@@ -2357,6 +2369,41 @@ def shift_expr():
         if str_eq(ins, "shl"):
             band_line(cur_line())
         ety = T_INT
+
+def dyn_shift(ins, start, mark):
+# << >> with an untyped operand: inline while both are small non-negative ints and the
+# result stays below the pointer range, else __shift (bigints, negatives, overflow)
+    global ety
+    lr(start, mark)
+    e("mov %rax, %rdx")
+    e("or %rcx, %rdx")
+    e("cmp rt_dlov(%rip), %rdx")
+    e("jae 1f")
+    e("cmp $63, %rcx")
+    e("ja 1f")
+    if str_eq(ins, "sar"):
+        e("sar %cl, %rax")
+    else:
+        e("mov %rax, %rdx")
+        e("shl %cl, %rdx")
+        e("mov %rdx, %rsi")
+        e("sar %cl, %rsi")
+        e("cmp %rax, %rsi")
+        e("jne 1f")
+        e("cmp rt_dlov(%rip), %rdx")
+        e("jae 1f")
+        e("mov %rdx, %rax")
+    e("jmp 2f")
+    emit_raw("1:\n")
+    e("push %rax")
+    e("push %rcx")
+    if str_eq(ins, "sar"):
+        e("push $1")
+    else:
+        e("push $0")
+    call_internal("__shift", 3)
+    emit_raw("2:\n")
+    ety = 0
 
 def add_expr():
     global pos, ety
@@ -4668,6 +4715,9 @@ def apply_binary(op, start, mark, lt, rt, line):
         ins = "sar"
         if str_eq(op, "<<"):
             ins = "shl"
+        if not (lt == T_INT and rt == T_INT):
+            dyn_shift(ins, start, mark)
+            return 0
         lr(start, mark)
         e2(ins, " %cl, %rax")
         if str_eq(ins, "shl"):

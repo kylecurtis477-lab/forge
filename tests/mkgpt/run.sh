@@ -5,7 +5,7 @@
 cd "$(dirname "$0")/../.." || exit 1
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
-build/forgec examples/efi/mkgpt.forge $T/m.s && build/fas -o $T/m.o $T/m.s && build/fld -o $T/mkgpt $T/m.o || { echo "FAIL mkgpt build"; exit 1; }
+build/forgec examples/efi/mkgpt.forge $T/m.s && build/fas -o $T/m.o $T/m.s && build/fld --base 0x100000000000 -o $T/mkgpt $T/m.o || { echo "FAIL mkgpt build"; exit 1; }
 command -v python3 >/dev/null || { echo "SKIP mkgpt (needs python3 for the reference)"; exit 0; }
 chk() { # name esp [size]
   rm -f $T/p.img $T/f.img

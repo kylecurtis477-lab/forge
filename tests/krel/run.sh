@@ -5,7 +5,7 @@
 cd "$(dirname "$0")/../.." || exit 1
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
-build/forgec tools/krel.forge $T/krel.s && build/fas -o $T/krel.o $T/krel.s && build/fld -o $T/krel $T/krel.o || { echo "FAIL krel build"; exit 1; }
+build/forgec tools/krel.forge $T/krel.s && build/fas -o $T/krel.o $T/krel.s && build/fld --base 0x100000000000 -o $T/krel $T/krel.o || { echo "FAIL krel build"; exit 1; }
 command -v ld >/dev/null && command -v python3 >/dev/null || { echo "SKIP krel (needs GNU ld + python3 for the reference)"; exit 0; }
 chk() { # name elf
   python3 tools/krel.py $2 $T/p.s >$T/p.out 2>&1; pr=$?

@@ -37,8 +37,7 @@ def mt_init(s: int):
     MT.append(s)
     i: int = 1
     while i < 624:
-        p: int = MT[i - 1]
-        MT.append((1812433253 * (p ^ (p >> 30)) + i) & 0xFFFFFFFF)
+        MT.append((1812433253 * (MT[i - 1] ^ (MT[i - 1] >> 30)) + i) & 0xFFFFFFFF)
         i += 1
     MTI[0] = 624
 
@@ -60,50 +59,38 @@ def mt_seed(seed: int):
     if kl > 624:
         k = kl
     while k > 0:
-        p: int = MT[i - 1]
-        c: int = MT[i]
-        kj: int = key[j]
-        MT[i] = ((c ^ ((p ^ (p >> 30)) * 1664525)) + kj + j) & 0xFFFFFFFF
+        MT[i] = ((MT[i] ^ ((MT[i - 1] ^ (MT[i - 1] >> 30)) * 1664525)) + key[j] + j) & 0xFFFFFFFF
         i += 1
         j += 1
         if i >= 624:
-            last: int = MT[623]
-            MT[0] = last
+            MT[0] = MT[623]
             i = 1
         if j >= kl:
             j = 0
         k -= 1
     k = 623
     while k > 0:
-        p: int = MT[i - 1]
-        c: int = MT[i]
-        MT[i] = ((c ^ ((p ^ (p >> 30)) * 1566083941)) - i) & 0xFFFFFFFF
+        MT[i] = ((MT[i] ^ ((MT[i - 1] ^ (MT[i - 1] >> 30)) * 1566083941)) - i) & 0xFFFFFFFF
         i += 1
         if i >= 624:
-            last: int = MT[623]
-            MT[0] = last
+            MT[0] = MT[623]
             i = 1
         k -= 1
     MT[0] = 0x80000000
 
 def genrand() -> int:
-    m0: int = MTI[0]
-    if m0 >= 624:
+    if MTI[0] >= 624:
         kk: int = 0
         while kk < 624:
-            a: int = MT[kk]
-            b: int = MT[(kk + 1) % 624]
-            y: int = (a & 0x80000000) | (b & 0x7FFFFFFF)
-            v: int = MT[(kk + 397) % 624]
-            v = v ^ (y >> 1)
+            y: int = (MT[kk] & 0x80000000) | (MT[(kk + 1) % 624] & 0x7FFFFFFF)
+            v: int = MT[(kk + 397) % 624] ^ (y >> 1)
             if y & 1:
                 v = v ^ 0x9908B0DF
             MT[kk] = v
             kk += 1
         MTI[0] = 0
-    mi: int = MTI[0]
-    y: int = MT[mi]
-    MTI[0] = mi + 1
+    y: int = MT[MTI[0]]
+    MTI[0] += 1
     y = y ^ (y >> 11)
     y = y ^ ((y << 7) & 0x9D2C5680)
     y = y ^ ((y << 15) & 0xEFC60000)

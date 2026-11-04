@@ -6,7 +6,7 @@
 cd "$(dirname "$0")/../.." || exit 1
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
-build/forgec tools/forge-part.forge $T/fp.s && build/fas -o $T/fp.o $T/fp.s && build/fld -o $T/fp $T/fp.o || { echo "FAIL forge-part build"; exit 1; }
+build/forgec tools/forge-part.forge $T/fp.s && build/fas -o $T/fp.o $T/fp.s && build/fld --base 0x100000000000 -o $T/fp $T/fp.o || { echo "FAIL forge-part build"; exit 1; }
 command -v python3 >/dev/null || { echo "SKIP forge-part (needs python3 for the reference)"; exit 0; }
 export FORGE_GUID_SEED=4242
 # case name, base image, args...: run both on copies, compare image + stdout + stderr + rc
