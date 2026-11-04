@@ -79,6 +79,7 @@ no OOM was logged. That is an intermittent guest stall, not slow emulation; the 
 
 ## Compiler tooling (Phase 3)
 - `--diagnostics=json`: one schema-v1 JSON object per error (file/line/col span, code, message, fix-its); goldens in `tests/diag`.
+- Hosted runtime source: `selfhost/runtime.forge` (naked Forge functions, inline asm; v1.3 item 9). build.sh compiles it with the seed to `build/runtime.s`, which `build/embed` splices into forgec. `tests/rtport/run.sh` checks it assembles to the same instruction/data stream as the reference `selfhost/runtime.s`. To change the runtime, edit runtime.forge (and keep runtime.s in step or retire it).
 
 
 ### Slices and bounds checks (Phase 4.1)

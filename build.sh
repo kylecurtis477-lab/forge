@@ -15,7 +15,9 @@ SAS=seed/fas-seed; SLD="seed/fld-seed --base 0x100000000000"
 # stage2, embed and the stage2-built fas/fld are assembled and linked by the seed fas/fld; every later
 # stage (and everything else in the repo) goes through the freshly built fas/fld. No GNU as/ld.
 $SEED tools/embed.forge build/embed.s && $SAS -o build/embed.o build/embed.s && $SLD -o build/embed build/embed.o
-build/embed selfhost/compiler.forge selfhost/prelude.forge selfhost/runtime.s selfhost/forgec.forge
+# the hosted runtime is Forge (naked functions + inline asm); the seed compiles it to build/runtime.s
+$SEED selfhost/runtime.forge build/runtime.s || { echo "runtime.forge failed"; exit 1; }
+build/embed selfhost/compiler.forge selfhost/prelude.forge build/runtime.s selfhost/forgec.forge
 $SEED selfhost/forgec.forge build/stage2.s || { echo "seed failed"; exit 1; }
 $SAS -o build/stage2.o build/stage2.s && $SLD -o build/stage2 build/stage2.o
 seed() { build/stage2 tools/$1.forge build/$1.s && $SAS -o build/$1.o build/$1.s && $SLD -o build/$1 build/$1.o; }

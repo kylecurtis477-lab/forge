@@ -1,5 +1,6 @@
 # embed: builds selfhost/forgec.forge = compiler.forge + runtime/prelude text as string functions
 # usage: embed <compiler.forge> <prelude.forge> <runtime.s> <out.forge>
+#   (build.sh passes build/runtime.s, compiled from selfhost/runtime.forge)
 
 def quote(s):
     n = len(s)

@@ -80,7 +80,7 @@ Memory: see Phase 3 (GC). `mark()` returns bytes in use; `release(m)` forces a f
 - Values: real `True`/`False` (tagged), `None` as a distinct value that prints `None`, boxed 64-bit floats with Python formatting and mixed arithmetic.
 - Classes: single inheritance, `super()`, `isinstance` (`tests/inherit`); exceptions with `try/except/else/finally`, exception classes, `raise`, line-numbered uncaught errors (`tests/exceptions`).
 - Functions: `lambda`, nested `def`, closures with `nonlocal`, first-class functions (incl. builtins like `str`/`len` as values), `map`/`filter`, `sorted`/`sort` with `key=`/`reverse=` (`tests/closures`, compared with CPython).
-- **Garbage collector:** a non-moving, conservative mark-sweep collector in `selfhost/runtime.s`.
+- **Garbage collector:** a non-moving, conservative mark-sweep collector in the hosted runtime, `selfhost/runtime.forge` (naked Forge functions with inline asm; `selfhost/runtime.s` is the original, kept as the byte-check reference).
   - Heap: 64 KiB pages in a 64 GiB reserved region, plus a page table. Small objects use 38 segregated size classes (16 B steps up to 512 B, then powers of two up to 32 KiB) with free lists. Larger objects get page runs (first fit). Free pages and runs are returned to the OS with `madvise(DONTNEED)`.
   - Roots: all registers (spilled at the allocation point), the whole machine stack up to the entry `%rsp` (which also covers the exception-handler frames saved on the stack), every global and data object (`rt_dlo..rt_dhi`), and `rt_exc_val`. Interior pointers are accepted. Strings and floats are not scanned.
   - A collection triggers when the bytes allocated reach `max(32 MB, 2 × live)`.
