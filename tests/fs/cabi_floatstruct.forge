@@ -1,0 +1,137 @@
+# forge: no-runtime
+# C ABI structs with float fields by value (11.2): SysV eightbyte classes SSE / INTEGER, both directions
+include "linux.fsi"
+
+struct V2:
+    x: f64
+    y: f64
+
+struct M:
+    a: i64
+    b: f64
+
+struct F4:
+    a: f32
+    b: f32
+    c: f32
+    d: f32
+
+struct F3:
+    a: f32
+    b: f32
+    c: f32
+
+struct FI:
+    a: f32
+    b: i32
+    c: f64
+
+struct BF:
+    a: f64
+    b: f64
+    c: f64
+
+extern def c_v2(v: V2) -> i64
+extern def c_m(k: i64, m: M, z: f64) -> i64
+extern def c_f4(f: F4) -> i64
+extern def c_f3(f: F3, n: i64) -> i64
+extern def c_fi(f: FI) -> i64
+extern def c_bf(b: BF, x: f64) -> i64
+extern def c_xspill(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, v: V2, h: f64) -> i64
+extern def c_v2ret(x: f64) -> V2
+extern def c_mret(a: i64) -> M
+extern def c_f3ret() -> F3
+extern def c_firet() -> FI
+extern def c_bfret(x: f64) -> BF
+extern def c_calls() -> i64
+
+@export
+def forge_v2(v: V2) -> V2:
+    r: V2
+    r.x = v.y * 2.0
+    r.y = v.x + 0.5
+    return r
+
+@export
+def forge_m(m: M, k: i64) -> M:
+    r: M
+    r.a = m.a + k
+    r.b = m.b * 3.0
+    return r
+
+@export
+def forge_fi(f: FI) -> FI:
+    r: FI
+    r.a = f.a + f32(1.0)
+    r.b = f.b * 2
+    r.c = f.c - 1.0
+    return r
+
+@export
+def forge_f4(f: F4) -> i64:
+    return i64((f.a + f.b * f32(2.0) + f.c * f32(3.0) + f.d * f32(4.0)) * f32(10.0))
+
+@export
+def forge_bf(b: BF) -> BF:
+    r: BF
+    r.a = b.c
+    r.b = b.b
+    r.c = b.a
+    return r
+
+def main() -> i64:
+    v: V2
+    v.x = 1.5
+    v.y = 2.25
+    put_i64(c_v2(v))
+    nl()
+    m: M
+    m.a = 7
+    m.b = 0.5
+    put_i64(c_m(3, m, 0.25))
+    nl()
+    f: F4
+    f.a = f32(1.0)
+    f.b = f32(2.0)
+    f.c = f32(3.0)
+    f.d = f32(4.5)
+    put_i64(c_f4(f))
+    nl()
+    g: F3
+    g.a = f32(1.5)
+    g.b = f32(2.5)
+    g.c = f32(3.5)
+    put_i64(c_f3(g, 9))
+    nl()
+    h: FI
+    h.a = f32(1.25)
+    h.b = -6
+    h.c = 8.5
+    put_i64(c_fi(h))
+    nl()
+    b: BF
+    b.a = 1.0
+    b.b = 2.0
+    b.c = 3.0
+    put_i64(c_bf(b, 0.5))
+    nl()
+    put_i64(c_xspill(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, v, 0.125))
+    nl()
+    r = c_v2ret(4.0)
+    put_i64(i64(r.x * 1000.0) + i64(r.y))
+    nl()
+    q = c_mret(11)
+    put_i64(q.a * 1000 + i64(q.b * 100.0))
+    nl()
+    t = c_f3ret()
+    put_i64(i64(f64(t.a) * 100.0) + i64(f64(t.b) * 10.0) + i64(f64(t.c)))
+    nl()
+    u = c_firet()
+    put_i64(i64(f64(u.a) * 1000.0) + i64(u.b) * 10 + i64(u.c))
+    nl()
+    w = c_bfret(2.0)
+    put_i64(i64(w.a * 100.0 + w.b * 10.0 + w.c))
+    nl()
+    put_i64(c_calls())
+    nl()
+    return 0

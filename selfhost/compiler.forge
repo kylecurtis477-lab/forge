@@ -16702,6 +16702,45 @@ def fs_pwords(t):
         return (ftsz[t] + 7) // 8
     return 1
 
+def fs_cls(t, off, w):
+# SysV classification bits of eightbyte w for a value of type t at byte offset off: 1 INTEGER, 2 SSE
+    lo = 8 * w
+    if off + ftsz[t] <= lo or off >= lo + 8:
+        return 0
+    if fsk[t] == 6:
+        return 2
+    c = 0
+    if fsk[t] == 3:
+        es = ftsz[ftel[t]]
+        if es <= 0:
+            return 1
+        k = 0
+        while k * es < ftsz[t]:
+            c = c | fs_cls(ftel[t], off + k * es, w)
+            k += 1
+        return c
+    if fsk[t] == 2:
+        i = ftf0[t]
+        while i < ftf0[t] + ftfn[t]:
+            c = c | fs_cls(fft[i], off + ffo[i], w)
+            i += 1
+        return c
+    return 1
+
+def fs_wsse(t, w):
+# is eightbyte w of struct t class SSE (only float fields in it); otherwise INTEGER
+    return fs_cls(t, 0, w) == 2
+
+def fs_nsse(t):
+# number of SSE eightbytes of a register-passed struct
+    n = 0
+    w = 0
+    while w < fs_pwords(t):
+        if fs_wsse(t, w):
+            n += 1
+        w += 1
+    return n
+
 def fs_smem(t):
 # SysV class MEMORY: a struct over 16 bytes travels on the stack (and is returned via a hidden pointer)
     return fsk[t] == 2 and ftsz[t] > 16
@@ -16728,7 +16767,17 @@ def fs_layout(f):
         elif fsk[t] == 6:
             fs_wd[w] = 100 + s
             s += 1
-        elif not fs_smem(t) and r + nw <= 6:
+        elif fsk[t] == 2 and not fs_smem(t) and r + nw - fs_nsse(t) <= 6 and x + fs_nsse(t) <= 8:
+        # struct <= 16 bytes: each eightbyte in the next xmm (SSE) or GPR (INTEGER)
+            while j < nw:
+                if fs_wsse(t, j):
+                    fs_wd[w + j] = 50 + x
+                    x += 1
+                else:
+                    fs_wd[w + j] = r
+                    r += 1
+                j += 1
+        elif fsk[t] != 2 and r + nw <= 6:
             while j < nw:
                 fs_wd[w + j] = r + j
                 j += 1
@@ -16763,14 +16812,36 @@ def fs_fcall(f, target):
         fs_xf(rt, 0, "%rax")
     if tmp >= 0:
         if not fs_smem(rt):
-            e(c3("mov %rax,", str(fsl_o[tmp]), "(%rbp)"))
-            if ftsz[rt] > 8:
-                e(c3("mov %rdx,", str(fsl_o[tmp] + 8), "(%rbp)"))
+            fs_retw(rt, fsl_o[tmp], 1)
         e(c3("lea ", str(fsl_o[tmp]), "(%rbp),%rax"))
         fs_sretv = 1
     elif fsk[rt] != 6:
     # SysV leaves upper bits of narrow return values unspecified
         fs_norm(fs_ety)
+    return 0
+
+FS_RREG = ["%rax", "%rdx"]
+def fs_retw(t, o, st):
+# struct <= 16 bytes returned in registers: INTEGER eightbytes in rax, rdx and SSE ones in xmm0, xmm1
+# (in order); st 1 stores them to o(%rbp) after a call, 0 loads them from o(%rbp) before ret
+    ri = 0
+    xi = 0
+    w = 0
+    while w < fs_pwords(t):
+        m = c3(str(o + 8 * w), "(%rbp)", "")
+        if fs_wsse(t, w):
+            if st:
+                e(c4("movq %xmm", str(xi), ",", m))
+            else:
+                e(c4("movq ", m, ",%xmm", str(xi)))
+            xi += 1
+        else:
+            if st:
+                e(c4("mov ", FS_RREG[ri], ",", m))
+            else:
+                e(c4("mov ", m, ",", FS_RREG[ri]))
+            ri += 1
+        w += 1
     return 0
 
 FS_AREG = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]
@@ -18950,8 +19021,6 @@ def fs_sig(ext):
     i = 0
     while i < n:
         nr += fs_pwords(fsp_t[fsf_p0[f] + i])
-        if fsk[fsp_t[fsf_p0[f] + i]] == 2 and fs_hasflt(fsp_t[fsf_p0[f] + i]):
-            fs_die("a struct with float fields cannot be passed by value yet (pass a pointer)")
         if fsk[fsp_t[fsf_p0[f] + i]] == 6 and fs_bop(fs_datt, 22, 0):
             fs_die("float parameters are not supported with @efiapi / @interrupt")
         if fsk[fsp_t[fsf_p0[f] + i]] == 2 and fs_bop(fs_datt, 22, 0):
@@ -18971,8 +19040,6 @@ def fs_sig(ext):
             fsf_ret[f] = fs_type()
             if fsk[fsf_ret[f]] == 1 and ftsg[fsf_ret[f]] >= 3:
                 fs_die("a function cannot return a borrow (ref[T]/mut[T])")
-            if fsk[fsf_ret[f]] == 2 and fs_hasflt(fsf_ret[f]):
-                fs_die("a struct with float fields cannot be returned by value yet")
             if fsk[fsf_ret[f]] == 6 and fs_bop(fs_datt, 22, 0):
                 fs_die("@efiapi / @interrupt functions cannot return a float")
             if fsk[fsf_ret[f]] == 2 and fs_bop(fs_datt, 22, 0):
@@ -19271,9 +19338,10 @@ def fs_function2(f):
     if fsk[fs_rty] == 6:
         fs_fx(fs_rty, "%rax", 0)
     if fsk[fs_rty] == 2:
-        e(c3("mov ", str(fsl_o[fs_rslot]), "(%rbp),%rax"))
-        if ftsz[fs_rty] > 8 and not fs_smem(fs_rty):
-            e(c3("mov ", str(fsl_o[fs_rslot] + 8), "(%rbp),%rdx"))
+        if fs_smem(fs_rty):
+            e(c3("mov ", str(fsl_o[fs_rslot]), "(%rbp),%rax"))
+        else:
+            fs_retw(fs_rty, fsl_o[fs_rslot], 0)
     guard = fs_sp and not str_eq(nm, "stack_smashed") and fs_hasbuf()
     if guard:
         ok = fs_newlab()
