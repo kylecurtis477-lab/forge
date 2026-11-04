@@ -128,6 +128,7 @@ Subsystem docs (design, formats, APIs, tests, limits):
 - docs/services.md: isolated driver services (kbdd, nvmed) and kexec driver state
 - docs/livepatch.md: live patching of kernel functions
 - docs/GRAMMAR.md, docs/SYSTEMS.md, docs/BUILD_PLAN.md: the language grammar (v1.2; effect annotations `def f() uses fs, ipc:` are reserved syntax that the checker rejects with E0106), systems features and the plan
+- docs/rfc/incremental.md: RFC (proposed, design only) for a query-based incremental compiler: module/function queries, dependency graph with early cutoff, content-addressed cache, LSP integration, byte-identical output (FIXPOINT, seals unaffected) and the test plan
 
 ## Limitations
 - Int-typed or inferred-int code raises `OverflowError` rather than promoting to a bigint, e.g. `fact(40)` called with a literal. `int(big)` raises. There are no bitwise operators on bigints.

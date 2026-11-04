@@ -241,7 +241,7 @@ Each driver gets its own boot test, and none of them writes to disks it does not
      2. [done] Seal v3: version field, algorithm ID, room for several signatures, a reserved proof slot; Ed25519 only; v2 seals still readable.
      3. [done] (11.2) Structs with float fields by value (SysV eightbyte classification; tests/fs/cabi_floatstruct).
      4. [done] Reserve effect syntax in GRAMMAR.md and the AST (names = the Phase 6 capability names); the checker rejects it for now. Syntax `def f(...) [-> T] uses fs, ipc:` (grammar v1.2, soft keyword); AST: optional `Effects` child of `Def`; pretty-printer round-trips it; the checker rejects it with E0106 (hosted and freestanding). Tests: tests/grammar/{valid/effects, invalid/effect_unknown, invalid/effect_trailing_comma}, tests/diag/effects_reserved{,_method,_freestanding}.
-     5. docs/rfc: query-based incremental compiler (no refactor).
+     5. [done] docs/rfc: query-based incremental compiler (no refactor). docs/rfc/incremental.md: module/function granularity, the query table, dependency graph with early cutoff and a per-function-summary worklist for the inference fixpoint, content-addressed cache keyed by compiler identity + flags, LSP integration, byte-identical output so FIXPOINT/SEED/seals are unaffected, test strategy and a 4-step rollout. Design only; no compiler code changed.
      6. One nondeterminism hook point (syscall results, timers/interrupts, scheduler choices, RNG), recording off by default.
      7. kexec handoff record = the single versioned process-state format.
      8. Interface spec for the kernel core (scheduler, IPC, capabilities).
