@@ -6219,11 +6219,9 @@ def load_mod(name, dir):
     if str_eq(name, "math") or std_mod(name):
         return 0
     ms = read_file(concat(concat(dir, name), ".forge"))
-    if ms:
-        ms = test_desugar(ms, 0)
-    mi: int = ms
-    if mi == 0:
+    if ms is None:
         return 0
+    ms = test_desugar(ms, 0)
     if nlm < 256:
         lmods[nlm] = name
         nlm += 1
@@ -14895,8 +14893,7 @@ def ast_main():
 # forgec in.forge out --emit=ast-json | --emit=pretty
     global ast_raw, lex_fname, main_sid
     src = read_file(argv(1))
-    srci: int = src
-    if srci == 0:
+    if src is None:
         diag_file_err(concat("cannot read input file ", argv(1)))
         exit(1)
     ast_raw = 1
@@ -15279,8 +15276,7 @@ def forge_main():
     if emit_mode:
         return ast_main()
     src = read_file(argv(1))
-    srci: int = src
-    if srci == 0:
+    if src is None:
         diag_file_err(concat("cannot read input file ", argv(1)))
         exit(1)
     src = test_desugar(src, test_mode)
@@ -19582,8 +19578,7 @@ def fs_include(src, dir, depth):
                 if char_at(f, 0) != 47:
                     f = concat(dir, f)
                 sub = read_file(f)
-                subi: int = sub
-                if subi == 0:
+                if sub is None:
                     diag_file_err(concat("cannot read include file ", f))
                     exit(1)
                 sl = len(f) - 1

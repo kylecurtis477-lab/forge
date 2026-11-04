@@ -38,6 +38,9 @@ def uhex(v):
 
 def main():
     d = read_file(argv(1))
+    if d is None:
+        eputs("krel: cannot read " + argv(1))
+        exit(1)
     shoff = rd(d, 0x28, 8)
     shentsize = rd(d, 0x3A, 2)
     shnum = rd(d, 0x3C, 2)

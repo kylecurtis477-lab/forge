@@ -1,0 +1,6 @@
+True True True
+missing: None
+True
+False 3 abc
+False 0 ''
+ok:3 none:/nonexistent/x

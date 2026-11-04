@@ -87,6 +87,8 @@ def main():
         size = int(argv(3))
     nsec = size * 1024 * 1024 // SEC
     espdata = read_file(argv(2))
+    if espdata is None:
+        die("cannot read " + argv(2))
     esp_secs = (len(espdata) + SEC - 1) // SEC
     first = 2048
     lba = first

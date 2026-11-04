@@ -206,7 +206,7 @@ def normlen(x0, y0):
 # ---------------- font tables ----------------
 def load_font(path):
     d = read_file(path)
-    if __tag(d) < 0 or len(d) < 12:  # read_file gives a non-object on failure
+    if d is None or len(d) < 12:
         die("cannot read " + path)
     DATA[0] = d
     n = u16(4)

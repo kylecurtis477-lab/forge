@@ -474,8 +474,7 @@ def run(args):
     __syscall(61, pid, st, 0)
     w: int = __ld(st, 0)
     e = read_file(ERRF[0])
-    ei: int = e
-    if ei == 0:
+    if e is None:
         e = ""
     return [(w >> 8) & 255, e]
 

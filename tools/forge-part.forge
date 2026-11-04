@@ -125,6 +125,8 @@ def hdr(h, hs, my, alt, el, ecrc):
 
 def create(disk, mib):
     d = read_file(disk)
+    if d is None:
+        die("cannot read " + disk)
     g = load(d)
     h = g[0]
     hs = g[1]
@@ -176,6 +178,8 @@ def create(disk, mib):
 
 def read(disk, name):
     d = read_file(disk)
+    if d is None:
+        die("cannot read " + disk)
     g = load(d)
     p = [q for q in parts(g[6], g[5]) if q[1] == FORGE]
     if len(p) != 1:

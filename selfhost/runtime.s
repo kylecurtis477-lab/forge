@@ -1002,7 +1002,7 @@ rt_write_file:
 1:  xor %eax, %eax
     ret
 rt_read_file:
-    # (path) -> string, or 0 on failure
+    # (path) -> string, or None on failure (open fails: missing, unreadable, directory read error)
     mov 8(%rsp), %rdi
     xor %esi, %esi
     mov $2, %eax
@@ -1048,7 +1048,7 @@ rt_read_file:
     syscall
     mov %r10, %rax
     ret
-9:  xor %eax, %eax
+9:  mov $4611686018427387906, %rax
     ret
 # ---- slow paths that preserve r8-r11 (expression temporaries) ----
 rtp_getidx:
