@@ -59,7 +59,7 @@ It has no GC, no libc, no syscall runtime, no bigints, and no prelude. The entry
   - LoadedImage → SimpleFileSystem reads `\EFI\Forge\kernel.elf` from its own volume. It then loads the PT_LOAD segments at a 2 MiB-congruent base below 1 GiB and finds the entry through the `FORGEKRN` header.
   - It picks GOP 1024×768 when offered, finds the ACPI 2.0 RSDP in the configuration table, and builds identity (0–4 GiB) plus −2 GiB tables.
   - It runs GetMemoryMap → ExitBootServices (retried when the map key is stale), converts the map into BootInfo, switches CR3 and jumps to `kentry64`.
-  - It is linked directly by `ld -m i386pep --subsystem 10`. `mkgpt.py` builds a GPT disk with an ESP plus placeholder Microsoft basic data and Linux partitions.
+  - It is linked directly by `ld -m i386pep --subsystem 10`. `mkgpt.forge` (Forge port of `mkgpt.py`, byte-identical) builds a GPT disk with an ESP plus placeholder Microsoft basic data and Linux partitions.
 - **Tests:** `tests/os/boot.py` boots each path headless, checks the serial markers, takes a QEMU monitor `screendump` after `KERNEL OK`, decodes every framebuffer text row against the font (KERNEL OK must be on screen, so console scrolling is checked), and then sends `q` on COM1 so the kernel exits. The three paths are BIOS+GRUB, OVMF+GRUB, and OVMF+forgex64.efi on GPT, all with `-smp 4` and a read-only virtio-blk copy of the GPT disk (its removable-media fallback loader removed so firmware never boots it).
 
 ## Compiler tooling (Phase 3)

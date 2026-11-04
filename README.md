@@ -153,3 +153,4 @@ Policy: every tool that can be written in Forge is written in Forge (one languag
 |---|---|---|---|
 | krel (kernel .krel table, KASLR reference) | `tools/krel.forge` | ported; tests/fld uses it; `tools/krel.py` kept as the reference for tests/krel | `tests/krel/run.sh` ([docs/tools-krel.md](docs/tools-krel.md)) |
 | forge-part (create / read the Forge FS GPT partition) | `tools/forge-part.forge` | ported; tests/os/forgefs.sh uses it; `tools/forge-part.py` kept as the reference for tests/forge-part | `tests/forge-part/run.sh` ([docs/tools-forge-part.md](docs/tools-forge-part.md)) |
+| mkgpt (GPT test disk: ESP + Windows/Linux placeholders) | `examples/efi/mkgpt.forge` | ported; examples/efi/build.sh uses it; `mkgpt.py` kept as the reference for tests/mkgpt | `tests/mkgpt/run.sh` ([docs/tools-mkgpt.md](docs/tools-mkgpt.md)) |

@@ -30,6 +30,7 @@ head -c 4194304 /dev/zero >$T/nogpt.img
 chk create-64-16 $T/d64.img create $T/a.img 16 --yes-add-forge-partition
 chk create-128-32 $T/d128.img create $T/a.img 32 --yes-add-forge-partition
 chk create-128-1 $T/d128.img create $T/a.img 1 --yes-add-forge-partition
+FORGE_GUID_SEED=18446744073709551615 chk seed-max $T/d128.img create $T/a.img 4 --yes-add-forge-partition
 chk no-gap $T/d40.img create $T/a.img 64 --yes-add-forge-partition
 chk needs-flag $T/d64.img create $T/a.img 16 --yes
 chk bad-header-crc $T/bad.img create $T/a.img 16 --yes-add-forge-partition

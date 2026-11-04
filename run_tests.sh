@@ -43,6 +43,7 @@ tests/fas/run.sh || fail=1
 tests/fld/run.sh || fail=1
 tests/krel/run.sh || fail=1
 tests/forge-part/run.sh || fail=1
+tests/mkgpt/run.sh || fail=1
 tests/pkg/run.sh || fail=1
 tests/lsp/run.sh || fail=1
 tests/testblocks/run.sh || fail=1

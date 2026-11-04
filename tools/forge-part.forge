@@ -61,6 +61,24 @@ def le(v, n):
 def put(s, o, b):
     return s[:o] + b + s[o + len(b):]
 
+# decimal FORGE_GUID_SEED as u64 little-endian (8 bytes), carried in 32-bit halves; out of range fails
+# like Python's struct.pack('<Q')
+def seed_le(s):
+    lo = 0
+    hi = 0
+    if len(s) == 0:
+        die("bad FORGE_GUID_SEED")
+    for i in range(len(s)):
+        dg = char_at(s, i) - 48
+        if dg < 0 or dg > 9:
+            die("bad FORGE_GUID_SEED")
+        lo = lo * 10 + dg
+        hi = hi * 10 + (lo >> 32)
+        lo = lo & 0xFFFFFFFF
+        if hi > 0xFFFFFFFF:
+            die("FORGE_GUID_SEED out of range")
+    return le(lo, 4) + le(hi, 4)
+
 def newguid(k):
     seed = os.getenv("FORGE_GUID_SEED")
     if seed is None:
@@ -70,7 +88,7 @@ def newguid(k):
         b = b[k:]
         __syscall(318, b, 16, 0)
         return b[:7] + chr((ord(b[7]) & 0x0F) | 0x40) + chr((ord(b[8]) & 0x3F) | 0x80) + b[9:]
-    return le(int(seed), 8) + le(k, 8)
+    return seed_le(seed) + le(k, 8)
 
 def load(d):
     h = d[SEC:2 * SEC]
