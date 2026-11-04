@@ -31,8 +31,10 @@ K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x9
 M32 = 0xFFFFFFFF
 HEX = "0123456789abcdef"
 
-def rotr(x, n):
-    return ((x >> n) | (x << (32 - n))) & M32
+def rotr(x: int, n: int) -> int:
+# typed: the 64-bit intermediate x << (32 - n) can land in the GC heap's address range
+# (0x200000000000...), where an untyped value would be taken for a heap object
+    return ((x >> n) | (x << (32 - n))) & 0xffffffff
 
 def sha256(s):
     b = []
