@@ -8,10 +8,17 @@ usage: forge-part.py create DISK SIZE_MIB --yes-add-forge-partition
 largest free gap, rewrites only the primary and backup GPT headers and entry arrays, and zeroes the
 first 4 KiB of the new partition (so the kernel will format it). It refuses without the flag, on a
 disk without a valid GPT, if a Forge partition already exists, or if no gap is large enough.
-No existing partition and no byte outside the GPT structures and the new partition is changed."""
-import sys, struct, zlib, uuid
+No existing partition and no byte outside the GPT structures and the new partition is changed.
+FORGE_GUID_SEED=N (testing only): the new partition's unique GUID is bytes_le = pack('<QQ', N, 0)
+instead of uuid4, so output is reproducible (tests/forge-part compares against tools/forge-part.forge)."""
+import os, sys, struct, zlib, uuid
 SEC = 512
 FORGE = uuid.UUID('D0C2E3A1-6B7F-4F0A-9E11-466F72676546')
+
+def newguid(k):
+    seed = os.environ.get('FORGE_GUID_SEED')
+    if seed is None: return uuid.uuid4()
+    return uuid.UUID(bytes_le=struct.pack('<QQ', int(seed), k))
 
 def die(m):
     print('forge-part: ' + m, file=sys.stderr); sys.exit(1)
@@ -56,7 +63,7 @@ def create(disk, mib):
         if not best: die('no free gap of %d MiB' % mib)
         s, e = best[0], best[0] + need - 1
         i = free[0]
-        ents[i * 128:(i + 1) * 128] = FORGE.bytes_le + uuid.uuid4().bytes_le + struct.pack('<QQQ', s, e, 0) + 'Forge FS'.encode('utf-16-le').ljust(72, b'\0')
+        ents[i * 128:(i + 1) * 128] = FORGE.bytes_le + newguid(0).bytes_le + struct.pack('<QQQ', s, e, 0) + 'Forge FS'.encode('utf-16-le').ljust(72, b'\0')
         ecrc = zlib.crc32(ents)
         f.seek(0, 2); nsec = f.tell() // SEC
         def hdr(my, alt, el):
