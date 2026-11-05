@@ -254,13 +254,39 @@ tlb_active: u64
 tlb_cr3: u64
 tlb_va: u64
 tlb_n: u64
-tlb_acks: u64
-tlb_pending: u64[8]
+tlb_gen: u64  # rendezvous round number: bumped by the initiator of every shootdown / stop-machine round
+tlb_req_gen: u64[8]  # per CPU: the round it has been asked to answer
+tlb_ack_gen: u64[8]  # per CPU: the last round it answered (pending while req != ack)
+tlb_in_poll: u64[8]  # per CPU: inside tlb_poll; a nested IPI only leaves the request for the outer poll
 tlb_ipis: u64
 tlb_rounds: u64
 tlb_park: u64
 stop_rounds: u64
 stop_parked: u64
+
+def tlb_post(nc: u64, me: u64) -> u64:
+# start a rendezvous round (tlb_lock held): every other online CPU is asked to answer round tlb_gen
+    g = atomic_load(addr(tlb_gen), acquire) + 1
+    atomic_store(addr(tlb_gen), g, seq_cst)
+    cnt: u64 = 0
+    c: u64 = 0
+    while c < nc:
+        if c != me:
+            atomic_store(addr(tlb_req_gen[c]), g, seq_cst)
+            cnt += 1
+        c += 1
+    return cnt
+
+def tlb_wait_acks(nc: u64, me: u64):
+# done when every CPU has answered exactly this round: a late or duplicate answer to an older round
+# cannot be counted toward this one, unlike the old shared ack counter
+    g = atomic_load(addr(tlb_gen), acquire)
+    c: u64 = 0
+    while c < nc:
+        if c != me:
+            while atomic_load(addr(tlb_ack_gen[c]), acquire) != g:
+                cpu_relax()
+        c += 1
 
 def stop_machine_begin() -> u64:
 # park every other online CPU in its IPI handler (or in the spin loop it is in) with interrupts off;
@@ -271,24 +297,16 @@ def stop_machine_begin() -> u64:
     if nc > 1:
         tlb_cr3 = 1  # matches no address space: parked CPUs flush nothing
         tlb_n = 0
-        atomic_store(addr(tlb_acks), 0, seq_cst)
         atomic_store(addr(tlb_park), stop_rounds + 1, seq_cst)
         me = lapic_cpu()
-        cnt: u64 = 0
-        c: u64 = 0
-        while c < nc:
-            if c != me:
-                atomic_store(addr(tlb_pending[c]), 1, seq_cst)
-                cnt += 1
-            c += 1
+        cnt = tlb_post(nc, me)
         atomic_store(addr(tlb_active), 1, seq_cst)
-        c = 0
+        c: u64 = 0
         while c < nc:
             if c != me:
                 lapic_ipi(cpu_to_apic[c], u32(VEC_TLB))
             c += 1
-        while atomic_load(addr(tlb_acks), acquire) < cnt:
-            cpu_relax()
+        tlb_wait_acks(nc, me)
         stop_parked = cnt
     stop_rounds += 1
     return f
@@ -320,26 +338,47 @@ def tlb_local(cr3: u64, va: u64, n: u64):
 
 tlb_halt: u64  # kexec: parked CPUs halt for good (the successor restarts them with INIT-SIPI)
 
+def tlb_answer(c: u64) -> u64:
+# answer this CPU's outstanding request, if any; returns the round answered (0: none)
+    r = atomic_load(addr(tlb_req_gen[c]), acquire)
+    if r == atomic_load(addr(tlb_ack_gen[c]), acquire):
+        return 0
+    tlb_local(tlb_cr3, tlb_va, tlb_n)
+    atomic_store(addr(tlb_ack_gen[c]), r, release)
+    return r
+
 @unsafe
 def tlb_poll():
-# safe with interrupts off: called from spin loops so a CPU that waits on a lock still answers
+# safe from any context: called from spin loops (often with interrupts on) and from the IPI handler.
+# Interrupts are held off for the whole poll so the CPU number cannot go stale: with IF=1 a timer tick
+# inside the poll could reschedule the thread onto another CPU, which then answered (and parked for)
+# the first CPU's request; the stray answer was counted against a later round, which finished early
+# and left the initiator waiting forever on a parked CPU (kx-fix6 / smx hangs). A nested entry on the
+# same CPU (an NMI-free path: only possible through the IPI handler) leaves the request to the outer
+# poll. Answers are per-CPU round numbers, so nothing can be counted twice or against the wrong round.
     if atomic_load(addr(tlb_active), acquire) == 0:
         return
+    f = irq_save()
     c = lapic_cpu()
-    if atomic_load(addr(tlb_pending[c]), acquire) != 0:
-        tlb_local(tlb_cr3, tlb_va, tlb_n)
-        atomic_store(addr(tlb_pending[c]), 0, seq_cst)
-        atomic_fetch_add(addr(tlb_acks), 1, acq_rel)
+    if tlb_in_poll[c] != 0:
+        irq_restore(f)
+        return
+    tlb_in_poll[c] = 1
+    if tlb_answer(c) != 0:
         g = atomic_load(addr(tlb_park), acquire)
         if g != 0:
         # stop-machine: stay parked (interrupts off) until the initiator ends round g, then serialise
         # so this CPU refetches any instruction bytes the initiator rewrote. Waiting on the round
-        # number (not on 0) means a CPU that misses the brief 0 is not trapped into the next round.
+        # number (not on 0) means a CPU that misses the brief 0 is not trapped into the next round;
+        # a request posted meanwhile is answered from inside the wait.
             while tlb_halt:
                 hlt()
             while atomic_load(addr(tlb_park), acquire) == g:
+                tlb_answer(c)
                 cpu_relax()
             cpuid4(0, 0)
+    tlb_in_poll[c] = 0
+    irq_restore(f)
 
 tlb_stray: u64  # shootdown IPIs taken with no shootdown in progress (stale, e.g. latched across kexec)
 
@@ -371,24 +410,16 @@ def tlb_shootdown(cr3: u64, va: u64, n: u64):
         tlb_cr3 = cr3
         tlb_va = va
         tlb_n = n
-        atomic_store(addr(tlb_acks), 0, seq_cst)
         me = lapic_cpu()
-        cnt: u64 = 0
-        c: u64 = 0
         nc = atomic_load(addr(ncpu_online), acquire)
-        while c < nc:
-            if c != me:
-                atomic_store(addr(tlb_pending[c]), 1, seq_cst)
-                cnt += 1
-            c += 1
+        cnt = tlb_post(nc, me)
         atomic_store(addr(tlb_active), 1, seq_cst)
-        c = 0
+        c: u64 = 0
         while c < nc:
             if c != me:
                 lapic_ipi(cpu_to_apic[c], u32(VEC_TLB))
             c += 1
-        while atomic_load(addr(tlb_acks), acquire) < cnt:
-            cpu_relax()
+        tlb_wait_acks(nc, me)
         atomic_store(addr(tlb_active), 0, seq_cst)
         tlb_ipis += cnt
         tlb_rounds += 1

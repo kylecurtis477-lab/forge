@@ -1322,6 +1322,46 @@ def lp_quiesce():
             yield_cpu()
         i += 1
 
+smx_lock: u64
+smx_stop: u64
+smx_spins: u64[8]
+
+def smx_hammer(i: u64):
+# contend one spinlock with interrupts on: the waiters sit in spin_lock's loop, which calls tlb_poll,
+# so a stop-machine IPI can nest inside a poll that already saw its request (kx-fix6 deadlock)
+    while atomic_load(addr(smx_stop), acquire) == 0:
+        spin_lock(addr(smx_lock))
+        smx_spins[i] += 1
+        k: u64 = 0
+        while k < 50:
+            cpu_relax()
+            k += 1
+        spin_unlock(addr(smx_lock))
+
+def stop_machine_stress():
+# regression: many stop-machine rounds against CPUs spinning on a lock with interrupts on
+    if ncpu_online < 2:
+        puts("stop_machine stress skipped (1 cpu)\n")
+        return
+    t0 = thread_spawn(u64(smx_hammer), 0)
+    t1 = thread_spawn(u64(smx_hammer), 1)
+    t2 = thread_spawn(u64(smx_hammer), 2)
+    sleep_ticks(2)
+    r: u64 = 0
+    while r < 3000:
+        f = stop_machine_begin()
+        stop_machine_end(f)
+        r += 1
+    atomic_store(addr(smx_stop), 1, release)
+    thread_reap(t0)
+    thread_reap(t1)
+    thread_reap(t2)
+    puts("stop_machine stress OK: ")
+    put_u64(r)
+    puts(" rounds against ")
+    put_u64(smx_spins[0] + smx_spins[1] + smx_spins[2])
+    puts(" contended lock passes\n")
+
 @unsafe
 def livepatch_test():
     f0 = frames_free
@@ -1785,6 +1825,7 @@ def after_overflow():
     module_test()
     drv_test()
     livepatch_test()
+    stop_machine_stress()
     if bi.handoff != 0:
         kexec_resume()
     else:
