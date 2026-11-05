@@ -21,7 +21,14 @@ def script():
     s += [["s", "run busybox expr 6 + 7"], ["s", "run busybox uname -s -m"], ["s", "run busybox wc -c /efi/forge/docs/big.bin"], ["s", "run busybox sha256sum /efi/forge/docs/big.bin"], ["s", "run busybox cat /efi/forge/bin/cat"]]
     s += [["s", "run busybox ls /efi/forge/bin"], ["s", "run busybox ls /efi/forge/docs"], ["s", "run busybox printf %d-%s 42 ok"], ["s", "run busybox pwd"], ["s", "run busybox sleep 1"], ["s", "run busybox sh -c exit${IFS}3"]]
     s += [["s", "run busybox sh -c exit${IFS}4</efi/forge/docs/big.bin"], ["s", "run busybox tail -n 2 /efi/forge/docs/hello.sh"], ["s", "run busybox sh /efi/forge/docs/hello.sh"], ["s", "run busybox grep -c echo /efi/forge/docs/hello.sh"]]
-    s += [["s", "capdeny"], ["s", "badptr"], ["s", "crash k 4"], ["k", "hello Swap OK"], ["s", "exit"], ["s", "hello x"], ["s", "bg 1 &"], ["s", "hello z &"], ["s", "kexec next"], ["k", "hello after kexec"], ["s", "wait"], ["s", "exit"]]
+    s += [["s", "capdeny"], ["s", "badptr"], ["s", "crash k 4"], ["k", "hello Swap OK"], ["s", "exit"], ["s", "hello x"], ["s", "bg 1 &"], ["s", "hello z &"], ["s", "kexec next"], ["k", "hello after kexec"], ["s", "wait"]]
+    # FORGE_BOOT_KEXEC=N: N handoffs in one boot, each next line sent the moment the new prompt appears
+    # (regression for the inv80 hang: kernel lines interleaved with the post-kexec prompt)
+    i: int = 1
+    while i < int(os.getenv("FORGE_BOOT_KEXEC", "1")):
+        s += [["s", "kexec next"], ["s", "hello serial " + str(i)], ["k", "hello keys"]]
+        i += 1
+    s += [["s", "exit"]]
     return s
 
 class H:

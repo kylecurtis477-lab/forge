@@ -1655,15 +1655,15 @@ def kexec_test():
     input_off()
     panic("kexec session ended without a handoff")
 
-def kexec_resume():
-    input_init()
-    t = kx_restore()
-    if u64(t) == 0:
-        panic("kexec: the handoff was not adopted")
+kxr_c0: u64
+kxr_n0: u64
+
+def kexec_input_resume():
+# called by kx_restore once the handoff is adopted, while the adopted threads are still parked
     if kxd_adopted == 0:
         panic("kexec: input service state not carried")
-    c0 = kb_commits
-    n0 = kb_committed
+    kxr_c0 = kb_commits
+    kxr_n0 = kb_committed
     s0 = kb_state
     v0 = kb_ver
     kbd_service_start_from(1)
@@ -1674,9 +1674,19 @@ def kexec_resume():
     puts(", ")
     put_u64(kxd_sent)
     puts(" uncommitted entries, ")
-    put_u64(c0)
+    put_u64(kxr_c0)
     puts(" commits so far\n")
+
+def kexec_resume():
+    input_init()
+    t = kx_restore()
+    if u64(t) == 0:
+        panic("kexec: the handoff was not adopted")
+    c0 = kxr_c0
+    n0 = kxr_n0
+    ktest_hooks = 1  # the shell may hand over again (tests/os/run.sh repeats kexec in one boot)
     code = proc_reap(t)
+    ktest_hooks = 0
     orph = proc_reap_orphans()
     kbd_service_stop()
     puts("kexec: input service in generation 1: ")
@@ -1700,7 +1710,7 @@ def kexec_resume():
     puts(", running ")
     puts(kernel_version())
     putc(10)
-    if code != 0 or kx_restored == 0 or kx_nproc < 3:
+    if code != 0 or kx_restored == 0 or kx_nproc < 1 or (kx_gen == 1 and kx_nproc < 3):
         panic("kexec handoff test failed")
     puts("kexec handoff OK\n")
 

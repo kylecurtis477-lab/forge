@@ -735,6 +735,9 @@ def kx_restore() -> nptr[Thread]:
     kxd_adopt(h)
     kx_release(hb, total, total)
     bi.handoff = 0
+    # restart the input service and print its report before any adopted thread is runnable: no input
+    # or kernel console line of the new generation can overtake the shell's first prompt (inv80 hang)
+    kexec_input_resume()
     i = 0
     while i < nproc:
         c = ptr[Proc](newp[i])

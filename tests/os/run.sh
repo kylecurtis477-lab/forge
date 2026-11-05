@@ -28,7 +28,9 @@ build/forgec tests/os/boot.forge $L/boot.s && build/fas -o $L/boot.o $L/boot.s &
 # deleted so firmware never boots from it); the kernel reads \EFI\Forge\init.elf from its ESP
 cp build/efi/disk.img $L/vdisk.img && mdel -i $L/vdisk.img@@1048576 ::/EFI/BOOT/BOOTX64.EFI
 VD="-drive file=$L/vdisk.img,format=raw,if=none,id=vd,readonly=on -device virtio-blk-pci,drive=vd"
-$B kernel-bios $L/bios.log 150 "multiboot2 (BIOS)|$K" "$FB" -- $Q $VD -boot d -cdrom build/kernel/forge.iso
+# FORGE_BOOT_KEXEC=3: this boot hands over 3 times (kernel -> next -> next -> next) with input at each prompt
+KXR=3
+FORGE_BOOT_KEXEC=$KXR $B kernel-bios $L/bios.log 200 "multiboot2 (BIOS)|$K|kexec: generation 3 kernel adopted" "$FB" -- $Q $VD -boot d -cdrom build/kernel/forge.iso
 # single CPU (-machine pc -smp 1): no APs, no IPIs; the kernel must still boot to KERNEL OK and kexec
 Q1=${Q/-smp 4/-smp 1}
 $B kernel-bios-smp1 $L/bios-smp1.log 200 "SMP: 1 cpus online|x2APIC: all cpus in x2APIC mode, IPIs sent via MSR 0x830: 0|preemptive SMP scheduler OK|ring 3 + syscall/sysret + ELF loader OK|processes + VFS + keyboard/serial input + sh OK|KERNEL OK|kexec handoff OK" "$FB" -- $Q1 -machine pc $VD -boot d -cdrom build/kernel/forge.iso
@@ -41,7 +43,7 @@ $B efi-loader-gpt $L/efi.log 360 "hello from PE32+|signature OK|, set mode |GOP 
 # kexec handoff: the boot disk the loader ran from (writable in QEMU) is byte-identical afterwards
 if [ "$(sha256sum < build/efi/disk.img)" = "$DH0" ]; then echo "PASS os/kexec-no-disk-write"; else echo "FAIL os/kexec-no-disk-write"; fi
 python3 -c "import sys; k=open(\"build/user/seal.key\",\"rb\").read(); p=open(\"build/user/seal.pub\",\"rb\").read(); imgs=[open(f,\"rb\").read() for f in (\"build/kernel/kernel.elf\",\"build/efi/disk.img\")]; sys.exit(0 if all(k not in i and p in i for i in imgs) else 1)" && echo "PASS os/seal-private-key-not-shipped" || echo "FAIL os/seal-private-key-not-shipped"
-# KASLR: every boot (3 first-generation kernels + 3 kexec'd ones) picks its own heap/stack bases
+# KASLR: every boot (3 first-generation kernels + 3 + KXR - 1 kexec'd ones) picks its own heap/stack bases
 NK=$(grep -ah '^KASLR: big heap at' $L/bios.log $L/uefi.log $L/efi.log | sort -u | wc -l)
 # image KASLR: each of the 6 kernels relocated itself to its own slide and unmapped the link-address alias;
 # the UEFI loader and kexec both checked the image carries its relocation table
@@ -49,8 +51,8 @@ NI=$(grep -ah '^KASLR: kernel image at .*link-address alias unmapped' $L/bios.lo
 NU=$(grep -ah 'unslid .text 0x.* -> unmapped' $L/bios.log $L/uefi.log $L/efi.log | wc -l)
 NL=$(grep -ah '^kernel relocatable: [1-9]' $L/efi.log | wc -l)
 NX=$(grep -ah '^kexec: new kernel relocatable, [1-9]' $L/bios.log $L/uefi.log $L/efi.log | wc -l)
-if [ "$NK" -ge 5 ] && [ "$NI" -ge 5 ] && [ "$NU" -eq 6 ] && [ "$NL" -eq 1 ] && [ "$NX" -eq 3 ]; then
-    echo "PASS os/kaslr ($NK heap/stack layouts, $NI image bases in 6 boots)"
+if [ "$NK" -ge 5 ] && [ "$NI" -ge 5 ] && [ "$NU" -eq $((5 + KXR)) ] && [ "$NL" -eq 1 ] && [ "$NX" -eq $((2 + KXR)) ]; then
+    echo "PASS os/kaslr ($NK heap/stack layouts, $NI image bases in $((5 + KXR)) boots)"
 else echo "FAIL os/kaslr (layouts $NK, image bases $NI, unslid unmapped $NU, loader $NL, kexec $NX)"; fi
 
 # Phase 8.7: hardware drivers on q35 (read-only disks, ARP only on restricted user netdevs)

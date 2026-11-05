@@ -233,6 +233,17 @@ def kbd_service_start_from(carried: u64):
 # carried = 1: journal, state word, version and counters were set from a kexec handoff (kxd_adopt)
 # diagnostics (carried only): pinpoint where a post-kexec boot stalls (disk read vs driver start)
     if carried != 0:
+    # from now on the interrupt handlers append to the carried journal, behind the carried entries,
+    # and the kernel decoder starts from the carried state word (same derivation as kbd_service_stop)
+        f = irq_save()
+        spin_lock(addr(rq_lock))
+        kbd_shift = kb_state & 5
+        if kbd_shift != 0:
+            kbd_shift = 1
+        kbd_e0 = (kb_state >> 1) & 1
+        kb_svc = 1
+        spin_unlock(addr(rq_lock))
+        irq_restore(f)
         puts("kexec: input service: reading kbdd\n")
     kb_img[1] = fs_read_file("EFI/Forge/bin/kbdd", addr(kb_sz[1]))
     if carried != 0:
