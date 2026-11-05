@@ -1,0 +1,436 @@
+# tests/os/boot.forge: Forge port of tests/os/boot.py (kept as the reference) — boot one QEMU configuration,
+# check serial markers and (optionally) OCR the framebuffer.
+# usage: boot NAME LOG TIMEOUT 'marker|marker|...' FBTEXT -- qemu args...
+# Same behaviour and PASS/FAIL/HANG/SLOW lines as boot.py; see its docstring. Differences: QEMU runs via
+# os.fork/os.execv with its serial console on two pipes, and the HMP monitor is a `-chardev pipe` (the FIFOs
+# MON.in / MON.out made with os.mkfifo, opened O_RDWR so neither side blocks) read with os.poll, instead of a
+# Unix socket per command. Built with `fld --base 0x100000000000` like the other hosted tools.
+import os
+import sys
+import time
+
+KEYS = {" ": "spc", "/": "slash", "-": "minus", ".": "dot", "\n": "ret"}
+
+def script():
+# after the n-th "sh$ " prompt, type line n: 'k' on the PS/2 keyboard (monitor sendkey), 's' on COM1;
+# a third element holds the line back until that text has appeared
+    s = [["k", "ls"], ["s", "cat /efi/forge/docs/Long File Name Notes.txt"], ["k", "forktest"], ["s", "hello a b"], ["k", "nosuch"], ["k", "ls /EFI/Forge"], ["s", "crash 40"]]
+    s += [["s", "sum /efi/forge/docs/big.bin"], ["s", "captest"], ["s", "chantest"], ["s", "run sbtest"], ["s", "run grtest &"], ["s", "grants"], ["s", "revoke grtest", "grtest: halfway"], ["s", "wait", "grtest: cut off"]]
+    s += [["s", "grants"], ["s", "audit"], ["s", "wxtest"], ["s", "unsealed"], ["s", "tampered"], ["s", "forged"], ["s", "linuxabi"], ["s", "lxtest"], ["s", "run lxtest"], ["s", "run lxthreads"], ["s", "run lxfs"], ["s", "run lxexec"]]
+    s += [["s", "run lxsig"], ["s", "run lxsig term"], ["s", "run busybox echo hello from busybox"], ["s", "run busybox basename /a/b/forge-bb"], ["s", "run busybox false"], ["s", "run busybox seq -s , 3 5"]]
+    s += [["s", "run busybox expr 6 + 7"], ["s", "run busybox uname -s -m"], ["s", "run busybox wc -c /efi/forge/docs/big.bin"], ["s", "run busybox sha256sum /efi/forge/docs/big.bin"], ["s", "run busybox cat /efi/forge/bin/cat"]]
+    s += [["s", "run busybox ls /efi/forge/bin"], ["s", "run busybox ls /efi/forge/docs"], ["s", "run busybox printf %d-%s 42 ok"], ["s", "run busybox pwd"], ["s", "run busybox sleep 1"], ["s", "run busybox sh -c exit${IFS}3"]]
+    s += [["s", "run busybox sh -c exit${IFS}4</efi/forge/docs/big.bin"], ["s", "run busybox tail -n 2 /efi/forge/docs/hello.sh"], ["s", "run busybox sh /efi/forge/docs/hello.sh"], ["s", "run busybox grep -c echo /efi/forge/docs/hello.sh"]]
+    s += [["s", "capdeny"], ["s", "badptr"], ["s", "crash k 4"], ["k", "hello Swap OK"], ["s", "exit"], ["s", "hello x"], ["s", "bg 1 &"], ["s", "hello z &"], ["s", "kexec next"], ["k", "hello after kexec"], ["s", "wait"], ["s", "exit"]]
+    return s
+
+class H:
+    def __init__(self):
+        self.root = ""
+        self.mon = ""
+        self.mfd = -1
+        self.shot = ""
+        self.log = ""
+        self.name = ""
+        self.tmo = 0.0
+        self.stall = 60.0
+        self.qargs = []
+
+def fix(x):
+# %.0f-style integer seconds
+    return str(int(x + 0.5))
+
+def nocount(s, sub) -> int:
+    c: int = 0
+    i: int = find(s, sub, 0)
+    while i >= 0:
+        c += 1
+        i = find(s, sub, i + len(sub))
+    return c
+
+def font(h):
+    src = read_file(os.path.join(h.root, "examples/kernel/font.fsi"))
+    a: int = find(src, "[", find(src, "=", 0))
+    b: int = rfind(src, "]")
+    out = []
+    for x in split(replace(src[a + 1:b], "\n", " "), ","):
+        if strip(x) != "":
+            out.append(int(strip(x)))
+    return out
+
+def read_ppm(path):
+    d = read_file(path)
+    toks = []
+    i: int = 0
+    while len(toks) < 4:
+        while d[i] == " " or d[i] == "\n" or d[i] == "\t" or d[i] == "\r":
+            i += 1
+        j: int = i
+        while not (d[j] == " " or d[j] == "\n" or d[j] == "\t" or d[j] == "\r"):
+            j += 1
+        toks.append(d[i:j])
+        i = j
+    return [int(toks[1]), int(toks[2]), d, i + 1]
+
+def decode_row(f, ppm, row: int):
+    w: int = ppm[0]
+    px = ppm[2]
+    base: int = ppm[3]
+    n: int = w // 8
+    out = ""
+    cx: int = 0
+    while cx < n:
+        bits = []
+        r: int = 0
+        while r < 16:
+            b: int = 0
+            x: int = 0
+            while x < 8:
+                o: int = base + ((row * 16 + r) * w + cx * 8 + x) * 3
+                b = b << 1
+                if ord(px[o]) + ord(px[o + 1]) + ord(px[o + 2]) > 384:
+                    b = b | 1
+                x += 1
+            bits.append(b)
+            r += 1
+        ch = "?"
+        g: int = 0
+        while g < 95:
+            if f[g * 16:(g + 1) * 16] == bits:
+                ch = chr(32 + g)
+                break
+            g += 1
+        out += ch
+        cx += 1
+    return out
+
+def strip_esc(t):
+# drop ANSI CSI sequences ESC [ digits letter, like re.sub(r'\x1b\[[0-9]*[A-Za-z]', '', t)
+    out = ""
+    i: int = 0
+    n: int = len(t)
+    while i < n:
+        if t[i] == chr(27) and i + 1 < n and t[i + 1] == "[":
+            j: int = i + 2
+            while j < n and isdigit(t[j]):
+                j += 1
+            if j < n and isalpha(t[j]):
+                i = j + 1
+                continue
+        out += t[i]
+        i += 1
+    return out
+
+def mon_drain(h):
+    got = ""
+    while len(os.poll([[h.mfd, 1]], 0)) > 0:
+        c = os.read(h.mfd, 65536)
+        if c == "":
+            break
+        got += c
+    return got
+
+def monitor(h, cmd, wait=1.0):
+    try:
+        mon_drain(h)
+        w = os.open(concat(h.mon, ".in"), 2048 | 1)
+        os.write(w, concat(cmd, "\n"))
+        os.close(w)
+        out = ""
+        t0 = time.time()
+        while time.time() - t0 < wait:
+            left: int = int((wait - (time.time() - t0)) * 1000) + 1
+            if len(os.poll([[h.mfd, 1]], left)) == 0:
+                break
+            out += os.read(h.mfd, 65536)
+        t = strip_esc(out)
+        keep = []
+        for l in splitlines(t):
+            if not startswith(l, "(qemu) i"):
+                keep.append(l)
+        return "\n".join(keep)
+    except Exception as ex:
+        return f"[monitor {__repr(cmd)} failed: {ex}]"
+
+def ishex(c) -> bool:
+    return isdigit(c) or (c >= "a" and c <= "f")
+
+def stack_dump(h, regs):
+# 64 words at each vCPU's rsp, parsed from 'info registers -a' (HMP has no $rsp); 'cpu N' selects the vCPU
+    out = []
+    ls = splitlines(regs)
+    k: int = 0
+    while k < len(ls):
+        l = ls[k]
+        if startswith(l, "CPU#") and len(l) > 4 and isdigit(l[4]):
+            j: int = 4
+            while j < len(l) and isdigit(l[j]):
+                j += 1
+            cpu = l[4:j]
+            rsp = ""
+            m: int = k + 1
+            while m < len(ls) and m <= k + 3 and rsp == "":
+                for key in ["RSP=", "ESP="]:
+                    p: int = find(ls[m], key, 0)
+                    if p >= 0 and rsp == "":
+                        e: int = p + 4
+                        while e < len(ls[m]) and ishex(ls[m][e]):
+                            e += 1
+                        if e - p - 4 >= 8:
+                            rsp = ls[m][p + 4:e]
+                m += 1
+            if rsp != "":
+                words = []
+                for wl in splitlines(monitor(h, f"cpu {cpu}\nx/64gx 0x{rsp}", 1.0)):
+                    c: int = find(wl, ": ", 0)
+                    if c > 0 and all_hex(wl[0:c]):
+                        words.append(wl)
+                out.append(concat(f"---- CPU#{cpu} stack at rsp=0x{rsp} ----\n", "\n".join(words)))
+        k += 1
+    if len(out) == 0:
+        return "[no RSP found in info registers -a]"
+    return "\n".join(out)
+
+def all_hex(s) -> bool:
+    for c in s:
+        if not ishex(c):
+            return False
+    return len(s) > 0
+
+def last_line(text):
+    last = ""
+    for l in splitlines(text):
+        if strip(l) != "":
+            last = l
+    return last[0:120]
+
+def type_keys(h, line):
+    w = os.open(concat(h.mon, ".in"), 2048 | 1)
+    for ch in concat(line, "\n"):
+        k = ""
+        if ch in KEYS:
+            k = KEYS[ch]
+        elif isupper(ch):
+            k = concat("shift-", lower(ch))
+        else:
+            k = ch
+        os.write(w, f"sendkey {k}\n")
+        time.sleep(0.03)
+    os.close(w)
+    time.sleep(0.2)
+
+def spawn(h, pin, pout):
+    pid = os.fork()
+    if pid == 0:
+        os.dup2(pin[0], 0)
+        os.dup2(pout[1], 1)
+        os.dup2(pout[1], 2)
+        args = ["env", "qemu-system-x86_64"] + h.qargs + ["-chardev", f"pipe,id=fmon,path={h.mon}", "-mon", "chardev=fmon,mode=readline"]
+        os.execv("/usr/bin/env", args)
+        os._exit(127)
+    return pid
+
+def boot(h, attempt):
+    for sfx in [".in", ".out"]:
+        if os.path.exists(concat(h.mon, sfx)):
+            os.remove(concat(h.mon, sfx))
+        os.mkfifo(concat(h.mon, sfx), 384)
+    h.mfd = os.open(concat(h.mon, ".out"), 2048 | 2)
+    pin = os.pipe()
+    pout = os.pipe()
+    pid = spawn(h, pin, pout)
+    os.close(pin[0])
+    os.close(pout[1])
+    sin = pin[1]
+    sout = pout[0]
+    os.set_blocking(sout, False)
+    sc = script()
+    buf = ""
+    t0 = time.time()
+    shot_ok = False
+    fbmsg = ""
+    sent: int = 0
+    tlast = t0
+    deadline = t0 + h.tmo
+    kind = ""
+    dump = ""
+    rc = None
+    eof = False
+    while rc is None:
+        w = os.waitpid(pid, 1)
+        if w[0] == pid:
+            rc = os.waitstatus_to_exitcode(w[1])
+            break
+        now = time.time()
+        if now >= deadline:
+            if now - tlast < h.stall and now < t0 + 2 * h.tmo:
+                deadline = min(now + h.stall, t0 + 2 * h.tmo)
+                kind = "slow"
+            else:
+                if now - tlast >= h.stall:
+                    kind = "hang"
+                    dump = f"{h.log}.hang{attempt}"
+                    load = split__1(read_file("/proc/loadavg"))[0]
+                    hdr = f"hang: no serial output for {fix(now - tlast)}s (stopped at +{fix(tlast - t0)}s), load {load}\nlast line: {last_line(buf)}\n\n"
+                    regs = monitor(h, "info registers -a", 2.0)
+                    write_file(dump, concat(concat(hdr, monitor(h, "info cpus")), concat(concat("\n", regs), concat("\n", stack_dump(h, regs)))))
+                break
+        if not eof and len(os.poll([[sout, 1]], 0)) > 0:
+            chunk = ""
+            try:
+                chunk = os.read(sout, 65536)
+            except OSError:
+                chunk = ""
+            if chunk != "":
+                buf += chunk
+                tlast = time.time()
+        if nocount(buf, "sh$ ") > sent and sent < len(sc) and (len(sc[sent]) < 3 or sc[sent][2] in buf):
+            how = sc[sent][0]
+            line = sc[sent][1]
+            sent += 1
+            try:
+                if how == "k":
+                    type_keys(h, line)
+                else:
+                    os.write(sin, concat(line, "\r"))
+            except Exception as ex:
+                buf += f"[harness: send failed: {ex}]"
+        if not shot_ok and "KERNEL OK" in buf:
+            shot_ok = True
+            if FBTEXT[0] != "":
+                fbmsg = screenshot(h)
+            try:
+                os.write(sin, "q")
+            except Exception:
+                pass
+        time.sleep(0.05)
+    if rc is None:
+        __syscall(62, pid, 9, 0)
+        w = os.waitpid(pid, 0)
+        rc = os.waitstatus_to_exitcode(w[1])
+    os.set_blocking(sout, True)
+    while len(os.poll([[sout, 1]], 0)) > 0:
+        c = os.read(sout, 65536)
+        if c == "":
+            break
+        buf += c
+    os.close(sout)
+    os.close(sin)
+    os.close(h.mfd)
+    for sfx in [".in", ".out"]:
+        if os.path.exists(concat(h.mon, sfx)):
+            os.remove(concat(h.mon, sfx))
+    el = time.time() - t0
+    why = ""
+    if kind == "hang":
+        why = f"HANG: killed after {fix(el)}s, no serial output after +{fix(tlast - t0)}s, last line \"{last_line(buf)}\", vCPU dump {dump}"
+    elif rc == -9:
+        why = f"SLOW: killed at the 2x limit ({fix(el)}s of {TMO[0]}s), output still arriving"
+    write_file(h.log, f"{buf}\n[fb] {fbmsg}\nrc={rc}\n[harness] {fix1(el)}s {why}\n")
+    if kind == "hang":
+        old = read_file(dump)
+        write_file(dump, concat(concat(old, "\n---- serial output of the hung boot ----\n"), buf))
+    res = ""
+    wy = ""
+    if why != "":
+        wy = concat("; ", why)
+    for m in split(MARKERS[0], "|"):
+        if m != "" and res == "" and not (m in buf):
+            res = f"FAIL os/{h.name} (missing: {m}, qemu rc={rc}; {fix(el)}s{wy})"
+    fbt = FBTEXT[0]
+    if res == "" and fbt != "":
+        parts = split(fbt, "^")
+        if not (f"=\"{parts[len(parts) - 1]}\"" in fbmsg):
+            res = f"FAIL os/{h.name} (framebuffer: {fbmsg})"
+    if res == "" and rc != 33:
+        res = f"FAIL os/{h.name} (qemu rc={rc}; {fix(el)}s{wy})"
+    if res == "":
+        slow = f"{fix(el)}s"
+        if el > h.tmo:
+            slow = f"SLOW {fix(el)}s > {TMO[0]}s timeout"
+        fbp = ""
+        if fbt != "":
+            fbp = f" [fb {fbmsg}]"
+        res = f"PASS os/{h.name}{fbp} [{slow}]"
+    return [res, kind, why]
+
+def fix1(x):
+    t: int = int(x * 10 + 0.5)
+    return f"{t // 10}.{t % 10}"
+
+def screenshot(h):
+    try:
+        if os.path.exists(h.shot):
+            os.remove(h.shot)
+        monitor(h, f"screendump {h.shot}", 0.5)
+        k: int = 0
+        while k < 50:
+            if os.path.exists(h.shot) and len(read_file(h.shot)) > 0:
+                break
+            time.sleep(0.1)
+            k += 1
+        time.sleep(0.3)
+        ppm = read_ppm(h.shot)
+        w: int = ppm[0]
+        hh: int = ppm[1]
+        f = font(h)
+        rows = []
+        r: int = 0
+        while r < hh // 16:
+            rows.append(rstrip(decode_row(f, ppm, r)))
+            r += 1
+        want = split(FBTEXT[0], "^")
+        last = want[len(want) - 1]
+        hit: int = -1
+        i: int = 0
+        while i < len(rows):
+            if last in rows[i] and (len(want) == 1 or (i > 0 and want[0] in rows[i - 1])):
+                hit = i
+            i += 1
+        if hit < 0:
+            return f"{w}x{hh} text not found, last row=\"{rows[len(rows) - 1]}\""
+        pre = ""
+        if len(want) > 1:
+            pre = f"{w}x{hh} row{hit - 1}=\"{rows[hit - 1]}\" "
+        return f"{pre}{w}x{hh} row{hit}=\"{rows[hit]}\""
+    except Exception as ex:
+        return f"screendump failed: {ex}"
+
+MARKERS = [""]
+FBTEXT = [""]
+TMO = [""]
+
+def main():
+    a = sys.argv
+    h = H()
+    h.name = a[1]
+    h.log = a[2]
+    TMO[0] = a[3]
+    h.tmo = float(a[3])
+    MARKERS[0] = a[4]
+    FBTEXT[0] = a[5]
+    k: int = 6
+    while a[k] != "--":
+        k += 1
+    h.qargs = a[k + 1:]
+    st = os.getenv("FORGE_BOOT_STALL", "60")
+    h.stall = float(st)
+    # argv[0] is ROOT/build/... (run.sh builds it to build/os/boot); the repo root is the cwd run.sh uses
+    h.root = os.getcwd()
+    h.mon = f"/tmp/forge-mon-{os.getpid()}"
+    ld = os.path.dirname(h.log)
+    if ld == "":
+        ld = "."
+    h.shot = os.path.join(ld, f"{h.name}.ppm")
+    r = boot(h, 1)
+    res = r[0]
+    if r[1] == "hang" and os.getenv("FORGE_BOOT_NO_RETRY", "") != "1":
+        r2 = boot(h, 2)
+        s2 = "FAIL"
+        if startswith(r2[0], "PASS"):
+            s2 = "PASS"
+        print(f"FLAKY os/{h.name}: first boot {r[2]}; informational retry {s2}")
+        res = concat(res, f" [retry {s2}; a HANG always fails, dump kept in {h.log}.hang1]")
+    print(res)
+
+main()
