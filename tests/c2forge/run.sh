@@ -7,10 +7,12 @@
 # Step 5: floats.c (float/double, conversions, casts, void *); union-error and float-mod-error are clean errors.
 # Step 6: pp.c (object-like #define/#undef, standard headers); fnmacro-error, if-error, header-error and
 # typedef-without-header are clean errors.
+# Step 7: lib.c, a first small real C library (zlib-style CRC-32 and Adler-32, the XTEA reference cipher),
+# translated and run against the gcc build, including the standard check values for "123456789".
 cd "$(dirname "$0")/../.." || exit 1
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
-PROGS="ints flow ptrs floats pp"
+PROGS="ints flow ptrs floats pp lib"
 build/forgec tools/c2forge.forge $T/c2.s && build/fas -o $T/c2.o $T/c2.s && build/fld --base 0x100000000000 -o $T/c2forge $T/c2.o || { echo "FAIL c2forge build"; exit 1; }
 $T/c2forge --tokens tests/c2forge/lex.c | cmp -s - tests/c2forge/lex.expected && echo "PASS c2forge lex" || { echo "FAIL c2forge lex"; fail=1; }
 printf 'int x = @;\n' > $T/bad.c
