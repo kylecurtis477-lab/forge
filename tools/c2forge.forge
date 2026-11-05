@@ -204,6 +204,9 @@ class Parser:
         self.vars = {}
         self.ret = "void"
         self.out = []
+        self.pre = []
+        self.loops = []
+        self.tmp = 0
 
     def peek(self, k=0):
         return self.toks[self.pos + k]
@@ -293,6 +296,21 @@ class Parser:
         if signed == "unsigned":
             return "u" + bits
         return "i" + bits
+
+    def new_tmp(self, kind):
+        self.tmp += 1
+        return "_" + kind + str(self.tmp)
+
+    def flush(self, ind):
+    # hoisted statements (ternaries, short-circuit operands that contain them) go before the user
+        for l in self.pre:
+            self.emit(ind + l[0], l[1])
+        self.pre = []
+
+    def take_pre(self, start):
+        r = self.pre[start:]
+        self.pre = self.pre[0:start]
+        return r
 
     # ---- expressions: each returns [code, type, isbool] ----
     def val(self, e):
@@ -447,12 +465,59 @@ class Parser:
         a = self.bin_expr(lvl + 1)
         while self.peek()[0] == "op" and self.peek()[1] in levels[lvl]:
             op = self.next()[1]
+            mark = len(self.pre)
             b = self.bin_expr(lvl + 1)
-            a = self.binop(op, a, b)
+            if (op == "&&" or op == "||") and len(self.pre) > mark:
+            # the right operand needs hoisted statements: keep the short circuit explicit
+                bp = self.take_pre(mark)
+                t = self.new_tmp("l")
+                self.pre.append([0, t + ": i32 = " + self.val([self.cond(a), "i32", True])])
+                if op == "&&":
+                    self.pre.append([0, "if " + t + " != 0:"])
+                else:
+                    self.pre.append([0, "if " + t + " == 0:"])
+                for l in bp:
+                    self.pre.append([l[0] + 1, l[1]])
+                self.pre.append([1, t + " = " + self.val([self.cond(b), "i32", True])])
+                a = ["(" + t + " != 0)", "i32", True]
+            else:
+                a = self.binop(op, a, b)
         return a
 
+    def ternary(self):
+        c = self.bin_expr(0)
+        if not self.is_op("?"):
+            return c
+        self.pos += 1
+        cc = self.cond(c)
+        mark = len(self.pre)
+        a = self.assign_expr()
+        ap = self.take_pre(mark)
+        self.expect(":")
+        b = self.ternary()
+        bp = self.take_pre(mark)
+        if a[1] == "void" or b[1] == "void":
+            self.err("void value")
+        r = common(self.vtype(a), self.vtype(b))
+        t = self.new_tmp("t")
+        self.pre.append([0, t + ": " + r + " = 0"])
+        self.pre.append([0, "if " + cc + ":"])
+        for l in ap:
+            self.pre.append([l[0] + 1, l[1]])
+        self.pre.append([1, t + " = " + self.conv(a, r)])
+        self.pre.append([0, "else:"])
+        for l in bp:
+            self.pre.append([l[0] + 1, l[1]])
+        self.pre.append([1, t + " = " + self.conv(b, r)])
+        return [t, r, False]
+
+    def vtype(self, e):
+        if e[2]:
+            return "i32"
+        return e[1]
+
     def assign_expr(self):
-        return self.bin_expr(0)
+        return self.ternary()
 
     def expr(self):
         e = self.assign_expr()
@@ -485,12 +550,14 @@ class Parser:
             return
         if self.starts_type():
             self.declaration(ind)
+            self.expect(";")
             return
         if self.is_kw("if"):
             self.pos += 1
             self.expect("(")
             c = self.cond(self.expr())
             self.expect(")")
+            self.flush(ind)
             self.emit(ind, "if " + c + ":")
             self.block_body(ind + 1)
             if self.is_kw("else"):
@@ -501,10 +568,89 @@ class Parser:
         if self.is_kw("while"):
             self.pos += 1
             self.expect("(")
-            c = self.cond(self.expr())
+            cpos = self.pos
+            self.loop_head(ind, cpos)
+            self.skip_expr()
             self.expect(")")
-            self.emit(ind, "while " + c + ":")
+            self.loops.append(["while"])
             self.block_body(ind + 1)
+            self.loops.pop()
+            return
+        if self.is_kw("do"):
+            self.pos += 1
+            self.emit(ind, "while True:")
+            # body first; the condition's position is found after it, so continue re-parses it later
+            self.loops.append(["do", -1])
+            body_start = self.pos
+            depth = self.skip_statement()
+            self.expect("while")
+            self.expect("(")
+            self.loops[len(self.loops) - 1][1] = self.pos
+            end = self.pos
+            self.pos = body_start
+            self.block_body(ind + 1)
+            self.loops.pop()
+            self.expect("while")
+            self.expect("(")
+            self.emit_break_unless(ind + 1, self.pos)
+            self.skip_expr()
+            self.expect(")")
+            self.expect(";")
+            return
+        if self.is_kw("for"):
+            self.pos += 1
+            self.expect("(")
+            if not self.is_op(";"):
+                if self.starts_type():
+                    self.declaration(ind)
+                else:
+                    self.expr_statement(ind)
+            self.expect(";")
+            cpos = -1
+            if not self.is_op(";"):
+                cpos = self.pos
+                self.skip_expr()
+            self.expect(";")
+            spos = -1
+            if not self.is_op(")"):
+                spos = self.pos
+                self.skip_expr()
+            self.expect(")")
+            if cpos < 0:
+                self.emit(ind, "while True:")
+            else:
+                save = self.pos
+                self.loop_head(ind, cpos)
+                self.pos = save
+            self.loops.append(["for", spos])
+            self.block_body(ind + 1)
+            self.loops.pop()
+            self.emit_step(ind + 1, spos)
+            return
+        if self.is_kw("switch"):
+            self.switch(ind)
+            return
+        if self.is_kw("break"):
+            self.pos += 1
+            self.expect(";")
+            if len(self.loops) == 0:
+                self.err("break outside a loop or switch")
+            self.emit(ind, "break")
+            return
+        if self.is_kw("continue"):
+            self.pos += 1
+            self.expect(";")
+            i = len(self.loops) - 1
+            while i >= 0 and self.loops[i][0] == "switch":
+                self.err("continue inside a switch is not supported yet")
+            if i < 0:
+                self.err("continue outside a loop")
+            l = self.loops[i]
+            if l[0] == "for":
+                self.emit_step(ind, l[1])
+            elif l[0] == "do":
+                self.emit_break_unless(ind, l[1])
+            self.emit(ind, "continue")
             return
         if self.is_kw("return"):
             self.pos += 1
@@ -518,10 +664,190 @@ class Parser:
             self.expect(";")
             if self.ret == "void":
                 self.err("return with a value in a void function")
+            self.flush(ind)
             self.emit(ind, "return " + self.conv(e, self.ret))
             return
+        if self.is_kw("case") or self.is_kw("default"):
+            self.err("case label outside a switch")
         self.expr_statement(ind)
         self.expect(";")
+
+    def loop_head(self, ind, cpos):
+    # `while cond:`, or `while True:` + hoisted statements + `if not cond: break` when cond needs them
+        save = self.pos
+        self.pos = cpos
+        c = self.cond(self.expr())
+        self.pos = save
+        if len(self.pre) == 0:
+            self.emit(ind, "while " + c + ":")
+            return
+        self.emit(ind, "while True:")
+        self.flush(ind + 1)
+        self.emit(ind + 1, "if not " + c + ":")
+        self.emit(ind + 2, "break")
+
+    def emit_break_unless(self, ind, cpos):
+        save = self.pos
+        self.pos = cpos
+        c = self.cond(self.expr())
+        self.pos = save
+        self.flush(ind)
+        self.emit(ind, "if not " + c + ":")
+        self.emit(ind + 1, "break")
+
+    def emit_step(self, ind, spos):
+        if spos < 0:
+            return
+        save = self.pos
+        self.pos = spos
+        self.expr_statement(ind)
+        while self.is_op(","):
+            self.pos += 1
+            self.expr_statement(ind)
+        self.pos = save
+
+    def skip_expr(self):
+    # skip to the ) or ; that ends an expression at depth 0
+        d = 0
+        while True:
+            t = self.peek()
+            if t[0] == "eof":
+                self.err("unexpected end of file")
+            if t[0] == "op" and (t[1] == "(" or t[1] == "["):
+                d += 1
+            elif t[0] == "op" and (t[1] == ")" or t[1] == "]"):
+                if d == 0:
+                    return
+                d -= 1
+            elif t[0] == "op" and t[1] == ";" and d == 0:
+                return
+            self.pos += 1
+
+    def skip_statement(self):
+    # skip one statement (used to find a do/while condition before translating the body)
+        t = self.peek()
+        if t[0] == "op" and t[1] == "{":
+            d = 0
+            while True:
+                t = self.next()
+                if t[0] == "eof":
+                    self.err("unterminated block")
+                if t[0] == "op" and t[1] == "{":
+                    d += 1
+                elif t[0] == "op" and t[1] == "}":
+                    d -= 1
+                    if d == 0:
+                        return 0
+        if t[0] == "kw" and (t[1] == "if" or t[1] == "while" or t[1] == "for" or t[1] == "switch"):
+            self.pos += 1
+            self.expect("(")
+            d = 0
+            while not (self.is_op(")") and d == 0):
+                if self.is_op("("):
+                    d += 1
+                elif self.is_op(")"):
+                    d -= 1
+                self.pos += 1
+            self.pos += 1
+            self.skip_statement()
+            if t[1] == "if" and self.is_kw("else"):
+                self.pos += 1
+                self.skip_statement()
+            return 0
+        if t[0] == "kw" and t[1] == "do":
+            self.pos += 1
+            self.skip_statement()
+            self.expect("while")
+            self.expect("(")
+            self.skip_expr()
+            self.expect(")")
+            self.expect(";")
+            return 0
+        d = 0
+        while not (self.is_op(";") and d == 0):
+            if self.peek()[0] == "eof":
+                self.err("unexpected end of file")
+            if self.is_op("(") or self.is_op("{"):
+                d += 1
+            elif self.is_op(")") or self.is_op("}"):
+                d -= 1
+            self.pos += 1
+        self.pos += 1
+        return 0
+
+    def switch(self, ind):
+    # switch -> a one-pass `while True:` (so break leaves it) holding one `if` per case group:
+    #   if _fN != 0 or (v == c1 or v == c2): _fN = 1; body      (fall-through via _fN)
+    # default matches when no case value does.
+        self.pos += 1
+        self.expect("(")
+        e = self.expr()
+        self.expect(")")
+        if e[1] == "void":
+            self.err("void value")
+        st = promote(self.vtype(e))
+        v = self.new_tmp("s")
+        f = self.new_tmp("f")
+        self.flush(ind)
+        self.emit(ind, v + ": " + st + " = " + self.conv(e, st))
+        self.emit(ind, f + ": i32 = 0")
+        self.emit(ind, "while True:")
+        self.expect("{")
+        self.loops.append(["switch"])
+        segs = []
+        allv = []
+        while not self.is_op("}"):
+            if self.peek()[0] == "eof":
+                self.err("unterminated switch")
+            if self.is_kw("case") or self.is_kw("default"):
+                labels = []
+                isdef = False
+                while self.is_kw("case") or self.is_kw("default"):
+                    if self.is_kw("default"):
+                        self.pos += 1
+                        isdef = True
+                    else:
+                        self.pos += 1
+                        mark = len(self.pre)
+                        c = self.ternary()
+                        if len(self.pre) > mark:
+                            self.err("case label must be a constant")
+                        labels.append(self.conv(c, st))
+                        allv.append(self.conv(c, st))
+                    self.expect(":")
+                segs.append([labels, isdef, len(self.out)])
+                continue
+            if len(segs) == 0:
+                self.err("statement before the first case label")
+            self.statement(ind + 2)
+        self.pos += 1
+        self.loops.pop()
+        # rebuild: insert the case headers in front of each segment's lines
+        body = self.out[segs[0][2]:]
+        self.out = self.out[0:segs[0][2]]
+        k = 0
+        while k < len(segs):
+            sg = segs[k]
+            end = len(body) + segs[0][2]
+            if k + 1 < len(segs):
+                end = segs[k + 1][2]
+            conds = []
+            for l in sg[0]:
+                conds.append(v + " == " + l)
+            if sg[1]:
+                if len(allv) == 0:
+                    conds.append("True")
+                else:
+                    ne = []
+                    for l in allv:
+                        ne.append(v + " != " + l)
+                    conds.append("(" + " and ".join(ne) + ")")
+            self.emit(ind + 1, "if " + f + " != 0 or " + " or ".join(conds) + ":")
+            self.emit(ind + 2, f + " = 1")
+            for l in body[sg[2] - segs[0][2]:end - segs[0][2]]:
+                self.out.append(l)
+            k += 1
+        self.emit(ind + 1, "break")
 
     def expr_statement(self, ind):
         t = self.peek()
@@ -546,6 +872,7 @@ class Parser:
                     self.assign_to(ind, t[1], op[0:len(op) - 1], e)
                 return
         e = self.expr()
+        self.flush(ind)
         self.emit(ind, e[0])
 
     def assign_to(self, ind, n, op, e):
@@ -555,6 +882,7 @@ class Parser:
         t = self.vars[n]
         if op != "":
             e = self.binop(op, [fname(n), t, False], e)
+        self.flush(ind)
         self.emit(ind, fname(n) + " = " + self.conv(e, t))
 
     def declaration(self, ind):
@@ -563,20 +891,26 @@ class Parser:
             self.err("void variable")
         while True:
             n = self.ident()
+            again = False
             if n in self.vars:
-                self.pos -= 1
-                self.err("redeclaration of " + n + " (block scoping is not supported yet)")
+                if self.vars[n] != bt:
+                    self.pos -= 1
+                    self.err("redeclaration of " + n + " with another type (block scoping is not supported yet)")
+                again = True
             init = "0"
             if self.is_op("="):
                 self.pos += 1
                 init = self.conv(self.assign_expr(), bt)
             self.vars[n] = bt
-            self.emit(ind, fname(n) + ": " + bt + " = " + init)
+            self.flush(ind)
+            if again:
+                self.emit(ind, fname(n) + " = " + init)
+            else:
+                self.emit(ind, fname(n) + ": " + bt + " = " + init)
             if self.is_op(","):
                 self.pos += 1
             else:
                 break
-        self.expect(";")
 
     # ---- top level ----
     def params(self):
