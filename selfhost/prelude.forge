@@ -2391,15 +2391,20 @@ def __ipow(a: int, b: int) -> int:
     return r
 
 def __powfits(a: int, b: int) -> int:
+# exact: |a|**b <= 2**62 - 1 (the small-int range; 2**62 and above must take the bigint path), checked one multiplication at a time (|a| >= 2 ends within 62 steps). The old
+# bit-length test (bits(|a|) * b <= 62) wrongly rejected 10**16..10**18, so float literals 1e16..1e22 (whose
+# Clinger fast path in __fparse uses __ipow(10, k)) and typed-int powers failed with "integer overflow".
     if a < 0:
         a = 0 - a
     if a <= 1:
         return 1
-    k: int = 0
-    while a > 0:
-        k += 1
-        a = a >> 1
-    return k * b <= 62
+    r: int = 1
+    while b > 0:
+        if r > 4611686018427387903 // a:
+            return 0
+        r = r * a
+        b -= 1
+    return 1
 
 def __msort(d, t, lo: int, hi: int):
     if hi - lo < 2:

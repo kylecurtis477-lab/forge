@@ -1,0 +1,12 @@
+# pow_fits: __powfits is exact. Its old bit-length test (bits(|a|) * b <= 62) rejected 10**16..10**18 although they
+# fit in an int, so typed-int powers and float literals 1e16..1e22 (Clinger fast path: __ipow(10, k)) raised
+# "integer overflow"; the freestanding compiler hit it while folding a literal such as 1e17 (c2forge step 5).
+def tpow(a: int, b: int) -> int:
+    return a ** b
+
+print(tpow(10, 16), tpow(10, 18), tpow(3, 39), tpow(2, 61), tpow(-10, 17), tpow(7, 22))
+print(1e16 == 10000000000000000.0, 1e17 == 100000000000000000.0, 1e20 / 1e19, 1.5e22 / 1e21)
+print(float("1e17") == 1e17, float("2.5e19") / 1e18, float("-4e22") / 1e21)
+print(tpow(3037000499, 2), tpow(1, 1000), tpow(-1, 1001), tpow(0, 5))
+# 2**62 and above are outside the small-int range: they must stay exact (bigint path), not wrap
+print(2 ** 62, 2 ** 62 + 2 ** 62, 2 ** 63 - 1, (-2) ** 62, 4 ** 31, 2 ** 62 - 1)
