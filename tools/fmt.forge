@@ -10,6 +10,7 @@
 #   4. an inline comment is preceded by exactly two spaces; comment text is unchanged.
 # Strings (including multi-line triple-quoted strings) are never changed.
 # usage: fmt [--check] files...   (--check: list files that would change, exit 1 if any)
+#        fmt --list | --help         (--help/-h: print usage, exit 0; unknown option or missing file: error, exit 2)
 
 import sys
 import os
@@ -276,8 +277,13 @@ def repo_files():
             keep.append(p)
     return keep
 
+USAGE = "usage: fmt [--check] FILE...   reformat FILEs in place (--check: report, exit 1 if any would change)\n       fmt --list                list the repo's *.forge/*.fsi files\n       fmt --help                show this help\n"
+
 def main():
     args = sys.argv[1:]
+    if len(args) > 0 and (args[0] == "--help" or args[0] == "-h"):
+        sys.stdout.write(USAGE)
+        return 0
     if len(args) > 0 and args[0] == "--list":
         for p in repo_files():
             print(p)
@@ -288,6 +294,12 @@ def main():
         if f == "--check":
             check = True
             continue
+        if f.startswith("-"):
+            sys.stderr.write("fmt: unknown option " + f + "\n" + USAGE)
+            return 2
+        if not os.path.isfile(f):
+            sys.stderr.write("fmt: no such file: " + f + "\n")
+            return 2
         src = read_file(f)
         new = fmt_text(src)
         if new != src:

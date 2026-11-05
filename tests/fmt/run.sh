@@ -1,5 +1,5 @@
 #!/bin/bash
-# forge fmt CI: golden rules, repo is fmt-clean, fmt is idempotent and AST-preserving
+# forge fmt CI: golden rules, --help / bad option / missing file are clean errors (no segfault), repo is fmt-clean, fmt is idempotent and AST-preserving
 # (ast-json identical incl. line numbers on a formatted copy of every source).
 cd "$(dirname "$0")/../.." || exit 1
 FMT=build/fmt; FC=build/forgec; T=$(mktemp -d); fail=0
@@ -21,4 +21,10 @@ for f in $FILES; do
   cmp -s $T/a2 $T/b2 || { echo "  astdiff $f"; bad=1; }
 done
 [ $bad = 0 ] && echo "PASS fmt-ast-preserving" || { echo "FAIL fmt-ast-preserving"; fail=1; }
+out=$($FMT --help); rc=$?
+[ $rc = 0 ] && echo "$out" | grep -q '^usage: fmt' && echo "PASS fmt-help" || { echo "FAIL fmt-help (rc=$rc)"; fail=1; }
+out=$($FMT --bogus 2>&1); rc=$?
+[ $rc = 2 ] && echo "$out" | grep -q '^fmt: unknown option --bogus' && echo "PASS fmt-bad-option" || { echo "FAIL fmt-bad-option (rc=$rc)"; fail=1; }
+out=$($FMT --check $T/missing.forge 2>&1); rc=$?
+[ $rc = 2 ] && [ "$out" = "fmt: no such file: $T/missing.forge" ] && echo "PASS fmt-missing-file" || { echo "FAIL fmt-missing-file (rc=$rc)"; fail=1; }
 rm -rf $T; exit $fail
