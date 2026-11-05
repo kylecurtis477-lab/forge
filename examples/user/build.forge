@@ -5,7 +5,8 @@
 # tree from /dev/urandom, never committed; the kernel embeds only seal.pub). cat also carries a second
 # signature (seal2.key). Then the seal v3/v2 and 6.3/6.4 negative images, the 11.1 Linux-ABI test programs
 # (EI_OSABI = 3 set before sealing) and, when the BusyBox source tarball is on the box, BusyBox via
-# tools/busybox/build.sh. The byte patches the script did with python3 one-liners are done here in Forge.
+# build/busybox-build (tools/busybox/build.forge; the caller builds it). The script's python3 byte patches
+# are done here in Forge.
 # usage: build/user-build [OUTDIR]  (default build/user). The binary lives in build/, so the repo is the
 # parent of its directory; it runs from examples/user like the shell script. Stops at the first failing
 # step with that step's exit code (sh -e). $FORGEC_FLAGS is passed to forgec for the programs.
@@ -122,7 +123,7 @@ def main():
     if bb == "":
         bb = "/workspace/bb"
     if os.path.isfile(bb + "/busybox-1.38.0.tar.bz2"):
-        step(["/bin/sh", "../../tools/busybox/build.sh", out + "/busybox.elf", k])
+        step(["../../build/busybox-build", out + "/busybox.elf", k])
     return 0
 
 exit(main())

@@ -12,6 +12,7 @@ T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
 cp -a build/user $T/orig
 ./forge examples/user/build.forge -o build/user-build >/dev/null || { echo "FAIL user-build build"; exit 1; }
+./forge tools/busybox/build.forge -o build/busybox-build >/dev/null || { echo "FAIL user-build busybox-build"; exit 1; }
 man() { (cd $1 && stat -c '%a %n' * && sha256sum *); }
 # chk name flags bbsrc nfiles
 chk() {

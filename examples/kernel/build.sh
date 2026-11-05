@@ -8,8 +8,9 @@ B=../../build/kernel; mkdir -p $B/iso/boot/grub
 klink() {
     ../../build/fld --format kernel -o $1.elf $1.o
 }
-# the user programs: examples/user/build.forge (examples/user/build.sh is kept as the reference;
-# tests/user-build checks they produce identical artifacts)
+# the user programs: examples/user/build.forge, BusyBox via build/busybox-build (tools/busybox/build.forge);
+# examples/user/build.sh and tools/busybox/build.sh are kept as the references (tests/user-build, tests/busybox-build)
+../../forge ../../tools/busybox/build.forge -o ../../build/busybox-build
 ../../forge ../user/build.forge -o ../../build/user-build
 ../../build/user-build
 # the test modules: examples/modules/build.forge (examples/modules/build.sh is kept as the reference;

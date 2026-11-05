@@ -54,6 +54,7 @@ tests/c2forge/run.sh || fail=1
 tests/forgeseal/run.sh || fail=1
 tests/modules-build/run.sh || fail=1
 tests/user-build/run.sh || fail=1
+tests/busybox-build/run.sh || fail=1
 tests/rtport/run.sh || fail=1
 tests/pecheck/run.sh || fail=1
 tests/memimg/run.sh || fail=1

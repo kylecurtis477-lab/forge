@@ -1,0 +1,156 @@
+# tools/busybox/build.forge: Forge port of tools/busybox/build.sh (kept as the reference;
+# tests/busybox-build/run.sh checks both give the same busybox.elf bytes, output and exit code).
+# Phase 11.1e: build BusyBox from verified source as a static musl Linux-ABI image, tag it EI_OSABI = 3 and
+# seal it --foreign. The tarballs in $BB_SRC (default /workspace/bb) are pinned by SHA-256 and checked against
+# the upstream signatures when $BB_SRC/gnupg exists; network is never used. GNU make and musl are built from
+# source into $BB_WORK (default $BB_SRC/work) when missing. The python3 one-liners of the script (tarfile
+# extraction, the EI_OSABI byte) are gone: extraction is tar -xjf, whose bzip2 is still the
+# tools/busybox/bzip2 shim (Python's bz2; a Forge bzip2 is a separate item), and the byte patch is Forge.
+# usage: build/busybox-build OUT.elf SEALKEY  (the binary lives in build/, so the repo is the parent of its
+# directory). Stops at the first failing step with that step's exit code (sh -e).
+import os
+import sys
+
+def step(args, cwd=None):
+    r = os.run(args, cwd)
+    os.write(1, r[1])
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+    return r[1]
+
+# a step whose stdout the script sent to /dev/null
+def quiet(args, cwd=None):
+    r = os.run(args, cwd)
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+
+# a step with both streams sent to /dev/null
+def silent(args, cwd=None):
+    r = os.run(args, cwd)
+    if r[0] != 0:
+        exit(r[0])
+
+# pin(name, sha256, sigext): the script's pin(); sha256sum reads the check line from a temp file
+# instead of a pipe (same messages)
+def pin(s, name, sha, ext):
+    f = s + "/" + name
+    if not os.path.isfile(f):
+        os.write(1, "busybox: " + f + " missing\n")
+        exit(2)
+    t = "/tmp/forge-bb-pin." + str(os.getpid())
+    write_file(t, sha + "  " + f + "\n")
+    r = os.run(["sha256sum", "-c", "--quiet", t])
+    os.remove(t)
+    os.write(1, r[1])
+    os.write(2, r[2].replace(t, "-"))
+    if r[0] != 0:
+        os.write(1, "busybox: " + name + " SHA-256 mismatch\n")
+        exit(3)
+    if os.path.isfile(f + "." + ext) and os.path.isdir(s + "/gnupg"):
+        st = os.run(["env", "GNUPGHOME=" + s + "/gnupg", "gpg", "--status-fd", "1", "--verify", f + "." + ext, f])[1]
+        if st.find("GOODSIG") >= 0:
+            pass
+        elif st.find("EXPKEYSIG") >= 0:
+            os.write(1, "busybox: " + name + ": good signature by a key that has since expired\n")
+        elif st.find("NO_PUBKEY") >= 0:
+            os.write(1, "busybox: " + name + ": signing key not on the box, SHA-256 pin only\n")
+        else:
+            os.write(1, "busybox: " + name + " signature bad\n")
+            exit(4)
+
+def has_make(path) -> bool:
+    for d in path.split(":"):
+        p = (d if d != "" else ".") + "/make"
+        if os.path.isfile(p) and __syscall(21, p, 1, 0) == 0:
+            return True
+    return False
+
+# tail -20: the last 20 lines of a file
+def tail20(p):
+    d = read_file(p)
+    if d is None:
+        return
+    body = d[:len(d) - 1] if d.endswith("\n") else d
+    ls = body.split("\n")
+    if len(ls) > 20:
+        ls = ls[len(ls) - 20:]
+    if d != "":
+        os.write(1, "\n".join(ls) + ("\n" if d.endswith("\n") else ""))
+
+def main():
+    if len(sys.argv) < 3:
+        os.write(2, "usage: busybox-build OUT.elf SEALKEY\n")
+        exit(2)
+    me = sys.argv[0]
+    bdir = os.path.dirname(me) if me.find("/") >= 0 else "."
+    r = os.run(["realpath", bdir + "/../tools/busybox"])
+    t = r[1].strip()
+    r = os.run(["realpath", "-m", sys.argv[1]])
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+    out = r[1].strip()
+    r = os.run(["realpath", sys.argv[2]])
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+    key = r[1].strip()
+    s = os.getenv("BB_SRC", "")
+    if s == "":
+        s = "/workspace/bb"
+    w = os.getenv("BB_WORK", "")
+    if w == "":
+        w = s + "/work"
+    if os.path.isdir(s + "/gnupg"):
+        args = ["env", "GNUPGHOME=" + s + "/gnupg", "gpg", "-q", "--import"]
+        for k in sorted(os.listdir(t + "/keys")):
+            if k.endswith(".asc"):
+                append(args, t + "/keys/" + k)
+        r = os.run(args)
+        os.write(1, r[1])
+    pin(s, "busybox-1.38.0.tar.bz2", "34f9ea6ff8636f2c9241153b9114eefa9e65674a45318ae1ef95bb5f31c53bb2", "sig")
+    pin(s, "musl-1.2.5.tar.gz", "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4", "asc")
+    step(["mkdir", "-p", w + "/bin"])
+    step(["cp", t + "/bzip2", w + "/bin/bzip2"])
+    step(["chmod", "+x", w + "/bin/bzip2"])
+    path = w + "/bin:" + os.getenv("PATH", "")
+    pe = "PATH=" + path
+    if not has_make(path):
+        pin(s, "make-4.4.1.tar.gz", "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3", "sig")
+        if __syscall(21, w + "/bin/make", 1, 0) != 0:
+            step(["rm", "-rf", w + "/make-4.4.1"])
+            step(["env", pe, "tar", "xzf", s + "/make-4.4.1.tar.gz"], w)
+            m = w + "/make-4.4.1"
+            quiet(["env", pe, "./configure", "-q", "--disable-nls", "--disable-dependency-tracking"], m)
+            quiet(["env", pe, "sh", "build.sh"], m)
+            step(["cp", "make", w + "/bin/"], m)
+    if __syscall(21, w + "/musl/bin/musl-gcc", 1, 0) != 0:
+        step(["rm", "-rf", w + "/musl-1.2.5"])
+        step(["env", pe, "tar", "xzf", s + "/musl-1.2.5.tar.gz"], w)
+        m = w + "/musl-1.2.5"
+        quiet(["env", pe, "./configure", "--prefix=" + w + "/musl", "--disable-shared"], m)
+        quiet(["env", pe, "make", "-j8"], m)
+        quiet(["env", pe, "make", "install"], m)
+    b = w + "/busybox-1.38.0"
+    step(["rm", "-rf", b])
+    step(["env", pe, "tar", "--no-same-owner", "-xjf", s + "/busybox-1.38.0.tar.bz2"], w)
+    step(["cp", t + "/busybox.config", ".config"], b)
+    silent(["env", pe, "make", "oldconfig"], b)
+    r = os.run(["env", pe, "make", "-j8", "CC=" + w + "/musl/bin/musl-gcc"], b, True)
+    write_file(b + "/build.log", r[1])
+    if r[0] != 0:
+        tail20(b + "/build.log")
+        exit(5)
+    d = read_file(b + "/busybox")
+    write_file(out, d[:7] + chr(3) + d[8:])
+    fs = t + "/../../build/forgeseal"
+    if __syscall(21, fs, 1, 0) != 0:
+        bb = t + "/../../build/"
+        step([bb + "forgec", t + "/../forgeseal.forge", fs + ".s"])
+        step([bb + "fas", "-o", fs + ".o", fs + ".s"])
+        step([bb + "fld", "--base", "0x100000000000", "-o", fs, fs + ".o"])
+    step([fs, "--foreign", out, key])
+
+main()
