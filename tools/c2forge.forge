@@ -2,7 +2,7 @@
 # usage: c2forge --tokens IN.c         dump the C token stream (one "line kind text" per token)
 #        c2forge IN.c OUT.forge        translate IN.c to freestanding (no runtime) @unsafe Forge
 # Lexer (step 1): identifiers, keywords, integer/float/char/string literals, all C operators (longest
-# match), comments; a preprocessor line is one "pp" token and is not expanded (step 2 skips them).
+# match), comments; a preprocessor line is one "pp" token (handled by preprocess, step 6).
 # Translator (step 2): function definitions and prototypes over the C integer types (char/short/int/long,
 # signed/unsigned, the <stdint.h> names and size_t), mapped to i8..u64 (char is signed, long is 64-bit);
 # locals, expressions with C precedence, integer promotions and the usual arithmetic conversions made
@@ -27,6 +27,12 @@
 # internally (no deref, no arithmetic) and converts implicitly to and from any object pointer, as in C; the
 # output spells it ptr[u8]. Not yet: unions (Forge has none; plan 11.4 does not cover them), string
 # literals as values, globals, hex floats.
+# Preprocessor subset (step 6): a pass over the tokens before parsing. Object-like #define NAME body and
+# #undef; uses expand recursively, a macro is not re-expanded inside its own expansion (as in C), and
+# expanded tokens carry the line of the use. #include <stdint.h> / <stddef.h> / <sys/types.h> / <limits.h>
+# make that header's typedef names types (size_t -> u64, uint32_t -> u32, ...) and define its limit macros
+# (INT_MAX, UINT32_MAX, SIZE_MAX, NULL, ...); a typedef name is not a type without its header, as in C.
+# Errors: function-like macros, #if/#ifdef and every other directive, quoted or unknown headers.
 
 KEYWORDS = ["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while"]
 
@@ -159,7 +165,78 @@ def lex(s):
     return toks
 
 # ---- types ----
-TYPEDEFS = {"int8_t": "i8", "uint8_t": "u8", "int16_t": "i16", "uint16_t": "u16", "int32_t": "i32", "uint32_t": "u32", "int64_t": "i64", "uint64_t": "u64", "size_t": "u64", "ssize_t": "i64", "intptr_t": "i64", "uintptr_t": "u64"}
+# ---- preprocessor subset (step 6) ----
+# Standard headers: the typedef names each one makes visible and the object-like macros it defines (as C
+# source text, lexed like a #define body). A typedef name is a type only after its header is included.
+HEADER_TYPES = {"stdint.h": {"int8_t": "i8", "uint8_t": "u8", "int16_t": "i16", "uint16_t": "u16", "int32_t": "i32", "uint32_t": "u32", "int64_t": "i64", "uint64_t": "u64", "intptr_t": "i64", "uintptr_t": "u64"}, "stddef.h": {"size_t": "u64", "ptrdiff_t": "i64"}, "sys/types.h": {"size_t": "u64", "ssize_t": "i64"}, "limits.h": {}}
+HEADER_MACROS = {"stdint.h": {"INT8_MIN": "(-127-1)", "INT8_MAX": "127", "UINT8_MAX": "255", "INT16_MIN": "(-32767-1)", "INT16_MAX": "32767", "UINT16_MAX": "65535", "INT32_MIN": "(-2147483647-1)", "INT32_MAX": "2147483647", "UINT32_MAX": "4294967295U", "INT64_MIN": "(-9223372036854775807L-1)", "INT64_MAX": "9223372036854775807L", "UINT64_MAX": "18446744073709551615UL", "SIZE_MAX": "18446744073709551615UL"}, "stddef.h": {"NULL": "((void *)0)"}, "sys/types.h": {}, "limits.h": {"CHAR_BIT": "8", "SCHAR_MIN": "(-128)", "SCHAR_MAX": "127", "UCHAR_MAX": "255", "CHAR_MIN": "(-128)", "CHAR_MAX": "127", "SHRT_MIN": "(-32768)", "SHRT_MAX": "32767", "USHRT_MAX": "65535", "INT_MIN": "(-2147483647-1)", "INT_MAX": "2147483647", "UINT_MAX": "4294967295U", "LONG_MIN": "(-9223372036854775807L-1)", "LONG_MAX": "9223372036854775807L", "ULONG_MAX": "18446744073709551615UL"}}
+
+def pp_error(line, msg):
+    print("c2forge: line " + str(line) + ": " + msg)
+    exit(1)
+
+# lex a macro body; tokens take the line of the directive
+def pp_body(text, line):
+    out = []
+    for t in lex(text):
+        if t[0] != "eof":
+            out.append([t[0], t[1], line])
+    return out
+
+# expand identifier token t (recursively; a macro is not re-expanded inside its own expansion, as in C)
+def pp_expand(t, macros, hide, line, out):
+    if t[0] == "id" and t[1] in macros and t[1] not in hide:
+        h = dict(hide)
+        h[t[1]] = True
+        for b in macros[t[1]]:
+            pp_expand(b, macros, h, line, out)
+    else:
+        out.append([t[0], t[1], line])
+
+# object-like #define / #undef, #include of the standard headers above; everything else is an error.
+# Fills tdefs with the typedef names of the included headers and returns the expanded token list.
+def preprocess(toks, tdefs):
+    macros = {}
+    out = []
+    for t in toks:
+        if t[0] != "pp":
+            pp_expand(t, macros, {}, t[2], out)
+            continue
+        line = t[2]
+        d = t[1][1:].strip()
+        w = d.split()
+        if len(w) == 0:
+            continue
+        if w[0] == "include":
+            arg = d[7:].strip()
+            if not (arg.startswith("<") and arg.endswith(">")):
+                pp_error(line, "#include " + arg + ": only standard headers (<...>) are supported")
+            h = arg[1:len(arg) - 1].strip()
+            if h not in HEADER_TYPES:
+                pp_error(line, "#include <" + h + ">: unsupported header (supported: <stdint.h> <stddef.h> <sys/types.h> <limits.h>)")
+            for k in HEADER_TYPES[h]:
+                tdefs[k] = HEADER_TYPES[h][k]
+            for k in HEADER_MACROS[h]:
+                macros[k] = pp_body(HEADER_MACROS[h][k], line)
+        elif w[0] == "define":
+            rest = d[6:].strip()
+            m = 0
+            while m < len(rest) and (rest[m].isalnum() or rest[m] == "_"):
+                m += 1
+            name = rest[0:m]
+            if m == 0 or rest[0].isdigit():
+                pp_error(line, "#define needs a macro name")
+            if m < len(rest) and rest[m] == "(":
+                pp_error(line, "function-like macro " + name + " is not supported (only object-like #define)")
+            macros[name] = pp_body(rest[m:], line)
+        elif w[0] == "undef":
+            if len(w) != 2:
+                pp_error(line, "#undef needs one macro name")
+            if w[1] in macros:
+                macros.pop(w[1])
+        else:
+            pp_error(line, "#" + w[0] + " is not supported (only #define, #undef, #include <standard header>)")
+    return out
 FORGE_RESERVED = ["and", "or", "not", "def", "in", "is", "pass", "None", "True", "False", "elif", "lambda", "class", "import", "from", "as", "with", "try", "except", "finally", "raise", "yield", "global", "nonlocal", "del", "assert", "print", "len", "ptr", "addr", "sizeof", "struct", "include", "extern", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64", "match", "case"]
 
 INTS = ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"]
@@ -328,6 +405,8 @@ class Parser:
         self.loops = []
         self.tmp = 0
         self.structs = {}
+        self.tdefs = {}
+        self.toks = preprocess(toks, self.tdefs)
 
     def peek(self, k=0):
         return self.toks[self.pos + k]
@@ -367,7 +446,7 @@ class Parser:
         t = self.peek()
         if t[0] == "kw":
             return t[1] in ["void", "char", "short", "int", "long", "signed", "unsigned", "const", "volatile", "static", "inline", "extern", "register", "struct", "float", "double", "union"]
-        return t[0] == "id" and t[1] in TYPEDEFS
+        return t[0] == "id" and t[1] in self.tdefs
 
     def type_at(self, k):
         save = self.pos
@@ -412,8 +491,8 @@ class Parser:
                     self.pos -= 1
                     self.err("unknown struct " + sn)
                 seen = True
-            elif t[0] == "id" and t[1] in TYPEDEFS and not seen:
-                named = TYPEDEFS[t[1]]
+            elif t[0] == "id" and t[1] in self.tdefs and not seen:
+                named = self.tdefs[t[1]]
                 seen = True
                 self.pos += 1
             else:
@@ -1401,9 +1480,6 @@ class Parser:
 
     def toplevel(self):
         while self.peek()[0] != "eof":
-            if self.peek()[0] == "pp":
-                self.pos += 1
-                continue
             if self.is_kw("struct") and self.peek(1)[0] == "id" and self.peek(2)[1] == "{":
                 self.struct_def()
                 continue

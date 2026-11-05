@@ -5,10 +5,12 @@
 # output must equal the gcc build of the same C (with shim.c providing put_i64/put_u64/nl via printf).
 # Step 4: ptrs.c (pointers, arrays, structs); ptr-int-error: `int *p = 5;` is rejected (no implicit int->pointer).
 # Step 5: floats.c (float/double, conversions, casts, void *); union-error and float-mod-error are clean errors.
+# Step 6: pp.c (object-like #define/#undef, standard headers); fnmacro-error, if-error, header-error and
+# typedef-without-header are clean errors.
 cd "$(dirname "$0")/../.." || exit 1
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
-PROGS="ints flow ptrs floats"
+PROGS="ints flow ptrs floats pp"
 build/forgec tools/c2forge.forge $T/c2.s && build/fas -o $T/c2.o $T/c2.s && build/fld --base 0x100000000000 -o $T/c2forge $T/c2.o || { echo "FAIL c2forge build"; exit 1; }
 $T/c2forge --tokens tests/c2forge/lex.c | cmp -s - tests/c2forge/lex.expected && echo "PASS c2forge lex" || { echo "FAIL c2forge lex"; fail=1; }
 printf 'int x = @;\n' > $T/bad.c
@@ -36,4 +38,16 @@ out=$($T/c2forge $T/un.c $T/un.forge); rc=$?
 printf 'int main(void) { double d = 1.0; int x = d %% 2; return 0; }\n' > $T/fm.c
 out=$($T/c2forge $T/fm.c $T/fm.forge); rc=$?
 [ $rc = 1 ] && [ "$out" = "c2forge: line 1: invalid float operands to % (at ';')" ] && echo "PASS c2forge float-mod-error" || { echo "FAIL c2forge float-mod-error (rc=$rc)"; fail=1; }
+printf '#define SQ(x) ((x) * (x))\nint main(void) { return 0; }\n' > $T/fn.c
+out=$($T/c2forge $T/fn.c $T/fn.forge); rc=$?
+[ $rc = 1 ] && [ "$out" = "c2forge: line 1: function-like macro SQ is not supported (only object-like #define)" ] && echo "PASS c2forge fnmacro-error" || { echo "FAIL c2forge fnmacro-error (rc=$rc)"; fail=1; }
+printf 'int x;\n#ifdef X\n#endif\n' > $T/if.c
+out=$($T/c2forge $T/if.c $T/if.forge); rc=$?
+[ $rc = 1 ] && [ "$out" = "c2forge: line 2: #ifdef is not supported (only #define, #undef, #include <standard header>)" ] && echo "PASS c2forge if-error" || { echo "FAIL c2forge if-error (rc=$rc)"; fail=1; }
+printf '#include <stdio.h>\n' > $T/hd.c
+out=$($T/c2forge $T/hd.c $T/hd.forge); rc=$?
+[ $rc = 1 ] && [ "$out" = "c2forge: line 1: #include <stdio.h>: unsupported header (supported: <stdint.h> <stddef.h> <sys/types.h> <limits.h>)" ] && echo "PASS c2forge header-error" || { echo "FAIL c2forge header-error (rc=$rc)"; fail=1; }
+printf 'uint32_t f(void) { return 1; }\n' > $T/td.c
+$T/c2forge $T/td.c $T/td.forge >/dev/null; rc=$?
+[ $rc = 1 ] && echo "PASS c2forge typedef-without-header" || { echo "FAIL c2forge typedef-without-header (rc=$rc)"; fail=1; }
 exit $fail
