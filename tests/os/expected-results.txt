@@ -1,0 +1,34 @@
+# tests/os/expected-results.txt: every result name tests/os/run.sh must report (PASS or FAIL) in one run.
+# run_tests.sh fails os/result-count if any is missing, so lost output can never look like a smaller passing run.
+os/kernel-wx
+os/kernel-bios
+os/kernel-bios-smp1
+os/kernel-uefi
+os/efi-loader-gpt
+os/kexec-no-disk-write
+os/seal-private-key-not-shipped
+os/kaslr
+os/drivers
+os/drivers-no-disk-write
+os/forgefs-no-partition-no-write
+os/forgefs-tool-needs-flag
+os/forgefs-tool-keeps-partitions
+os/forgefs-format-write
+os/forgefs-persists
+os/forgefs-outside-unchanged
+os/nvme-service-swap-restart-boot1
+os/nvme-service-swap-restart-boot2
+os/objstore-crash-recover
+os/objstore-system-rewind
+os/objstore-rewind-persists
+os/objfs-vfs-view
+os/objfs-persists
+os/objstore-key-wrap
+os/objstore-no-plaintext
+os/objstore-nonce-unique
+os/objstore-wrong-key-locked
+os/objstore-tamper-rejected
+os/forgefs-host-read
+dwarf/image-unchanged-by-g
+dwarf/line-table
+dwarf/gdb-schedule

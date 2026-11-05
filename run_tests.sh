@@ -39,6 +39,9 @@ tests/fmt/run.sh || fail=1
 # tests/fas and tests/fld check every OS artifact (user programs, modules, EFI loader, kernel); build them
 # first so a clean tree (e.g. straight from the seed) runs the same checks instead of skipping them
 { examples/kernel/build.sh && examples/efi/build.sh; } >/dev/null 2>&1 || { echo "FAIL os-artifacts-build (fas/fld artifact checks would be skipped)"; fail=1; }
+# the boot harness asm is one of the fas artifacts; build it here so every run checks the same file set
+# (before, build/os/boot.s existed only after an earlier OS run, so O2 and O0 counted 638 vs 639)
+mkdir -p build/os && build/forgec tests/os/boot.forge build/os/boot.s || { echo "FAIL os-boot-harness-asm"; fail=1; }
 tests/fas/run.sh || fail=1
 tests/fld/run.sh || fail=1
 tests/krel/run.sh || fail=1
@@ -78,7 +81,14 @@ build/forgec build/no_such_input.forge build/t_inc.s > build/t_inc.txt 2>&1; rc=
 [ $rc = 1 ] && grep -q "^error: cannot read input file" build/t_inc.txt && echo "PASS input-missing" || { echo "FAIL input-missing (rc=$rc)"; fail=1; }
 # tests/os: boot the Forge kernel (BIOS + UEFI via GRUB multiboot2) and the native EFI app in headless QEMU
 if [ -z "$SKIP_OS" ] && command -v qemu-system-x86_64 >/dev/null && command -v grub-mkrescue >/dev/null; then
-  r=$(tests/os/run.sh); echo "$r"; echo "$r" | grep -q "^FAIL" && fail=1
+  # capture through a regular file, not $(...): a child that sets O_NONBLOCK on the shared pipe made later
+  # writes fail with EAGAIN, silently dropping result lines (inv83: 14 os/dwarf results missing at O0)
+  tests/os/run.sh > build/os-results.txt 2>&1; r=$(cat build/os-results.txt); echo "$r"; echo "$r" | grep -q "^FAIL" && fail=1
+  miss=""
+  for n in $(grep -v '^#' tests/os/expected-results.txt); do
+    echo "$r" | grep -qE "^(PASS|FAIL) $n( |$)" || miss="$miss $n"
+  done
+  [ -z "$miss" ] && echo "PASS os/result-count ($(grep -vc '^#' tests/os/expected-results.txt) results reported)" || { echo "FAIL os/result-count (missing:$miss)"; fail=1; }
 else
   echo "SKIP tests/os (needs qemu-system-x86_64, grub-mkrescue, mtools, OVMF; or SKIP_OS set)"
 fi
