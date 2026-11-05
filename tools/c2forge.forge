@@ -1,10 +1,16 @@
 # c2forge: C-to-Forge translator (plan item 11.4), written in Forge.
-# usage: c2forge --tokens IN.c     dump the C token stream (one "line kind text" per token)
-# Step 1 of the translator: the C lexer. Covers identifiers, keywords, decimal/hex/octal integer
-# literals with u/l suffixes, float literals, char and string literals (with escapes kept verbatim),
-# all C operators and punctuators (longest match), // and /* */ comments. Preprocessor lines are
-# not expanded: a line starting with # becomes one "pp" token (later steps handle #include/#define).
-# Later steps add the parser and the @unsafe freestanding Forge emitter (see docs/BUILD_PLAN.md 11.4).
+# usage: c2forge --tokens IN.c         dump the C token stream (one "line kind text" per token)
+#        c2forge IN.c OUT.forge        translate IN.c to freestanding (no runtime) @unsafe Forge
+# Lexer (step 1): identifiers, keywords, integer/float/char/string literals, all C operators (longest
+# match), comments; a preprocessor line is one "pp" token and is not expanded (step 2 skips them).
+# Translator (step 2): function definitions and prototypes over the C integer types (char/short/int/long,
+# signed/unsigned, the <stdint.h> names and size_t), mapped to i8..u64 (char is signed, long is 64-bit);
+# locals, expressions with C precedence, integer promotions and the usual arithmetic conversions made
+# explicit as Forge casts, comparisons and && || ! as Forge bools (i32() where C uses the value), calls,
+# assignment / compound assignment / ++ / -- as statements, if/else, while, return. Every emitted function
+# is @unsafe (the plan's starting point: translated code is made safe over time). Prototypes are only
+# recorded (Forge needs no forward declarations); calls to functions that are only declared go to the
+# definitions in the included linux.fsi (put_i64, put_u64, nl). See docs/BUILD_PLAN.md 11.4.
 
 KEYWORDS = ["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while"]
 
@@ -136,12 +142,524 @@ def lex(s):
     toks.append(["eof", "", line])
     return toks
 
+# ---- types ----
+TYPEDEFS = {"int8_t": "i8", "uint8_t": "u8", "int16_t": "i16", "uint16_t": "u16", "int32_t": "i32", "uint32_t": "u32", "int64_t": "i64", "uint64_t": "u64", "size_t": "u64", "ssize_t": "i64", "intptr_t": "i64", "uintptr_t": "u64"}
+FORGE_RESERVED = ["and", "or", "not", "def", "in", "is", "pass", "None", "True", "False", "elif", "lambda", "class", "import", "from", "as", "with", "try", "except", "finally", "raise", "yield", "global", "nonlocal", "del", "assert", "print", "len", "ptr", "addr", "sizeof", "struct", "include", "extern", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64", "match", "case"]
+
+def tsize(t):
+    return int(t[1:]) // 8
+
+def tsigned(t):
+    return t[0] == "i"
+
+def promote(t):
+    if tsize(t) < 4:
+        return "i32"
+    return t
+
+def common(a, b):
+    a = promote(a)
+    b = promote(b)
+    if a == b:
+        return a
+    if tsigned(a) == tsigned(b):
+        if tsize(a) >= tsize(b):
+            return a
+        return b
+    u = a
+    s = b
+    if tsigned(a):
+        u = b
+        s = a
+    if tsize(u) >= tsize(s):
+        return u
+    return s
+
+DIGITS = {"0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "a": 10, "b": 11, "c": 12, "d": 13, "e": 14, "f": 15}
+
+def parse_base(s, base):
+# digits come from a dict so v stays a dynamic int (bigint-promoting, for u64 literals)
+    v = DIGITS["0"]
+    for c in s.lower():
+        d = -1
+        if c in DIGITS:
+            d = DIGITS[c]
+        if d < 0 or d >= base:
+            print("c2forge: bad digit in literal " + s)
+            exit(1)
+        v = v * base + d
+    return v
+
+def fname(n):
+    if n in FORGE_RESERVED:
+        return n + "_"
+    return n
+
+# ---- parser state: P = [toks, pos] ----
+class Parser:
+    def __init__(self, toks):
+        self.toks = toks
+        self.pos = 0
+        self.funcs = {}
+        self.vars = {}
+        self.ret = "void"
+        self.out = []
+
+    def peek(self, k=0):
+        return self.toks[self.pos + k]
+
+    def next(self):
+        t = self.toks[self.pos]
+        self.pos += 1
+        return t
+
+    def err(self, msg):
+        t = self.peek()
+        print("c2forge: line " + str(t[2]) + ": " + msg + " (at '" + t[1] + "')")
+        exit(1)
+
+    def is_op(self, s):
+        t = self.peek()
+        return t[0] == "op" and t[1] == s
+
+    def is_kw(self, s):
+        t = self.peek()
+        return t[0] == "kw" and t[1] == s
+
+    def expect(self, s):
+        t = self.peek()
+        if t[1] != s or (t[0] != "op" and t[0] != "kw"):
+            self.err("expected '" + s + "'")
+        self.pos += 1
+
+    def ident(self):
+        t = self.peek()
+        if t[0] != "id":
+            self.err("expected an identifier")
+        self.pos += 1
+        return t[1]
+
+    def starts_type(self):
+        t = self.peek()
+        if t[0] == "kw":
+            return t[1] in ["void", "char", "short", "int", "long", "signed", "unsigned", "const", "volatile", "static", "inline", "extern", "register"]
+        return t[0] == "id" and t[1] in TYPEDEFS
+
+    def base_type(self):
+    # returns a Forge type name, or "void"
+        signed = ""
+        size = ""
+        longs = 0
+        named = ""
+        seen = False
+        while True:
+            t = self.peek()
+            if t[0] == "kw" and t[1] in ["const", "volatile", "static", "inline", "extern", "register"]:
+                self.pos += 1
+            elif t[0] == "kw" and (t[1] == "signed" or t[1] == "unsigned"):
+                signed = t[1]
+                seen = True
+                self.pos += 1
+            elif t[0] == "kw" and t[1] == "long":
+                longs += 1
+                seen = True
+                self.pos += 1
+            elif t[0] == "kw" and t[1] in ["void", "char", "short", "int"]:
+                if size != "" and not (t[1] == "int" and (size == "short")):
+                    self.err("bad type")
+                if t[1] != "int" or size == "":
+                    size = t[1]
+                seen = True
+                self.pos += 1
+            elif t[0] == "id" and t[1] in TYPEDEFS and not seen:
+                named = TYPEDEFS[t[1]]
+                seen = True
+                self.pos += 1
+            else:
+                break
+        if not seen:
+            self.err("expected a type")
+        if named != "":
+            return named
+        if size == "void":
+            return "void"
+        bits = "32"
+        if size == "char":
+            bits = "8"
+        elif size == "short":
+            bits = "16"
+        elif longs > 0:
+            bits = "64"
+        if signed == "unsigned":
+            return "u" + bits
+        return "i" + bits
+
+    # ---- expressions: each returns [code, type, isbool] ----
+    def val(self, e):
+    # e as an integer value of its type
+        if e[2]:
+            return "i32(" + e[0] + ")"
+        return e[0]
+
+    def cond(self, e):
+        if e[2]:
+            return e[0]
+        return "(" + e[0] + " != 0)"
+
+    def conv(self, e, t):
+        if e[2]:
+            return t + "(" + e[0] + ")"
+        if e[1] == t:
+            return e[0]
+        return t + "(" + e[0] + ")"
+
+    def primary(self):
+        t = self.next()
+        if t[0] == "int":
+            return self.int_lit(t[1])
+        if t[0] == "char":
+            return [str(self.char_val(t[1])), "i32", False]
+        if t[0] == "id":
+            n = t[1]
+            if self.is_op("("):
+                return self.call(n)
+            if n not in self.vars:
+                self.pos -= 1
+                self.err("unknown variable")
+            return [fname(n), self.vars[n], False]
+        if t[0] == "op" and t[1] == "(":
+            e = self.expr()
+            self.expect(")")
+            return e
+        self.pos -= 1
+        self.err("expected an expression")
+
+    def char_val(self, s):
+        b = s[1:len(s) - 1]
+        if b[0] != "\\":
+            return ord(b[0])
+        c = b[1]
+        esc = {"n": 10, "t": 9, "r": 13, "0": 0, "\\": 92, "'": 39, "\"": 34, "a": 7, "b": 8, "f": 12, "v": 11}
+        if c == "x":
+            return parse_base(b[2:], 16)
+        if c >= "0" and c <= "7":
+            return parse_base(b[1:], 8)
+        return esc[c]
+
+    def int_lit(self, s):
+        low = s.lower()
+        uns = "u" in low
+        lng = "l" in low
+        while len(low) > 0 and (low[len(low) - 1] == "u" or low[len(low) - 1] == "l"):
+            low = low[0:len(low) - 1]
+        dec = True
+        if low.startswith("0x"):
+            v = parse_base(low[2:], 16)
+            dec = False
+        elif len(low) > 1 and low[0] == "0":
+            v = parse_base(low[1:], 8)
+            dec = False
+        else:
+            v = parse_base(low, 10)
+        t = "i32"
+        if uns:
+            t = "u32"
+            if lng or v >= 4294967296:
+                t = "u64"
+        elif lng:
+            t = "i64"
+            if not dec and v >= 9223372036854775808:
+                t = "u64"
+        elif v < 2147483648:
+            t = "i32"
+        elif not dec and v < 4294967296:
+            t = "u32"
+        elif v < 9223372036854775808:
+            t = "i64"
+        else:
+            t = "u64"
+        return [str(v), t, False]
+
+    def call(self, n):
+        self.expect("(")
+        if n not in self.funcs:
+            self.pos -= 1
+            self.err("call to an undeclared function " + n)
+        f = self.funcs[n]
+        args = []
+        if not self.is_op(")"):
+            while True:
+                e = self.assign_expr()
+                if len(args) >= len(f[1]):
+                    self.err("too many arguments to " + n)
+                args.append(self.conv(e, f[1][len(args)]))
+                if self.is_op(","):
+                    self.pos += 1
+                else:
+                    break
+        self.expect(")")
+        if len(args) != len(f[1]):
+            self.err("wrong number of arguments to " + n)
+        return [fname(n) + "(" + ", ".join(args) + ")", f[0], False]
+
+    def unary(self):
+        t = self.peek()
+        if t[0] == "op" and t[1] in ["-", "+", "~", "!"]:
+            self.pos += 1
+            e = self.unary()
+            if t[1] == "!":
+                return ["(not " + self.cond(e) + ")", "i32", True]
+            if e[1] == "void":
+                self.err("void value")
+            r = promote(e[1])
+            if t[1] == "+":
+                return [self.conv(e, r), r, False]
+            return ["(" + t[1] + self.conv(e, r) + ")", r, False]
+        if t[0] == "op" and (t[1] == "++" or t[1] == "--"):
+            self.err("++/-- inside an expression is not supported yet")
+        e = self.primary()
+        if self.is_op("++") or self.is_op("--"):
+            self.err("++/-- inside an expression is not supported yet")
+        return e
+
+    def binop(self, op, a, b):
+        if a[1] == "void" or b[1] == "void":
+            self.err("void value")
+        if op == "&&" or op == "||":
+            w = "and"
+            if op == "||":
+                w = "or"
+            return ["(" + self.cond(a) + " " + w + " " + self.cond(b) + ")", "i32", True]
+        if op == "<<" or op == ">>":
+            r = promote(a[1])
+            return ["(" + self.conv(a, r) + " " + op + " " + self.conv(b, r) + ")", r, False]
+        r = common(a[1], b[1])
+        code = "(" + self.conv(a, r) + " " + op + " " + self.conv(b, r) + ")"
+        if op in ["<", ">", "<=", ">=", "==", "!="]:
+            return [code, "i32", True]
+        return [code, r, False]
+
+    def bin_expr(self, lvl):
+    # C precedence levels, loosest first
+        levels = [["||"], ["&&"], ["|"], ["^"], ["&"], ["==", "!="], ["<", ">", "<=", ">="], ["<<", ">>"], ["+", "-"], ["*", "/", "%"]]
+        if lvl == len(levels):
+            return self.unary()
+        a = self.bin_expr(lvl + 1)
+        while self.peek()[0] == "op" and self.peek()[1] in levels[lvl]:
+            op = self.next()[1]
+            b = self.bin_expr(lvl + 1)
+            a = self.binop(op, a, b)
+        return a
+
+    def assign_expr(self):
+        return self.bin_expr(0)
+
+    def expr(self):
+        e = self.assign_expr()
+        if self.is_op(","):
+            self.err("the comma operator is not supported")
+        return e
+
+    # ---- statements ----
+    def emit(self, ind, s):
+        self.out.append("    " * ind + s)
+
+    def block_body(self, ind):
+    # a statement used as a body: emit at ind, ensure non-empty
+        n = len(self.out)
+        self.statement(ind)
+        if len(self.out) == n:
+            self.emit(ind, "pass")
+
+    def statement(self, ind):
+        if self.is_op("{"):
+            self.pos += 1
+            while not self.is_op("}"):
+                if self.peek()[0] == "eof":
+                    self.err("unterminated block")
+                self.statement(ind)
+            self.pos += 1
+            return
+        if self.is_op(";"):
+            self.pos += 1
+            return
+        if self.starts_type():
+            self.declaration(ind)
+            return
+        if self.is_kw("if"):
+            self.pos += 1
+            self.expect("(")
+            c = self.cond(self.expr())
+            self.expect(")")
+            self.emit(ind, "if " + c + ":")
+            self.block_body(ind + 1)
+            if self.is_kw("else"):
+                self.pos += 1
+                self.emit(ind, "else:")
+                self.block_body(ind + 1)
+            return
+        if self.is_kw("while"):
+            self.pos += 1
+            self.expect("(")
+            c = self.cond(self.expr())
+            self.expect(")")
+            self.emit(ind, "while " + c + ":")
+            self.block_body(ind + 1)
+            return
+        if self.is_kw("return"):
+            self.pos += 1
+            if self.is_op(";"):
+                self.pos += 1
+                if self.ret != "void":
+                    self.err("return without a value")
+                self.emit(ind, "return")
+                return
+            e = self.expr()
+            self.expect(";")
+            if self.ret == "void":
+                self.err("return with a value in a void function")
+            self.emit(ind, "return " + self.conv(e, self.ret))
+            return
+        self.expr_statement(ind)
+        self.expect(";")
+
+    def expr_statement(self, ind):
+        t = self.peek()
+        t1 = self.peek(1)
+        if t[0] == "op" and (t[1] == "++" or t[1] == "--"):
+            self.pos += 1
+            n = self.ident()
+            self.assign_to(ind, n, t[1][0], ["1", "i32", False])
+            return
+        if t[0] == "id" and t1[0] == "op":
+            op = t1[1]
+            if op == "++" or op == "--":
+                self.pos += 2
+                self.assign_to(ind, t[1], op[0], ["1", "i32", False])
+                return
+            if op in ["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="]:
+                self.pos += 2
+                e = self.assign_expr()
+                if op == "=":
+                    self.assign_to(ind, t[1], "", e)
+                else:
+                    self.assign_to(ind, t[1], op[0:len(op) - 1], e)
+                return
+        e = self.expr()
+        self.emit(ind, e[0])
+
+    def assign_to(self, ind, n, op, e):
+        if n not in self.vars:
+            self.pos -= 1
+            self.err("unknown variable " + n)
+        t = self.vars[n]
+        if op != "":
+            e = self.binop(op, [fname(n), t, False], e)
+        self.emit(ind, fname(n) + " = " + self.conv(e, t))
+
+    def declaration(self, ind):
+        bt = self.base_type()
+        if bt == "void":
+            self.err("void variable")
+        while True:
+            n = self.ident()
+            if n in self.vars:
+                self.pos -= 1
+                self.err("redeclaration of " + n + " (block scoping is not supported yet)")
+            init = "0"
+            if self.is_op("="):
+                self.pos += 1
+                init = self.conv(self.assign_expr(), bt)
+            self.vars[n] = bt
+            self.emit(ind, fname(n) + ": " + bt + " = " + init)
+            if self.is_op(","):
+                self.pos += 1
+            else:
+                break
+        self.expect(";")
+
+    # ---- top level ----
+    def params(self):
+        ps = []
+        self.expect("(")
+        if self.is_kw("void") and self.peek(1)[1] == ")":
+            self.pos += 1
+        elif not self.is_op(")"):
+            while True:
+                t = self.base_type()
+                n = ""
+                if self.peek()[0] == "id":
+                    n = self.ident()
+                ps.append([n, t])
+                if self.is_op(","):
+                    self.pos += 1
+                else:
+                    break
+        self.expect(")")
+        return ps
+
+    def toplevel(self):
+        while self.peek()[0] != "eof":
+            if self.peek()[0] == "pp":
+                self.pos += 1
+                continue
+            rt = self.base_type()
+            n = self.ident()
+            if not self.is_op("("):
+                self.err("global variables are not supported yet")
+            ps = self.params()
+            pts = []
+            for p in ps:
+                pts.append(p[1])
+            if n in self.funcs and (self.funcs[n][0] != rt or self.funcs[n][1] != pts):
+                self.err("conflicting declaration of " + n)
+            self.funcs[n] = [rt, pts]
+            if self.is_op(";"):
+                self.pos += 1
+                continue
+            self.function(n, rt, ps)
+
+    def function(self, n, rt, ps):
+        self.vars = {}
+        self.ret = rt
+        sig = []
+        for p in ps:
+            if p[0] == "":
+                self.err("unnamed parameter in a definition")
+            self.vars[p[0]] = p[1]
+            sig.append(fname(p[0]) + ": " + p[1])
+        self.emit(0, "")
+        self.emit(0, "@unsafe")
+        if n == "main":
+            if rt != "i32" or len(ps) != 0:
+                self.err("main must be int main(void)")
+            self.ret = "i64"
+            self.emit(0, "def main() -> i64:")
+        elif rt == "void":
+            self.emit(0, "def " + fname(n) + "(" + ", ".join(sig) + "):")
+        else:
+            self.emit(0, "def " + fname(n) + "(" + ", ".join(sig) + ") -> " + rt + ":")
+        self.expect("{")
+        self.pos -= 1
+        self.block_body(1)
+
+def translate(src, name):
+    p = Parser(lex(src))
+    p.emit(0, "# forge: " + "no-runtime")
+    p.emit(0, "# translated from " + name + " by c2forge (tools/c2forge.forge)")
+    p.emit(0, "include \"linux.fsi\"")
+    p.toplevel()
+    return "\n".join(p.out) + "\n"
+
 def main():
     if argc() == 3 and argv(1) == "--tokens":
         for t in lex(read_file(argv(2))):
             print(str(t[2]) + " " + t[0] + " " + t[1])
         return
-    print("usage: c2forge --tokens IN.c")
+    if argc() == 3:
+        write_file(argv(2), translate(read_file(argv(1)), argv(1)))
+        return
+    print("usage: c2forge --tokens IN.c | c2forge IN.c OUT.forge")
     exit(2)
 
 main()
