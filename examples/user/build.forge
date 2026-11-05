@@ -1,0 +1,128 @@
+# examples/user/build.forge: Forge port of examples/user/build.sh (kept as the reference;
+# tests/user-build/run.sh checks both produce byte-identical artifacts, the same output and exit code).
+# Builds the Forge user programs as static ELF64 executables (ring 3, loaded by the kernel's ELF loader)
+# and seals them with tools/forgeseal.forge under build/user/seal.key (an Ed25519 seed made once per build
+# tree from /dev/urandom, never committed; the kernel embeds only seal.pub). cat also carries a second
+# signature (seal2.key). Then the seal v3/v2 and 6.3/6.4 negative images, the 11.1 Linux-ABI test programs
+# (EI_OSABI = 3 set before sealing) and, when the BusyBox source tarball is on the box, BusyBox via
+# tools/busybox/build.sh. The byte patches the script did with python3 one-liners are done here in Forge.
+# usage: build/user-build [OUTDIR]  (default build/user). The binary lives in build/, so the repo is the
+# parent of its directory; it runs from examples/user like the shell script. Stops at the first failing
+# step with that step's exit code (sh -e). $FORGEC_FLAGS is passed to forgec for the programs.
+import os
+import sys
+
+def step(args):
+    r = os.run(args)
+    os.write(1, r[1])
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+    return r[1]
+
+# a step whose stdout the script sent to /dev/null
+def quiet(args):
+    r = os.run(args)
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+
+def need(p):
+    d = read_file(p)
+    if d is None:
+        os.write(2, "cp: cannot stat '" + p + "': No such file or directory\n")
+        exit(1)
+    return d
+
+# cp(1) without -p: same bytes; an executable source (access X_OK) gives mode 0755 like cp under umask 022
+def cp_file(a, b):
+    write_file(b, need(a))
+    if __syscall(21, a, 1, 0) == 0:
+        os.chmod(b, 493)
+
+# the script's python3 one-liners: copy a to b with byte off XORed with x, or set to v
+def patch(a, b, off: int, x: int, v: int):
+    d = need(a)
+    if off < 0:
+        off = len(d) + off
+    c: int = v if v >= 0 else ord(d[off]) ^ x
+    write_file(b, d[:off] + chr(c) + d[off + 1:])
+
+def keygen(p):
+    d = read_file(p)
+    if d is not None and len(d) > 0:
+        return
+    fd: int = os.open("/dev/urandom", 0)
+    k = ""
+    while len(k) < 32:
+        k += os.read(fd, 32 - len(k))
+    os.close(fd)
+    write_file(p, k)
+
+def main():
+    here = os.getcwd()
+    out = ""
+    if len(sys.argv) > 1:
+        out = sys.argv[1]
+        if not out.startswith("/"):
+            out = here + "/" + out
+    me = sys.argv[0]
+    root = os.path.dirname(me) + "/.." if me.find("/") >= 0 else ".."
+    os.chdir(root + "/examples/user")
+    if out == "":
+        out = "../../build/user"
+    if not os.path.isdir(out):
+        os.mkdir(out)
+    flags = []
+    for f in os.getenv("FORGEC_FLAGS", "").split():
+        flags.append(f)
+    s = "../../build/forgeseal"
+    step(["../../build/forgec", "../../tools/forgeseal.forge", s + ".s"])
+    step(["../../build/fas", "-o", s + ".o", s + ".s"])
+    step(["../../build/fld", "--base", "0x100000000000", "-o", s, s + ".o"])
+    k = out + "/seal.key"
+    keygen(k)
+    keygen(out + "/seal2.key")
+    r = os.run([s, "--pub", k])
+    write_file(out + "/seal.pub", r[1])
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+    bl = "../../tests/unsafe/baseline.txt"
+    for p in ["hello", "fault", "sh", "cat", "forktest", "blkd", "crash", "sum", "bg", "captest", "chantest",
+              "sbtest", "grtest", "wxtest", "capdeny", "badptr", "kbdd", "kbdd2", "nvmed", "nvmed2"]:
+        b = out + "/" + p
+        step(["../../build/forgec", p + ".forge", b + ".s"] + flags)
+        step(["../../build/fas", "-o", b + ".o", b + ".s"])
+        step(["../../build/fld", "-o", b + ".elf", b + ".o"])
+        cp_file(b + ".elf", b + ".raw")
+        x = ["--extra-key", out + "/seal2.key"] if p == "cat" else []
+        quiet([s] + x + [p + ".forge", b + ".elf", k, bl])
+    # seal v3 checks: hello in the old v2 format (still accepted), an unknown algorithm ID, a filled proof slot
+    for neg in [["hellov2", "--v2"], ["algbad", "--alg-id", "2"], ["proofset", "--proof-byte"]]:
+        cp_file(out + "/hello.raw", out + "/" + neg[0] + ".elf")
+        quiet([s] + neg[1:] + ["hello.forge", out + "/" + neg[0] + ".elf", k, bl])
+    # 6.3 negatives: unsealed, one code byte flipped after sealing, a manifest claiming every capability
+    cp_file(out + "/hello.raw", out + "/unsealed.elf")
+    patch(out + "/hello.elf", out + "/tampered.elf", 0x1010, 1, -1)
+    patch(out + "/hello.elf", out + "/forged.elf", 0 - 384 + 32, 0, 0x7f)
+    # 6.4: hello re-tagged as a Linux ABI binary (EI_OSABI = 3) and properly sealed: still refused
+    patch(out + "/hello.raw", out + "/linuxabi.elf", 7, 0, 3)
+    quiet([s, "hello.forge", out + "/linuxabi.elf", k, bl])
+    # 11.1: raw-syscall Linux programs, tagged EI_OSABI = 3 before sealing so the seal covers the tag
+    for p in ["lxtest", "lxthreads", "lxfs", "lxexec", "lxsig"]:
+        b = out + "/" + p
+        step(["../../build/forgec", p + ".forge", b + ".s"] + flags)
+        step(["../../build/fas", "-o", b + ".o", b + ".s"])
+        step(["../../build/fld", "-o", b + ".raw", b + ".o"])
+        patch(b + ".raw", b + ".elf", 7, 0, 3)
+        quiet([s, p + ".forge", b + ".elf", k, bl])
+    # 11.1e: BusyBox from verified source, only when the source tarballs are on the box
+    bb = os.getenv("BB_SRC", "")
+    if bb == "":
+        bb = "/workspace/bb"
+    if os.path.isfile(bb + "/busybox-1.38.0.tar.bz2"):
+        step(["/bin/sh", "../../tools/busybox/build.sh", out + "/busybox.elf", k])
+    return 0
+
+exit(main())
