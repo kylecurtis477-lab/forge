@@ -1,0 +1,147 @@
+# c2forge: C-to-Forge translator (plan item 11.4), written in Forge.
+# usage: c2forge --tokens IN.c     dump the C token stream (one "line kind text" per token)
+# Step 1 of the translator: the C lexer. Covers identifiers, keywords, decimal/hex/octal integer
+# literals with u/l suffixes, float literals, char and string literals (with escapes kept verbatim),
+# all C operators and punctuators (longest match), // and /* */ comments. Preprocessor lines are
+# not expanded: a line starting with # becomes one "pp" token (later steps handle #include/#define).
+# Later steps add the parser and the @unsafe freestanding Forge emitter (see docs/BUILD_PLAN.md 11.4).
+
+KEYWORDS = ["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while"]
+
+PUNCT3 = ["<<=", ">>=", "..."]
+PUNCT2 = ["->", "++", "--", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="]
+PUNCT1 = "+-*/%<>=!&|^~?:;,.()[]{}"
+
+def is_digit(c):
+    return c >= "0" and c <= "9"
+
+def is_ident(c):
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_" or is_digit(c)
+
+def is_hex(c):
+    return is_digit(c) or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")
+
+def lex_error(line, msg):
+    print("c2forge: line " + str(line) + ": " + msg)
+    exit(1)
+
+def lex(s):
+    toks = []
+    i = 0
+    n = len(s)
+    line = 1
+    bol = True
+    while i < n:
+        c = s[i]
+        if c == "\n":
+            line += 1
+            bol = True
+            i += 1
+            continue
+        if c == " " or c == "\t" or c == "\r":
+            i += 1
+            continue
+        if c == "#" and bol:
+            j = i
+            pl = line
+            while j < n and s[j] != "\n":
+                if s[j] == "\\" and j + 1 < n and s[j + 1] == "\n":
+                    line += 1
+                    j += 1
+                j += 1
+            toks.append(["pp", " ".join(s[i:j].replace("\\\n", " ").split()), pl])
+            i = j
+            continue
+        bol = False
+        if c == "/" and i + 1 < n and s[i + 1] == "/":
+            while i < n and s[i] != "\n":
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and s[i + 1] == "*":
+            j = s.find("*/", i + 2)
+            if j < 0:
+                lex_error(line, "unterminated comment")
+            line += s[i:j].count("\n")
+            i = j + 2
+            continue
+        if is_ident(c) and not is_digit(c):
+            j = i
+            while j < n and is_ident(s[j]):
+                j += 1
+            w = s[i:j]
+            if w in KEYWORDS:
+                toks.append(["kw", w, line])
+            else:
+                toks.append(["id", w, line])
+            i = j
+            continue
+        if is_digit(c) or (c == "." and i + 1 < n and is_digit(s[i + 1])):
+            j = i
+            kind = "int"
+            if c == "0" and i + 1 < n and (s[i + 1] == "x" or s[i + 1] == "X"):
+                j = i + 2
+                while j < n and is_hex(s[j]):
+                    j += 1
+            else:
+                while j < n and is_digit(s[j]):
+                    j += 1
+                if j < n and s[j] == ".":
+                    kind = "float"
+                    j += 1
+                    while j < n and is_digit(s[j]):
+                        j += 1
+                if j < n and (s[j] == "e" or s[j] == "E"):
+                    kind = "float"
+                    j += 1
+                    if j < n and (s[j] == "+" or s[j] == "-"):
+                        j += 1
+                    while j < n and is_digit(s[j]):
+                        j += 1
+            while j < n and (s[j] in "uUlLfF"):
+                if s[j] in "fF":
+                    kind = "float"
+                j += 1
+            toks.append([kind, s[i:j], line])
+            i = j
+            continue
+        if c == "'" or c == "\"":
+            j = i + 1
+            while j < n and s[j] != c:
+                if s[j] == "\\":
+                    j += 1
+                if j < n and s[j] == "\n":
+                    lex_error(line, "newline in literal")
+                j += 1
+            if j >= n:
+                lex_error(line, "unterminated literal")
+            if c == "'":
+                toks.append(["char", s[i:j + 1], line])
+            else:
+                toks.append(["str", s[i:j + 1], line])
+            i = j + 1
+            continue
+        if s[i:i + 3] in PUNCT3:
+            toks.append(["op", s[i:i + 3], line])
+            i += 3
+            continue
+        if s[i:i + 2] in PUNCT2:
+            toks.append(["op", s[i:i + 2], line])
+            i += 2
+            continue
+        if c in PUNCT1:
+            toks.append(["op", c, line])
+            i += 1
+            continue
+        lex_error(line, "unexpected character " + repr(c))
+    toks.append(["eof", "", line])
+    return toks
+
+def main():
+    if argc() == 3 and argv(1) == "--tokens":
+        for t in lex(read_file(argv(2))):
+            print(str(t[2]) + " " + t[0] + " " + t[1])
+        return
+    print("usage: c2forge --tokens IN.c")
+    exit(2)
+
+main()
