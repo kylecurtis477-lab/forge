@@ -1002,7 +1002,7 @@ rt_write_file:
 1:  xor %eax, %eax
     ret
 rt_read_file:
-    # (path) -> string, or None on failure (open fails: missing, unreadable, directory read error)
+    # (path) -> string, or None on failure (open fails: missing, unreadable, directory read error; or lseek fails: unseekable)
     mov 8(%rsp), %rdi
     xor %esi, %esi
     mov $2, %eax
@@ -1016,6 +1016,9 @@ rt_read_file:
     mov $8, %eax
     syscall
     mov %rax, %r9
+    # unseekable (/proc seq_files, pipes): lseek fails with -errno; return None, never size a string from it
+    test %rax, %rax
+    js 8f
     mov %r8, %rdi
     xor %esi, %esi
     xor %edx, %edx
@@ -1048,6 +1051,9 @@ rt_read_file:
     syscall
     mov %r10, %rax
     ret
+    8:  mov %r8, %rdi
+    mov $3, %eax
+    syscall
 9:  mov $4611686018427387906, %rax
     ret
 # ---- slow paths that preserve r8-r11 (expression temporaries) ----

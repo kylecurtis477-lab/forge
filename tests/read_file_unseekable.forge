@@ -1,0 +1,16 @@
+# read_file_unseekable: read_file on an unseekable file (a /proc seq_file, a FIFO) returns None instead of
+# sizing a string from lseek's -errno (that negative size spun rt_refill forever: the inv78 boot-harness HANG)
+import os
+
+print(read_file("/proc/loadavg") is None)
+p = f"/tmp/forge-rfu-{os.getpid()}"
+os.mkfifo(p, 384)
+fd = os.open(p, 2048 | 2)
+os.write(fd, "x")
+print(read_file(p) is None)
+os.close(fd)
+os.remove(p)
+fd = os.open("/proc/loadavg", 0)
+print(len(os.read(fd, 4096)) > 0)
+os.close(fd)
+print(read_file("tests/read_file_unseekable.forge")[0:20])

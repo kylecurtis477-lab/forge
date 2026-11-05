@@ -191,6 +191,18 @@ def stack_dump(h, regs):
         return "[no RSP found in info registers -a]"
     return "\n".join(out)
 
+def proc_text(path):
+# /proc files are unseekable, so read_file returns None for them; read with os.read instead
+    fd = os.open(path, 0)
+    out = ""
+    while True:
+        c = os.read(fd, 4096)
+        if c == "":
+            break
+        out += c
+    os.close(fd)
+    return out
+
 def all_hex(s) -> bool:
     for c in s:
         if not ishex(c):
@@ -270,7 +282,7 @@ def boot(h, attempt):
                 if now - tlast >= h.stall:
                     kind = "hang"
                     dump = f"{h.log}.hang{attempt}"
-                    load = split__1(read_file("/proc/loadavg"))[0]
+                    load = split__1(proc_text("/proc/loadavg"))[0]
                     hdr = f"hang: no serial output for {fix(now - tlast)}s (stopped at +{fix(tlast - t0)}s), load {load}\nlast line: {last_line(buf)}\n\n"
                     regs = monitor(h, "info registers -a", 2.0)
                     write_file(dump, concat(concat(hdr, monitor(h, "info cpus")), concat(concat("\n", regs), concat("\n", stack_dump(h, regs)))))
