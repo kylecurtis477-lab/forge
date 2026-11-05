@@ -11,6 +11,14 @@
 # is @unsafe (the plan's starting point: translated code is made safe over time). Prototypes are only
 # recorded (Forge needs no forward declarations); calls to functions that are only declared go to the
 # definitions in the included linux.fsi (put_i64, put_u64, nl). See docs/BUILD_PLAN.md 11.4.
+# Control flow (step 3): for, do/while, break/continue, switch (fall-through, default anywhere), ?:.
+# Pointers, arrays, structs (step 4): `T *` -> ptr[T], `T a[N][M]` -> T[M][N] (Forge nests inside-out),
+# `struct S {...}` -> a Forge struct (C layout). *p -> p[0], &x -> addr(x), p->f / s.f -> p.f / s.f,
+# pointer +/- integer and pointer - pointer (scaled by Forge as in C), pointer comparisons, arrays decay
+# to addr(a[0]), array parameters become pointers, sizeof (u64), brace initializers (memset to zero, then
+# one store per element), whole-struct copies through memcpy. The constant 0 is the null pointer:
+# ptr[T](u64(0)) (Forge's ptr[T] is non-null by type; the translation is @unsafe) and pointer truth
+# tests compare u64(p) with 0. Not yet: void *, casts, string literals as values, unions, globals.
 
 KEYWORDS = ["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while"]
 
@@ -146,6 +154,91 @@ def lex(s):
 TYPEDEFS = {"int8_t": "i8", "uint8_t": "u8", "int16_t": "i16", "uint16_t": "u16", "int32_t": "i32", "uint32_t": "u32", "int64_t": "i64", "uint64_t": "u64", "size_t": "u64", "ssize_t": "i64", "intptr_t": "i64", "uintptr_t": "u64"}
 FORGE_RESERVED = ["and", "or", "not", "def", "in", "is", "pass", "None", "True", "False", "elif", "lambda", "class", "import", "from", "as", "with", "try", "except", "finally", "raise", "yield", "global", "nonlocal", "del", "assert", "print", "len", "ptr", "addr", "sizeof", "struct", "include", "extern", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64", "match", "case"]
 
+INTS = ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"]
+
+def is_int(t):
+    return t in INTS
+
+def is_ptr(t):
+# "ptr[X]" whose opening bracket closes at the very end (so "ptr[i32][3]" is an array of pointers)
+    if not t.startswith("ptr["):
+        return False
+    d = 0
+    i = 3
+    while i < len(t):
+        if t[i] == "[":
+            d += 1
+        elif t[i] == "]":
+            d -= 1
+            if d == 0:
+                return i == len(t) - 1
+        i += 1
+    return False
+
+def is_arr(t):
+    return t.endswith("]") and not is_ptr(t)
+
+def pelem(t):
+    return t[4:len(t) - 1]
+
+def last_lb(t):
+    i = len(t) - 1
+    while t[i] != "[":
+        i -= 1
+    return i
+
+def aelem(t):
+    return t[0:last_lb(t)]
+
+def alen(t):
+    return int(t[last_lb(t) + 1:len(t) - 1])
+
+def is_word(c):
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+def is_atom(code):
+# usable directly before [i] or .f: names, fields and indexes only (anything else gets parentheses)
+    d = 0
+    for c in code:
+        if c == "(" and d == 0:
+            return False
+        if c == "(" or c == "[":
+            d += 1
+        elif c == ")" or c == "]":
+            d -= 1
+        elif d == 0 and not (is_word(c) or c == "."):
+            return False
+    return True
+
+def atom(code):
+    if is_atom(code):
+        return code
+    return "(" + code + ")"
+
+def is_lv(code):
+# Forge lvalue shapes produced by the translator: x, x.f, x[i], (expr)[i], (expr).f
+    c = code[len(code) - 1]
+    if c == "]":
+        return True
+    if not is_word(c):
+        return False
+    d = 0
+    i = len(code) - 1
+    while i >= 0:
+        ch = code[i]
+        if ch == ")" or ch == "]":
+            d += 1
+        elif ch == "(" or ch == "[":
+            d -= 1
+        elif d == 0 and ch == ".":
+            return True
+        elif d == 0 and not is_word(ch):
+            return False
+        i -= 1
+    return not (code[0] >= "0" and code[0] <= "9")
+
+ASSIGN_OPS = ["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="]
+
 def tsize(t):
     return int(t[1:]) // 8
 
@@ -207,6 +300,7 @@ class Parser:
         self.pre = []
         self.loops = []
         self.tmp = 0
+        self.structs = {}
 
     def peek(self, k=0):
         return self.toks[self.pos + k]
@@ -245,8 +339,15 @@ class Parser:
     def starts_type(self):
         t = self.peek()
         if t[0] == "kw":
-            return t[1] in ["void", "char", "short", "int", "long", "signed", "unsigned", "const", "volatile", "static", "inline", "extern", "register"]
+            return t[1] in ["void", "char", "short", "int", "long", "signed", "unsigned", "const", "volatile", "static", "inline", "extern", "register", "struct"]
         return t[0] == "id" and t[1] in TYPEDEFS
+
+    def type_at(self, k):
+        save = self.pos
+        self.pos += k
+        r = self.starts_type()
+        self.pos = save
+        return r
 
     def base_type(self):
     # returns a Forge type name, or "void"
@@ -274,6 +375,14 @@ class Parser:
                     size = t[1]
                 seen = True
                 self.pos += 1
+            elif t[0] == "kw" and t[1] == "struct" and not seen:
+                self.pos += 1
+                sn = self.ident()
+                named = fname(sn)
+                if named not in self.structs:
+                    self.pos -= 1
+                    self.err("unknown struct " + sn)
+                seen = True
             elif t[0] == "id" and t[1] in TYPEDEFS and not seen:
                 named = TYPEDEFS[t[1]]
                 seen = True
@@ -297,6 +406,48 @@ class Parser:
             return "u" + bits
         return "i" + bits
 
+    def declarator(self, bt, param):
+    # pointer stars, an optional name, array dimensions: returns [name, Forge type]
+        t = bt
+        while self.is_op("*"):
+            self.pos += 1
+            while self.is_kw("const") or self.is_kw("volatile") or self.is_kw("restrict"):
+                self.pos += 1
+            if t == "void":
+                self.err("void pointers are not supported yet")
+            t = "ptr[" + t + "]"
+        n = ""
+        if self.peek()[0] == "id":
+            n = self.ident()
+        dims = []
+        while self.is_op("["):
+            self.pos += 1
+            if self.is_op("]"):
+                dims.append("")
+            else:
+                d = self.next()
+                if d[0] != "int":
+                    self.pos -= 1
+                    self.err("array size must be an integer constant")
+                dims.append(self.int_lit(d[1])[0])
+            self.expect("]")
+        if len(dims) > 0 and t == "void":
+            self.err("array of void")
+        k = len(dims) - 1
+        while k >= 1:
+            if dims[k] == "":
+                self.err("only the first array dimension may be omitted")
+            t = t + "[" + dims[k] + "]"
+            k -= 1
+        if len(dims) > 0:
+            if param:
+                t = "ptr[" + t + "]"
+            elif dims[0] == "" or dims[0] == "0":
+                self.err("array needs a positive size")
+            else:
+                t = t + "[" + dims[0] + "]"
+        return [n, t]
+
     def new_tmp(self, kind):
         self.tmp += 1
         return "_" + kind + str(self.tmp)
@@ -313,6 +464,12 @@ class Parser:
         return r
 
     # ---- expressions: each returns [code, type, isbool] ----
+    def rv(self, e):
+    # an array used as a value decays to a pointer to its first element
+        if not e[2] and is_arr(e[1]):
+            return ["addr(" + atom(e[0]) + "[0])", "ptr[" + aelem(e[1]) + "]", False]
+        return e
+
     def val(self, e):
     # e as an integer value of its type
         if e[2]:
@@ -320,15 +477,27 @@ class Parser:
         return e[0]
 
     def cond(self, e):
+        e = self.rv(e)
         if e[2]:
             return e[0]
+        if is_ptr(e[1]):
+            return "(u64(" + e[0] + ") != 0)"
+        if not is_int(e[1]):
+            self.err("a " + e[1] + " value used as a condition")
         return "(" + e[0] + " != 0)"
 
     def conv(self, e, t):
+        e = self.rv(e)
         if e[2]:
+            if not is_int(t):
+                self.err("cannot convert a comparison to " + t)
             return t + "(" + e[0] + ")"
         if e[1] == t:
             return e[0]
+        if is_ptr(t) and is_int(e[1]) and e[0] == "0":
+            return t + "(u64(0))"
+        if not is_int(t) or not is_int(e[1]):
+            self.err("cannot convert " + e[1] + " to " + t + " (casts are not supported yet)")
         return t + "(" + e[0] + ")"
 
     def primary(self):
@@ -420,8 +589,79 @@ class Parser:
             self.err("wrong number of arguments to " + n)
         return [fname(n) + "(" + ", ".join(args) + ")", f[0], False]
 
+    def postfix(self):
+        e = self.primary()
+        while True:
+            if self.is_op("["):
+                self.pos += 1
+                i = self.rv(self.expr())
+                self.expect("]")
+                if not i[2] and not is_int(i[1]):
+                    self.err("array index is not an integer")
+                if is_arr(e[1]):
+                    e = [atom(e[0]) + "[" + self.val(i) + "]", aelem(e[1]), False]
+                elif is_ptr(e[1]):
+                    e = [atom(e[0]) + "[" + self.val(i) + "]", pelem(e[1]), False]
+                else:
+                    self.err("subscript of a non-array")
+            elif self.is_op(".") or self.is_op("->"):
+                arrow = self.next()[1] == "->"
+                st = e[1]
+                if arrow:
+                    if not is_ptr(st):
+                        self.err("-> on a non-pointer")
+                    st = pelem(st)
+                if st not in self.structs:
+                    self.err("member access on a non-struct")
+                f = self.ident()
+                ft = ""
+                for fd in self.structs[st]:
+                    if fd[0] == f:
+                        ft = fd[1]
+                if ft == "":
+                    self.pos -= 1
+                    self.err("struct " + st + " has no member " + f)
+                e = [atom(e[0]) + "." + fname(f), ft, False]
+            else:
+                return e
+
+    def type_name(self):
+    # a type in sizeof(...): base type plus an abstract declarator
+        d = self.declarator(self.base_type(), False)
+        if d[0] != "":
+            self.err("unexpected name in a type")
+        return d[1]
+
     def unary(self):
         t = self.peek()
+        if t[0] == "op" and t[1] == "*":
+            self.pos += 1
+            e = self.rv(self.unary())
+            if not is_ptr(e[1]):
+                self.err("dereference of a non-pointer")
+            return [atom(e[0]) + "[0]", pelem(e[1]), False]
+        if t[0] == "op" and t[1] == "&":
+            self.pos += 1
+            e = self.unary()
+            if e[2] or not is_lv(e[0]):
+                self.err("address of a non-lvalue")
+            return ["addr(" + e[0] + ")", "ptr[" + e[1] + "]", False]
+        if t[0] == "kw" and t[1] == "sizeof":
+            self.pos += 1
+            if self.is_op("(") and self.type_at(1):
+                self.pos += 1
+                ty = self.type_name()
+                self.expect(")")
+            else:
+                mark = len(self.pre)
+                e = self.unary()
+                self.take_pre(mark)
+                ty = e[1]
+                if e[2]:
+                    ty = "i32"
+            if ty == "void":
+                self.err("sizeof void")
+            return ["u64(sizeof(" + ty + "))", "u64", False]
         if t[0] == "op" and t[1] in ["-", "+", "~", "!"]:
             self.pos += 1
             e = self.unary()
@@ -429,20 +669,45 @@ class Parser:
                 return ["(not " + self.cond(e) + ")", "i32", True]
             if e[1] == "void":
                 self.err("void value")
+            if not e[2] and not is_int(e[1]):
+                self.err("invalid operand to unary " + t[1])
             r = promote(e[1])
             if t[1] == "+":
                 return [self.conv(e, r), r, False]
             return ["(" + t[1] + self.conv(e, r) + ")", r, False]
         if t[0] == "op" and (t[1] == "++" or t[1] == "--"):
             self.err("++/-- inside an expression is not supported yet")
-        e = self.primary()
+        e = self.postfix()
         if self.is_op("++") or self.is_op("--"):
             self.err("++/-- inside an expression is not supported yet")
         return e
 
     def binop(self, op, a, b):
+        a = self.rv(a)
+        b = self.rv(b)
         if a[1] == "void" or b[1] == "void":
             self.err("void value")
+        pa = not a[2] and is_ptr(a[1])
+        pb = not b[2] and is_ptr(b[1])
+        if (pa or pb) and op != "&&" and op != "||":
+            if op == "+" and pa and not pb and (b[2] or is_int(b[1])):
+                return ["(" + a[0] + " + " + self.val(b) + ")", a[1], False]
+            if op == "+" and pb and not pa and (a[2] or is_int(a[1])):
+                return ["(" + b[0] + " + " + self.val(a) + ")", b[1], False]
+            if op == "-" and pa and pb and a[1] == b[1]:
+                return ["(" + a[0] + " - " + b[0] + ")", "i64", False]
+            if op == "-" and pa and not pb and (b[2] or is_int(b[1])):
+                return ["(" + a[0] + " - " + self.val(b) + ")", a[1], False]
+            if op in ["<", ">", "<=", ">=", "==", "!="]:
+                if pa and pb and a[1] == b[1]:
+                    return ["(" + a[0] + " " + op + " " + b[0] + ")", "i32", True]
+                if (op == "==" or op == "!=") and pa and not pb and b[0] == "0":
+                    return ["(u64(" + a[0] + ") " + op + " 0)", "i32", True]
+                if (op == "==" or op == "!=") and pb and not pa and a[0] == "0":
+                    return ["(u64(" + b[0] + ") " + op + " 0)", "i32", True]
+            self.err("invalid pointer operands to " + op)
+        if op != "&&" and op != "||" and ((not a[2] and not is_int(a[1])) or (not b[2] and not is_int(b[1]))):
+            self.err("invalid operands to " + op)
         if op == "&&" or op == "||":
             w = "and"
             if op == "||":
@@ -496,11 +761,27 @@ class Parser:
         self.expect(":")
         b = self.ternary()
         bp = self.take_pre(mark)
+        a = self.rv(a)
+        b = self.rv(b)
         if a[1] == "void" or b[1] == "void":
             self.err("void value")
-        r = common(self.vtype(a), self.vtype(b))
+        ta = self.vtype(a)
+        tb = self.vtype(b)
+        if is_int(ta) and is_int(tb):
+            r = common(ta, tb)
+        elif ta == tb and is_ptr(ta):
+            r = ta
+        elif is_ptr(ta) and b[0] == "0":
+            r = ta
+        elif is_ptr(tb) and a[0] == "0":
+            r = tb
+        else:
+            self.err("mismatched ?: operand types " + ta + " and " + tb)
         t = self.new_tmp("t")
-        self.pre.append([0, t + ": " + r + " = 0"])
+        z = "0"
+        if is_ptr(r):
+            z = r + "(u64(0))"
+        self.pre.append([0, t + ": " + r + " = " + z])
         self.pre.append([0, "if " + cc + ":"])
         for l in ap:
             self.pre.append([l[0] + 1, l[1]])
@@ -783,8 +1064,8 @@ class Parser:
         self.expect("(")
         e = self.expr()
         self.expect(")")
-        if e[1] == "void":
-            self.err("void value")
+        if not e[2] and not is_int(e[1]):
+            self.err("switch on a non-integer")
         st = promote(self.vtype(e))
         v = self.new_tmp("s")
         f = self.new_tmp("f")
@@ -849,64 +1130,133 @@ class Parser:
             k += 1
         self.emit(ind + 1, "break")
 
+    def lvalue(self):
+        if self.is_op("*"):
+            return self.unary()
+        return self.postfix()
+
     def expr_statement(self, ind):
-        t = self.peek()
-        t1 = self.peek(1)
-        if t[0] == "op" and (t[1] == "++" or t[1] == "--"):
-            self.pos += 1
-            n = self.ident()
-            self.assign_to(ind, n, t[1][0], ["1", "i32", False])
+    # assignments, compound assignments and ++/-- are statements; anything else is evaluated
+        one = ["1", "i32", False]
+        if self.is_op("++") or self.is_op("--"):
+            op = self.next()[1]
+            self.assign(ind, self.lvalue(), op[0:1], one)
             return
-        if t[0] == "id" and t1[0] == "op":
-            op = t1[1]
-            if op == "++" or op == "--":
-                self.pos += 2
-                self.assign_to(ind, t[1], op[0], ["1", "i32", False])
+        save = self.pos
+        mark = len(self.pre)
+        tmp = self.tmp
+        if self.peek()[0] == "id" or self.is_op("*") or self.is_op("("):
+            lv = self.lvalue()
+            if self.is_op("++") or self.is_op("--"):
+                op = self.next()[1]
+                self.assign(ind, lv, op[0:1], one)
                 return
-            if op in ["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="]:
-                self.pos += 2
+            if self.peek()[0] == "op" and self.peek()[1] in ASSIGN_OPS:
+                op = self.next()[1]
                 e = self.assign_expr()
-                if op == "=":
-                    self.assign_to(ind, t[1], "", e)
-                else:
-                    self.assign_to(ind, t[1], op[0:len(op) - 1], e)
+                self.assign(ind, lv, op[0:len(op) - 1], e)
                 return
+            self.pos = save
+            self.pre = self.pre[0:mark]
+            self.tmp = tmp
         e = self.expr()
         self.flush(ind)
         self.emit(ind, e[0])
 
-    def assign_to(self, ind, n, op, e):
-        if n not in self.vars:
-            self.pos -= 1
-            self.err("unknown variable " + n)
-        t = self.vars[n]
+    def assign(self, ind, lv, op, e):
+        if lv[2] or not is_lv(lv[0]):
+            self.err("assignment to a non-lvalue")
+        t = lv[1]
+        if is_arr(t):
+            self.err("assignment to an array")
         if op != "":
-            e = self.binop(op, [fname(n), t, False], e)
+            e = self.binop(op, lv, e)
+        if not is_int(t) and not is_ptr(t):
+            e = self.rv(e)
+            if e[1] != t:
+                self.err("cannot assign " + e[1] + " to " + t)
+            self.flush(ind)
+            if is_lv(e[0]):
+                self.emit(ind, "memcpy(addr(" + lv[0] + "), addr(" + e[0] + "), sizeof(" + t + "))")
+            else:
+                self.emit(ind, lv[0] + " = " + e[0])
+            return
+        c = self.conv(e, t)
         self.flush(ind)
-        self.emit(ind, fname(n) + " = " + self.conv(e, t))
+        self.emit(ind, lv[0] + " = " + c)
+
+    def init_agg(self, ind, lv, t):
+    # { a, b, {c, d} }: one store per element, after the whole object was zeroed
+        self.expect("{")
+        k = 0
+        fields = []
+        if not is_arr(t):
+            fields = self.structs[t]
+        while not self.is_op("}"):
+            if is_arr(t):
+                if k >= alen(t):
+                    self.err("too many initializers")
+                tg = [lv + "[" + str(k) + "]", aelem(t), False]
+            else:
+                if k >= len(fields):
+                    self.err("too many initializers")
+                tg = [lv + "." + fname(fields[k][0]), fields[k][1], False]
+            if self.is_op("{"):
+                if is_int(tg[1]) or is_ptr(tg[1]):
+                    self.err("braces around a scalar initializer")
+                self.init_agg(ind, tg[0], tg[1])
+            else:
+                if is_arr(tg[1]):
+                    self.err("an array member needs a braced initializer")
+                self.assign(ind, tg, "", self.assign_expr())
+            k += 1
+            if self.is_op(","):
+                self.pos += 1
+            else:
+                break
+        self.expect("}")
 
     def declaration(self, ind):
         bt = self.base_type()
-        if bt == "void":
-            self.err("void variable")
         while True:
-            n = self.ident()
+            d = self.declarator(bt, False)
+            n = d[0]
+            t = d[1]
+            if n == "":
+                self.err("expected an identifier")
+            if t == "void":
+                self.err("void variable")
             again = False
             if n in self.vars:
-                if self.vars[n] != bt:
+                if self.vars[n] != t:
                     self.pos -= 1
                     self.err("redeclaration of " + n + " with another type (block scoping is not supported yet)")
                 again = True
-            init = "0"
-            if self.is_op("="):
-                self.pos += 1
-                init = self.conv(self.assign_expr(), bt)
-            self.vars[n] = bt
-            self.flush(ind)
-            if again:
-                self.emit(ind, fname(n) + " = " + init)
+            self.vars[n] = t
+            v = fname(n)
+            if not is_int(t) and not is_ptr(t):
+                self.flush(ind)
+                if not again:
+                    self.emit(ind, v + ": " + t)
+                if self.is_op("="):
+                    self.pos += 1
+                    if self.is_op("{"):
+                        self.emit(ind, "memset(addr(" + v + "), 0, sizeof(" + t + "))")
+                        self.init_agg(ind, v, t)
+                    else:
+                        self.assign(ind, [v, t, False], "", self.assign_expr())
             else:
-                self.emit(ind, fname(n) + ": " + bt + " = " + init)
+                init = "0"
+                if is_ptr(t):
+                    init = t + "(u64(0))"
+                if self.is_op("="):
+                    self.pos += 1
+                    init = self.conv(self.assign_expr(), t)
+                self.flush(ind)
+                if again:
+                    self.emit(ind, v + " = " + init)
+                else:
+                    self.emit(ind, v + ": " + t + " = " + init)
             if self.is_op(","):
                 self.pos += 1
             else:
@@ -920,11 +1270,10 @@ class Parser:
             self.pos += 1
         elif not self.is_op(")"):
             while True:
-                t = self.base_type()
-                n = ""
-                if self.peek()[0] == "id":
-                    n = self.ident()
-                ps.append([n, t])
+                d = self.declarator(self.base_type(), True)
+                if d[1] == "void":
+                    self.err("void parameter")
+                ps.append(d)
                 if self.is_op(","):
                     self.pos += 1
                 else:
@@ -937,7 +1286,15 @@ class Parser:
             if self.peek()[0] == "pp":
                 self.pos += 1
                 continue
+            if self.is_kw("struct") and self.peek(1)[0] == "id" and self.peek(2)[1] == "{":
+                self.struct_def()
+                continue
             rt = self.base_type()
+            while self.is_op("*"):
+                self.pos += 1
+                if rt == "void":
+                    self.err("void pointers are not supported yet")
+                rt = "ptr[" + rt + "]"
             n = self.ident()
             if not self.is_op("("):
                 self.err("global variables are not supported yet")
@@ -952,6 +1309,43 @@ class Parser:
                 self.pos += 1
                 continue
             self.function(n, rt, ps)
+
+    def struct_def(self):
+    # struct S { members; };  -> a Forge struct (same C layout)
+        self.pos += 1
+        sn = self.ident()
+        st = fname(sn)
+        if st in self.structs:
+            self.pos -= 1
+            self.err("redefinition of struct " + sn)
+        self.structs[st] = []
+        self.expect("{")
+        self.emit(0, "")
+        self.emit(0, "struct " + st + ":")
+        fields = []
+        while not self.is_op("}"):
+            bt = self.base_type()
+            while True:
+                d = self.declarator(bt, False)
+                if d[0] == "":
+                    self.err("expected a member name")
+                if d[1] == "void" or d[1] == st or is_arr(d[1]) and aelem(d[1]) == st:
+                    self.err("member " + d[0] + " has an incomplete type")
+                for f in fields:
+                    if f[0] == d[0]:
+                        self.err("duplicate member " + d[0])
+                fields.append(d)
+                self.emit(1, fname(d[0]) + ": " + d[1])
+                if self.is_op(","):
+                    self.pos += 1
+                else:
+                    break
+            self.expect(";")
+        if len(fields) == 0:
+            self.err("empty struct")
+        self.pos += 1
+        self.expect(";")
+        self.structs[st] = fields
 
     def function(self, n, rt, ps):
         self.vars = {}
