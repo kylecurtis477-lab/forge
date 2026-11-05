@@ -1,0 +1,70 @@
+# examples/modules/build.forge: Forge port of examples/modules/build.sh (kept as the reference;
+# tests/modules-build/run.sh checks both produce byte-identical artifacts, the same output and exit code).
+# Builds the test kernel modules as relocatable ELF64 objects (.ko = tools/fas output, ET_REL), sealed
+# with tools/forgeseal.forge (--module) under build/user/seal.key, plus the negative modules: unsealed,
+# one code byte flipped after sealing, and a sealed user program.
+# usage: build/modules-build [OUTDIR]  (default build/modules). The binary lives in build/, so the repo is
+# the parent of its directory; it runs from examples/modules like the shell script. Stops at the first
+# failing step with that step's exit code (sh -e). $FORGEC_FLAGS is passed to forgec for the modules.
+import os
+import sys
+
+def step(args):
+    r = os.run(args)
+    os.write(1, r[1])
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+    return r[1]
+
+# cp(1) without -p: same bytes; an executable source (access X_OK) gives mode 0755 like cp under umask 022
+def cp_file(a, b):
+    d = read_file(a)
+    if d is None:
+        os.write(2, "cp: cannot stat '" + a + "': No such file or directory\n")
+        exit(1)
+    write_file(b, d)
+    if __syscall(21, a, 1, 0) == 0:
+        os.chmod(b, 493)
+
+def flip(a, b, off: int):
+    d = read_file(a)
+    write_file(b, d[:off] + chr(ord(d[off]) ^ 1) + d[off + 1:])
+
+def main():
+    here = os.getcwd()
+    out = ""
+    if len(sys.argv) > 1:
+        out = sys.argv[1]
+        if not out.startswith("/"):
+            out = here + "/" + out
+    me = sys.argv[0]
+    root = os.path.dirname(me) + "/.." if me.find("/") >= 0 else ".."
+    os.chdir(root + "/examples/modules")
+    if out == "":
+        out = "../../build/modules"
+    if not os.path.isdir(out):
+        os.mkdir(out)
+    flags = []
+    for f in os.getenv("FORGEC_FLAGS", "").split():
+        flags.append(f)
+    s = "../../build/forgeseal"
+    step(["../../build/forgec", "../../tools/forgeseal.forge", s + ".s"])
+    step(["../../build/fas", "-o", s + ".o", s + ".s"])
+    step(["../../build/fld", "--base", "0x100000000000", "-o", s, s + ".o"])
+    for m in ["hello", "badabi", "unresolved", "newer", "tty1", "tty2", "getpid2"]:
+        step(["../../build/forgec", m + ".forge", out + "/" + m + ".s"] + flags)
+        step(["../../build/fas", "-o", out + "/" + m + ".ko", out + "/" + m + ".s"])
+        cp_file(out + "/" + m + ".ko", out + "/" + m + ".raw")
+        r = os.run([s, "--module", m + ".forge", out + "/" + m + ".ko", "../../build/user/seal.key",
+                    "../../tests/unsafe/baseline.txt"])
+        os.write(2, r[2])
+        if r[0] != 0:
+            exit(r[0])
+    cp_file(out + "/hello.raw", out + "/unsealed.ko")
+    cp_file(out + "/tty1.raw", out + "/tty1u.ko")
+    flip(out + "/hello.ko", out + "/tampered.ko", 0x50)
+    cp_file("../../build/user/hello.elf", out + "/userimg.ko")
+    return 0
+
+exit(main())

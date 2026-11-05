@@ -9,7 +9,10 @@ klink() {
     ../../build/fld --format kernel -o $1.elf $1.o
 }
 sh ../user/build.sh
-sh ../modules/build.sh
+# the test modules: examples/modules/build.forge (examples/modules/build.sh is kept as the reference;
+# tests/modules-build checks they produce identical artifacts)
+../../forge ../modules/build.forge -o ../../build/modules-build
+../../build/modules-build
 ../../build/forgec kernel.forge $B/kernel.s $FORGEC_FLAGS
 ../../build/fas -I ../../build/user -o $B/kernel.o $B/kernel.s
 klink $B/kernel
