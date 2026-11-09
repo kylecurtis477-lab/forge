@@ -12,7 +12,8 @@ OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
 Q="-cpu max -display none -no-reboot -net none -m 256 -smp 4 -serial stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04"
 examples/kernel/build.sh >/dev/null || { echo "FAIL os/kernel-build"; exit 0; }
-examples/efi/build.sh >/dev/null || { echo "FAIL os/efi-build"; exit 0; }
+# examples/efi/build.forge (examples/efi/build.sh is kept as the reference; tests/efi-build)
+{ ./forge examples/efi/build.forge -o build/efi-build && build/efi-build; } >/dev/null || { echo "FAIL os/efi-build"; exit 0; }
 L=build/os; mkdir -p $L
 readelf -lW build/kernel/kernel.elf | grep -q "LOAD.* RWE " && echo "FAIL os/kernel-wx (RWX PT_LOAD)" || echo "PASS os/kernel-wx (no RWX PT_LOAD)"
 FB="back == front^KERNEL OK"

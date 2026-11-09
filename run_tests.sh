@@ -38,7 +38,7 @@ tests/grammar/run.sh || fail=1
 tests/fmt/run.sh || fail=1
 # tests/fas and tests/fld check every OS artifact (user programs, modules, EFI loader, kernel); build them
 # first so a clean tree (e.g. straight from the seed) runs the same checks instead of skipping them
-{ examples/kernel/build.sh && examples/efi/build.sh; } >/dev/null 2>&1 || { echo "FAIL os-artifacts-build (fas/fld artifact checks would be skipped)"; fail=1; }
+{ examples/kernel/build.sh && ./forge examples/efi/build.forge -o build/efi-build && build/efi-build; } >/dev/null 2>&1 || { echo "FAIL os-artifacts-build (fas/fld artifact checks would be skipped)"; fail=1; }
 # the boot harness asm is one of the fas artifacts; build it here so every run checks the same file set
 # (before, build/os/boot.s existed only after an earlier OS run, so O2 and O0 counted 638 vs 639)
 mkdir -p build/os && build/forgec tests/os/boot.forge build/os/boot.s || { echo "FAIL os-boot-harness-asm"; fail=1; }
@@ -55,6 +55,7 @@ tests/forgeseal/run.sh || fail=1
 tests/modules-build/run.sh || fail=1
 tests/user-build/run.sh || fail=1
 tests/busybox-build/run.sh || fail=1
+tests/efi-build/run.sh || fail=1
 tests/rtport/run.sh || fail=1
 tests/pecheck/run.sh || fail=1
 tests/memimg/run.sh || fail=1

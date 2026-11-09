@@ -1,0 +1,90 @@
+# examples/efi/build.forge: Forge port of examples/efi/build.sh (kept as the reference; tests/efi-build/run.sh
+# checks both give the same build/efi artifacts byte for byte, the same output and exit code).
+# Builds the Forge UEFI loader (PE32+, EFI application) plus the kernel (examples/kernel/build.sh), then a
+# FAT32 ESP image (mtools) holding the loader, kernels, init, the user programs, the test modules and test
+# files under \EFI\Forge\ next to empty Microsoft/debian vendor directories (BOOT\BOOTX64.EFI is only this
+# test disk's removable-media fallback), and a GPT test disk around it with build/efi/mkgpt (mkgpt.forge).
+# The script's python3 one-liner (big.bin, a 96 KiB test pattern) and its printf are done here in Forge.
+# usage: build/efi-build  (the binary lives in build/, so the repo is the parent of its directory; it runs
+# from examples/efi like the script and writes build/efi). Stops at the first failing step with that step's
+# exit code (sh -e). $FORGEC_FLAGS is passed to forgec for the loader (and inherited by the kernel build).
+import os
+import sys
+
+def step(args):
+    r = os.run(args)
+    os.write(1, r[1])
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+
+# a step whose stdout the script sent to /dev/null
+def quiet(args):
+    r = os.run(args)
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+
+def main():
+    me = sys.argv[0]
+    root = os.path.dirname(me) + "/.." if me.find("/") >= 0 else ".."
+    os.chdir(root + "/examples/efi")
+    b = "../../build/efi"
+    if not os.path.isdir(b):
+        os.mkdir(b)
+    flags = []
+    for f in os.getenv("FORGEC_FLAGS", "").split():
+        flags.append(f)
+    step(["../../build/forgec", "loader.forge", b + "/loader.s"] + flags)
+    step(["../../build/fas", "-o", b + "/loader.o", b + "/loader.s"])
+    step(["../../build/fld", "--format", "pe", "--subsystem", "10", "--image-base", "0x10000000", "-e", "efi_main",
+          "-o", b + "/forgex64.efi", b + "/loader.o"])
+    quiet(["../kernel/build.sh"])
+    e = b + "/esp.fat"
+    if os.path.isfile(e):
+        os.remove(e)
+    step(["mformat", "-C", "-F", "-c", "1", "-i", e, "-T", "131072", "-v", "FORGE_ESP", "::"])
+    step(["mmd", "-i", e, "::/EFI", "::/EFI/BOOT", "::/EFI/Forge", "::/EFI/Microsoft", "::/EFI/debian"])
+    step(["mcopy", "-i", e, b + "/forgex64.efi", "::/EFI/Forge/forgex64.efi"])
+    step(["mcopy", "-i", e, "../../build/kernel/kernel.elf", "::/EFI/Forge/kernel.elf"])
+    step(["mcopy", "-i", e, "../../build/kernel/kernel-next.elf", "::/EFI/Forge/kernel-next.elf"])
+    step(["mcopy", "-i", e, "../../build/user/hello.elf", "::/EFI/Forge/init.elf"])
+    step(["mmd", "-i", e, "::/EFI/Forge/bin", "::/EFI/Forge/docs", "::/EFI/Forge/mod"])
+    for m in ["hello", "badabi", "unresolved", "newer", "tty1", "tty2", "getpid2", "unsealed", "tty1u", "tampered",
+              "userimg"]:
+        step(["mcopy", "-i", e, "../../build/modules/" + m + ".ko", "::/EFI/Forge/mod/" + m + ".ko"])
+    for p in ["sh", "hello", "cat", "forktest", "fault", "blkd", "crash", "sum", "bg", "captest", "chantest", "sbtest",
+              "grtest", "wxtest", "capdeny", "badptr", "kbdd", "kbdd2", "nvmed", "nvmed2", "unsealed", "tampered",
+              "forged", "hellov2", "algbad", "proofset", "linuxabi", "lxtest", "lxthreads", "lxfs", "lxexec", "lxsig"]:
+        step(["mcopy", "-i", e, "../../build/user/" + p + ".elf", "::/EFI/Forge/bin/" + p])
+    # the script's `[ -f busybox.elf ] && mcopy ...`: a failing mcopy there does not stop sh -e
+    if os.path.isfile("../../build/user/busybox.elf"):
+        r = os.run(["mcopy", "-i", e, "../../build/user/busybox.elf", "::/EFI/Forge/bin/busybox"])
+        os.write(1, r[1])
+        os.write(2, r[2])
+    write_file(b + "/notes.txt", "Forge long file name test: this file lives at \\EFI\\Forge\\docs\\Long File Name Notes.txt\n"
+               + "It spans more than one 13-character LFN entry and is read with open/read/stat/close.\n")
+    step(["mcopy", "-i", e, b + "/notes.txt", "::/EFI/Forge/docs/Long File Name Notes.txt"])
+    # big.bin: byte i = (i * 7 + (i >> 9)) & 255, 98304 bytes
+    parts = []
+    i: int = 0
+    while i < 98304:
+        parts.append(chr((i * 7 + (i >> 9)) & 255))
+        i += 1
+    write_file(b + "/big.bin", "".join(parts))
+    step(["mcopy", "-i", e, b + "/big.bin", "::/EFI/Forge/docs/big.bin"])
+    step(["mcopy", "-i", e, "scripts/hello.sh", "::/EFI/Forge/docs/hello.sh"])
+    step(["mmd", "-i", e, "::/EFI/Forge/apps"])
+    for a in sorted(os.listdir("../apps")):
+        if a.endswith(".mf"):
+            step(["mcopy", "-i", e, "../apps/" + a, "::/EFI/Forge/apps/" + a])
+    step(["mcopy", "-i", e, b + "/forgex64.efi", "::/EFI/BOOT/BOOTX64.EFI"])
+    # GPT disk: mkgpt.forge (byte-identical to mkgpt.py with FORGE_GUID_SEED, tests/mkgpt)
+    step(["../../build/forgec", "mkgpt.forge", b + "/mkgpt.s"])
+    step(["../../build/fas", "-o", b + "/mkgpt.o", b + "/mkgpt.s"])
+    step(["../../build/fld", "--base", "0x100000000000", "-o", b + "/mkgpt", b + "/mkgpt.o"])
+    step([b + "/mkgpt", b + "/disk.img", b + "/esp.fat", "128"])
+    os.write(1, "built " + b + "/forgex64.efi and " + b + "/disk.img\n")
+    return 0
+
+exit(main())
