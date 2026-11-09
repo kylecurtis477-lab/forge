@@ -4,8 +4,8 @@
 # seal it --foreign. The tarballs in $BB_SRC (default /workspace/bb) are pinned by SHA-256 and checked against
 # the upstream signatures when $BB_SRC/gnupg exists; network is never used. GNU make and musl are built from
 # source into $BB_WORK (default $BB_SRC/work) when missing. The python3 one-liners of the script (tarfile
-# extraction, the EI_OSABI byte) are gone: extraction is tar -xjf, whose bzip2 is still the
-# tools/busybox/bzip2 shim (Python's bz2; a Forge bzip2 is a separate item), and the byte patch is Forge.
+# extraction, the EI_OSABI byte) are gone: extraction is tar -xjf with build/bzip2 on PATH (tools/busybox/bzip2.forge;
+# tools/busybox/bzip2 is kept as the Python reference), and the byte patch is Forge.
 # usage: build/busybox-build OUT.elf SEALKEY  (the binary lives in build/, so the repo is the parent of its
 # directory). Stops at the first failing step with that step's exit code (sh -e).
 import os
@@ -113,7 +113,9 @@ def main():
     pin(s, "busybox-1.38.0.tar.bz2", "34f9ea6ff8636f2c9241153b9114eefa9e65674a45318ae1ef95bb5f31c53bb2", "sig")
     pin(s, "musl-1.2.5.tar.gz", "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4", "asc")
     step(["mkdir", "-p", w + "/bin"])
-    step(["cp", t + "/bzip2", w + "/bin/bzip2"])
+    # tools/busybox/bzip2.forge (tools/busybox/bzip2 is kept as the Python reference; tests/bzip2)
+    step([bdir + "/../forge", t + "/bzip2.forge", "-o", bdir + "/bzip2"])
+    step(["cp", bdir + "/bzip2", w + "/bin/bzip2"])
     step(["chmod", "+x", w + "/bin/bzip2"])
     path = w + "/bin:" + os.getenv("PATH", "")
     pe = "PATH=" + path

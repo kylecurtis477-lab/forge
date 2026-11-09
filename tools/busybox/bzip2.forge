@@ -1,0 +1,1548 @@
+# tools/busybox/bzip2.forge: Forge port of the tools/busybox/bzip2 shim (kept as the reference;
+# tests/bzip2/run.sh checks both give the same bytes). The shim is a stdin -> stdout filter over Python's
+# bz2 module, i.e. libbzip2 1.0.8: `bzip2 -d` decompresses (bz2.decompress: concatenated streams, trailing
+# garbage after a good stream ignored), anything else compresses at level 9 (bz2.compress(d, 9)).
+# Byte-identical compression needs libbzip2's exact choices, so this is a faithful port of 1.0.8 with
+# workFactor 30: bzlib.c (RLE1 with runs of 4..255, blocks of at most 100000*9-19 bytes, a run pending
+# at a full block carries over), blocksort.c (mainSort: radix on 2 bytes, mainQSort3/mainSimpleSort/
+# mainGtU with the quadrant array and a budget of nblock*9; fallbackSort for blocks < 10000 or when
+# the budget runs out), compress.c (MTF + RUNA/RUNB, 2..6 tables by nMTF, 4 refinement iterations,
+# selector MTF) and huffman.c (heap code lengths, max 17, the halving retry). Decompression follows
+# decompress.c, including its sanity checks and randomised blocks.
+# Errors exit 1 with Python's last traceback line on stderr (OSError: Invalid data stream / ValueError:
+# Compressed data ended before the end-of-stream marker was reached); stdout stays empty, as with the shim.
+import os
+import sys
+
+CRC = [0] * 256
+RNUMS = [619, 720, 127, 481, 931, 816, 813, 233, 566, 247, 985, 724, 205, 454, 863, 491, 741, 242, 949, 214, 733, 859, 335, 708, 621, 574, 73, 654, 730, 472, 419, 436, 278, 496, 867, 210, 399, 680, 480, 51, 878, 465, 811, 169, 869, 675, 611, 697, 867, 561, 862, 687, 507, 283, 482, 129, 807, 591, 733, 623, 150, 238, 59, 379, 684, 877, 625, 169, 643, 105, 170, 607, 520, 932, 727, 476, 693, 425, 174, 647, 73, 122, 335, 530, 442, 853, 695, 249, 445, 515, 909, 545, 703, 919, 874, 474, 882, 500, 594, 612, 641, 801, 220, 162, 819, 984, 589, 513, 495, 799, 161, 604, 958, 533, 221, 400, 386, 867, 600, 782, 382, 596, 414, 171, 516, 375, 682, 485, 911, 276, 98, 553, 163, 354, 666, 933, 424, 341, 533, 870, 227, 730, 475, 186, 263, 647, 537, 686, 600, 224, 469, 68, 770, 919, 190, 373, 294, 822, 808, 206, 184, 943, 795, 384, 383, 461, 404, 758, 839, 887, 715, 67, 618, 276, 204, 918, 873, 777, 604, 560, 951, 160, 578, 722, 79, 804, 96, 409, 713, 940, 652, 934, 970, 447, 318, 353, 859, 672, 112, 785, 645, 863, 803, 350, 139, 93, 354, 99, 820, 908, 609, 772, 154, 274, 580, 184, 79, 626, 630, 742, 653, 282, 762, 623, 680, 81, 927, 626, 789, 125, 411, 521, 938, 300, 821, 78, 343, 175, 128, 250, 170, 774, 972, 275, 999, 639, 495, 78, 352, 126, 857, 956, 358, 619, 580, 124, 737, 594, 701, 612, 669, 112, 134, 694, 363, 992, 809, 743, 168, 974, 944, 375, 748, 52, 600, 747, 642, 182, 862, 81, 344, 805, 988, 739, 511, 655, 814, 334, 249, 515, 897, 955, 664, 981, 649, 113, 974, 459, 893, 228, 433, 837, 553, 268, 926, 240, 102, 654, 459, 51, 686, 754, 806, 760, 493, 403, 415, 394, 687, 700, 946, 670, 656, 610, 738, 392, 760, 799, 887, 653, 978, 321, 576, 617, 626, 502, 894, 679, 243, 440, 680, 879, 194, 572, 640, 724, 926, 56, 204, 700, 707, 151, 457, 449, 797, 195, 791, 558, 945, 679, 297, 59, 87, 824, 713, 663, 412, 693, 342, 606, 134, 108, 571, 364, 631, 212, 174, 643, 304, 329, 343, 97, 430, 751, 497, 314, 983, 374, 822, 928, 140, 206, 73, 263, 980, 736, 876, 478, 430, 305, 170, 514, 364, 692, 829, 82, 855, 953, 676, 246, 369, 970, 294, 750, 807, 827, 150, 790, 288, 923, 804, 378, 215, 828, 592, 281, 565, 555, 710, 82, 896, 831, 547, 261, 524, 462, 293, 465, 502, 56, 661, 821, 976, 991, 658, 869, 905, 758, 745, 193, 768, 550, 608, 933, 378, 286, 215, 979, 792, 961, 61, 688, 793, 644, 986, 403, 106, 366, 905, 644, 372, 567, 466, 434, 645, 210, 389, 550, 919, 135, 780, 773, 635, 389, 707, 100, 626, 958, 165, 504, 920, 176, 193, 713, 857, 265, 203, 50, 668, 108, 645, 990, 626, 197, 510, 357, 358, 850, 858, 364, 936, 638]
+INCS = [1, 4, 13, 40, 121, 364, 1093, 3280, 9841, 29524, 88573, 265720, 797161, 2391484]
+N_OVERSHOOT = 34
+SETMASK = 2097152
+CLEARMASK = 4292870143
+
+def crc_init():
+    i: int = 0
+    while i < 256:
+        c: int = i << 24
+        k: int = 0
+        while k < 8:
+            if c & 0x80000000:
+                c = ((c << 1) ^ 0x04c11db7) & 0xffffffff
+            else:
+                c = (c << 1) & 0xffffffff
+            k += 1
+        CRC[i] = c
+        i += 1
+
+# ---- bit writer: the output bytes accumulate in OUT; BS = [buff, live] ----
+def bsw(out, bs, n: int, v: int):
+    b: int = bs[0]
+    live: int = bs[1]
+    while live >= 8:
+        out.append(chr((b >> 24) & 255))
+        b = (b << 8) & 0xffffffff
+        live -= 8
+    b = b | (v << (32 - live - n))
+    bs[0] = b
+    bs[1] = live + n
+
+def bs_finish(out, bs):
+    b: int = bs[0]
+    live: int = bs[1]
+    while live > 0:
+        out.append(chr((b >> 24) & 255))
+        b = (b << 8) & 0xffffffff
+        live -= 8
+    bs[0] = b
+    bs[1] = live
+
+def bs_u32(out, bs, u: int):
+    bsw(out, bs, 8, (u >> 24) & 255)
+    bsw(out, bs, 8, (u >> 16) & 255)
+    bsw(out, bs, 8, (u >> 8) & 255)
+    bsw(out, bs, 8, u & 255)
+
+# ---- blocksort.c: fallbackSort ----
+def fallback_simple_sort(fmap, eclass, lo: int, hi: int):
+    if lo == hi:
+        return
+    i: int = 0
+    j: int = 0
+    tmp: int = 0
+    ec: int = 0
+    if hi - lo > 3:
+        i = hi - 4
+        while i >= lo:
+            tmp = fmap[i]
+            ec = eclass[tmp]
+            j = i + 4
+            while j <= hi and ec > eclass[fmap[j]]:
+                fmap[j - 4] = fmap[j]
+                j += 4
+            fmap[j - 4] = tmp
+            i -= 1
+    i = hi - 1
+    while i >= lo:
+        tmp = fmap[i]
+        ec = eclass[tmp]
+        j = i + 1
+        while j <= hi and ec > eclass[fmap[j]]:
+            fmap[j - 1] = fmap[j]
+            j += 1
+        fmap[j - 1] = tmp
+        i -= 1
+
+def fvswap(fmap, p1: int, p2: int, n: int):
+    while n > 0:
+        t: int = fmap[p1]
+        fmap[p1] = fmap[p2]
+        fmap[p2] = t
+        p1 += 1
+        p2 += 1
+        n -= 1
+
+def fallback_qsort3(fmap, eclass, lo_st: int, hi_st: int):
+    stlo = [0] * 100
+    sthi = [0] * 100
+    r: int = 0
+    sp: int = 1
+    stlo[0] = lo_st
+    sthi[0] = hi_st
+    while sp > 0:
+        sp -= 1
+        lo: int = stlo[sp]
+        hi: int = sthi[sp]
+        if hi - lo < 10:
+            fallback_simple_sort(fmap, eclass, lo, hi)
+            continue
+        r = ((r * 7621) + 1) % 32768
+        r3: int = r % 3
+        med: int = 0
+        if r3 == 0:
+            med = eclass[fmap[lo]]
+        elif r3 == 1:
+            med = eclass[fmap[(lo + hi) >> 1]]
+        else:
+            med = eclass[fmap[hi]]
+        unlo: int = lo
+        ltlo: int = lo
+        unhi: int = hi
+        gthi: int = hi
+        n: int = 0
+        t: int = 0
+        while True:
+            while True:
+                if unlo > unhi:
+                    break
+                n = eclass[fmap[unlo]] - med
+                if n == 0:
+                    t = fmap[unlo]
+                    fmap[unlo] = fmap[ltlo]
+                    fmap[ltlo] = t
+                    ltlo += 1
+                    unlo += 1
+                    continue
+                if n > 0:
+                    break
+                unlo += 1
+            while True:
+                if unlo > unhi:
+                    break
+                n = eclass[fmap[unhi]] - med
+                if n == 0:
+                    t = fmap[unhi]
+                    fmap[unhi] = fmap[gthi]
+                    fmap[gthi] = t
+                    gthi -= 1
+                    unhi -= 1
+                    continue
+                if n < 0:
+                    break
+                unhi -= 1
+            if unlo > unhi:
+                break
+            t = fmap[unlo]
+            fmap[unlo] = fmap[unhi]
+            fmap[unhi] = t
+            unlo += 1
+            unhi -= 1
+        if gthi < ltlo:
+            continue
+        n = min(ltlo - lo, unlo - ltlo)
+        fvswap(fmap, lo, unlo - n, n)
+        m: int = min(hi - gthi, gthi - unhi)
+        fvswap(fmap, unlo, hi - m + 1, m)
+        n = lo + unlo - ltlo - 1
+        m = hi - (gthi - unhi) + 1
+        if n - lo > hi - m:
+            stlo[sp] = lo
+            sthi[sp] = n
+            stlo[sp + 1] = m
+            sthi[sp + 1] = hi
+        else:
+            stlo[sp] = m
+            sthi[sp] = hi
+            stlo[sp + 1] = lo
+            sthi[sp + 1] = n
+        sp += 2
+
+def isset(bh, z: int) -> int:
+    return (bh[z >> 5] >> (z & 31)) & 1
+
+def fallback_sort(fmap, block, nblock: int):
+    ftab = [0] * 257
+    fcopy = [0] * 256
+    eclass = [0] * nblock
+    i: int = 0
+    j: int = 0
+    k: int = 0
+    while i < nblock:
+        ftab[block[i]] += 1
+        i += 1
+    i = 0
+    while i < 256:
+        fcopy[i] = ftab[i]
+        i += 1
+    i = 1
+    while i < 257:
+        ftab[i] += ftab[i - 1]
+        i += 1
+    i = 0
+    while i < nblock:
+        j = block[i]
+        k = ftab[j] - 1
+        ftab[j] = k
+        fmap[k] = i
+        i += 1
+    nbh: int = 2 + (nblock // 32)
+    # libbzip2 keeps bhtab in ftab, so the sentinel bits may run one word past nBhtab
+    bh = [0] * (nbh + 2)
+    i = 0
+    while i < 256:
+        k = ftab[i]
+        bh[k >> 5] = bh[k >> 5] | (1 << (k & 31))
+        i += 1
+    i = 0
+    while i < 32:
+        k = nblock + 2 * i
+        bh[k >> 5] = bh[k >> 5] | (1 << (k & 31))
+        k += 1
+        bh[k >> 5] = bh[k >> 5] & (0xffffffff ^ (1 << (k & 31)))
+        i += 1
+    h: int = 1
+    while True:
+        j = 0
+        i = 0
+        while i < nblock:
+            if (bh[i >> 5] >> (i & 31)) & 1:
+                j = i
+            k = fmap[i] - h
+            if k < 0:
+                k += nblock
+            eclass[k] = j
+            i += 1
+        notdone: int = 0
+        r: int = -1
+        l: int = 0
+        while True:
+            k = r + 1
+            while ((bh[k >> 5] >> (k & 31)) & 1) and (k & 31):
+                k += 1
+            if (bh[k >> 5] >> (k & 31)) & 1:
+                while bh[k >> 5] == 0xffffffff:
+                    k += 32
+                while (bh[k >> 5] >> (k & 31)) & 1:
+                    k += 1
+            l = k - 1
+            if l >= nblock:
+                break
+            while ((bh[k >> 5] >> (k & 31)) & 1) == 0 and (k & 31):
+                k += 1
+            if ((bh[k >> 5] >> (k & 31)) & 1) == 0:
+                while bh[k >> 5] == 0:
+                    k += 32
+                while ((bh[k >> 5] >> (k & 31)) & 1) == 0:
+                    k += 1
+            r = k - 1
+            if r >= nblock:
+                break
+            if r > l:
+                notdone += r - l + 1
+                fallback_qsort3(fmap, eclass, l, r)
+                cc: int = -1
+                i = l
+                while i <= r:
+                    cc1: int = eclass[fmap[i]]
+                    if cc != cc1:
+                        bh[i >> 5] = bh[i >> 5] | (1 << (i & 31))
+                        cc = cc1
+                    i += 1
+        h *= 2
+        if h > nblock or notdone == 0:
+            break
+
+# ---- blocksort.c: mainSort ----
+def main_gtu(i1: int, i2: int, block, quad, nblock: int, budget) -> int:
+    c1: int = 0
+    c2: int = 0
+    n: int = 0
+    while n < 12:
+        c1 = block[i1]
+        c2 = block[i2]
+        if c1 != c2:
+            return 1 if c1 > c2 else 0
+        i1 += 1
+        i2 += 1
+        n += 1
+    k: int = nblock + 8
+    while True:
+        n = 0
+        while n < 8:
+            c1 = block[i1]
+            c2 = block[i2]
+            if c1 != c2:
+                return 1 if c1 > c2 else 0
+            c1 = quad[i1]
+            c2 = quad[i2]
+            if c1 != c2:
+                return 1 if c1 > c2 else 0
+            i1 += 1
+            i2 += 1
+            n += 1
+        if i1 >= nblock:
+            i1 -= nblock
+        if i2 >= nblock:
+            i2 -= nblock
+        k -= 8
+        budget[0] -= 1
+        if k < 0:
+            break
+    return 0
+
+def main_simple_sort(ptr, block, quad, nblock: int, lo: int, hi: int, d: int, budget):
+    bign: int = hi - lo + 1
+    if bign < 2:
+        return
+    hp: int = 0
+    while INCS[hp] < bign:
+        hp += 1
+    hp -= 1
+    while hp >= 0:
+        h: int = INCS[hp]
+        i: int = lo + h
+        while True:
+            rep: int = 0
+            stop: int = 0
+            while rep < 3:
+                if i > hi:
+                    stop = 1
+                    break
+                v: int = ptr[i]
+                j: int = i
+                while main_gtu(ptr[j - h] + d, v + d, block, quad, nblock, budget):
+                    ptr[j] = ptr[j - h]
+                    j = j - h
+                    if j <= lo + h - 1:
+                        break
+                ptr[j] = v
+                i += 1
+                rep += 1
+            if stop:
+                break
+            if budget[0] < 0:
+                return
+        hp -= 1
+
+def mvswap(ptr, p1: int, p2: int, n: int):
+    while n > 0:
+        t: int = ptr[p1]
+        ptr[p1] = ptr[p2]
+        ptr[p2] = t
+        p1 += 1
+        p2 += 1
+        n -= 1
+
+def mmed3(a: int, b: int, c: int) -> int:
+    t: int = 0
+    if a > b:
+        t = a
+        a = b
+        b = t
+    if b > c:
+        b = c
+        if a > b:
+            b = a
+    return b
+
+def main_qsort3(ptr, block, quad, nblock: int, lo_st: int, hi_st: int, d_st: int, budget):
+    stlo = [0] * 100
+    sthi = [0] * 100
+    std = [0] * 100
+    nlo = [0, 0, 0]
+    nhi = [0, 0, 0]
+    nd = [0, 0, 0]
+    sp: int = 1
+    stlo[0] = lo_st
+    sthi[0] = hi_st
+    std[0] = d_st
+    while sp > 0:
+        sp -= 1
+        lo: int = stlo[sp]
+        hi: int = sthi[sp]
+        d: int = std[sp]
+        if hi - lo < 20 or d > 14:
+            main_simple_sort(ptr, block, quad, nblock, lo, hi, d, budget)
+            if budget[0] < 0:
+                return
+            continue
+        med: int = mmed3(block[ptr[lo] + d], block[ptr[hi] + d], block[ptr[(lo + hi) >> 1] + d])
+        unlo: int = lo
+        ltlo: int = lo
+        unhi: int = hi
+        gthi: int = hi
+        n: int = 0
+        t: int = 0
+        while True:
+            while True:
+                if unlo > unhi:
+                    break
+                n = block[ptr[unlo] + d] - med
+                if n == 0:
+                    t = ptr[unlo]
+                    ptr[unlo] = ptr[ltlo]
+                    ptr[ltlo] = t
+                    ltlo += 1
+                    unlo += 1
+                    continue
+                if n > 0:
+                    break
+                unlo += 1
+            while True:
+                if unlo > unhi:
+                    break
+                n = block[ptr[unhi] + d] - med
+                if n == 0:
+                    t = ptr[unhi]
+                    ptr[unhi] = ptr[gthi]
+                    ptr[gthi] = t
+                    gthi -= 1
+                    unhi -= 1
+                    continue
+                if n < 0:
+                    break
+                unhi -= 1
+            if unlo > unhi:
+                break
+            t = ptr[unlo]
+            ptr[unlo] = ptr[unhi]
+            ptr[unhi] = t
+            unlo += 1
+            unhi -= 1
+        if gthi < ltlo:
+            stlo[sp] = lo
+            sthi[sp] = hi
+            std[sp] = d + 1
+            sp += 1
+            continue
+        n = min(ltlo - lo, unlo - ltlo)
+        mvswap(ptr, lo, unlo - n, n)
+        m: int = min(hi - gthi, gthi - unhi)
+        mvswap(ptr, unlo, hi - m + 1, m)
+        n = lo + unlo - ltlo - 1
+        m = hi - (gthi - unhi) + 1
+        nlo[0] = lo
+        nhi[0] = n
+        nd[0] = d
+        nlo[1] = m
+        nhi[1] = hi
+        nd[1] = d
+        nlo[2] = n + 1
+        nhi[2] = m - 1
+        nd[2] = d + 1
+        if nhi[0] - nlo[0] < nhi[1] - nlo[1]:
+            nswap(nlo, nhi, nd, 0, 1)
+        if nhi[1] - nlo[1] < nhi[2] - nlo[2]:
+            nswap(nlo, nhi, nd, 1, 2)
+        if nhi[0] - nlo[0] < nhi[1] - nlo[1]:
+            nswap(nlo, nhi, nd, 0, 1)
+        t = 0
+        while t < 3:
+            stlo[sp] = nlo[t]
+            sthi[sp] = nhi[t]
+            std[sp] = nd[t]
+            sp += 1
+            t += 1
+
+def nswap(a, b, c, x: int, y: int):
+    t: int = a[x]
+    a[x] = a[y]
+    a[y] = t
+    t = b[x]
+    b[x] = b[y]
+    b[y] = t
+    t = c[x]
+    c[x] = c[y]
+    c[y] = t
+
+def bigfreq(ftab, b: int) -> int:
+    return ftab[(b + 1) << 8] - ftab[b << 8]
+
+def main_sort(ptr, block, quad, nblock: int, budget):
+    ftab = [0] * 65537
+    i: int = 0
+    j: int = block[0] << 8
+    k: int = 0
+    i = nblock - 1
+    while i >= 0:
+        j = (j >> 8) | (block[i] << 8)
+        ftab[j] += 1
+        i -= 1
+    i = 0
+    while i < N_OVERSHOOT:
+        block[nblock + i] = block[i]
+        i += 1
+    i = 1
+    while i <= 65536:
+        ftab[i] += ftab[i - 1]
+        i += 1
+    s: int = block[0] << 8
+    i = nblock - 1
+    while i >= 0:
+        s = (s >> 8) | (block[i] << 8)
+        j = ftab[s] - 1
+        ftab[s] = j
+        ptr[j] = i
+        i -= 1
+    bigdone = [0] * 256
+    order = [0] * 256
+    i = 0
+    while i < 256:
+        order[i] = i
+        i += 1
+    h: int = 1
+    while True:
+        h = 3 * h + 1
+        if h > 256:
+            break
+    while True:
+        h = h // 3
+        i = h
+        while i <= 255:
+            vv: int = order[i]
+            j = i
+            while bigfreq(ftab, order[j - h]) > bigfreq(ftab, vv):
+                order[j] = order[j - h]
+                j = j - h
+                if j <= h - 1:
+                    break
+            order[j] = vv
+            i += 1
+        if h == 1:
+            break
+    cstart = [0] * 256
+    cend = [0] * 256
+    i = 0
+    while i <= 255:
+        ss: int = order[i]
+        j = 0
+        while j <= 255:
+            if j != ss:
+                sb: int = (ss << 8) + j
+                if (ftab[sb] & SETMASK) == 0:
+                    lo: int = ftab[sb] & CLEARMASK
+                    hi: int = (ftab[sb + 1] & CLEARMASK) - 1
+                    if hi > lo:
+                        main_qsort3(ptr, block, quad, nblock, lo, hi, 2, budget)
+                        if budget[0] < 0:
+                            return
+                ftab[sb] = ftab[sb] | SETMASK
+            j += 1
+        j = 0
+        while j <= 255:
+            cstart[j] = ftab[(j << 8) + ss] & CLEARMASK
+            cend[j] = (ftab[(j << 8) + ss + 1] & CLEARMASK) - 1
+            j += 1
+        c1: int = 0
+        j = ftab[ss << 8] & CLEARMASK
+        while j < cstart[ss]:
+            k = ptr[j] - 1
+            if k < 0:
+                k += nblock
+            c1 = block[k]
+            if bigdone[c1] == 0:
+                ptr[cstart[c1]] = k
+                cstart[c1] += 1
+            j += 1
+        j = (ftab[(ss + 1) << 8] & CLEARMASK) - 1
+        while j > cend[ss]:
+            k = ptr[j] - 1
+            if k < 0:
+                k += nblock
+            c1 = block[k]
+            if bigdone[c1] == 0:
+                ptr[cend[c1]] = k
+                cend[c1] -= 1
+            j -= 1
+        j = 0
+        while j <= 255:
+            ftab[(j << 8) + ss] = ftab[(j << 8) + ss] | SETMASK
+            j += 1
+        bigdone[ss] = 1
+        if i < 255:
+            bbstart: int = ftab[ss << 8] & CLEARMASK
+            bbsize: int = (ftab[(ss + 1) << 8] & CLEARMASK) - bbstart
+            shifts: int = 0
+            while (bbsize >> shifts) > 65534:
+                shifts += 1
+            j = bbsize - 1
+            while j >= 0:
+                a2: int = ptr[bbstart + j]
+                q: int = (j >> shifts) & 0xffff
+                quad[a2] = q
+                if a2 < N_OVERSHOOT:
+                    quad[a2 + nblock] = q
+                j -= 1
+        i += 1
+
+def block_sort(ptr, block, nblock: int) -> int:
+    if nblock < 10000:
+        fallback_sort(ptr, block, nblock)
+    else:
+        quad = [0] * (nblock + N_OVERSHOOT)
+        budget = [nblock * 9]
+        main_sort(ptr, block, quad, nblock, budget)
+        if budget[0] < 0:
+            fallback_sort(ptr, block, nblock)
+    i: int = 0
+    while i < nblock:
+        if ptr[i] == 0:
+            return i
+        i += 1
+    return -1
+
+# ---- huffman.c ----
+def make_code_lengths(ln, freq, alpha: int, maxlen: int):
+    heap = [0] * 260
+    weight = [0] * 516
+    parent = [0] * 516
+    i: int = 0
+    while i < alpha:
+        f: int = freq[i]
+        if f == 0:
+            f = 1
+        weight[i + 1] = f << 8
+        i += 1
+    while True:
+        nnodes: int = alpha
+        nheap: int = 0
+        heap[0] = 0
+        weight[0] = 0
+        parent[0] = -2
+        zz: int = 0
+        yy: int = 0
+        tmp: int = 0
+        i = 1
+        while i <= alpha:
+            parent[i] = -1
+            nheap += 1
+            heap[nheap] = i
+            zz = nheap
+            tmp = heap[zz]
+            while weight[tmp] < weight[heap[zz >> 1]]:
+                heap[zz] = heap[zz >> 1]
+                zz >>= 1
+            heap[zz] = tmp
+            i += 1
+        while nheap > 1:
+            n1: int = heap[1]
+            heap[1] = heap[nheap]
+            nheap -= 1
+            downheap(heap, weight, nheap)
+            n2: int = heap[1]
+            heap[1] = heap[nheap]
+            nheap -= 1
+            downheap(heap, weight, nheap)
+            nnodes += 1
+            parent[n1] = nnodes
+            parent[n2] = nnodes
+            w1: int = weight[n1]
+            w2: int = weight[n2]
+            d1: int = w1 & 255
+            d2: int = w2 & 255
+            weight[nnodes] = ((w1 & 0xffffff00) + (w2 & 0xffffff00)) | (1 + (d1 if d1 > d2 else d2))
+            parent[nnodes] = -1
+            nheap += 1
+            heap[nheap] = nnodes
+            zz = nheap
+            tmp = heap[zz]
+            while weight[tmp] < weight[heap[zz >> 1]]:
+                heap[zz] = heap[zz >> 1]
+                zz >>= 1
+            heap[zz] = tmp
+        toolong: int = 0
+        i = 1
+        while i <= alpha:
+            j: int = 0
+            k: int = i
+            while parent[k] >= 0:
+                k = parent[k]
+                j += 1
+            ln[i - 1] = j
+            if j > maxlen:
+                toolong = 1
+            i += 1
+        if toolong == 0:
+            break
+        i = 1
+        while i <= alpha:
+            j = weight[i] >> 8
+            j = 1 + (j // 2)
+            weight[i] = j << 8
+            i += 1
+
+def downheap(heap, weight, nheap: int):
+    zz: int = 1
+    tmp: int = heap[zz]
+    while True:
+        yy: int = zz << 1
+        if yy > nheap:
+            break
+        if yy < nheap and weight[heap[yy + 1]] < weight[heap[yy]]:
+            yy += 1
+        if weight[tmp] < weight[heap[yy]]:
+            break
+        heap[zz] = heap[yy]
+        zz = yy
+    heap[zz] = tmp
+
+# ---- compress.c ----
+def compress_block(out, bs, block, nblock: int, inuse, bcrc: int):
+    ptr = [0] * nblock
+    origptr: int = block_sort(ptr, block, nblock)
+    for c in [0x31, 0x41, 0x59, 0x26, 0x53, 0x59]:
+        bsw(out, bs, 8, c)
+    bs_u32(out, bs, bcrc)
+    bsw(out, bs, 1, 0)
+    bsw(out, bs, 24, origptr)
+    # generateMTFValues
+    unseq = [0] * 256
+    ninuse: int = 0
+    i: int = 0
+    while i < 256:
+        if inuse[i]:
+            unseq[i] = ninuse
+            ninuse += 1
+        i += 1
+    eob: int = ninuse + 1
+    freq = [0] * 258
+    mtfv = [0] * (nblock + 1)
+    yy = [0] * 256
+    i = 0
+    while i < ninuse:
+        yy[i] = i
+        i += 1
+    wr: int = 0
+    zpend: int = 0
+    j: int = 0
+    i = 0
+    while i < nblock:
+        j = ptr[i] - 1
+        if j < 0:
+            j += nblock
+        lli: int = unseq[block[j]]
+        if yy[0] == lli:
+            zpend += 1
+        else:
+            if zpend > 0:
+                zpend -= 1
+                while True:
+                    if zpend & 1:
+                        mtfv[wr] = 1
+                        freq[1] += 1
+                    else:
+                        mtfv[wr] = 0
+                        freq[0] += 1
+                    wr += 1
+                    if zpend < 2:
+                        break
+                    zpend = (zpend - 2) // 2
+                zpend = 0
+            rtmp: int = yy[1]
+            yy[1] = yy[0]
+            p: int = 1
+            while lli != rtmp:
+                p += 1
+                rtmp2: int = rtmp
+                rtmp = yy[p]
+                yy[p] = rtmp2
+            yy[0] = rtmp
+            mtfv[wr] = p + 1
+            wr += 1
+            freq[p + 1] += 1
+        i += 1
+    if zpend > 0:
+        zpend -= 1
+        while True:
+            if zpend & 1:
+                mtfv[wr] = 1
+                freq[1] += 1
+            else:
+                mtfv[wr] = 0
+                freq[0] += 1
+            wr += 1
+            if zpend < 2:
+                break
+            zpend = (zpend - 2) // 2
+    mtfv[wr] = eob
+    wr += 1
+    freq[eob] += 1
+    nmtf: int = wr
+    send_mtf_values(out, bs, mtfv, nmtf, freq, ninuse, inuse)
+
+def send_mtf_values(out, bs, mtfv, nmtf: int, mfreq, ninuse: int, inuse):
+    alpha: int = ninuse + 2
+    ln = []
+    rfreq = []
+    code = []
+    t: int = 0
+    while t < 6:
+        ln.append([15] * alpha)
+        rfreq.append([0] * alpha)
+        code.append([0] * alpha)
+        t += 1
+    ngroups: int = 6
+    if nmtf < 200:
+        ngroups = 2
+    elif nmtf < 600:
+        ngroups = 3
+    elif nmtf < 1200:
+        ngroups = 4
+    elif nmtf < 2400:
+        ngroups = 5
+    npart: int = ngroups
+    remf: int = nmtf
+    gs: int = 0
+    ge: int = 0
+    v: int = 0
+    while npart > 0:
+        tfreq: int = remf // npart
+        ge = gs - 1
+        afreq: int = 0
+        while afreq < tfreq and ge < alpha - 1:
+            ge += 1
+            afreq += mfreq[ge]
+        if ge > gs and npart != ngroups and npart != 1 and ((ngroups - npart) % 2 == 1):
+            afreq -= mfreq[ge]
+            ge -= 1
+        lp = ln[npart - 1]
+        v = 0
+        while v < alpha:
+            if v >= gs and v <= ge:
+                lp[v] = 0
+            else:
+                lp[v] = 15
+            v += 1
+        npart -= 1
+        gs = ge + 1
+        remf -= afreq
+    selector = [0] * (2 + (nmtf // 50) + 1)
+    nsel: int = 0
+    cost = [0] * 6
+    it: int = 0
+    i: int = 0
+    while it < 4:
+        t = 0
+        while t < ngroups:
+            rf = rfreq[t]
+            v = 0
+            while v < alpha:
+                rf[v] = 0
+                v += 1
+            t += 1
+        nsel = 0
+        gs = 0
+        while gs < nmtf:
+            ge = gs + 49
+            if ge >= nmtf:
+                ge = nmtf - 1
+            t = 0
+            while t < ngroups:
+                lt = ln[t]
+                c: int = 0
+                i = gs
+                while i <= ge:
+                    c += lt[mtfv[i]]
+                    i += 1
+                cost[t] = c
+                t += 1
+            bc: int = 999999999
+            bt: int = -1
+            t = 0
+            while t < ngroups:
+                if cost[t] < bc:
+                    bc = cost[t]
+                    bt = t
+                t += 1
+            selector[nsel] = bt
+            nsel += 1
+            rf = rfreq[bt]
+            i = gs
+            while i <= ge:
+                rf[mtfv[i]] += 1
+                i += 1
+            gs = ge + 1
+        t = 0
+        while t < ngroups:
+            make_code_lengths(ln[t], rfreq[t], alpha, 17)
+            t += 1
+        it += 1
+    pos = [0, 1, 2, 3, 4, 5]
+    selmtf = [0] * nsel
+    i = 0
+    while i < nsel:
+        lli: int = selector[i]
+        j: int = 0
+        tmp: int = pos[j]
+        while lli != tmp:
+            j += 1
+            tmp2: int = tmp
+            tmp = pos[j]
+            pos[j] = tmp2
+        pos[0] = tmp
+        selmtf[i] = j
+        i += 1
+    t = 0
+    while t < ngroups:
+        lt = ln[t]
+        minlen: int = 32
+        maxlen: int = 0
+        i = 0
+        while i < alpha:
+            if lt[i] > maxlen:
+                maxlen = lt[i]
+            if lt[i] < minlen:
+                minlen = lt[i]
+            i += 1
+        vec: int = 0
+        n: int = minlen
+        ct = code[t]
+        while n <= maxlen:
+            i = 0
+            while i < alpha:
+                if lt[i] == n:
+                    ct[i] = vec
+                    vec += 1
+                i += 1
+            vec <<= 1
+            n += 1
+        t += 1
+    in16 = [0] * 16
+    i = 0
+    while i < 16:
+        j = 0
+        while j < 16:
+            if inuse[i * 16 + j]:
+                in16[i] = 1
+            j += 1
+        i += 1
+    i = 0
+    while i < 16:
+        bsw(out, bs, 1, in16[i])
+        i += 1
+    i = 0
+    while i < 16:
+        if in16[i]:
+            j = 0
+            while j < 16:
+                bsw(out, bs, 1, 1 if inuse[i * 16 + j] else 0)
+                j += 1
+        i += 1
+    bsw(out, bs, 3, ngroups)
+    bsw(out, bs, 15, nsel)
+    i = 0
+    while i < nsel:
+        j = 0
+        while j < selmtf[i]:
+            bsw(out, bs, 1, 1)
+            j += 1
+        bsw(out, bs, 1, 0)
+        i += 1
+    t = 0
+    while t < ngroups:
+        lt = ln[t]
+        curr: int = lt[0]
+        bsw(out, bs, 5, curr)
+        i = 0
+        while i < alpha:
+            while curr < lt[i]:
+                bsw(out, bs, 2, 2)
+                curr += 1
+            while curr > lt[i]:
+                bsw(out, bs, 2, 3)
+                curr -= 1
+            bsw(out, bs, 1, 0)
+            i += 1
+        t += 1
+    sc: int = 0
+    gs = 0
+    while gs < nmtf:
+        ge = gs + 49
+        if ge >= nmtf:
+            ge = nmtf - 1
+        lt = ln[selector[sc]]
+        ct = code[selector[sc]]
+        i = gs
+        while i <= ge:
+            bsw(out, bs, lt[mtfv[i]], ct[mtfv[i]])
+            i += 1
+        gs = ge + 1
+        sc += 1
+
+# ---- bzlib.c: RLE1 and block filling ----
+def compress(d) -> str:
+    out = []
+    bs = [0, 0]
+    for c in [66, 90, 104, 57]:
+        bsw(out, bs, 8, c)
+    n: int = len(d)
+    nmax: int = 900000 - 19
+    block = [0] * (900000 + N_OVERSHOOT)
+    inuse = [0] * 256
+    nb: int = 0
+    bcrc: int = 0xffffffff
+    comb: int = 0
+    inch: int = 256
+    inlen: int = 0
+    i: int = 0
+    pos: int = 0
+    while True:
+        if nb >= nmax or pos >= n:
+            if pos >= n:
+                if nb < nmax:
+                    break
+            # full block: compress it, the pending run carries over
+            bcrc = bcrc ^ 0xffffffff
+            comb = (((comb << 1) | (comb >> 31)) & 0xffffffff) ^ bcrc
+            compress_block(out, bs, block, nb, inuse, bcrc)
+            nb = 0
+            bcrc = 0xffffffff
+            i = 0
+            while i < 256:
+                inuse[i] = 0
+                i += 1
+            if pos >= n:
+                break
+            continue
+        ch: int = ord(d[pos])
+        pos += 1
+        if ch != inch and inlen == 1:
+            bcrc = ((bcrc << 8) & 0xffffffff) ^ CRC[(bcrc >> 24) ^ inch]
+            inuse[inch] = 1
+            block[nb] = inch
+            nb += 1
+            inch = ch
+        elif ch != inch or inlen == 255:
+            if inch < 256:
+                nb = add_pair(block, nb, inuse, inch, inlen)
+                i = 0
+                while i < inlen:
+                    bcrc = ((bcrc << 8) & 0xffffffff) ^ CRC[(bcrc >> 24) ^ inch]
+                    i += 1
+            inch = ch
+            inlen = 1
+        else:
+            inlen += 1
+    if inch < 256:
+        nb = add_pair(block, nb, inuse, inch, inlen)
+        i = 0
+        while i < inlen:
+            bcrc = ((bcrc << 8) & 0xffffffff) ^ CRC[(bcrc >> 24) ^ inch]
+            i += 1
+    if nb > 0:
+        bcrc = bcrc ^ 0xffffffff
+        comb = (((comb << 1) | (comb >> 31)) & 0xffffffff) ^ bcrc
+        compress_block(out, bs, block, nb, inuse, bcrc)
+    for c in [0x17, 0x72, 0x45, 0x38, 0x50, 0x90]:
+        bsw(out, bs, 8, c)
+    bs_u32(out, bs, comb)
+    bs_finish(out, bs)
+    return "".join(out)
+
+def add_pair(block, nb: int, inuse, ch: int, ln: int) -> int:
+    inuse[ch] = 1
+    k: int = ln
+    if k > 4:
+        k = 4
+    while k > 0:
+        block[nb] = ch
+        nb += 1
+        k -= 1
+    if ln >= 4:
+        inuse[ln - 4] = 1
+        block[nb] = ln - 4
+        nb += 1
+    return nb
+
+# ---- decompress.c ----
+# BR = [byte position, bit buffer, live bits]; a read past the end sets BR[3] (truncated stream)
+def getbits(d, br, n: int) -> int:
+    while br[2] < n:
+        if br[0] >= len(d):
+            br[3] = 1
+            return -1
+        br[1] = ((br[1] << 8) | ord(d[br[0]])) & 0xffffffff
+        br[0] += 1
+        br[2] += 8
+    v: int = (br[1] >> (br[2] - n)) & ((1 << n) - 1)
+    br[2] -= n
+    return v
+
+# returns 0 at a good end of stream, 1 for a data error, 2 for a bad magic, 3 when the input ran out
+def decompress_stream(d, br, out) -> int:
+    for c in [66, 90, 104]:
+        if getbits(d, br, 8) != c:
+            return 3 if br[3] else 2
+    bsz: int = getbits(d, br, 8)
+    if br[3]:
+        return 3
+    if bsz < 49 or bsz > 57:
+        return 2
+    bsz -= 48
+    comb: int = 0
+    tt = [0] * (bsz * 100000)
+    while True:
+        u: int = getbits(d, br, 8)
+        if br[3]:
+            return 3
+        if u == 0x17:
+            for c in [0x72, 0x45, 0x38, 0x50, 0x90]:
+                u = getbits(d, br, 8)
+                if br[3]:
+                    return 3
+                if u != c:
+                    return 1
+            stored: int = getbits(d, br, 16)
+            stored = (stored << 16) | getbits(d, br, 16)
+            if br[3]:
+                return 3
+            if stored != comb:
+                return 1
+            return 0
+        if u != 0x31:
+            return 1
+        for c in [0x41, 0x59, 0x26, 0x53, 0x59]:
+            u = getbits(d, br, 8)
+            if br[3]:
+                return 3
+            if u != c:
+                return 1
+        r: int = decode_block(d, br, out, tt, bsz)
+        if r < 0:
+            return -r
+        comb = (((comb << 1) | (comb >> 31)) & 0xffffffff) ^ r
+
+def make_decode_tables(limit, base, perm, length, minlen: int, maxlen: int, alpha: int):
+    pp: int = 0
+    i: int = minlen
+    j: int = 0
+    while i <= maxlen:
+        j = 0
+        while j < alpha:
+            if length[j] == i:
+                perm[pp] = j
+                pp += 1
+            j += 1
+        i += 1
+    i = 0
+    while i < 23:
+        base[i] = 0
+        limit[i] = 0
+        i += 1
+    i = 0
+    while i < alpha:
+        base[length[i] + 1] += 1
+        i += 1
+    i = 1
+    while i < 23:
+        base[i] += base[i - 1]
+        i += 1
+    vec: int = 0
+    i = minlen
+    while i <= maxlen:
+        vec += base[i + 1] - base[i]
+        limit[i] = vec - 1
+        vec <<= 1
+        i += 1
+    i = minlen + 1
+    while i <= maxlen:
+        base[i] = ((limit[i - 1] + 1) << 1) - base[i]
+        i += 1
+
+# decodes one block after its magic; returns its CRC, or -(error code)
+def decode_block(d, br, out, tt, bsz: int) -> int:
+    stored: int = getbits(d, br, 16)
+    stored = (stored << 16) | getbits(d, br, 16)
+    rand: int = getbits(d, br, 1)
+    origptr: int = getbits(d, br, 24)
+    if br[3]:
+        return -3
+    if origptr > 10 + 100000 * bsz:
+        return -1
+    in16 = [0] * 16
+    i: int = 0
+    j: int = 0
+    while i < 16:
+        in16[i] = getbits(d, br, 1)
+        i += 1
+    seq = [0] * 256
+    ninuse: int = 0
+    i = 0
+    while i < 16:
+        if in16[i] == 1:
+            j = 0
+            while j < 16:
+                if getbits(d, br, 1) == 1:
+                    seq[ninuse] = i * 16 + j
+                    ninuse += 1
+                j += 1
+        i += 1
+    if br[3]:
+        return -3
+    if ninuse == 0:
+        return -1
+    alpha: int = ninuse + 2
+    ngroups: int = getbits(d, br, 3)
+    if br[3]:
+        return -3
+    if ngroups < 2 or ngroups > 6:
+        return -1
+    nsel: int = getbits(d, br, 15)
+    if br[3]:
+        return -3
+    if nsel < 1:
+        return -1
+    selmtf = [0] * 18002
+    i = 0
+    while i < nsel:
+        j = 0
+        while True:
+            u: int = getbits(d, br, 1)
+            if br[3]:
+                return -3
+            if u == 0:
+                break
+            j += 1
+            if j >= ngroups:
+                return -1
+        if i < 18002:
+            selmtf[i] = j
+        i += 1
+    if nsel > 18002:
+        nsel = 18002
+    pos = [0, 1, 2, 3, 4, 5]
+    selector = [0] * nsel
+    i = 0
+    while i < nsel:
+        v: int = selmtf[i]
+        tmp: int = pos[v]
+        while v > 0:
+            pos[v] = pos[v - 1]
+            v -= 1
+        pos[0] = tmp
+        selector[i] = tmp
+        i += 1
+    limits = []
+    bases = []
+    perms = []
+    minlens = [0] * 6
+    t: int = 0
+    while t < ngroups:
+        ln = [0] * alpha
+        curr: int = getbits(d, br, 5)
+        i = 0
+        while i < alpha:
+            while True:
+                if br[3]:
+                    return -3
+                if curr < 1 or curr > 20:
+                    return -1
+                if getbits(d, br, 1) == 0:
+                    break
+                if getbits(d, br, 1) == 0:
+                    curr += 1
+                else:
+                    curr -= 1
+            ln[i] = curr
+            i += 1
+        if br[3]:
+            return -3
+        minlen: int = 32
+        maxlen: int = 0
+        i = 0
+        while i < alpha:
+            if ln[i] > maxlen:
+                maxlen = ln[i]
+            if ln[i] < minlen:
+                minlen = ln[i]
+            i += 1
+        lim = [0] * 23
+        bas = [0] * 23
+        per = [0] * 258
+        make_decode_tables(lim, bas, per, ln, minlen, maxlen, alpha)
+        limits.append(lim)
+        bases.append(bas)
+        perms.append(per)
+        minlens[t] = minlen
+        t += 1
+    eob: int = ninuse + 1
+    nbmax: int = 100000 * bsz
+    unz = [0] * 256
+    mtfa = [0] * 256
+    i = 0
+    while i < 256:
+        mtfa[i] = i
+        i += 1
+    groupno: int = -1
+    grouppos: int = 0
+    nblock: int = 0
+    lim = limits[0]
+    bas = bases[0]
+    per = perms[0]
+    gmin: int = 0
+    sym: int = 0
+    es: int = 0
+    nn: int = 0
+    getsym: int = 1
+    while True:
+        if getsym:
+        # GET_MTF_VAL
+            if grouppos == 0:
+                groupno += 1
+                if groupno >= nsel:
+                    return -1
+                grouppos = 50
+                g: int = selector[groupno]
+                gmin = minlens[g]
+                lim = limits[g]
+                bas = bases[g]
+                per = perms[g]
+            grouppos -= 1
+            zn: int = gmin
+            zvec: int = getbits(d, br, zn)
+            if br[3]:
+                return -3
+            while True:
+                if zn > 20:
+                    return -1
+                if zvec <= lim[zn]:
+                    break
+                zn += 1
+                zj: int = getbits(d, br, 1)
+                if br[3]:
+                    return -3
+                zvec = (zvec << 1) | zj
+            if zvec - bas[zn] < 0 or zvec - bas[zn] >= 258:
+                return -1
+            sym = per[zvec - bas[zn]]
+        getsym = 1
+        if sym == eob:
+            break
+        if sym == 0 or sym == 1:
+            es = -1
+            nn = 1
+            while sym == 0 or sym == 1:
+                if nn >= 2097152:
+                    return -1
+                es += nn * (sym + 1)
+                nn *= 2
+                if grouppos == 0:
+                    groupno += 1
+                    if groupno >= nsel:
+                        return -1
+                    grouppos = 50
+                    g = selector[groupno]
+                    gmin = minlens[g]
+                    lim = limits[g]
+                    bas = bases[g]
+                    per = perms[g]
+                grouppos -= 1
+                zn = gmin
+                zvec = getbits(d, br, zn)
+                if br[3]:
+                    return -3
+                while True:
+                    if zn > 20:
+                        return -1
+                    if zvec <= lim[zn]:
+                        break
+                    zn += 1
+                    zj = getbits(d, br, 1)
+                    if br[3]:
+                        return -3
+                    zvec = (zvec << 1) | zj
+                if zvec - bas[zn] < 0 or zvec - bas[zn] >= 258:
+                    return -1
+                sym = per[zvec - bas[zn]]
+            es += 1
+            uc: int = seq[mtfa[0]]
+            unz[uc] += es
+            while es > 0:
+                if nblock >= nbmax:
+                    return -1
+                tt[nblock] = uc
+                nblock += 1
+                es -= 1
+            getsym = 0
+            continue
+        if nblock >= nbmax:
+            return -1
+        nv: int = sym - 1
+        u2: int = mtfa[nv]
+        while nv > 0:
+            mtfa[nv] = mtfa[nv - 1]
+            nv -= 1
+        mtfa[0] = u2
+        uc = seq[u2]
+        unz[uc] += 1
+        tt[nblock] = uc
+        nblock += 1
+    if origptr < 0 or origptr >= nblock:
+        return -1
+    cftab = [0] * 257
+    i = 1
+    while i <= 256:
+        cftab[i] = cftab[i - 1] + unz[i - 1]
+        i += 1
+    i = 0
+    while i < nblock:
+        uc = tt[i] & 255
+        tt[cftab[uc]] = tt[cftab[uc]] | (i << 8)
+        cftab[uc] += 1
+        i += 1
+    # unRLE_obuf_to_output_FAST
+    tpos: int = tt[origptr] >> 8
+    used: int = 0
+    rntogo: int = 0
+    rtpos: int = 0
+    crc: int = 0xffffffff
+    lim2: int = 100000 * bsz
+    k0: int = 0
+    k1: int = 0
+    if tpos >= lim2:
+        return -1
+    tpos = tt[tpos]
+    k0 = tpos & 255
+    tpos >>= 8
+    used += 1
+    if rand:
+        if rntogo == 0:
+            rntogo = RNUMS[rtpos]
+            rtpos += 1
+            if rtpos == 512:
+                rtpos = 0
+        rntogo -= 1
+        if rntogo == 1:
+            k0 ^= 1
+    outlen: int = 0
+    outch: int = 0
+    seg = []
+    while True:
+        while outlen > 0:
+            seg.append(chr(outch))
+            crc = ((crc << 8) & 0xffffffff) ^ CRC[(crc >> 24) ^ outch]
+            outlen -= 1
+        if used == nblock + 1:
+            break
+        if used > nblock + 1:
+            return -1
+        outlen = 1
+        outch = k0
+        step: int = 0
+        while True:
+            if tpos >= lim2:
+                return -1
+            tpos = tt[tpos]
+            k1 = tpos & 255
+            tpos >>= 8
+            if rand:
+                if rntogo == 0:
+                    rntogo = RNUMS[rtpos]
+                    rtpos += 1
+                    if rtpos == 512:
+                        rtpos = 0
+                rntogo -= 1
+                if rntogo == 1:
+                    k1 ^= 1
+            used += 1
+            if step == 3:
+                outlen = k1 + 4
+                if tpos >= lim2:
+                    return -1
+                tpos = tt[tpos]
+                k0 = tpos & 255
+                tpos >>= 8
+                if rand:
+                    if rntogo == 0:
+                        rntogo = RNUMS[rtpos]
+                        rtpos += 1
+                        if rtpos == 512:
+                            rtpos = 0
+                    rntogo -= 1
+                    if rntogo == 1:
+                        k0 ^= 1
+                used += 1
+                break
+            if used == nblock + 1:
+                break
+            if k1 != k0:
+                k0 = k1
+                break
+            step += 1
+            outlen = step + 1
+    crc = crc ^ 0xffffffff
+    if crc != stored:
+        return -1
+    out.append("".join(seg))
+    return crc
+
+def decompress(d, err) -> str:
+    results = []
+    p: int = 0
+    while p < len(d):
+        br = [p, 0, 0, 0]
+        out = []
+        r: int = decompress_stream(d, br, out)
+        if r == 1 or r == 2:
+            if len(results) > 0:
+                break
+            err[0] = "OSError: Invalid data stream\n"
+            return ""
+        if r == 3:
+            err[0] = "ValueError: Compressed data ended before the end-of-stream marker was reached\n"
+            return ""
+        results.append("".join(out))
+        p = br[0]
+    return "".join(results)
+
+def main() -> int:
+    crc_init()
+    parts = []
+    while True:
+        c = os.read(0, 1048576)
+        if len(c) == 0:
+            break
+        parts.append(c)
+    d = "".join(parts)
+    if "-d" in sys.argv:
+        err = [""]
+        r = decompress(d, err)
+        if err[0] != "":
+            os.write(2, err[0])
+            return 1
+        os.write(1, r)
+    else:
+        os.write(1, compress(d))
+    return 0
+
+exit(main())
