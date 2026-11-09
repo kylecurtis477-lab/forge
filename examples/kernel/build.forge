@@ -1,0 +1,98 @@
+# examples/kernel/build.forge: Forge port of examples/kernel/build.sh (kept as the reference;
+# tests/kernel-build/run.sh checks both give the same build/kernel artifacts, output and exit code).
+# Builds the Forge kernel (ELF64 multiboot2, image KASLR: fld --format kernel lays out the low boot stub at
+# 1 MiB and the rest at -2 GiB + phys and writes the .krel self-relocation table), the user programs
+# (build/user-build, examples/user/build.forge, which builds BusyBox via build/busybox-build), the test modules
+# (build/modules-build), a second kernel with another version string for the kexec test (kernel-next.elf, must
+# differ from kernel.elf) and a BIOS+UEFI hybrid GRUB ISO. The script's sed/grep/cmp steps are done in Forge.
+# usage: build/kernel-build  (the binary lives in build/, so the repo is the parent of its directory; it runs
+# from examples/kernel like the script). Stops at the first failing step with that step's exit code (sh -e).
+# $FORGEC_FLAGS is passed to forgec for both kernels (and inherited by the user and module builds).
+import os
+import sys
+
+def step(args):
+    r = os.run(args)
+    os.write(1, r[1])
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+
+def mkdirs(p):
+    d = ""
+    for part in p.split("/"):
+        d = part if d == "" else d + "/" + part
+        if not os.path.isdir(d):
+            os.mkdir(d)
+
+def need(p):
+    d = read_file(p)
+    if d is None:
+        os.write(2, "cp: cannot stat '" + p + "': No such file or directory\n")
+        exit(1)
+    return d
+
+# cp(1) without -p: same bytes; an executable source (access X_OK) gives mode 0755 like cp under umask 022
+def cp_file(a, b):
+    write_file(b, need(a))
+    if __syscall(21, a, 1, 0) == 0:
+        os.chmod(b, 493)
+
+def klink(p):
+    step(["../../build/fld", "--format", "kernel", "-o", p + ".elf", p + ".o"])
+
+def main():
+    me = sys.argv[0]
+    root = os.path.dirname(me) + "/.." if me.find("/") >= 0 else ".."
+    os.chdir(root + "/examples/kernel")
+    b = "../../build/kernel"
+    mkdirs(b + "/iso/boot/grub")
+    flags = []
+    for f in os.getenv("FORGEC_FLAGS", "").split():
+        flags.append(f)
+    # the user programs and BusyBox (examples/user/build.forge, tools/busybox/build.forge)
+    step(["../../forge", "../../tools/busybox/build.forge", "-o", "../../build/busybox-build"])
+    step(["../../forge", "../user/build.forge", "-o", "../../build/user-build"])
+    step(["../../build/user-build"])
+    # the test modules (examples/modules/build.forge)
+    step(["../../forge", "../modules/build.forge", "-o", "../../build/modules-build"])
+    step(["../../build/modules-build"])
+    step(["../../build/forgec", "kernel.forge", b + "/kernel.s"] + flags)
+    step(["../../build/fas", "-I", "../../build/user", "-o", b + "/kernel.o", b + "/kernel.s"])
+    klink(b + "/kernel")
+    step(["grub-file", "--is-x86-multiboot2", b + "/kernel.elf"])
+    # a genuinely different build for the kexec test (\EFI\Forge\kernel-next.elf): another version string
+    # (the script's sed, first match per line, and its grep -q check)
+    src = need("kernel.forge")
+    old = "\"forge-kernel 0.2.6\""
+    new = "\"forge-kernel 0.2.6-next\""
+    lines = []
+    for l in src.split("\n"):
+        i = l.find(old)
+        if i >= 0:
+            l = l[:i] + new + l[i + len(old):]
+        lines.append(l)
+    nx = "\n".join(lines)
+    write_file(".kernel_next.forge", nx)
+    if nx.find(new) < 0:
+        exit(1)
+    r = os.run(["../../build/forgec", ".kernel_next.forge", b + "/kernel-next.s"] + flags)
+    os.write(1, r[1])
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+    os.remove(".kernel_next.forge")
+    step(["../../build/fas", "-I", "../../build/user", "-o", b + "/kernel-next.o", b + "/kernel-next.s"])
+    klink(b + "/kernel-next")
+    if read_file(b + "/kernel.elf") == read_file(b + "/kernel-next.elf"):
+        os.write(1, "kernel-next.elf is identical to kernel.elf\n")
+        exit(1)
+    cp_file(b + "/kernel.elf", b + "/iso/boot/kernel.elf")
+    cp_file("grub.cfg", b + "/iso/boot/grub/grub.cfg")
+    r = os.run(["grub-mkrescue", "-o", b + "/forge.iso", b + "/iso"])
+    if r[0] != 0:
+        exit(r[0])
+    os.write(1, "built " + b + "/kernel.elf and " + b + "/forge.iso\n")
+    return 0
+
+exit(main())

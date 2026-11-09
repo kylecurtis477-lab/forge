@@ -1,6 +1,6 @@
 # examples/efi/build.forge: Forge port of examples/efi/build.sh (kept as the reference; tests/efi-build/run.sh
 # checks both give the same build/efi artifacts byte for byte, the same output and exit code).
-# Builds the Forge UEFI loader (PE32+, EFI application) plus the kernel (examples/kernel/build.sh), then a
+# Builds the Forge UEFI loader (PE32+, EFI application) plus the kernel (build/kernel-build, examples/kernel/build.forge; examples/kernel/build.sh is kept as the reference), then a
 # FAT32 ESP image (mtools) holding the loader, kernels, init, the user programs, the test modules and test
 # files under \EFI\Forge\ next to empty Microsoft/debian vendor directories (BOOT\BOOTX64.EFI is only this
 # test disk's removable-media fallback), and a GPT test disk around it with build/efi/mkgpt (mkgpt.forge).
@@ -39,7 +39,9 @@ def main():
     step(["../../build/fas", "-o", b + "/loader.o", b + "/loader.s"])
     step(["../../build/fld", "--format", "pe", "--subsystem", "10", "--image-base", "0x10000000", "-e", "efi_main",
           "-o", b + "/forgex64.efi", b + "/loader.o"])
-    quiet(["../kernel/build.sh"])
+    # the kernel (examples/kernel/build.forge; examples/kernel/build.sh is kept as the reference)
+    quiet(["../../forge", "../kernel/build.forge", "-o", "../../build/kernel-build"])
+    quiet(["../../build/kernel-build"])
     e = b + "/esp.fat"
     if os.path.isfile(e):
         os.remove(e)
