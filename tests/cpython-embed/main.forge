@@ -1,8 +1,9 @@
 # forge: no-runtime
 # tests/cpython-embed/main.forge: register the Forge @export functions in api.forge
-# as Python module "forge" through tools/cpython/embed.fsi, then run assertions
-# that call back into Forge. gcc -no-pie links this with api.o and libpython3.13.a;
-# there is no C file in this test. @export main is the gcc crt entry point.
+# as Python module "forge" through tools/cpython/embed.fsi, run Python-to-Forge
+# assertions, then call Python from Forge (eval, 0/1/2-arg object calls, and a
+# Python function that calls back into Forge). gcc -no-pie links this with api.o
+# and libpython3.13.a; there is no C file. @export main is the gcc crt entry point.
 
 include "../../tools/cpython/embed.fsi"
 
@@ -87,6 +88,49 @@ def main() -> i64:
     if forge_py_run("import forge\nassert forge.add(20, 22) == 42, forge.add(20, 22)\nassert forge.mul(6, 7) == 42, forge.mul(6, 7)\nassert forge.neg(42) == -42, forge.neg(42)\nassert forge.answer() == 42, forge.answer()\nassert forge.sum_to(10) == 55, forge.sum_to(10)\nprint('python-to-forge add(20,22)=', forge.add(20, 22), sep='')\nprint('python-to-forge mul(6,7)=', forge.mul(6, 7), sep='')\nprint('python-to-forge neg(42)=', forge.neg(42), sep='')\nprint('python-to-forge answer()=', forge.answer(), sep='')\nprint('python-to-forge sum_to(10)=', forge.sum_to(10), sep='')\n") != 0:
         forge_py_finalize()
         return 5
+    if forge_py_run("import forge\ndef py_mul(a, b):\n    return a * b\ndef py_neg(a):\n    return -a\ndef py_answer():\n    return 42\ndef py_twice_add(a, b):\n    return forge.add(a, b) * 2\n") != 0:
+        forge_py_finalize()
+        return 7
+    ev = forge_py_eval("6*7")
+    if ev == 0:
+        forge_py_finalize()
+        return 7
+    evv = PyLong_AsLong(ev)
+    Py_DecRef(ev)
+    if evv != 42:
+        printf("forge-to-python eval got %lld\n", u64(evv))
+        forge_py_finalize()
+        return 7
+    printf("forge-to-python eval(6*7)=%lld\n", u64(evv))
+    fn = forge_py_main_attr("py_mul")
+    v: i64 = 0
+    if fn == 0 or forge_py_call_i64(fn, 2, 6, 7, addr(v)) != 0 or v != 42:
+        printf("forge-to-python mul got %lld\n", u64(v))
+        forge_py_finalize()
+        return 7
+    Py_DecRef(fn)
+    printf("forge-to-python mul(6,7)=%lld\n", u64(v))
+    fn = forge_py_main_attr("py_neg")
+    if fn == 0 or forge_py_call_i64(fn, 1, 42, 0, addr(v)) != 0 or v != 0 - 42:
+        printf("forge-to-python neg got %lld\n", u64(v))
+        forge_py_finalize()
+        return 7
+    Py_DecRef(fn)
+    printf("forge-to-python neg(42)=%lld\n", u64(v))
+    fn = forge_py_main_attr("py_answer")
+    if fn == 0 or forge_py_call_i64(fn, 0, 0, 0, addr(v)) != 0 or v != 42:
+        printf("forge-to-python answer got %lld\n", u64(v))
+        forge_py_finalize()
+        return 7
+    Py_DecRef(fn)
+    printf("forge-to-python answer()=%lld\n", u64(v))
+    fn = forge_py_main_attr("py_twice_add")
+    if fn == 0 or forge_py_call_i64(fn, 2, 20, 22, addr(v)) != 0 or v != 84:
+        printf("forge-to-python-to-forge twice_add got %lld\n", u64(v))
+        forge_py_finalize()
+        return 7
+    Py_DecRef(fn)
+    printf("forge-to-python-to-forge twice_add(20,22)=%lld\n", u64(v))
     if forge_py_finalize() != 0:
         return 6
     return 0

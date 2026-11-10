@@ -1,6 +1,8 @@
 #!/bin/sh
-# tests/cpython-embed: Python calls into Forge @export functions through the
-# 11.5(a) embed API (tools/cpython/embed.fsi, written in Forge) and the 11.2 C ABI.
+# tests/cpython-embed: Python calls into Forge @export functions, and Forge calls
+# back into Python (eval, object calls, and a Python function that calls Forge),
+# through the 11.5(a) embed API (tools/cpython/embed.fsi, written in Forge) and
+# the 11.2 C ABI.
 # Builds the pinned CPython if needed (warm when the prefix is current), compiles
 # api.forge and main.forge with forgec/fas, and links with gcc -no-pie against
 # prefix/lib/libpython3.13.a and the box libc (not fld). SKIP if there is no
@@ -42,4 +44,11 @@ if [ $rc = 0 ] \
    && grep -q 'python-to-forge answer()=42' $T/o \
    && grep -q 'python-to-forge sum_to(10)=55' $T/o
 then echo "PASS cpython-embed/python-to-forge"; else echo "FAIL cpython-embed/python-to-forge (rc $rc)"; cat $T/o $T/e; fail=1; fi
+if [ $rc = 0 ] \
+   && grep -Fq 'forge-to-python eval(6*7)=42' $T/o \
+   && grep -Fq 'forge-to-python mul(6,7)=42' $T/o \
+   && grep -Fq 'forge-to-python neg(42)=-42' $T/o \
+   && grep -Fq 'forge-to-python answer()=42' $T/o \
+   && grep -Fq 'forge-to-python-to-forge twice_add(20,22)=84' $T/o
+then echo "PASS cpython-embed/forge-to-python"; else echo "FAIL cpython-embed/forge-to-python (rc $rc)"; cat $T/o $T/e; fail=1; fi
 exit $fail
