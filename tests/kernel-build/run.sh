@@ -5,6 +5,7 @@
 # with identical bytes and modes. forge.iso is not byte-reproducible even from the script (grub-mkrescue embeds a
 # fresh UUID in its core images and the .disk/<time>.uuid name), so the ISOs are compared by their file trees
 # (xorriso extract): same paths apart from .disk/*.uuid, identical boot/kernel.elf and boot/grub/grub.cfg.
+# xorriso's extract tree is read-only; isot and the EXIT trap chmod -R u+w before rm -rf so cleanup is silent.
 # Cases: default, O0, and missing-input (grub.cfg hidden: the same cp error and exit code, the same partial tree).
 # Needs build/ (forgec, fas, fld, forge): run after build.sh.
 cd "$(dirname "$0")/../.." || exit 1
@@ -15,7 +16,9 @@ fail=0
 man() { (cd $1 && find . -type f ! -name forge.iso | sort | xargs stat -c '%a %n' && find . -type f ! -name forge.iso | sort | xargs sha256sum); }
 isot() {
   [ -f $1/forge.iso ] || { echo none; return; }
-  rm -rf $T/x; xorriso -osirrox on -indev $1/forge.iso -extract / $T/x >/dev/null 2>&1
+  # xorriso extracts read-only; chmod before rm or the next call (and the EXIT trap) spam Permission denied
+  chmod -R u+w "$T/x" 2>/dev/null; rm -rf "$T/x"
+  xorriso -osirrox on -indev $1/forge.iso -extract / $T/x >/dev/null 2>&1
   (cd $T/x && find . -type f ! -path './.disk/*' | sort && sha256sum boot/kernel.elf boot/grub/grub.cfg)
 }
 chk() {
