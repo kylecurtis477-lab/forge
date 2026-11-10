@@ -25,8 +25,14 @@
 # (float -> integer truncates, as in C). Casts: (T)x between numbers; pointer <-> pointer as ptr[U](p);
 # integer -> pointer as ptr[T](u64(x)); pointer -> integer as T(u64(p)); (void)x. void * is ptr[void]
 # internally (no deref, no arithmetic) and converts implicitly to and from any object pointer, as in C; the
-# output spells it ptr[u8]. Not yet: unions (Forge has none; plan 11.4 does not cover them), string
-# literals as values, globals, hex floats.
+# output spells it ptr[u8]. Remaining gaps (0.15.1, listed in BUILD_PLAN item 4): globals; string
+# literals as values (and char s[] = "..." initializers); ++/-- inside an expression (statement form
+# works); array sizes that are not an integer literal or a #define expanding to one (constant
+# expressions are not folded). Also rejected: unions (Forge has none; the plan does not add them),
+# hex floats, long double, the comma operator, compound literals, continue in a switch, enum, goto,
+# varargs, local typedef, bit-fields, K&R, attributes, GNU statement-expressions, _Bool, _Complex.
+# Silent (wrong, no error): static locals are ordinary locals; same-name/same-type inner-block
+# declarations overwrite the outer variable.
 # Preprocessor subset (step 6): a pass over the tokens before parsing. Object-like #define NAME body and
 # #undef; uses expand recursively, a macro is not re-expanded inside its own expansion (as in C), and
 # expanded tokens carry the line of the use. #include <stdint.h> / <stddef.h> / <sys/types.h> / <limits.h>
