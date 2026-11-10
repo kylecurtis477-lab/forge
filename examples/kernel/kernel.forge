@@ -12,6 +12,7 @@ include "mm.fsi"
 include "mmio.fsi"
 include "cpu.fsi"
 include "acpi.fsi"
+include "iommu.fsi"
 include "apic.fsi"
 include "cpux.fsi"
 include "sched.fsi"
@@ -490,6 +491,7 @@ def kmain_high():
     demand_test()
     if acpi_init(bi.rsdp) == 0:
         panic("ACPI/MADT not found")
+    iommu_probe()
     before = frames_free
     pmm_reclaim(addr(bi))
     puts("memory reclaimed: loader ")

@@ -3,6 +3,7 @@
 os/kernel-wx
 os/kernel-bios
 os/kernel-bios-smp1
+os/kernel-iommu
 os/kernel-uefi
 os/efi-loader-gpt
 os/kexec-no-disk-write
