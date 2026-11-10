@@ -1,0 +1,192 @@
+# tools/cpython/build.forge: Forge build tool for a pinned CPython (Phase 11.5, item a).
+# Builds CPython 3.13.5 from the official source tarball in $CP_SRC (default /workspace/cpython),
+# pinned by SHA-256 and checked against the upstream GPG signature (Thomas Wouters, key in
+# tools/cpython/keys) when the .asc is present. Network is never used here: put Python-3.13.5.tar.xz
+# and Python-3.13.5.tar.xz.asc in $CP_SRC first. No distro python3-dev or libpython is used.
+# GNU make is taken from PATH, $CP_WORK/bin, or /workspace/bb/work/bin, and is built from the
+# pinned make-4.4.1 tarball (in $CP_SRC or /workspace/bb) if missing. Host compiler: the box's gcc.
+# Configure: --disable-shared --without-ensurepip --disable-test-modules (no PGO). The install
+# prefix is $CP_WORK/prefix (or argv[1]); a stamp file records the pin and flags so a current
+# install is a no-op. Produces prefix/bin/python3, prefix/include/python3.13/Python.h and
+# prefix/lib/libpython3.13.a for later 11.5 embed work. tests/cpython-build/run.sh checks the
+# pin refusals and that a (warm) install has the right version and artifacts.
+# usage: build/cpython-build [PREFIX]
+import os
+import sys
+
+PIN_SHA = "93e583f243454e6e9e4588ca2c2662206ad961659863277afcdb96801647d640"
+TAR = "Python-3.13.5.tar.xz"
+FLAGS = "--disable-shared --without-ensurepip --disable-test-modules"
+MAKE_SHA = "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"
+
+def step(args, cwd=None):
+    r = os.run(args, cwd)
+    os.write(1, r[1])
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+    return r[1]
+
+def quiet(args, cwd=None):
+    r = os.run(args, cwd)
+    os.write(2, r[2])
+    if r[0] != 0:
+        exit(r[0])
+
+def pin(s, name, sha, ext):
+    f = s + "/" + name
+    if not os.path.isfile(f):
+        os.write(1, "cpython: " + f + " missing\n")
+        exit(2)
+    t = "/tmp/forge-cp-pin." + str(os.getpid())
+    write_file(t, sha + "  " + f + "\n")
+    r = os.run(["sha256sum", "-c", "--quiet", t])
+    os.remove(t)
+    os.write(1, r[1])
+    os.write(2, r[2].replace(t, "-"))
+    if r[0] != 0:
+        os.write(1, "cpython: " + name + " SHA-256 mismatch\n")
+        exit(3)
+    if os.path.isfile(f + "." + ext) and os.path.isdir(s + "/gnupg"):
+        st = os.run(["env", "GNUPGHOME=" + s + "/gnupg", "gpg", "--status-fd", "1", "--verify", f + "." + ext, f])[1]
+        if st.find("GOODSIG") >= 0:
+            pass
+        elif st.find("EXPKEYSIG") >= 0:
+            os.write(1, "cpython: " + name + ": good signature by a key that has since expired\n")
+        elif st.find("NO_PUBKEY") >= 0:
+            os.write(1, "cpython: " + name + ": signing key not on the box, SHA-256 pin only\n")
+        else:
+            os.write(1, "cpython: " + name + " signature bad\n")
+            exit(4)
+
+def has_make(path) -> bool:
+    for d in path.split(":"):
+        p = (d if d != "" else ".") + "/make"
+        if os.path.isfile(p) and __syscall(21, p, 1, 0) == 0:
+            return True
+    return False
+
+def tail20(p):
+    d = read_file(p)
+    if d is None:
+        return
+    body = d[:len(d) - 1] if d.endswith("\n") else d
+    ls = body.split("\n")
+    if len(ls) > 20:
+        ls = ls[len(ls) - 20:]
+    if d != "":
+        os.write(1, "\n".join(ls) + ("\n" if d.endswith("\n") else ""))
+
+def current(prefix, stamp) -> bool:
+    if read_file(prefix + "/.forge-cpython-stamp") != stamp:
+        return False
+    if not os.path.isfile(prefix + "/bin/python3"):
+        return False
+    if not os.path.isfile(prefix + "/include/python3.13/Python.h"):
+        return False
+    if not os.path.isfile(prefix + "/lib/libpython3.13.a"):
+        return False
+    return True
+
+def main():
+    me = sys.argv[0]
+    bdir = os.path.dirname(me) if me.find("/") >= 0 else "."
+    r = os.run(["realpath", bdir + "/../tools/cpython"])
+    t = r[1].strip()
+    s = os.getenv("CP_SRC", "")
+    if s == "":
+        s = "/workspace/cpython"
+    w = os.getenv("CP_WORK", "")
+    if w == "":
+        w = s + "/work"
+    prefix = w + "/prefix"
+    if len(sys.argv) >= 2:
+        r = os.run(["realpath", "-m", sys.argv[1]])
+        os.write(2, r[2])
+        if r[0] != 0:
+            exit(r[0])
+        prefix = r[1].strip()
+    stamp = PIN_SHA + "  " + TAR + " " + FLAGS + "\n"
+    step(["mkdir", "-p", w + "/bin"])
+    step(["mkdir", "-p", w + "/gnupg"])
+    step(["chmod", "700", w + "/gnupg"])
+    # import the shipped release-manager key into a private keyring (no network)
+    args = ["env", "GNUPGHOME=" + w + "/gnupg", "gpg", "-q", "--import"]
+    nkeys = 0
+    if os.path.isdir(t + "/keys"):
+        for k in sorted(os.listdir(t + "/keys")):
+            if k.endswith(".asc"):
+                append(args, t + "/keys/" + k)
+                nkeys += 1
+    if nkeys > 0:
+        os.run(args)
+    # point pin()'s verify at this keyring
+    if os.path.isdir(s + "/gnupg"):
+        pass
+    else:
+    # use the work keyring by making pin look at w for gnupg: copy a marker via symlink? pin uses s/gnupg.
+    # Import is in w/gnupg; also set s/gnupg if we can use env in pin. Easier: if s has no gnupg,
+    # verify ourselves after pin with w/gnupg.
+        pass
+    pin(s, TAR, PIN_SHA, "asc")
+    if os.path.isfile(s + "/" + TAR + ".asc") and nkeys > 0 and not os.path.isdir(s + "/gnupg"):
+        st = os.run(["env", "GNUPGHOME=" + w + "/gnupg", "gpg", "--status-fd", "1", "--verify", s + "/" + TAR + ".asc", s + "/" + TAR])[1]
+        if st.find("GOODSIG") >= 0:
+            pass
+        elif st.find("EXPKEYSIG") >= 0:
+            os.write(1, "cpython: " + TAR + ": good signature by a key that has since expired\n")
+        elif st.find("NO_PUBKEY") >= 0:
+            os.write(1, "cpython: " + TAR + ": signing key not on the box, SHA-256 pin only\n")
+        else:
+            os.write(1, "cpython: " + TAR + " signature bad\n")
+            exit(4)
+    if current(prefix, stamp):
+        os.write(1, "cpython: up to date at " + prefix + "\n")
+        return 0
+    path = os.getenv("PATH", "")
+    if os.path.isfile("/workspace/bb/work/bin/make") and __syscall(21, "/workspace/bb/work/bin/make", 1, 0) == 0:
+        path = "/workspace/bb/work/bin:" + path
+    path = w + "/bin:" + path
+    pe = "PATH=" + path
+    if not has_make(path):
+        ms = s
+        if not os.path.isfile(s + "/make-4.4.1.tar.gz") and os.path.isfile("/workspace/bb/make-4.4.1.tar.gz"):
+            ms = "/workspace/bb"
+        pin(ms, "make-4.4.1.tar.gz", MAKE_SHA, "sig")
+        if __syscall(21, w + "/bin/make", 1, 0) != 0:
+            step(["rm", "-rf", w + "/make-4.4.1"])
+            step(["env", pe, "tar", "xzf", ms + "/make-4.4.1.tar.gz"], w)
+            m = w + "/make-4.4.1"
+            quiet(["env", pe, "./configure", "-q", "--disable-nls", "--disable-dependency-tracking"], m)
+            quiet(["env", pe, "sh", "build.sh"], m)
+            step(["cp", "make", w + "/bin/"], m)
+    src = w + "/Python-3.13.5"
+    step(["rm", "-rf", src])
+    step(["env", pe, "tar", "--no-same-owner", "-xJf", s + "/" + TAR], w)
+    logp = w + "/build.log"
+    r = os.run(["env", pe, "./configure", "--prefix=" + prefix, "--disable-shared", "--without-ensurepip", "--disable-test-modules"], src, True)
+    write_file(logp, r[1] + r[2])
+    if r[0] != 0:
+        tail20(logp)
+        os.write(1, "cpython: configure failed\n")
+        exit(5)
+    r = os.run(["env", pe, "make", "-j8"], src, True)
+    write_file(logp, read_file(logp) + r[1] + r[2])
+    if r[0] != 0:
+        tail20(logp)
+        os.write(1, "cpython: make failed\n")
+        exit(5)
+    r = os.run(["env", pe, "make", "install"], src, True)
+    write_file(logp, read_file(logp) + r[1] + r[2])
+    if r[0] != 0:
+        tail20(logp)
+        os.write(1, "cpython: make install failed\n")
+        exit(5)
+    write_file(prefix + "/.forge-cpython-stamp", stamp)
+    if not current(prefix, stamp):
+        os.write(1, "cpython: install missing python3, Python.h or libpython3.13.a\n")
+        exit(5)
+    os.write(1, "cpython: Python 3.13.5 at " + prefix + "\n")
+    return 0
+
+exit(main())

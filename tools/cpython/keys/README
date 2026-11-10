@@ -1,0 +1,4 @@
+Official CPython 3.13.5 release-manager key, used by tools/cpython/build.forge
+to verify Python-3.13.5.tar.xz.asc. Thomas Wouters <thomas@python.org>,
+fingerprint 7169 605F 62C7 5135 6D05  4A26 A821 E680 E5FA 6305.
+Imported from keys.openpgp.org; the build tool never uses the network.
