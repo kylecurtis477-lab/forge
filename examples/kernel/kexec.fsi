@@ -534,7 +534,8 @@ def sys_kexec(frame: u64, which: u64) -> u64:
     # quiesce: input and disk interrupts off, device reset, other CPUs halted for good, timer stopped
     input_off()
     hw_quiesce()
-    pio_wr(vb_io + VIO_STATUS, 1, 0)
+    if vb_modern or vb_io != 0:
+        vb_status_wr(0)
     i = 0
     while i < 24:
         ioapic_mask_pin(i)

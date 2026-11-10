@@ -1,9 +1,11 @@
 # Drivers as isolated services (Phase 2.2). The virtio-blk driver can run as a ring-3 process (`blkd`)
 # that reaches its device only through capabilities the kernel grants it:
-#   - port I/O limited to the device's I/O BAR window (DRV_IO_LEN bytes),
+#   - port I/O limited to the device's I/O BAR window (DRV_IO_LEN bytes), or, for a modern virtio-blk
+#     device, MMIO in that device's capability BAR through the same 400/401 syscalls,
 #   - waiting for the device's MSI-X interrupt (the kernel's handler counts and wakes),
-#   - one physically contiguous DMA region mapped into its address space (no IOMMU yet: the device
-#     itself could still DMA anywhere; the capability only limits what the driver code can touch).
+#   - one physically contiguous DMA region mapped into its address space. When VT-d translation is
+#     on, drv 403 returns a non-identity IOVA and the IOMMU maps only that grant; without a remapping
+#     unit, 403 still returns the host PA. Broader device grants stay gated on confinement.
 # Clients (vb_read, so the FAT layer and every process doing file I/O) talk to it over a one-slot IPC
 # channel: post a request, sleep, get the reply. When the driver process dies the kernel resets the
 # device *before* its DMA frames are freed and fails the in-flight request with EIO (or keeps it for
@@ -77,7 +79,8 @@ def drv_died(p: ptr[Proc]):
 # called from proc_exit of a driver process, before its address space (and DMA frames) is freed
     f = irq_save()
     spin_lock(addr(rq_lock))
-    pio_wr(vb_io + VIO_STATUS, 1, 0)  # device reset: stops all DMA into the driver's frames
+    vb_status_wr(0)  # device reset: stops all DMA into the driver's frames
+    iommu_unmap_grant()
     blkd_up = 0
     drv_deaths += 1
     if (rq_flags & 2) != 0:
@@ -99,6 +102,15 @@ def drv_died(p: ptr[Proc]):
 def drv_port_ok(port: u64, w: u64) -> u64:
     return port >= vb_io and port + w <= vb_io + DRV_IO_LEN and (w == 1 or w == 2 or w == 4)
 
+def drv_mmio_ok(off: u64, w: u64) -> u64:
+    if w != 1 and w != 2 and w != 4 and w != 8:
+        return 0
+    if (off & (w - 1)) != 0:
+        return 0
+    if off + w > vb_bar_len:
+        return 0
+    return 1
+
 @unsafe
 def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
     p = cur_proc()
@@ -115,6 +127,10 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
     if u64(p) == 0 or p.drv != DRV_BLK:
         return EPERM
     if nr == 400:
+        if vb_modern:
+            if drv_mmio_ok(a, b) == 0:
+                return EPERM
+            return mmio_rd(vb_cfg - vb_cfg_off + a, b)
         if drv_port_ok(a, b) == 0:
             return EPERM
         if b == 1:
@@ -123,6 +139,11 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
             return pio_rd(a, 2)
         return pio_rd(a, 4)
     if nr == 401:
+        if vb_modern:
+            if drv_mmio_ok(a, b) == 0:
+                return EPERM
+            mmio_wr(vb_cfg - vb_cfg_off + a, b, c)
+            return 0
         if drv_port_ok(a, b) == 0:
             return EPERM
         if b == 1:
@@ -149,8 +170,14 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
         p.dma_pa = pa
         p.dma_n = a
         p.dma_va = va
+        if pci_vblk != 0:
+            iova = iommu_map_grant(pci_vblk - 1, pa, a)
+            if iova != 0:
+                return va
         return va
     if nr == 403:
+        if iommu_grant_iova != 0:
+            return iommu_grant_iova
         return p.dma_pa
     if nr == 404:
     # irq_wait(seen): block until the device interrupt count differs from seen; returns the count
@@ -208,6 +235,20 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
         irq_restore(f)
         return rr
     if nr == 407:
+        if a == 1:
+            return vb_msix
+        if a == 5:
+            return vb_modern
+        if vb_modern:
+            if a == 0:
+                return vb_cfg_off
+            if a == 2:
+                return vb_notify_off
+            if a == 3:
+                return vb_notify_mul
+            if a == 4:
+                return vb_devcfg_off
+            return 0
         if a == 0:
             return vb_io
         return vb_msix
@@ -217,23 +258,37 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
 def vb_reinit():
 # take the device back into the kernel's own driver: reset, fresh ring in the original frames
     mutex_lock(addr(vb_m))
-    io = vb_io
-    pio_wr(io + VIO_STATUS, 1, 0)
     used = vb_used_off
     total = used + ((6 + 8 * vb_qsz + PAGE - 1) & ~u64(PAGE - 1))
     memset(vb_q, 0, total)
     vb_last_used = 0
-    pio_wr(io + VIO_STATUS, 1, 1)
-    pio_wr(io + VIO_STATUS, 1, 3)
-    hf = pio_rd(io + VIO_HOSTF, 4)
-    pio_wr(io + VIO_GUESTF, 4, hf & (u64(1) << VBLK_F_RO))
-    pio_wr(io + VIO_QSEL, 2, 0)
-    pio_wr(io + VIO_QPFN, 4, vb_q_pa >> 12)
-    if vb_msix:
-        pio_wr(io + VIO_MSIX_CFG, 2, 0xFFFF)
+    if vb_modern:
+        vb_modern_reset()
+        vb_status_wr(1)
+        vb_status_wr(3)
+        if vb_modern_features() == 0:
+            panic("virtio-blk: modern reinit features refused")
+        vb_modern_queue(vb_q_pa)
+        if vb_msix:
+            mmio_wr(vb_cfg + 16, 2, 0xFFFF)
+            mmio_wr(vb_cfg + 22, 2, 0)
+            mmio_wr(vb_cfg + 26, 2, 0)
+        mmio_wr(vb_cfg + 28, 2, 1)
+        vb_status_wr(vb_status_rd() | 4)
+    else:
+        io = vb_io
+        pio_wr(io + VIO_STATUS, 1, 0)
+        pio_wr(io + VIO_STATUS, 1, 1)
+        pio_wr(io + VIO_STATUS, 1, 3)
+        hf = pio_rd(io + VIO_HOSTF, 4)
+        pio_wr(io + VIO_GUESTF, 4, hf & (u64(1) << VBLK_F_RO))
         pio_wr(io + VIO_QSEL, 2, 0)
-        pio_wr(io + VIO_MSIX_Q, 2, 0)
-    pio_wr(io + VIO_STATUS, 1, 7)
+        pio_wr(io + VIO_QPFN, 4, vb_q_pa >> 12)
+        if vb_msix:
+            pio_wr(io + VIO_MSIX_CFG, 2, 0xFFFF)
+            pio_wr(io + VIO_QSEL, 2, 0)
+            pio_wr(io + VIO_MSIX_Q, 2, 0)
+        pio_wr(io + VIO_STATUS, 1, 7)
     blkd_mode = 0
     mutex_unlock(addr(vb_m))
 

@@ -1,8 +1,11 @@
 # forge: no-runtime
 # forge: caps(drv)
 # blkd: the virtio-blk driver as a ring-3 service. It owns the device through kernel-granted
-# capabilities only (port I/O in the device window, its MSI-X interrupt, one DMA region) and serves
-# block reads to the kernel over the driver IPC channel (recv / reply).
+# capabilities only (port I/O in the device window, or MMIO in the modern capability BAR; its
+# MSI-X interrupt; one DMA region) and serves block reads to the kernel over the driver IPC
+# channel (recv / reply). When VT-d is on, syscall 403 is a non-identity IOVA and the queue is
+# programmed with that IOVA. Modern virtio 1.0 (ACCESS_PLATFORM) is used when the kernel reports
+# a modern device; 400/401 then address offsets in the granted MMIO BAR.
 include "ulib.fsi"
 
 def io_in(port: u64, w: u64) -> u64:
@@ -17,18 +20,63 @@ def desc(q: u64, i: u64, pa: u64, len: u64, flags: u64, next: u64):
     vstore64(d, pa)
     vstore64(d + 8, (len & 0xFFFFFFFF) | (flags << 32) | (next << 48))
 
+def modern_reset(cfg: u64):
+    io_out(cfg + 20, 1, 0)
+    i: u64 = 0
+    while i < 1000000:
+        if io_in(cfg + 20, 1) == 0:
+            return
+        i += 1
+
 @export
 @unsafe
 def _start():
-    io = syscall3(407, 0, 0, 0)
+    modern = syscall3(407, 5, 0, 0)
     msix = syscall3(407, 1, 0, 0)
-    io_out(io + 0x12, 1, 0)  # reset
-    io_out(io + 0x12, 1, 1)
-    io_out(io + 0x12, 1, 3)
-    hf = io_in(io, 4)
-    io_out(io + 4, 4, hf & 32)
-    io_out(io + 0x0E, 2, 0)
-    qsz = io_in(io + 0x0C, 2)
+    io: u64 = 0
+    cfg: u64 = 0
+    ntf: u64 = 0
+    mul: u64 = 0
+    ntf_off: u64 = 0
+    qsz: u64 = 0
+    if modern:
+        cfg = syscall3(407, 0, 0, 0)
+        ntf = syscall3(407, 2, 0, 0)
+        mul = syscall3(407, 3, 0, 0)
+        modern_reset(cfg)
+        io_out(cfg + 20, 1, 1)
+        io_out(cfg + 20, 1, 3)
+        io_out(cfg, 4, 0)
+        lo = io_in(cfg + 4, 4)
+        io_out(cfg, 4, 1)
+        hi = io_in(cfg + 4, 4)
+        io_out(cfg + 8, 4, 0)
+        io_out(cfg + 12, 4, lo & 32)
+        io_out(cfg + 8, 4, 1)
+        ghi: u64 = 1
+        if (hi & 2) != 0:
+            ghi = 3
+        io_out(cfg + 12, 4, ghi)
+        io_out(cfg + 20, 1, 11)
+        if (io_in(cfg + 20, 1) & 8) == 0:
+            out("blkd: modern features refused\n")
+            flush()
+            sys_exit(1)
+        io_out(cfg + 22, 2, 0)
+        qsz = io_in(cfg + 24, 2)
+    else:
+        io = syscall3(407, 0, 0, 0)
+        io_out(io + 0x12, 1, 0)
+        io_out(io + 0x12, 1, 1)
+        io_out(io + 0x12, 1, 3)
+        hf = io_in(io, 4)
+        io_out(io + 4, 4, hf & 32)
+        io_out(io + 0x0E, 2, 0)
+        qsz = io_in(io + 0x0C, 2)
+    if qsz == 0:
+        out("blkd: no virtqueue\n")
+        flush()
+        sys_exit(1)
     used = (16 * qsz + 6 + 2 * qsz + 4095) & ~u64(4095)
     total = used + ((6 + 8 * qsz + 4095) & ~u64(4095))
     np = total / 4096 + 1
@@ -40,17 +88,33 @@ def _start():
     qpa = syscall3(403, 0, 0, 0)
     req = q + total
     rpa = qpa + total
-    io_out(io + 0x08, 4, qpa >> 12)
-    if msix:
-        io_out(io + 0x14, 2, 0xFFFF)
-        io_out(io + 0x0E, 2, 0)
-        io_out(io + 0x16, 2, 0)
-    io_out(io + 0x12, 1, 7)
+    if modern:
+        io_out(cfg + 24, 2, qsz)
+        io_out(cfg + 32, 8, qpa)
+        io_out(cfg + 40, 8, qpa + 16 * qsz)
+        io_out(cfg + 48, 8, qpa + used)
+        if msix:
+            io_out(cfg + 16, 2, 0xFFFF)
+            io_out(cfg + 22, 2, 0)
+            io_out(cfg + 26, 2, 0)
+        io_out(cfg + 28, 2, 1)
+        io_out(cfg + 20, 1, io_in(cfg + 20, 1) | 4)
+        ntf_off = io_in(cfg + 30, 2)
+    else:
+        io_out(io + 0x08, 4, qpa >> 12)
+        if msix:
+            io_out(io + 0x14, 2, 0xFFFF)
+            io_out(io + 0x0E, 2, 0)
+            io_out(io + 0x16, 2, 0)
+        io_out(io + 0x12, 1, 7)
     out("blkd: pid ")
     out_u64(sys_getpid())
-    out(" owns virtio-blk io port ")
-    out_u64(io)
-    out(", queue ")
+    if modern:
+        out(" owns virtio-blk modern, queue ")
+    else:
+        out(" owns virtio-blk io port ")
+        out_u64(io)
+        out(", queue ")
     out_u64(qsz)
     out(", DMA ")
     out_u64(np)
@@ -79,7 +143,10 @@ def _start():
         vstore16(av + 4 + (idx % qsz) * 2, 0)
         vstore16(av + 2, u16((idx + 1) & 0xFFFF))
         seen = syscall3(404, 0xFFFFFFFFFFFFFFFF, 0, 0)
-        io_out(io + 0x10, 2, 0)
+        if modern:
+            io_out(ntf + ntf_off * mul, 2, 0)
+        else:
+            io_out(io + 0x10, 2, 0)
         if m[3] & 1:
         # fault injection: die with the request in flight on the device
             vstore64(0, 0x0BADBAD)

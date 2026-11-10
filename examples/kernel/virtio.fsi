@@ -1,4 +1,6 @@
-# virtio-blk over the legacy (transitional) PCI interface: I/O BAR0, one split virtqueue.
+# virtio-blk: legacy (transitional) I/O BAR0, or modern 1.0 MMIO capabilities when there is no
+# legacy I/O BAR. One split virtqueue. Modern is required for VT-d: QEMU only offers
+# ACCESS_PLATFORM (and will actually translate DMA) on a non-transitional device.
 # Completion is signalled by an MSI-X interrupt; requesters sleep on a mutex and a wait queue.
 # Without MSI-X (or with interrupts off) a request is polled under a spinlock as before.
 VIO_HOSTF = 0x00
@@ -32,11 +34,176 @@ vb_polled: u64
 VEC_VBLK = 0x50
 VIO_MSIX_CFG = 0x14
 VIO_MSIX_Q = 0x16
+vb_modern: u64
+vb_cfg: u64
+vb_notify: u64
+vb_notify_mul: u64
+vb_devcfg: u64
+vb_bar_pa: u64
+vb_bar_len: u64
+vb_cfg_off: u64
+vb_notify_off: u64
+vb_devcfg_off: u64
+
+
+def vb_status_wr(v: u64):
+    if vb_modern:
+        mmio_wr(vb_cfg + 20, 1, v)
+    elif vb_io != 0:
+        pio_wr(vb_io + VIO_STATUS, 1, v)
+
+def vb_status_rd() -> u64:
+    if vb_modern:
+        return mmio_rd(vb_cfg + 20, 1)
+    return pio_rd(vb_io + VIO_STATUS, 1)
+
+def vb_kick():
+    if vb_modern:
+        off = mmio_rd(vb_cfg + 30, 2)
+        mmio_wr(vb_notify + off * vb_notify_mul, 2, 0)
+    elif vb_io != 0:
+        pio_wr((vb_io + VIO_QNOTIFY), 2, 0)
+
+def vb_modern_features() -> u64:
+    mmio_wr(vb_cfg, 4, 0)
+    lo = mmio_rd(vb_cfg + 4, 4)
+    mmio_wr(vb_cfg, 4, 1)
+    hi = mmio_rd(vb_cfg + 4, 4)
+    if (hi & 1) == 0:
+        return 0
+    glo = lo & 32
+    ghi: u64 = 1
+    if (hi & 2) != 0:
+        ghi = 3
+    mmio_wr(vb_cfg + 8, 4, 0)
+    mmio_wr(vb_cfg + 12, 4, glo)
+    mmio_wr(vb_cfg + 8, 4, 1)
+    mmio_wr(vb_cfg + 12, 4, ghi)
+    vb_ro = (lo >> 5) & 1
+    mmio_wr(vb_cfg + 20, 1, 11)
+    if (mmio_rd(vb_cfg + 20, 1) & 8) == 0:
+        return 0
+    return 1
+
+def vb_modern_queue(pa: u64):
+    mmio_wr(vb_cfg + 22, 2, 0)
+    mmio_wr(vb_cfg + 24, 2, vb_qsz)
+    mmio_wr(vb_cfg + 32, 8, pa)
+    mmio_wr(vb_cfg + 40, 8, pa + 16 * vb_qsz)
+    mmio_wr(vb_cfg + 48, 8, pa + vb_used_off)
+
+def vb_modern_reset():
+    vb_status_wr(0)
+    i: u64 = 0
+    while i < 1000000:
+        if vb_status_rd() == 0:
+            return
+        i += 1
+
+def vb_try_modern(bdf: u64) -> u64:
+    c = pci_rd32(bdf, 0x34) & 0xFC
+    g: u64 = 0
+    common_bar: u64 = 0xFF
+    common_off: u64 = 0
+    notify_bar: u64 = 0xFF
+    notify_off: u64 = 0
+    notify_mul: u64 = 0
+    dev_bar: u64 = 0xFF
+    dev_off: u64 = 0
+    while c != 0 and g < 48:
+        h = pci_rd32(bdf, c)
+        if (h & 0xFF) == 9:
+            typ = (h >> 24) & 0xFF
+            bar = pci_rd32(bdf, c + 4) & 0xFF
+            off = pci_rd32(bdf, c + 8)
+            if typ == 1:
+                common_bar = bar
+                common_off = off
+            elif typ == 2:
+                notify_bar = bar
+                notify_off = off
+                if ((h >> 16) & 0xFF) >= 20:
+                    notify_mul = pci_rd32(bdf, c + 16)
+            elif typ == 4:
+                dev_bar = bar
+                dev_off = off
+        c = (h >> 8) & 0xFC
+        g += 1
+    if common_bar > 5 or notify_bar > 5 or dev_bar > 5:
+        return 0
+    if common_bar != notify_bar or common_bar != dev_bar:
+        return 0
+    sz: u64 = 0
+    pa = pci_bar(bdf, common_bar, addr(sz))
+    if pa == 0 or sz == 0:
+        return 0
+    mapn = sz
+    if mapn > 0x10000:
+        mapn = 0x10000
+    if common_off >= mapn or notify_off >= mapn or dev_off >= mapn:
+        return 0
+    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 6)
+    va = mmio_map(pa, mapn)
+    if va == 0:
+        return 0
+    vb_bar_pa = pa
+    vb_bar_len = mapn
+    vb_cfg_off = common_off
+    vb_notify_off = notify_off
+    vb_devcfg_off = dev_off
+    vb_cfg = va + common_off
+    vb_notify = va + notify_off
+    vb_devcfg = va + dev_off
+    vb_notify_mul = notify_mul
+    vb_modern = 1
+    vb_modern_reset()
+    vb_status_wr(1)
+    vb_status_wr(3)
+    if vb_modern_features() == 0:
+        vb_modern = 0
+        vb_status_wr(0)
+        return 0
+    mmio_wr(vb_cfg + 22, 2, 0)
+    vb_qsz = mmio_rd(vb_cfg + 24, 2)
+    if vb_qsz == 0:
+        vb_modern = 0
+        vb_status_wr(0)
+        return 0
+    used = (16 * vb_qsz + 6 + 2 * vb_qsz + PAGE - 1) & ~u64(PAGE - 1)
+    vb_used_off = used
+    total = used + ((6 + 8 * vb_qsz + PAGE - 1) & ~u64(PAGE - 1))
+    qpa = frame_alloc_contig(total / PAGE)
+    if qpa == 0:
+        vb_modern = 0
+        vb_status_wr(0)
+        return 0
+    vb_q = mmio_add(p2v(qpa), total)
+    vb_q_pa = qpa
+    vb_req_pa = frame_alloc()
+    vb_req = mmio_add(p2v(vb_req_pa), PAGE)
+    vb_modern_queue(qpa)
+    vb_cap = mmio_rd(vb_devcfg, 8)
+    return 1
 
 def vb_init() -> u64:
     if pci_vblk == 0:
         return 0
     bdf = pci_vblk - 1
+    if vb_try_modern(bdf):
+        puts("virtio-blk: modern, queue ")
+        put_u64(vb_qsz)
+        puts(", ")
+        put_u64(vb_cap)
+        puts(" sectors (")
+        put_u64(vb_cap / 2048)
+        puts(" MiB)")
+        if vb_ro:
+            puts(", read-only")
+        putc(10)
+        vb_msix_init(bdf)
+        mmio_wr(vb_cfg + 28, 2, 1)
+        vb_status_wr(vb_status_rd() | 4)
+        return 1
     bar = pci_rd32(bdf, 0x10)
     if (bar & 1) == 0:
         return 0
@@ -125,13 +292,21 @@ def vb_msix_init(bdf: u64):
     mmio_wr(t + 12, 4, 0)
     # message control: enable (bit 15), clear function mask (bit 14)
     pci_wr32(bdf, c, (pci_rd32(bdf, c) | 0x80000000) & ~u64(0x40000000))
-    io = vb_io
-    pio_wr(io + VIO_MSIX_CFG, 2, 0xFFFF)
-    pio_wr(io + VIO_QSEL, 2, 0)
-    pio_wr(io + VIO_MSIX_Q, 2, 0)
-    if pio_rd(io + VIO_MSIX_Q, 2) != 0:
-        puts("virtio-blk: queue vector rejected, polling\n")
-        return
+    if vb_modern:
+        mmio_wr(vb_cfg + 16, 2, 0xFFFF)
+        mmio_wr(vb_cfg + 22, 2, 0)
+        mmio_wr(vb_cfg + 26, 2, 0)
+        if mmio_rd(vb_cfg + 26, 2) != 0:
+            puts("virtio-blk: queue vector rejected, polling\n")
+            return
+    else:
+        io = vb_io
+        pio_wr(io + VIO_MSIX_CFG, 2, 0xFFFF)
+        pio_wr(io + VIO_QSEL, 2, 0)
+        pio_wr(io + VIO_MSIX_Q, 2, 0)
+        if pio_rd(io + VIO_MSIX_Q, 2) != 0:
+            puts("virtio-blk: queue vector rejected, polling\n")
+            return
     vb_msix = 1
     puts("virtio-blk: MSI-X vector 0x50 -> cpu0, sleeping requests\n")
 
@@ -153,7 +328,7 @@ def vb_submit(lba: u64, n: u64):
     mfence()
     mmio_wr(av + 2, 2, (idx + 1) & 0xFFFF)
     mfence()
-    pio_wr((vb_io + VIO_QNOTIFY), 2, 0)
+    vb_kick()
 
 def vb_done() -> u64:
     return ((mmio_rd(vb_q + vb_used_off, 8) >> 16) & 0xFFFF) != vb_last_used

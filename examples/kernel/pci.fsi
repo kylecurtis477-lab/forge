@@ -51,8 +51,12 @@ def pci_scan():
                     put_hex8(cls >> 24)
                     putc(46)
                     put_hex8((cls >> 16) & 0xFF)
-                    if id == 0x10011AF4:
-                        puts("  virtio-blk (transitional)")
+                    if (id & 0xFFFF) == 0x1AF4 and ((id >> 16) == 0x1001 or (id >> 16) == 0x1042):
+                        puts("  virtio-blk")
+                        if (id >> 16) == 0x1001:
+                            puts(" (transitional)")
+                        else:
+                            puts(" (modern)")
                         if pci_vblk == 0:
                             pci_vblk = bdf + 1
                     putc(10)
