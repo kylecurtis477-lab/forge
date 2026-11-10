@@ -1,0 +1,29 @@
+# forge: no-runtime
+# tests/cpython-embed/api.forge: Forge @export functions called from Python through
+# the 11.2 C ABI (Phase 11.5(a) step 2). No linux.fsi / _start: this object is
+# linked by gcc with tools/cpython/embed.c and libpython3.13.a, not by fld.
+
+@export
+def forge_add(a: i64, b: i64) -> i64:
+    return a + b
+
+@export
+def forge_mul(a: i64, b: i64) -> i64:
+    return a * b
+
+@export
+def forge_neg(a: i64) -> i64:
+    return 0 - a
+
+@export
+def forge_answer() -> i64:
+    return 42
+
+@export
+def forge_sum_to(n: i64) -> i64:
+    s: i64 = 0
+    i: i64 = 1
+    while i <= n:
+        s = s + i
+        i = i + 1
+    return s

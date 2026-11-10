@@ -1,0 +1,92 @@
+# forge: no-runtime
+# tests/cpython-embed/main.forge: register the Forge @export functions in api.forge
+# as Python module "forge" through tools/cpython/embed.fsi, then run assertions
+# that call back into Forge. gcc -no-pie links this with api.o and libpython3.13.a;
+# there is no C file in this test. @export main is the gcc crt entry point.
+
+include "../../tools/cpython/embed.fsi"
+
+extern def getenv(name: ptr[u8]) -> nptr[u8]
+extern def forge_add(a: i64, b: i64) -> i64
+extern def forge_mul(a: i64, b: i64) -> i64
+extern def forge_neg(a: i64) -> i64
+extern def forge_answer() -> i64
+extern def forge_sum_to(n: i64) -> i64
+extern def printf(fmt: ptr[u8], x: u64) -> i32
+
+@unsafe
+@export
+def py_add(self: nptr[u8], args: nptr[u8]) -> nptr[u8]:
+    if py_arg_count(args) != 2:
+        return py_err("add() takes 2 arguments")
+    return py_from_i64(forge_add(py_arg_i64(args, 0), py_arg_i64(args, 1)))
+
+@unsafe
+@export
+def py_mul(self: nptr[u8], args: nptr[u8]) -> nptr[u8]:
+    if py_arg_count(args) != 2:
+        return py_err("mul() takes 2 arguments")
+    return py_from_i64(forge_mul(py_arg_i64(args, 0), py_arg_i64(args, 1)))
+
+@unsafe
+@export
+def py_neg(self: nptr[u8], args: nptr[u8]) -> nptr[u8]:
+    if py_arg_count(args) != 1:
+        return py_err("neg() takes 1 argument")
+    return py_from_i64(forge_neg(py_arg_i64(args, 0)))
+
+@unsafe
+@export
+def py_answer(self: nptr[u8], args: nptr[u8]) -> nptr[u8]:
+    return py_from_i64(forge_answer())
+
+@unsafe
+@export
+def py_sum_to(self: nptr[u8], args: nptr[u8]) -> nptr[u8]:
+    if py_arg_count(args) != 1:
+        return py_err("sum_to() takes 1 argument")
+    return py_from_i64(forge_sum_to(py_arg_i64(args, 0)))
+
+@unsafe
+@export
+def main() -> i64:
+    prefix = getenv("CP_PREFIX")
+    m: nptr[u8]
+    if forge_py_layout_ok() == 0:
+        eputs("cpython-embed: PyConfig/PyStatus/PyMethodDef layout mismatch\n")
+        printf("sizeof(PyConfig)=%llu\n", sizeof(PyConfig))
+        return 1
+    printf("layout sizeof(PyConfig)=%llu\n", sizeof(PyConfig))
+    printf("layout offsetof(home)=%llu\n", offsetof(PyConfig, home))
+    if prefix == 0:
+        prefix = "/workspace/cpython/work/prefix"
+    if forge_py_init(prefix) != 0:
+        return 3
+    m = forge_py_module_new("forge")
+    if u64(m) == 0:
+        forge_py_finalize()
+        return 4
+    if forge_py_add_method(m, "add", nptr[u8](u64(py_add)), METH_VARARGS) != 0:
+        forge_py_finalize()
+        return 4
+    if forge_py_add_method(m, "mul", nptr[u8](u64(py_mul)), METH_VARARGS) != 0:
+        forge_py_finalize()
+        return 4
+    if forge_py_add_method(m, "neg", nptr[u8](u64(py_neg)), METH_VARARGS) != 0:
+        forge_py_finalize()
+        return 4
+    if forge_py_add_method(m, "answer", nptr[u8](u64(py_answer)), METH_NOARGS) != 0:
+        forge_py_finalize()
+        return 4
+    if forge_py_add_method(m, "sum_to", nptr[u8](u64(py_sum_to)), METH_VARARGS) != 0:
+        forge_py_finalize()
+        return 4
+    if forge_py_module_install(m, "forge") != 0:
+        forge_py_finalize()
+        return 4
+    if forge_py_run("import forge\nassert forge.add(20, 22) == 42, forge.add(20, 22)\nassert forge.mul(6, 7) == 42, forge.mul(6, 7)\nassert forge.neg(42) == -42, forge.neg(42)\nassert forge.answer() == 42, forge.answer()\nassert forge.sum_to(10) == 55, forge.sum_to(10)\nprint('python-to-forge add(20,22)=', forge.add(20, 22), sep='')\nprint('python-to-forge mul(6,7)=', forge.mul(6, 7), sep='')\nprint('python-to-forge neg(42)=', forge.neg(42), sep='')\nprint('python-to-forge answer()=', forge.answer(), sep='')\nprint('python-to-forge sum_to(10)=', forge.sum_to(10), sep='')\n") != 0:
+        forge_py_finalize()
+        return 5
+    if forge_py_finalize() != 0:
+        return 6
+    return 0

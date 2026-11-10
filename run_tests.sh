@@ -57,6 +57,7 @@ tests/user-build/run.sh || fail=1
 tests/busybox-build/run.sh || fail=1
 tests/bzip2/run.sh || fail=1
 tests/cpython-build/run.sh || fail=1
+tests/cpython-embed/run.sh || fail=1
 tests/efi-build/run.sh || fail=1
 tests/kernel-build/run.sh || fail=1
 tests/rtport/run.sh || fail=1
