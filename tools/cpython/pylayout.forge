@@ -1,0 +1,228 @@
+# tools/cpython/pylayout.forge: generate the Forge layouts of PyStatus, PyWideStringList, PyConfig and
+# PyMethodDef from the pinned CPython headers (Phase 11.5(a) step 4).
+# Reads INCLUDE_DIR/patchlevel.h, INCLUDE_DIR/pyconfig.h, INCLUDE_DIR/cpython/initconfig.h and
+# INCLUDE_DIR/methodobject.h of an installed CPython (build/cpython-build's prefix/include/python3.13),
+# parses the four struct definitions (comments stripped, `#ifdef`/`#ifndef` blocks resolved against
+# the macros pyconfig.h defines; MS_WINDOWS is never defined), computes the SysV x86-64 C layout of
+# each struct itself, and writes tools/cpython/pylayout.fsi: Forge structs with the C field names in
+# order, and SIZE / OFF constants that tests/cpython-embed cross-checks against forgec's sizeof /
+# offsetof. Refuses (no output) a header set that is not the pin: PY_VERSION other than 3.13.5 is
+# rc 3, a free-threaded build (Py_GIL_DISABLED) is rc 4, a debug build (Py_DEBUG) is rc 5, a
+# missing header or struct is rc 2. Those builds change PyConfig (enable_gil, run_presite), so a
+# layout from them must never reach embed.fsi.
+# usage: build/pylayout INCLUDE_DIR [OUT.fsi]   (stdout when OUT is omitted)
+import os
+import sys
+
+PIN = "3.13.5"
+INT_TYPES = {"int": "i32", "enum": "i32", "unsigned long": "u64", "long": "i64", "Py_ssize_t": "i64", "unsigned int": "u32"}
+
+def die(rc, msg):
+    os.write(2, "pylayout: " + msg + "\n")
+    exit(rc)
+
+def need(path):
+    d = read_file(path)
+    if d is None:
+        die(2, "cannot read " + path)
+    return d
+
+def strip_comments(src):
+    out = []
+    i = 0
+    n = len(src)
+    while i < n:
+        if src[i] == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            if j < 0:
+                return "".join(out)
+            # keep line structure so #ifdef lines stay on their own line
+            k = i
+            while k < j:
+                if src[k] == "\n":
+                    out.append("\n")
+                k = k + 1
+            i = j + 2
+        elif src[i] == "/" and i + 1 < n and src[i + 1] == "/":
+            j = src.find("\n", i)
+            if j < 0:
+                return "".join(out)
+            i = j
+        else:
+            out.append(src[i])
+            i = i + 1
+    return "".join(out)
+
+def defines(cfg):
+    ds = {}
+    for ln in cfg.split("\n"):
+        t = ln.strip()
+        if t.startswith("#define "):
+            ws = [w for w in t[8:].split(" ") if w != ""]
+            if len(ws) >= 1:
+                ds[ws[0]] = 1
+    return ds
+
+def version(pl):
+    for ln in pl.split("\n"):
+        t = ln.strip()
+        if t.startswith("#define PY_VERSION ") or t.startswith("#define PY_VERSION\t"):
+            a = t.find("\"")
+            b = t.find("\"", a + 1)
+            if a >= 0 and b > a:
+                return t[a + 1:b]
+    return ""
+
+# Return the body lines of the struct whose definition starts at the first line containing `start`
+# and ends at the closing brace line, with preprocessor conditionals resolved.
+def body(src, start, ds, what):
+    ls = src.split("\n")
+    i = 0
+    while i < len(ls) and ls[i].find(start) < 0:
+        i = i + 1
+    if i == len(ls):
+        die(2, "struct " + what + " not found")
+    out = []
+    keep = [True]
+    depth = 0
+    i = i + 1
+    while i < len(ls):
+        t = ls[i].strip()
+        i = i + 1
+        if t.startswith("#ifdef ") or t.startswith("#ifndef "):
+            m = t.split(" ")[1].strip()
+            on = m in ds
+            if t.startswith("#ifndef "):
+                on = not on
+            keep.append(keep[len(keep) - 1] and on)
+            continue
+        if t.startswith("#endif"):
+            pop(keep)
+            continue
+        if t.startswith("#else"):
+            v = pop(keep)
+            keep.append(keep[len(keep) - 1] and not v)
+            continue
+        if t.startswith("#"):
+            continue
+        if not keep[len(keep) - 1]:
+            continue
+        if depth == 0 and t.startswith("}"):
+            return out
+        if t.startswith("enum") and t.endswith("{"):
+            depth = depth + 1
+            continue
+        if depth > 0:
+            if t.startswith("}"):
+                depth = depth - 1
+                out.append("enum " + t[1:].strip())
+            continue
+        if t != "":
+            out.append(t)
+    die(2, "struct " + what + " not terminated")
+
+# One C field line -> (name, forge type, size, align)
+def field(t, what):
+    if not t.endswith(";"):
+        die(2, what + ": unsupported field line: " + t)
+    t = t[:len(t) - 1].replace("*", " * ")
+    ws = [w for w in t.split(" ") if w != "" and w != "const"]
+    name = ws[len(ws) - 1]
+    stars = 0
+    tw = []
+    for w in ws[:len(ws) - 1]:
+        if w == "*":
+            stars = stars + 1
+        else:
+            tw.append(w)
+    ty = " ".join(tw)
+    if stars > 0 or ty == "PyCFunction":
+        return [name, "nptr[u8]", 8, 8]
+    if ty == "PyWideStringList":
+        return [name, "PyWideStringList", 16, 8]
+    if ty in INT_TYPES:
+        ft = INT_TYPES[ty]
+        sz = 4 if ft == "i32" or ft == "u32" else 8
+        return [name, ft, sz, sz]
+    die(2, what + ": unsupported C type '" + ty + "' for field " + name)
+
+def layout(fields):
+    off = 0
+    al = 1
+    offs = {}
+    for f in fields:
+        a = f[3]
+        if off % a != 0:
+            off = off + a - off % a
+        offs[f[0]] = off
+        off = off + f[2]
+        if a > al:
+            al = a
+    if off % al != 0:
+        off = off + al - off % al
+    return [off, offs]
+
+def main():
+    if len(sys.argv) < 2:
+        die(1, "usage: pylayout INCLUDE_DIR [OUT.fsi]")
+    inc = sys.argv[1]
+    v = version(need(inc + "/patchlevel.h"))
+    if v != PIN:
+        die(3, "headers are CPython " + (v if v != "" else "(unknown)") + ", not the pinned " + PIN + "; the embed layout is generated only from the pinned build (build/cpython-build)")
+    ds = defines(strip_comments(need(inc + "/pyconfig.h")))
+    if "Py_GIL_DISABLED" in ds:
+        die(4, "free-threaded CPython (Py_GIL_DISABLED) is not supported: its PyConfig has enable_gil and a different object ABI; use the pinned release (GIL) build")
+    if "Py_DEBUG" in ds:
+        die(5, "debug CPython (Py_DEBUG) is not supported: its PyConfig has run_presite and a different object ABI; use the pinned release build")
+    ic = strip_comments(need(inc + "/cpython/initconfig.h"))
+    mo = strip_comments(need(inc + "/methodobject.h"))
+    specs = [["PyStatus", ic, "/* --- PyStatus", "PYSTATUS"], ["PyWideStringList", ic, "/* --- PyWideStringList", "PYWIDESTRINGLIST"], ["PyConfig", ic, "typedef struct PyConfig {", "PYCONFIG"], ["PyMethodDef", mo, "struct PyMethodDef {", "PYMETHODDEF"]]
+    o = []
+    o.append("# tools/cpython/pylayout.fsi: GENERATED by tools/cpython/pylayout.forge from the pinned CPython " + PIN)
+    o.append("# headers (cpython/initconfig.h, methodobject.h; release build: Py_GIL_DISABLED, Py_DEBUG, Py_STATS")
+    o.append("# and MS_WINDOWS not defined). Do not edit. Regenerate with")
+    o.append("#   build/pylayout PREFIX/include/python3.13 tools/cpython/pylayout.fsi")
+    o.append("# tests/cpython-embed/run.sh regenerates it and fails on any difference; SIZE / OFF constants are")
+    o.append("# the C layout computed by the generator and are checked against forgec's sizeof / offsetof.")
+    o.append("")
+    o.append("def py_pinned_version() -> ptr[u8]:")
+    o.append("    return \"" + PIN + "\"")
+    o.append("")
+    o.append("# Py_GetVersion() of the pinned build starts with this (the version, then a space)")
+    o.append("def py_pinned_prefix() -> ptr[u8]:")
+    o.append("    return \"" + PIN + " \"")
+    # PyStatus / PyWideStringList are anonymous typedef structs: locate them by their section comment in
+    # the raw header, then take the first "typedef struct {" after it
+    for sp in specs:
+        src = sp[1]
+        mark = sp[2]
+        if mark.startswith("/*"):
+            raw = need(inc + "/cpython/initconfig.h")
+            p = raw.find(mark)
+            if p < 0:
+                die(2, "struct " + sp[0] + " not found")
+            q = raw.find("typedef struct {", p)
+            if q < 0:
+                die(2, "struct " + sp[0] + " not found")
+            src = strip_comments(raw[q:])
+            mark = "typedef struct {"
+        fs = []
+        for t in body(src, mark, ds, sp[0]):
+            fs.append(field(t, sp[0]))
+        lo = layout(fs)
+        o.append("")
+        o.append("struct " + sp[0] + ":")
+        for f in fs:
+            o.append("    " + f[0] + ": " + f[1])
+        o.append("")
+        o.append(sp[3] + "_SIZE = " + str(lo[0]))
+        if sp[0] == "PyConfig":
+            for nm in ["isolated", "use_environment", "install_signal_handlers", "site_import", "program_name", "home", "module_search_paths"]:
+                o.append("PYCONFIG_OFF_" + nm.upper() + " = " + str(lo[1][nm]))
+    txt = "\n".join(o) + "\n"
+    if len(sys.argv) >= 3:
+        write_file(sys.argv[2], txt)
+    else:
+        os.write(1, txt)
+
+main()

@@ -2,8 +2,10 @@
 # tests/cpython-embed/main.forge: register the Forge @export functions in api.forge
 # as Python module "forge" through tools/cpython/embed.fsi, run Python-to-Forge
 # assertions, then call Python from Forge (eval, 0/1/2-arg object calls, and a
-# Python function that calls back into Forge). gcc -no-pie links this with api.o
-# and libpython3.13.a; there is no C file. @export main is the gcc crt entry point.
+# Python function that calls back into Forge). Also checks the libpython guard
+# (forge_py_lib_kind / forge_py_lib_check): the linked library is the pinned release build, and
+# synthetic 3.13.4, 3.13.50 and free-threaded version strings are refused with a clear error.
+# gcc -no-pie links this with api.o and libpython3.13.a; there is no C file. @export main is the gcc crt entry point.
 
 include "../../tools/cpython/embed.fsi"
 
@@ -59,6 +61,22 @@ def main() -> i64:
         return 1
     printf("layout sizeof(PyConfig)=%llu\n", sizeof(PyConfig))
     printf("layout offsetof(home)=%llu\n", offsetof(PyConfig, home))
+    if forge_py_lib_kind(Py_GetVersion()) != PYLIB_OK:
+        forge_py_lib_check(Py_GetVersion())
+        return 2
+    printf("libpython pinned release build: ok (kind %llu)\n", u64(forge_py_lib_kind(Py_GetVersion())))
+    k = forge_py_lib_kind("3.13.4 (main, Jun  4 2025, 00:00:00) [GCC 14.2.0]")
+    if k != PYLIB_NOT_PINNED or forge_py_lib_check("3.13.4 (main, Jun  4 2025, 00:00:00) [GCC 14.2.0]") != 1:
+        return 2
+    printf("libpython 3.13.4 refused (kind %llu)\n", u64(k))
+    k = forge_py_lib_kind("3.13.50 (main) [GCC]")
+    if k != PYLIB_NOT_PINNED:
+        return 2
+    printf("libpython 3.13.50 refused (kind %llu)\n", u64(k))
+    k = forge_py_lib_kind("3.13.5 experimental free-threading build (main, Jun 11 2025) [GCC 14.2.0]")
+    if k != PYLIB_FREE_THREADED or forge_py_lib_check("3.13.5 experimental free-threading build (main, Jun 11 2025) [GCC 14.2.0]") != 1:
+        return 2
+    printf("libpython free-threaded refused (kind %llu)\n", u64(k))
     if prefix == 0:
         prefix = "/workspace/cpython/work/prefix"
     if forge_py_init(prefix) != 0:

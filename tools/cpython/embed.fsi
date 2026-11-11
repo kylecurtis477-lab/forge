@@ -3,10 +3,13 @@
 # avoided by using the function forms CPython also exports (PyRun_SimpleString,
 # PyCMethod_New, PyModule_New, Py_IncRef / Py_DecRef, Py_InitializeFromConfig, …) and
 # by using PyTuple_Size / PyTuple_GetItem instead of varargs PyArg_ParseTuple.
-# PyConfig / PyStatus / PyMethodDef are transcribed from the pinned 3.13.5 headers
-# (release build: not Py_DEBUG, Py_GIL_DISABLED, Py_STATS, or MS_WINDOWS). tests
-# check sizeof(PyConfig)==448, offsetof(home)==296, sizeof(PyStatus)==32,
-# sizeof(PyMethodDef)==32. Isolated init sets home to the install prefix.
+# PyConfig / PyStatus / PyWideStringList / PyMethodDef come from pylayout.fsi, which
+# tools/cpython/pylayout.forge generates from the pinned 3.13.5 headers (release build:
+# not Py_DEBUG, Py_GIL_DISABLED, Py_STATS, or MS_WINDOWS); tests/cpython-embed regenerates
+# it and fails on a difference. forge_py_layout_ok checks forgec's sizeof / offsetof against
+# the generator's C layout (448 / home 296 / 32 / 16 / 32). forge_py_init first checks the
+# linked libpython with Py_GetVersion (callable before init): anything but the pinned
+# 3.13.5, or a free-threaded build, is refused with a clear error before PyConfig is touched.
 # Link with gcc -no-pie against prefix/lib/libpython3.13.a and the box libc, not fld
 # (fld stays no-libc and does not accept .a archives; fas objects are not PIC).
 # A PyMethodDef passed to PyCMethod_New must outlive the method; add_method heap-
@@ -15,97 +18,11 @@
 # forge_py_call_i64 call PyRun_String / PyObject_GetAttrString / PyObject_Call*
 # (function forms, no varargs).
 
-struct PyWideStringList:
-    length: i64
-    items: nptr[u8]
-
-struct PyConfig:
-    _config_init: i32
-    isolated: i32
-    use_environment: i32
-    dev_mode: i32
-    install_signal_handlers: i32
-    use_hash_seed: i32
-    hash_seed: u64
-    faulthandler: i32
-    tracemalloc: i32
-    perf_profiling: i32
-    import_time: i32
-    code_debug_ranges: i32
-    show_ref_count: i32
-    dump_refs: i32
-    dump_refs_file: nptr[u8]
-    malloc_stats: i32
-    filesystem_encoding: nptr[u8]
-    filesystem_errors: nptr[u8]
-    pycache_prefix: nptr[u8]
-    parse_argv: i32
-    orig_argv: PyWideStringList
-    argv: PyWideStringList
-    xoptions: PyWideStringList
-    warnoptions: PyWideStringList
-    site_import: i32
-    bytes_warning: i32
-    warn_default_encoding: i32
-    inspect: i32
-    interactive: i32
-    optimization_level: i32
-    parser_debug: i32
-    write_bytecode: i32
-    verbose: i32
-    quiet: i32
-    user_site_directory: i32
-    configure_c_stdio: i32
-    buffered_stdio: i32
-    stdio_encoding: nptr[u8]
-    stdio_errors: nptr[u8]
-    check_hash_pycs_mode: nptr[u8]
-    use_frozen_modules: i32
-    safe_path: i32
-    int_max_str_digits: i32
-    cpu_count: i32
-    pathconfig_warnings: i32
-    program_name: nptr[u8]
-    pythonpath_env: nptr[u8]
-    home: nptr[u8]
-    platlibdir: nptr[u8]
-    module_search_paths_set: i32
-    module_search_paths: PyWideStringList
-    stdlib_dir: nptr[u8]
-    executable: nptr[u8]
-    base_executable: nptr[u8]
-    prefix: nptr[u8]
-    base_prefix: nptr[u8]
-    exec_prefix: nptr[u8]
-    base_exec_prefix: nptr[u8]
-    skip_source_first_line: i32
-    run_command: nptr[u8]
-    run_module: nptr[u8]
-    run_filename: nptr[u8]
-    sys_path_0: nptr[u8]
-    _install_importlib: i32
-    _init_main: i32
-    _is_python_build: i32
-
-struct PyStatus:
-    typ: i32
-    func: nptr[u8]
-    err_msg: nptr[u8]
-    exitcode: i32
-
-struct PyMethodDef:
-    ml_name: nptr[u8]
-    ml_meth: nptr[u8]
-    ml_flags: i32
-    ml_doc: nptr[u8]
+include "pylayout.fsi"
 
 METH_VARARGS = 1
 METH_NOARGS = 4
 METH_O = 8
-PYCONFIG_SIZE = 448
-PYCONFIG_OFF_HOME = 296
-PYSTATUS_SIZE = 32
-PYMETHODDEF_SIZE = 32
 
 extern def PyConfig_InitPythonConfig(cfg: ptr[PyConfig])
 extern def PyConfig_SetBytesString(cfg: ptr[PyConfig], dest: ptr[nptr[u8]], s: ptr[u8]) -> PyStatus
@@ -131,6 +48,9 @@ extern def PyErr_Occurred() -> nptr[u8]
 extern def PyErr_Print()
 extern def malloc(n: u64) -> nptr[u8]
 extern def strlen(s: ptr[u8]) -> u64
+extern def strncmp(a: ptr[u8], b: ptr[u8], n: u64) -> i32
+extern def strstr(h: ptr[u8], n: ptr[u8]) -> nptr[u8]
+extern def Py_GetVersion() -> ptr[u8]
 extern def write(fd: i32, buf: ptr[u8], n: u64) -> i64
 extern def PyObject_Call(callable: nptr[u8], args: nptr[u8], kwargs: nptr[u8]) -> nptr[u8]
 extern def PyObject_CallNoArgs(callable: nptr[u8]) -> nptr[u8]
@@ -158,6 +78,45 @@ def forge_py_layout_ok() -> i32:
         return 0
     if sizeof(PyMethodDef) != PYMETHODDEF_SIZE:
         return 0
+    if sizeof(PyWideStringList) != PYWIDESTRINGLIST_SIZE:
+        return 0
+    if offsetof(PyConfig, isolated) != PYCONFIG_OFF_ISOLATED or offsetof(PyConfig, use_environment) != PYCONFIG_OFF_USE_ENVIRONMENT:
+        return 0
+    if offsetof(PyConfig, install_signal_handlers) != PYCONFIG_OFF_INSTALL_SIGNAL_HANDLERS or offsetof(PyConfig, site_import) != PYCONFIG_OFF_SITE_IMPORT:
+        return 0
+    if offsetof(PyConfig, program_name) != PYCONFIG_OFF_PROGRAM_NAME or offsetof(PyConfig, module_search_paths) != PYCONFIG_OFF_MODULE_SEARCH_PATHS:
+        return 0
+    return 1
+
+PYLIB_OK = 0
+PYLIB_NOT_PINNED = 1
+PYLIB_FREE_THREADED = 2
+
+# Classify a Py_GetVersion() string: "3.13.5 (main, ...) [GCC ...]" is the pin; a different
+# version, or "3.13.5 experimental free-threading build (...)", is refused.
+def forge_py_lib_kind(v: ptr[u8]) -> i32:
+    pin = py_pinned_prefix()
+    if strncmp(v, pin, strlen(pin)) != 0:
+        return PYLIB_NOT_PINNED
+    if strstr(v, "free-threading") != 0:
+        return PYLIB_FREE_THREADED
+    return PYLIB_OK
+
+# 0 when the linked libpython is the pinned release build; else prints why and returns 1.
+def forge_py_lib_check(v: ptr[u8]) -> i32:
+    k = forge_py_lib_kind(v)
+    if k == PYLIB_OK:
+        return 0
+    if k == PYLIB_FREE_THREADED:
+        eputs("forge_py_init: the linked libpython is a free-threaded build (")
+        eputs(v)
+        eputs("); only the pinned 3.13.5 release (GIL) build is supported, relink against build/cpython-build's libpython3.13.a\n")
+        return 1
+    eputs("forge_py_init: the linked libpython is ")
+    eputs(v)
+    eputs(", not the pinned ")
+    eputs(py_pinned_version())
+    eputs("; PyConfig would not match pylayout.fsi, relink against build/cpython-build's libpython3.13.a\n")
     return 1
 
 @unsafe
@@ -167,24 +126,26 @@ def forge_py_init(prefix: nptr[u8]) -> i32:
     if prefix == 0:
         eputs("forge_py_init: missing prefix\n")
         return 1
+    if forge_py_lib_check(Py_GetVersion()) != 0:
+        return 2
     PyConfig_InitPythonConfig(addr(cfg))
     cfg.isolated = 1
     cfg.site_import = 0
     cfg.use_environment = 0
     cfg.install_signal_handlers = 0
     st = PyConfig_SetBytesString(addr(cfg), addr(cfg.home), prefix)
-    if st.typ != 0:
+    if st._type != 0:
         eputs("forge_py_init: failed to set home\n")
         PyConfig_Clear(addr(cfg))
         return 1
     st = PyConfig_SetBytesString(addr(cfg), addr(cfg.program_name), "forge-py-embed")
-    if st.typ != 0:
+    if st._type != 0:
         eputs("forge_py_init: failed to set program_name\n")
         PyConfig_Clear(addr(cfg))
         return 1
     st = Py_InitializeFromConfig(addr(cfg))
     PyConfig_Clear(addr(cfg))
-    if st.typ != 0:
+    if st._type != 0:
         eputs("forge_py_init: Py_InitializeFromConfig failed\n")
         return 1
     g_py_ready = 1
