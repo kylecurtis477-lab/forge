@@ -286,9 +286,15 @@ def vb_msix_init(bdf: u64):
     pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 2)  # memory space for the table
     t = mmio_add(p2v(base + (tb & 0xFFFFFFF8)), 16)
     idt_set(VEC_VBLK, u64(on_vblk), 0)
-    mmio_wr(t, 4, 0xFEE00000 | (cpu_to_apic[0] << 12))
+    # with VT-d interrupt remapping on, the entry carries a remappable-format message (IRTE handle)
+    ma = 0xFEE00000 | (cpu_to_apic[0] << 12)
+    md = VEC_VBLK
+    if iommu_ir_route(IOMMU_IRTE_VBLK, bdf, VEC_VBLK, cpu_to_apic[0]) != 0:
+        ma = iommu_ir_addr(IOMMU_IRTE_VBLK)
+        md = 0
+    mmio_wr(t, 4, ma)
     mmio_wr(t + 4, 4, 0)
-    mmio_wr(t + 8, 4, VEC_VBLK)
+    mmio_wr(t + 8, 4, md)
     mmio_wr(t + 12, 4, 0)
     # message control: enable (bit 15), clear function mask (bit 14)
     pci_wr32(bdf, c, (pci_rd32(bdf, c) | 0x80000000) & ~u64(0x40000000))

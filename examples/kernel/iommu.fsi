@@ -68,6 +68,21 @@ iommu_test_rid: u64[4]
 iommu_test_nrid: u64
 iommu_tsl_va: u64[4]
 iommu_tsl_pa: u64[4]
+# queued invalidation (needed to invalidate the interrupt-entry cache) and interrupt remapping
+iommu_qi: u64
+iommu_iq_va: u64[4]
+iommu_iq_pa: u64[4]
+iommu_iq_tail: u64[4]
+iommu_qs_va: u64
+iommu_qs_pa: u64
+iommu_qseq: u64
+iommu_ir: u64
+iommu_irt_va: u64
+iommu_irt_pa: u64
+IOMMU_IRTE_VBLK = 0
+IOMMU_IRT_ENTRIES = 256
+VEC_IOMMU_TEST = 0x51
+iommu_test_irqs: u64
 # last fault drained by iommu_fault_drain
 iommu_f_sid: u64
 iommu_f_reason: u64
@@ -237,10 +252,43 @@ def iommu_wr64(u: u64, off: u64, v: u64):
     mmio_wr(iommu_regs[u] + off + 4, 4, v >> 32)
     mmio_wr(iommu_regs[u] + off, 4, v & 0xFFFFFFFF)
 
+def iommu_qi_submit(u: u64, lo: u64, hi: u64):
+    t = iommu_iq_tail[u]
+    mmio_wr(iommu_iq_va[u] + t * 16 + 8, 8, hi)
+    mmio_wr(iommu_iq_va[u] + t * 16, 8, lo)
+    iommu_iq_tail[u] = (t + 1) & 0xFF
+
+# Queued invalidation on unit u: the given descriptors (0 = none) then a wait descriptor that writes
+# a fresh sequence number to the status word; returns 1 once the hardware has written it.
+def iommu_qi_run(u: u64, d1: u64, d2: u64, d3: u64) -> u64:
+    if d1 != 0:
+        iommu_qi_submit(u, d1, 0)
+    if d2 != 0:
+        iommu_qi_submit(u, d2, 0)
+    if d3 != 0:
+        iommu_qi_submit(u, d3, 0)
+    iommu_qseq = (iommu_qseq + 1) & 0x7FFFFFFF
+    sa = iommu_qs_va + u * 8
+    mmio_wr(sa, 4, 0)
+    iommu_qi_submit(u, 0x5 | (u64(1) << 5) | (iommu_qseq << 32), iommu_qs_pa + u * 8)
+    mmio_wr(iommu_regs[u] + 0x88, 8, iommu_iq_tail[u] << 4)
+    i: u64 = 0
+    while i < 1000000:
+        if mmio_rd(sa, 4) == iommu_qseq:
+            return 1
+        i += 1
+    puts("VT-d: queued invalidation timed out\n")
+    return 0
+
 def iommu_inv():
-# on every programmed unit: write-buffer flush (if required), then global context-cache and
-# IOTLB invalidation (legacy register interface)
+# on every programmed unit: global context-cache and IOTLB invalidation, through the invalidation
+# queue once it is on, else the legacy registers (after a write-buffer flush if required)
     u: u64 = 0
+    if iommu_qi != 0:
+        while u < iommu_nprog:
+            iommu_qi_run(u, 0x1 | (u64(1) << 4), 0x2 | (u64(1) << 4) | (u64(1) << 6) | (u64(1) << 7), 0)
+            u += 1
+        return
     while u < iommu_nprog:
         if (iommu_caps[u] & 0x10) != 0:
             mmio_wr(iommu_regs[u] + 0x18, 4, (mmio_rd(iommu_regs[u] + 0x1C, 4) & 0x96FFFFFF) | (u64(1) << 27))
@@ -532,6 +580,7 @@ def iommu_enable():
             return
         u += 1
     iommu_te = 1
+    iommu_ir_enable()
     puts("VT-d: translation on, ")
     put_u64(iommu_nprog)
     puts(" of ")
@@ -768,6 +817,16 @@ def iommu_reason_str(r: u64) -> ptr[u8]:
         return "read not permitted"
     if r == 7:
         return "second-level entry invalid"
+    if r == 0x21:
+        return "interrupt index beyond the table"
+    if r == 0x22:
+        return "interrupt entry not present"
+    if r == 0x24:
+        return "reserved bits in interrupt entry"
+    if r == 0x25:
+        return "compatibility-format interrupt blocked"
+    if r == 0x26:
+        return "interrupt source-ID check failed"
     return "other"
 
 # Read and clear every pending fault record on every unit (FSTS, then each FRCD at the
@@ -972,6 +1031,7 @@ def iommu_dma_selftest():
     puts(" (")
     puts(iommu_reason_str(iommu_f_reason))
     puts(")\n")
+    iommu_ir_selftest(bdf, regs, rid)
     # tear down: bus mastering off, test domain removed, tables audited again, frames returned
     pci_wr32(bdf, 4, pci_rd32(bdf, 4) & ~u64(4))
     iommu_test_set(0)
@@ -1008,3 +1068,170 @@ def iommu_policy_report():
     if r != EPERM or drv_dma_check() != 0:
         panic("VT-d policy: strict mode did not refuse drv 402")
     puts("VT-d policy: strict mode refuses drv 402 without a remapping unit: EPERM\n")
+
+# GCMD write that keeps the persistent enables (TE, EAFL, QIE, IRE, CFI) and adds `bit`; waits for the
+# matching GSTS bit
+def iommu_gcmd_set(u: u64, bit: u64) -> u64:
+    reg = iommu_regs[u]
+    mmio_wr(reg + 0x18, 4, (mmio_rd(reg + 0x1C, 4) & 0x96FFFFFF) | bit)
+    return iommu_wait32(u, 0x1C, bit, bit)
+
+# Interrupt remapping (A.2 gap 2), when every unit has ecap.IR and ecap.QI. Per unit: an
+# invalidation queue (IQA/IQT, QIE) so the interrupt-entry cache can be invalidated, then one shared
+# 256-entry remapping table (IRTA, SIRTP), compatibility-format interrupts allowed (CFI: the IOAPIC
+# still sends them), and IRE. Devices then get remappable-format MSI/MSI-X messages whose handle
+# selects an IRTE (iommu_ir_route); each IRTE is source-validated against the device's requester ID.
+def iommu_ir_enable():
+    u: u64 = 0
+    iommu_ir = 0
+    iommu_qi = 0
+    while u < iommu_nprog:
+        e = mmio_rd(iommu_regs[u] + 0x10, 8)
+        if (e & 8) == 0 or (e & 2) == 0:
+            puts("VT-d: no interrupt remapping (ecap IR/QI clear), MSI stays compatibility format\n")
+            return
+        u += 1
+    iommu_qs_va = iommu_page()
+    iommu_qs_pa = iommu_tmp_pa
+    iommu_irt_va = iommu_page()
+    iommu_irt_pa = iommu_tmp_pa
+    if iommu_qs_va == 0 or iommu_irt_va == 0:
+        puts("VT-d: no frames for interrupt remapping\n")
+        return
+    u = 0
+    while u < iommu_nprog:
+        iommu_iq_va[u] = iommu_page()
+        iommu_iq_pa[u] = iommu_tmp_pa
+        if iommu_iq_va[u] == 0:
+            puts("VT-d: no frames for interrupt remapping\n")
+            return
+        iommu_iq_tail[u] = 0
+        mmio_wr(iommu_regs[u] + 0x88, 8, 0)
+        mmio_wr(iommu_regs[u] + 0x90, 8, iommu_iq_pa[u])
+        if iommu_gcmd_set(u, u64(1) << 26) == 0:
+            puts("VT-d: queued invalidation enable timed out\n")
+            return
+        u += 1
+    iommu_qi = 1
+    # IRTA: table address, S = 7 (2^(7+1) = 256 entries), xAPIC-format destinations (EIME = 0)
+    u = 0
+    while u < iommu_nprog:
+        mmio_wr(iommu_regs[u] + 0xB8, 8, iommu_irt_pa | 7)
+        if iommu_gcmd_set(u, u64(1) << 24) == 0:
+            puts("VT-d: set interrupt table timed out\n")
+            return
+        if iommu_qi_run(u, 0x4, 0, 0) == 0:
+            return
+        # CFI is best effort: a unit that does not report CFIS still passes compatibility-format
+        # interrupts while EIME is clear (QEMU's model), which is what the IOAPIC needs
+        iommu_gcmd_set(u, u64(1) << 23)
+        if iommu_gcmd_set(u, u64(1) << 25) == 0:
+            puts("VT-d: interrupt remapping enable timed out\n")
+            return
+        u += 1
+    iommu_ir = 1
+    puts("VT-d: interrupt remapping on (")
+    put_u64(IOMMU_IRT_ENTRIES)
+    puts("-entry table, source-validated entries, queued invalidation)\n")
+
+# remappable-format MSI address for IRTE `idx` (handle in bits 19:5 and 2, format bit 4, no subhandle)
+def iommu_ir_addr(idx: u64) -> u64:
+    return 0xFEE00000 | ((idx & 0x7FFF) << 5) | (u64(1) << 4) | ((idx >> 15) << 2)
+
+# Write IRTE idx: fixed delivery, edge, physical destination `apic`, `vector`, and source validation
+# against requester ID `sid` (SVT = 1, SQ = 0: all 16 bits must match). present = 0 clears it.
+# Invalidates the interrupt-entry cache. Returns 1 when written.
+def iommu_irte_set(idx: u64, sid: u64, vector: u64, apic: u64, present: u64) -> u64:
+    if iommu_ir == 0 or idx >= IOMMU_IRT_ENTRIES:
+        return 0
+    e = iommu_irt_va + idx * 16
+    mmio_wr(e, 8, 0)
+    if present != 0:
+        mmio_wr(e + 8, 8, (sid & 0xFFFF) | (u64(1) << 18))
+        mmio_wr(e, 8, 1 | ((vector & 0xFF) << 16) | (((apic & 0xFF) << 8) << 32))
+    else:
+        mmio_wr(e + 8, 8, 0)
+    u: u64 = 0
+    while u < iommu_nprog:
+        iommu_qi_run(u, 0x4, 0, 0)
+        u += 1
+    return 1
+
+# Route bdf's interrupts through IRTE idx (source ID = the requester ID its messages carry).
+# Returns 1 when the caller should program iommu_ir_addr(idx) with data 0, else 0 (compat format).
+def iommu_ir_route(idx: u64, bdf: u64, vector: u64, apic: u64) -> u64:
+    if iommu_ir == 0:
+        return 0
+    n = iommu_aliases(bdf)
+    if iommu_irte_set(idx, iommu_alias[n - 1], vector, apic, 1) == 0:
+        return 0
+    puts("VT-d: interrupt remapping: ")
+    iommu_put_bdf(bdf)
+    puts(" vector 0x")
+    put_hex8(vector)
+    puts(" -> IRTE ")
+    put_u64(idx)
+    puts(" (source ")
+    iommu_put_bdf(iommu_alias[n - 1])
+    puts(")\n")
+    return 1
+
+@interrupt
+def on_iommu_test(frame: ptr[u64]):
+    iommu_test_irqs += 1
+    lapic_eoi()
+
+# edu MSI through IRTE `idx`: raise once, wait, return how many test interrupts arrived
+def edu_msi_try(bdf: u64, regs: u64, c: u64, idx: u64) -> u64:
+    before = iommu_test_irqs
+    pci_wr32(bdf, c + 4, iommu_ir_addr(idx))
+    if ((pci_rd32(bdf, c) >> 16) & 0x80) != 0:
+        pci_wr32(bdf, c + 8, 0)
+        pci_wr32(bdf, c + 12, 0)
+    else:
+        pci_wr32(bdf, c + 8, 0)
+    pci_wr32(bdf, c, pci_rd32(bdf, c) | (u64(1) << 16))
+    mmio_wr(regs + 0x60, 4, 1)
+    i: u64 = 0
+    while i < 500000 and iommu_test_irqs == before:
+        mmio_rd(regs, 4)
+        i += 1
+    mmio_wr(regs + 0x64, 4, 1)
+    pci_wr32(bdf, c, pci_rd32(bdf, c) & ~(u64(1) << 16))
+    return iommu_test_irqs - before
+
+# Interrupt remapping observed: edu's MSI (remappable format) through an IRTE validated for edu's
+# requester ID is delivered; through an IRTE validated for another requester ID, or a not-present
+# IRTE, it is blocked. Fault records, if the hardware model writes them, are printed.
+def iommu_ir_selftest(bdf: u64, regs: u64, rid: u64):
+    if iommu_ir == 0:
+        return
+    c = pci_cap_find(bdf, 0x05)
+    if c == 0:
+        panic("VT-d: edu has no MSI capability")
+    idt_set(VEC_IOMMU_TEST, u64(on_iommu_test), 0)
+    iommu_fault_drain(1)
+    iommu_irte_set(1, rid, VEC_IOMMU_TEST, cpu_to_apic[0], 1)
+    iommu_irte_set(2, rid ^ 0x8, VEC_IOMMU_TEST, cpu_to_apic[0], 1)
+    iommu_irte_set(3, 0, 0, 0, 0)
+    ok = edu_msi_try(bdf, regs, c, 1)
+    other = edu_msi_try(bdf, regs, c, 2)
+    absent = edu_msi_try(bdf, regs, c, 3)
+    nf = iommu_fault_drain(0)
+    iommu_irte_set(1, 0, 0, 0, 0)
+    iommu_irte_set(2, 0, 0, 0, 0)
+    if ok != 1 or other != 0 or absent != 0:
+        put_u64(ok)
+        putc(32)
+        put_u64(other)
+        putc(32)
+        put_u64(absent)
+        putc(10)
+        panic("VT-d: interrupt remapping self-test failed")
+    puts("VT-d IR: edu MSI via IRTE 1 (source ")
+    iommu_put_bdf(rid)
+    puts(") delivered 1; via an IRTE validated for ")
+    iommu_put_bdf(rid ^ 0x8)
+    puts(" blocked; via a not-present IRTE blocked; ")
+    put_u64(nf)
+    puts(" fault record(s)\n")

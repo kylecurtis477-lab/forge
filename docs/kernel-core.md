@@ -161,10 +161,10 @@ refused: no proof manifest`, `tampered` / `forged` / `linuxabi` refusals; `os/se
 **Drivers, isolation and VT-d.** `PCI + virtio-blk + FAT32 (read-only) OK` and a byte-identical
 `init.elf` read through `blkd` (`blkd: read`, `through the user-mode driver, identical`) plus
 `isolated driver service OK` and `supervised driver restart OK` pin the Phase 2.2 virtio-blk
-service. `os/kernel-iommu` boots q35 with `-device intel-iommu,intremap=off` and a modern
+service. `os/kernel-iommu` boots q35 with `-device intel-iommu,intremap=on` and a modern
 virtio-blk (`disable-legacy=on,iommu_platform=on`) and requires `VT-d: 1 remapping unit`,
 `haw `, `bits, flags 0x`, `base 0x`, `translation on`, `drv 403 returns IOVA`,
-`slpt maps only the grant`, and `KERNEL OK`. Default deny and table coverage (A.2 gaps 1, 3, 6, closed): `translation on, 1 of 1 remapping unit programmed (default deny`, `VT-d: default deny: `, `scanned device(s) and every unscanned requester ID blocked`, `context audit: 65536 requester IDs, `, `0 stray, 0 missing`, and the negative case `context audit catches a stray pass-through entry`. Observed faults and aliasing (A.2 gaps 4, 5, closed): the same boot adds QEMU's `edu` device behind a root port and a PCIe-to-PCI bridge; `(alias via PCIe-to-PCI bridge `, `denied edu DMA faulted: source ` (an unclaimed device's DMA is recorded by the hardware model with the alias as source), `requester-ID context(s): 64 bytes into edu and back`, `identical, 0 faults` (DMA through the alias context arrives intact), and `out-of-grant edu DMA faulted at IOVA 0x0000000000810000: source ` (DMA outside the mapping faults at that address). DMA policy (A.2 gap 7, closed): `VT-d policy: remapping active (deny by default, grants confined)` on `os/kernel-iommu`; `VT-d policy: no remapping unit, DMA unconfined (permissive default` and the negative case `strict mode refuses drv 402 without a remapping unit: EPERM` on `os/kernel-bios`, `os/kernel-uefi` and `os/efi-loader-gpt`. The IOVA in that report is not the host PA
+`slpt maps only the grant`, and `KERNEL OK`. Default deny and table coverage (A.2 gaps 1, 3, 6, closed): `translation on, 1 of 1 remapping unit programmed (default deny`, `VT-d: default deny: `, `scanned device(s) and every unscanned requester ID blocked`, `context audit: 65536 requester IDs, `, `0 stray, 0 missing`, and the negative case `context audit catches a stray pass-through entry`. Observed faults and aliasing (A.2 gaps 4, 5, closed): the same boot adds QEMU's `edu` device behind a root port and a PCIe-to-PCI bridge; `(alias via PCIe-to-PCI bridge `, `denied edu DMA faulted: source ` (an unclaimed device's DMA is recorded by the hardware model with the alias as source), `requester-ID context(s): 64 bytes into edu and back`, `identical, 0 faults` (DMA through the alias context arrives intact), and `out-of-grant edu DMA faulted at IOVA 0x0000000000810000: source ` (DMA outside the mapping faults at that address). DMA policy (A.2 gap 7, closed): `VT-d policy: remapping active (deny by default, grants confined)` on `os/kernel-iommu`; `VT-d policy: no remapping unit, DMA unconfined (permissive default` and the negative case `strict mode refuses drv 402 without a remapping unit: EPERM` on `os/kernel-bios`, `os/kernel-uefi` and `os/efi-loader-gpt`. Interrupt remapping (A.2 gap 2, closed): `VT-d: interrupt remapping on (256-entry table`, `vector 0x50 -> IRTE 0 (source ` (virtio-blk MSI-X through a source-validated IRTE; blkd keeps serving the disk), `VT-d IR: edu MSI via IRTE 1 (source `, `delivered 1; via an IRTE validated for `, and `blocked; via a not-present IRTE blocked`. The IOVA in that report is not the host PA
 (`iommu_grant_ok` refuses an identity grant). Without a remapping unit the existing BIOS/UEFI
 boots still reach `KERNEL OK` and 403 still returns a host PA. Input and NVMe services,
 Forge FS and the object store have their own result names (`os/drivers`, `os/forgefs-*`,
@@ -192,7 +192,7 @@ is part of that baseline. Counts may shrink; they must not rise.
 The tests do not prove the kernel correct on every machine, under every interleaving, or against
 a formal model of x86, ACPI, PCI or VT-d. In particular they do not cover: timing or
 cache/side-channel behaviour; AArch64 or physical hardware; Secure Boot; multiple outstanding
-virtio requests; packed virtqueues; interrupt remapping; DMA under translation from devices other
+virtio requests; packed virtqueues; IOAPIC interrupt remapping; DMA under translation from devices other
 than the granted virtio-blk and the edu test device; or more than one remapping unit.
 Commentary in SYSTEMS.md or BUILD_PLAN.md that is not pinned by a
 named test or marker in A.1 is not a verification claim.
@@ -204,9 +204,13 @@ named test or marker in A.1 is not a verification claim.
    (translate-and-confine, domain 2) has a context entry; every other requester ID is blocked.
    Remaining limit: a kernel-driven device is trusted with host physical addresses (no per-device
    kernel DMA domains). Pinned in A.1.
-2. **No interrupt remapping.** The `os/kernel-iommu` command line sets `intremap=off`. MSI-X
-   still ends at the LAPIC through the ordinary path; IRTE programming and IRQ remapping faults
-   are not implemented and are not tested.
+2. **Closed: interrupt remapping.** With IR and QI on every unit, the kernel enables queued
+   invalidation, a 256-entry remapping table, CFI and IRE; virtio-blk's MSI-X is routed through a
+   source-validated IRTE, and edu's MSI is delivered only through an IRTE validated for its
+   requester ID. Remaining limits: compatibility-format interrupts stay allowed (CFI) because the
+   IOAPIC is not remapped, so a device that can rewrite its own MSI address could still send a
+   compatibility-format interrupt; x2APIC destinations above 255 (EIME) are not used; interrupt
+   remapping faults are printed if recorded but not required.
 3. **Closed: every DRHD is programmed.** All units the probe records (up to `IOMMU_MAX` = 4) get the
    shared root table, are invalidated together, and have translation enabled; the second-level
    width is one every unit supports. Remaining limit: the test topology has one unit (QEMU
@@ -242,7 +246,7 @@ not imply that device DMA was translated.
 - The host is QEMU running the command lines in `tests/os/run.sh` (256 MiB RAM; 4 VCPUs, or 1 on
   `os/kernel-bios-smp1`; SeaBIOS or OVMF; a read-only virtio-blk ESP, plus the extra disks only
   on the driver/Forge-FS/object-store tests).
-- For A.1's VT-d claims: `-machine q35 -device intel-iommu,intremap=off` and
+- For A.1's VT-d claims: `-machine q35 -device intel-iommu,intremap=on` and
   `virtio-blk-pci,disable-legacy=on,iommu_platform=on`, plus `pcie-root-port` -> `pcie-pci-bridge` -> `edu`
   for the fault and aliasing claims. The firmware DMAR describes at least one
   DRHD whose register base the kernel can map, and the granted device is on bus 0 in that unit's
