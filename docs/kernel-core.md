@@ -125,12 +125,15 @@ outside that configuration. The interface in §§0–5 is unchanged.
 ### A.1 What is verified, and by which tests
 
 Markers in this section are exact serial (or framebuffer) substrings required by `tests/os/run.sh`
-or a kernel self-test. A result name is one of the 33 entries in `tests/os/expected-results.txt`
+or a kernel self-test. A result name is one of the 34 entries in `tests/os/expected-results.txt`
 (`os/result-count` fails if any is missing). The framebuffer check on the BIOS, UEFI, EFI-loader
 and IOMMU boots requires `back == front` and a row that decodes as `KERNEL OK`.
 
 **Boot and memory.** `os/kernel-bios`, `os/kernel-bios-smp1`, `os/kernel-uefi` and
 `os/efi-loader-gpt` each reach `KERNEL OK` through GRUB BIOS, GRUB UEFI, or the Forge UEFI loader.
+After `KERNEL OK` the kernel prints `debug-exit N ms after KERNEL OK` (TSC-bounded 5 s wait for the
+harness screenshot); `os/efi-loader-gpt-post-ok` requires N < 8000, so a 60 s stall after `KERNEL OK`
+fails the suite.
 `os/kernel-wx` requires that `kernel.elf` has no RWX `PT_LOAD`. Identity mapping of low RAM is
 dropped (`identity 0x0000000000100000 -> unmapped`). Image and heap/stack KASLR are pinned by
 `os/kaslr` (`KASLR: big heap at`, `KASLR: kernel image at`, `link-address alias unmapped`,

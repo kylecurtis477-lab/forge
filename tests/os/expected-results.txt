@@ -6,6 +6,7 @@ os/kernel-bios-smp1
 os/kernel-iommu
 os/kernel-uefi
 os/efi-loader-gpt
+os/efi-loader-gpt-post-ok
 os/kexec-no-disk-write
 os/seal-private-key-not-shipped
 os/kaslr

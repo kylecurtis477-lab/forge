@@ -81,6 +81,10 @@ printed "kexec: input service state carried", so the boot thread was stuck insid
 (two sleeping virtio-blk reads of kbdd/kbdd2, then `kbd_start_l`). On the carried path it now prints
 `kexec: input service: reading kbdd` / `reading kbdd2` / `starting kbdd` / `kbdd started`, so the next
 such HANG's serial log plus its per-vCPU stacks show which step stalls (suspect: a lost virtio-blk completion).
+The efi-loader-gpt 60 s stall after `KERNEL OK` (open after inv78) was the guest `hlt()`-ing for the
+harness's `q` while the LAPIC timer was not firing and COM1 had no RX interrupt, so the CPU slept
+through the character. The wait is now TSC-bounded and uses `cpu_relax()`; the kernel prints
+`debug-exit N ms after KERNEL OK` and `os/efi-loader-gpt-post-ok` requires N < 8000.
 
 ## Compiler tooling (Phase 3)
 - `--diagnostics=json`: one schema-v1 JSON object per error (file/line/col span, code, message, fix-its); goldens in `tests/diag`.

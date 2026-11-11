@@ -1854,14 +1854,32 @@ def after_overflow():
         put_u64(full)
         puts("), back == front\n")
     puts("KERNEL OK\n")
-    # test harness: wait up to 5 s (LAPIC ticks) for 'q' on COM1 so it can take a screenshot first
-    t_end = lapic_ticks + 500
+    # test harness: wait up to 5 s for 'q' on COM1 so it can take a screenshot first.
+    # Do not hlt(): COM1 is polled (no RX interrupt), and after kexec the LAPIC timer may not
+    # be firing, so hlt() would sleep through the 'q' until the harness's 60 s serial stall.
+    # Bound the wait with the TSC and spin with cpu_relax() so a dead timer cannot hang us.
+    t0 = rdtsc()
+    ticks0 = lapic_ticks
+    spins = 0
+    limit = tsc_per_ms * 5000
+    lapic_timer_start()
     sti()
-    while lapic_ticks < t_end:
+    while 1:
         if serial_poll() == 113:
             break
-        hlt()
+        if tsc_per_ms != 0 and rdtsc() - t0 >= limit:
+            break
+        if tsc_per_ms == 0 and (lapic_ticks >= ticks0 + 500 or spins >= 100000000):
+            break
+        spins += 1
+        cpu_relax()
     cli()
+    waited = 0
+    if tsc_per_ms != 0:
+        waited = (rdtsc() - t0) / tsc_per_ms
+    puts("debug-exit ")
+    put_u64(waited)
+    puts(" ms after KERNEL OK\n")
     qemu_exit(0x10)
 
 @export
