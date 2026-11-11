@@ -8,7 +8,7 @@ ioapic: u64
 lapic_ticks: u64
 pit_irqs: u64
 lapic_per_10ms: u64
-tsc_per_ms: u64
+# tsc_per_ms is declared in console.fsi (serial_putc bounds the THRE wait with it)
 sched_on: u64
 
 x2apic_on: u64  # Phase 8: x2APIC mode, registers are MSRs 0x800 + offset/16

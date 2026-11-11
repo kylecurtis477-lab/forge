@@ -14,6 +14,8 @@ fb_row: u64
 vga_base: u64
 vga_pos: u64
 con_fg: u32
+# Calibrated in apic.fsi (PIT/HPET); 0 until then. Used here to bound serial_putc.
+tsc_per_ms: u64
 
 @unsafe
 def serial_init():
@@ -27,9 +29,27 @@ def serial_init():
 
 @unsafe
 def serial_putc(c: u8):
-    while (inb(COM1 + 5) & 0x20) == 0:
-        cpu_relax()
-    outb(COM1, c)
+# Bound the THRE wait so a backed-up host serial pipe cannot wedge the kernel
+# (os/kernel-bios-smp1: post-kexec seal_test spun here until the harness 2x timeout).
+# When tsc_per_ms is calibrated, wait up to 10 ms; before that, a spin cap. If THRE
+# stays 0, serial_init once and retry; if still stuck, drop the character.
+    tries = 0
+    while tries < 2:
+        t0 = rdtsc()
+        spins = 0
+        while True:
+            if (inb(COM1 + 5) & 0x20) != 0:
+                outb(COM1, c)
+                return
+            if tsc_per_ms != 0 and rdtsc() - t0 >= tsc_per_ms * 10:
+                break
+            spins += 1
+            if tsc_per_ms == 0 and spins >= 10000000:
+                break
+            cpu_relax()
+        if tries == 0:
+            serial_init()
+        tries += 1
 
 @unsafe
 def serial_poll() -> i64:
