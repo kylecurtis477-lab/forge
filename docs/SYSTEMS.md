@@ -258,6 +258,7 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
 ## Kernel core interface (plan v1.3 item 8)
 The contract of the scheduler, IPC channels and the two capability layers is specified in
 [kernel-core.md](kernel-core.md) (spec v1); changing any of it bumps that version.
+Appendix A of that file is the verification scope (what the tests pin, the known DMA/IOMMU gaps, verifier-ready conventions).
 
 ## Process-state format (plan v1.3 item 7)
 `examples/kernel/pstate.fsi` defines the single versioned record of one user process, **process-state

@@ -6,6 +6,8 @@ user programs may rely on for the three core services, as implemented today in
 capabilities). It is a description of the contract, not new code: nothing in the kernel changed with it.
 Anything not written here is an implementation detail and may change without notice. A change to
 anything written here bumps the spec version and must update this file in the same commit, with tests.
+Appendix A records the verification scope for this contract and for the kernel properties the boot
+tests pin, including the known DMA/IOMMU gaps. It does not change the interface in §§0–5.
 
 Related formats that are specified elsewhere and referenced, not repeated: process-state v1 and the
 kexec handoff (SYSTEMS.md "Process-state format", `pstate.fsi`), the nondeterminism hook
@@ -111,3 +113,173 @@ Priorities / real-time scheduling, channel select/poll across endpoints, capabil
 
 Tests that pin this contract: `examples/user/captest.forge`, `chantest.forge`, the kernel sync /
 sched / TLB self-tests and the grant and sandbox checks in `tests/os/run.sh`.
+
+## Appendix A. Verification scope
+
+This appendix is a statement of what the executable tests actually check, what they do not, and
+under which assumptions. "Verified" here means a named test in `run_tests.sh` (including
+`tests/os/run.sh`) has passed on the CI configuration, at both -O2 and -O0 unless a note says
+otherwise. It is not a machine-checked proof, and it is not a claim about hardware or firmware
+outside that configuration. The interface in §§0–5 is unchanged.
+
+### A.1 What is verified, and by which tests
+
+Markers in this section are exact serial (or framebuffer) substrings required by `tests/os/run.sh`
+or a kernel self-test. A result name is one of the 33 entries in `tests/os/expected-results.txt`
+(`os/result-count` fails if any is missing). The framebuffer check on the BIOS, UEFI, EFI-loader
+and IOMMU boots requires `back == front` and a row that decodes as `KERNEL OK`.
+
+**Boot and memory.** `os/kernel-bios`, `os/kernel-bios-smp1`, `os/kernel-uefi` and
+`os/efi-loader-gpt` each reach `KERNEL OK` through GRUB BIOS, GRUB UEFI, or the Forge UEFI loader.
+`os/kernel-wx` requires that `kernel.elf` has no RWX `PT_LOAD`. Identity mapping of low RAM is
+dropped (`identity 0x0000000000100000 -> unmapped`). Image and heap/stack KASLR are pinned by
+`os/kaslr` (`KASLR: big heap at`, `KASLR: kernel image at`, `link-address alias unmapped`,
+`unslid .text` unmapped, loader and kexec relocatable counts). The buddy allocator, vmalloc reuse
+and demand paging print `buddy allocator OK`, `vmalloc VA reuse OK` and `demand paging: 3 faults`.
+SMEP/SMAP and `copy_user` are checked by the uaccess self-test (`SMAP blocks kernel read`,
+`SMEP blocks kernel exec`, `uaccess:`) and by `examples/user/badptr.forge` (every pointer-taking
+syscall, four bad addresses, all `EFAULT`).
+
+**Scheduler, IPC and capabilities (§§1–4).** The legal thread states, wait queues, mutexes and
+condvars are exercised by the kernel sync self-test (`wait queues + sleeping mutexes + condvars OK`,
+`6 threads x 2000 increments = 12000`). Preemption and stealing: `preemptive SMP scheduler OK`,
+`per-CPU run queues:`, `SMP: 4 cpus online` (and `SMP: 1 cpus online` with zero IPIs on
+`os/kernel-bios-smp1`). Overflow into a kernel stack guard and a smashed canary kill the thread,
+not the kernel (`kernel stack guard pages:`, `stack canaries:`). Stop-machine rendezvous:
+`stop_machine stress OK: 3000 rounds`. Handle rights that only shrink, and the syscall-class
+gate, are pinned by `examples/user/captest.forge` (`captest: PASS`) and `capdeny` (`capability
+gate: undeclared spawn and probe denied at the syscall boundary`). Channel move, XFER, EOF on
+peer close, and `EFAULT` leaving a message queued are pinned by `chantest.forge` (`chantest: PASS`)
+and `badptr`. Grants and revocation: `sbtest: PASS`, `grtest:` mid-read cut-off, `audit: ledger
+check`. W^X in user space: `wxtest: PASS`. Sealed images: boot lines `verify: /efi/forge/bin/unsealed
+refused: no proof manifest`, `tampered` / `forged` / `linuxabi` refusals; `os/seal-private-key-not-shipped`;
+`tests/ed25519/run.sh` and `tests/forgeseal/run.sh`.
+
+**Drivers, isolation and VT-d.** `PCI + virtio-blk + FAT32 (read-only) OK` and a byte-identical
+`init.elf` read through `blkd` (`blkd: read`, `through the user-mode driver, identical`) plus
+`isolated driver service OK` and `supervised driver restart OK` pin the Phase 2.2 virtio-blk
+service. `os/kernel-iommu` boots q35 with `-device intel-iommu,intremap=off` and a modern
+virtio-blk (`disable-legacy=on,iommu_platform=on`) and requires `VT-d: 1 remapping unit`,
+`haw `, `bits, flags 0x`, `base 0x`, `translation on`, `drv 403 returns IOVA`,
+`slpt maps only the grant`, and `KERNEL OK`. The IOVA in that report is not the host PA
+(`iommu_grant_ok` refuses an identity grant). Without a remapping unit the existing BIOS/UEFI
+boots still reach `KERNEL OK` and 403 still returns a host PA. Input and NVMe services,
+Forge FS and the object store have their own result names (`os/drivers`, `os/forgefs-*`,
+`os/objstore-*`, `os/objfs-*`, `os/nvme-service-swap-restart-boot1` / `boot2`).
+
+**Kexec and process-state.** `kexec handoff OK`, `kexec: handoff format v5`, `process-state: format
+v1 (adopts v1..v1), header checks OK`, `TLB IPI: 1 stale shootdown IPI(s) from the previous kernel
+handled before SMP`, and `driver state carried across kexec OK`. `os/kexec-no-disk-write` requires
+the GPT image to be byte-identical after the loader boot. The bios suite repeats the handoff
+(`kexec: generation 3 kernel adopted`).
+
+**Linux personality, modules, live patch, nondeterminism.** `lxtest: PASS`, `lxthreads: PASS`,
+`lxfs: PASS`, `lxexec: PASS`, `lxsig: PASS`, and BusyBox ash (`hello from ash, forge`,
+`script done: ok`) run only in the compat sandbox; a plain exec of a Linux image is refused.
+Modules: `module ABI OK: 1002 loads, 1002 unloads, 7 rejected`. Live patch:
+`live patching OK`. The nondeterminism hook: `nondet: recording off by default`, `nondet hook OK`.
+
+**Unsafe surface.** `tests/unsafe/run.sh` (in `run_tests.sh`) compiles the allow/deny cases,
+checks `forgec --provenance-lint`, and fails if any program's function/block/op/asm count in
+`tests/unsafe/baseline.txt` grows. `forgec --unsafe-report` on `examples/kernel/kernel.forge`
+is part of that baseline. Counts may shrink; they must not rise.
+
+### A.2 What is not verified
+
+The tests do not prove the kernel correct on every machine, under every interleaving, or against
+a formal model of x86, ACPI, PCI or VT-d. In particular they do not cover: timing or
+cache/side-channel behaviour; AArch64 or physical hardware; Secure Boot; a default-deny I/O
+policy; multiple outstanding virtio requests; packed virtqueues; interrupt remapping; DMA from
+devices other than the granted virtio-blk under translation; or a written policy for a machine
+that has no remapping unit. Commentary in SYSTEMS.md or BUILD_PLAN.md that is not pinned by a
+named test or marker in A.1 is not a verification claim.
+
+**Known DMA/IOMMU gaps** (these are deliberate current limits, not omitted test bugs):
+
+1. **Pass-through is the default, not deny.** `iommu_enable` installs a pass-through context for
+   every bus. Only a device with a DMA grant (today, the virtio-blk that `blkd` owns) is switched
+   to translate-and-confine. A device without a grant still DMA-maps host physical addresses.
+   Broader device grants stay gated on tightening this.
+2. **No interrupt remapping.** The `os/kernel-iommu` command line sets `intremap=off`. MSI-X
+   still ends at the LAPIC through the ordinary path; IRTE programming and IRQ remapping faults
+   are not implemented and are not tested.
+3. **Only the first DRHD is programmed.** The probe can record up to four remapping units
+   (`IOMMU_MAX`); `iommu_enable` maps and programs `iommu_base[0]` only. A second unit, or a
+   unit whose scope is not "include all PCI", is ignored.
+4. **No DMAR fault logging.** The kernel does not read `FSTS` / `FRCD`, does not print a VT-d
+   fault, and does not have a test that injects DMA to an address outside the grant and expects
+   a hardware fault marker. `slpt maps only the grant` is a walk of the software-built
+   second-level page table, not an observed IOTLB miss or fault.
+5. **No requester-ID aliasing behind PCIe-to-PCI bridges.** Context entries are keyed by the
+   BDF the kernel scanned. A device behind a bridge that issues transactions under the bridge's
+   requester ID is not given a distinct context, and is not in the test topology (virtio-blk is
+   `00:02.0` on the root bus).
+6. **Context-table sizing and coverage are not checked.** One root page, one shared pass-through
+   context table (all 256 buses point at it), one translate table and four second-level pages are
+   preallocated. There is no test that every possible requester ID has a present, correctly typed
+   entry, that unused entries are invalid rather than pass-through, or that the tables are large
+   enough for a bus or device the scan did not see.
+7. **No policy yet for a machine with no remapping unit.** If the ACPI DMAR table is missing,
+   empty, or unusable, the probe prints `VT-d: no DMAR table` (or a similar failure line),
+   translation stays off, and drv 403 returns the host physical address so existing disks keep
+   working. There is no "refuse to run drivers" or "deny all DMA" policy, and no test requires
+   one.
+
+QEMU's transitional virtio-blk bypasses the IOMMU unless `VIRTIO_F_ACCESS_PLATFORM` is negotiated.
+The IOMMU boot therefore uses a modern (non-transitional) device; a pass of `os/kernel-bios` does
+not imply that device DMA was translated.
+
+### A.3 Assumptions
+
+- The host is QEMU running the command lines in `tests/os/run.sh` (256 MiB RAM; 4 VCPUs, or 1 on
+  `os/kernel-bios-smp1`; SeaBIOS or OVMF; a read-only virtio-blk ESP, plus the extra disks only
+  on the driver/Forge-FS/object-store tests).
+- For A.1's VT-d claims: `-machine q35 -device intel-iommu,intremap=off` and
+  `virtio-blk-pci,disable-legacy=on,iommu_platform=on`. The firmware DMAR describes at least one
+  DRHD whose register base the kernel can map, and the granted device is on bus 0 in that unit's
+  scope.
+- ACPI tables, PCI configuration, and the IOMMU's register interface are those QEMU presents.
+  The tests do not attack the firmware or the emulator.
+- The kernel under test is the one built by `examples/kernel/build.forge` / `examples/efi/build.forge`
+  with the self-hosted compiler (build.sh `FIXPOINT OK`, `SEED OK`, `TOOLS OK`, `SEED TOOLS OK`).
+- `ktest_hooks` (syscalls 408/409) is armed only for the boot self-test session. Recording in the
+  nondeterminism hook is off by default.
+- Claims are about the functional behaviour those tests observe (including "0 frames leaked" and
+  "0 heap leaked" where a marker says so), not about worst-case latency, throughput, or
+  resistance to a concurrent attacker with a second DMA-capable device.
+
+### A.4 Verifier-ready conventions
+
+These conventions are how a later verifier, or a human discharging a claim, should read this
+spec and the tests. They fit on one page; they are not themselves a proof system.
+
+1. **A claim is a sentence plus a pin.** The pin is a result name (`os/kernel-iommu`), a test
+   program (`examples/user/captest.forge`), and/or an exact marker substring. Text without a pin
+   is commentary.
+2. **Markers are literal.** Matching is substring inclusion of the text in A.1, as
+   `tests/os/run.sh` does. Do not normalise whitespace, case or punctuation when discharging a
+   marker claim.
+3. **Name the configuration** when the claim depends on hardware or QEMU flags (machine type,
+   IOMMU, virtio mode, CPU count). A pass on `-machine pc` does not discharge a q35+VT-d claim.
+4. **Negative claims need a rejected case.** "Refused", `EPERM`, `EACCES`, `EFAULT`, `EPIPE` and
+   seal reason lines are the evidence. The absence of a crash is not evidence that a path is
+   forbidden.
+5. **Rights and capabilities only shrink**, and **argument/permission errors occur before any
+   side effect** (§4). A verifier may treat a counterexample (a widened right, or a mutation
+   before `EFAULT`) as a failed claim even if some other test still passes.
+6. **Software table walks are not hardware observations.** `slpt maps only the grant` confirms
+   the page table the kernel wrote. It does not, by itself, confirm that the IOMMU walked that
+   table or that an out-of-grant transaction faulted (see A.2.4).
+7. **Default behaviour is stated, not inferred.** "Pass-through for devices without a grant" is
+   the current default (A.2.1). Do not read "DMA is confined" as applying to a device that was
+   never granted.
+8. **The unsafe baseline is a budget, not a memory-safety proof.** `tests/unsafe/baseline.txt`
+   and `--unsafe-report` bound the counted surface. They do not prove that every `@unsafe`
+   function is correct, or that unmarked code is free of other undefined behaviour.
+9. **Spec and tests change together.** A change to anything in §§0–5 bumps the spec version and
+   updates this file and the pins in the same commit (page 1). A new kernel guarantee is not
+   "verified" until it has a pin in A.1. Closing a gap in A.2 is a new pin, not a silent
+   deletion of the gap.
+10. **Stable identifiers.** Prefer the result name, the source path, and the marker text over
+    line numbers or commit hashes. Line numbers move; markers and result names are the
+    interface of the test suite.
