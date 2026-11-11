@@ -164,7 +164,7 @@ refused: no proof manifest`, `tampered` / `forged` / `linuxabi` refusals; `os/se
 service. `os/kernel-iommu` boots q35 with `-device intel-iommu,intremap=off` and a modern
 virtio-blk (`disable-legacy=on,iommu_platform=on`) and requires `VT-d: 1 remapping unit`,
 `haw `, `bits, flags 0x`, `base 0x`, `translation on`, `drv 403 returns IOVA`,
-`slpt maps only the grant`, and `KERNEL OK`. The IOVA in that report is not the host PA
+`slpt maps only the grant`, and `KERNEL OK`. Default deny and table coverage (A.2 gaps 1, 3, 6, closed): `translation on, 1 of 1 remapping unit programmed (default deny`, `VT-d: default deny: `, `scanned device(s) and every unscanned requester ID blocked`, `context audit: 65536 requester IDs, `, `0 stray, 0 missing`, and the negative case `context audit catches a stray pass-through entry`. The IOVA in that report is not the host PA
 (`iommu_grant_ok` refuses an identity grant). Without a remapping unit the existing BIOS/UEFI
 boots still reach `KERNEL OK` and 403 still returns a host PA. Input and NVMe services,
 Forge FS and the object store have their own result names (`os/drivers`, `os/forgefs-*`,
@@ -199,16 +199,19 @@ named test or marker in A.1 is not a verification claim.
 
 **Known DMA/IOMMU gaps** (these are deliberate current limits, not omitted test bugs):
 
-1. **Pass-through is the default, not deny.** `iommu_enable` installs a pass-through context for
-   every bus. Only a device with a DMA grant (today, the virtio-blk that `blkd` owns) is switched
-   to translate-and-confine. A device without a grant still DMA-maps host physical addresses.
-   Broader device grants stay gated on tightening this.
+1. **Closed: deny is the default.** The root table starts empty. Only a device the kernel drives
+   itself (claimed through `pci_busmaster`, pass-through, domain 1) or a device with a DMA grant
+   (translate-and-confine, domain 2) has a context entry; every other requester ID is blocked.
+   Remaining limit: a kernel-driven device is trusted with host physical addresses (no per-device
+   kernel DMA domains). Pinned in A.1.
 2. **No interrupt remapping.** The `os/kernel-iommu` command line sets `intremap=off`. MSI-X
    still ends at the LAPIC through the ordinary path; IRTE programming and IRQ remapping faults
    are not implemented and are not tested.
-3. **Only the first DRHD is programmed.** The probe can record up to four remapping units
-   (`IOMMU_MAX`); `iommu_enable` maps and programs `iommu_base[0]` only. A second unit, or a
-   unit whose scope is not "include all PCI", is ignored.
+3. **Closed: every DRHD is programmed.** All units the probe records (up to `IOMMU_MAX` = 4) get the
+   shared root table, are invalidated together, and have translation enabled; the second-level
+   width is one every unit supports. Remaining limit: the test topology has one unit (QEMU
+   presents one), so the multi-unit path is not exercised by a boot, and device-scope entries are
+   not parsed (sharing one root table is correct for any scope).
 4. **No DMAR fault logging.** The kernel does not read `FSTS` / `FRCD`, does not print a VT-d
    fault, and does not have a test that injects DMA to an address outside the grant and expects
    a hardware fault marker. `slpt maps only the grant` is a walk of the software-built
@@ -217,11 +220,11 @@ named test or marker in A.1 is not a verification claim.
    BDF the kernel scanned. A device behind a bridge that issues transactions under the bridge's
    requester ID is not given a distinct context, and is not in the test topology (virtio-blk is
    `00:02.0` on the root bus).
-6. **Context-table sizing and coverage are not checked.** One root page, one shared pass-through
-   context table (all 256 buses point at it), one translate table and four second-level pages are
-   preallocated. There is no test that every possible requester ID has a present, correctly typed
-   entry, that unused entries are invalid rather than pass-through, or that the tables are large
-   enough for a bus or device the scan did not see.
+6. **Closed: context-table coverage is checked.** Context tables are allocated per bus on demand
+   (up to 8 buses). `iommu_audit` walks all 65536 requester IDs and requires that exactly the
+   claimed and granted ones are present, with the right translation type and domain, and that
+   nothing else is (unused entries are not present, never pass-through). A planted stray entry
+   must be caught. Pinned in A.1.
 7. **No policy yet for a machine with no remapping unit.** If the ACPI DMAR table is missing,
    empty, or unusable, the probe prints `VT-d: no DMAR table` (or a similar failure line),
    translation stays off, and drv 403 returns the host physical address so existing disks keep
@@ -273,9 +276,10 @@ spec and the tests. They fit on one page; they are not themselves a proof system
 6. **Software table walks are not hardware observations.** `slpt maps only the grant` confirms
    the page table the kernel wrote. It does not, by itself, confirm that the IOMMU walked that
    table or that an out-of-grant transaction faulted (see A.2.4).
-7. **Default behaviour is stated, not inferred.** "Pass-through for devices without a grant" is
-   the current default (A.2.1). Do not read "DMA is confined" as applying to a device that was
-   never granted.
+7. **Default behaviour is stated, not inferred.** Under VT-d the default is deny (A.2.1): a
+   requester ID with no claim and no grant has no context entry. Kernel-driven devices are
+   pass-through, so do not read "DMA is confined" as applying to them; only a granted device is
+   confined to its grant.
 8. **The unsafe baseline is a budget, not a memory-safety proof.** `tests/unsafe/baseline.txt`
    and `--unsafe-report` bound the counted surface. They do not prove that every `@unsafe`
    function is correct, or that unmarked code is free of other undefined behaviour.

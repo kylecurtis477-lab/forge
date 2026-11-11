@@ -1,6 +1,6 @@
 # PCI configuration space via mechanism #1 (ports 0xCF8/0xCFC); bus 0..255 brute-force scan.
 pci_count: u64
-pci_vblk: u64  # bus<<16 | dev<<11 | fn<<8 of the first virtio-blk device, +1 (0 = none)
+pci_vblk: u64  # bdf (bus<<8 | dev<<3 | fn) of the first virtio-blk device, +1 (0 = none)
 
 def pci_addr(bdf: u64, off: u64) -> u32:
     return u32(0x80000000 | (bdf << 8) | (off & 0xFC))
@@ -12,6 +12,13 @@ def pci_rd32(bdf: u64, off: u64) -> u64:
 def pci_wr32(bdf: u64, off: u64, v: u64):
     pio_wr(0xCF8, 4, pci_addr(bdf, off))
     pio_wr(0xCFC, 4, v)
+
+def pci_busmaster(bdf: u64, bits: u64):
+# set command-register bits for a device the kernel drives itself; bit 2 (bus master) first gives the
+# device a pass-through IOMMU context (iommu_claim), since under VT-d every other device is denied
+    if (bits & 4) != 0:
+        iommu_claim(bdf)
+    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | bits)
 
 def pci_scan():
     pio_add(0xCF8, 8)
@@ -127,5 +134,5 @@ def pci_map_bar(bdf: u64, i: u64, maxlen: u64) -> u64:
         return 0
     if sz > maxlen:
         sz = maxlen
-    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 6)
+    pci_busmaster(bdf, 6)
     return mmio_map(pa, sz)

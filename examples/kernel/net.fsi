@@ -259,7 +259,7 @@ def virtio_net_init() -> u64:
         return 0
     vn_io = bar & 0xFFFC
     pio_add(vn_io, 0x20)
-    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 5)
+    pci_busmaster(bdf, 5)
     io = vn_io
     pio_wr(io + VIO_STATUS, 1, 0)
     pio_wr(io + VIO_STATUS, 1, 1)

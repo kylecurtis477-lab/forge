@@ -142,7 +142,7 @@ def vb_try_modern(bdf: u64) -> u64:
         mapn = 0x10000
     if common_off >= mapn or notify_off >= mapn or dev_off >= mapn:
         return 0
-    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 6)
+    pci_busmaster(bdf, 6)
     va = mmio_map(pa, mapn)
     if va == 0:
         return 0
@@ -209,7 +209,7 @@ def vb_init() -> u64:
         return 0
     vb_io = bar & 0xFFFC
     pio_add(vb_io, DRV_IO_LEN)
-    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 5)  # I/O space + bus master
+    pci_busmaster(bdf, 5)  # I/O space + bus master
     io = vb_io
     pio_wr(io + VIO_STATUS, 1, 0)
     pio_wr(io + VIO_STATUS, 1, 1)

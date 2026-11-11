@@ -38,8 +38,9 @@ Q1=${Q/-smp 4/-smp 1}
 $B kernel-bios-smp1 $L/bios-smp1.log 200 "SMP: 1 cpus online|x2APIC: all cpus in x2APIC mode, IPIs sent via MSR 0x830: 0|preemptive SMP scheduler OK|ring 3 + syscall/sysret + ELF loader OK|processes + VFS + keyboard/serial input + sh OK|KERNEL OK|kexec handoff OK|debug-exit |ms after KERNEL OK" "$FB" -- $Q1 -machine pc $VD -boot d -cdrom build/kernel/forge.iso
 # VT-d: q35 + intel-iommu (interrupt remapping off). Modern virtio-blk (no legacy, iommu_platform=on)
 # is required so QEMU offers ACCESS_PLATFORM and actually translates device DMA; transitional virtio
-# bypasses the IOMMU. Translation on, drv 403 returns an IOVA, grant-only slpt.
-$B kernel-iommu $L/iommu.log 200 "VT-d: 1 remapping unit|haw |bits, flags 0x|base 0x|translation on|drv 403 returns IOVA|slpt maps only the grant|KERNEL OK|debug-exit |ms after KERNEL OK" "$FB" -- $Q -machine q35 -device intel-iommu,intremap=off -drive file=$L/vdisk.img,format=raw,if=none,id=vd,readonly=on -device virtio-blk-pci,drive=vd,disable-legacy=on,iommu_platform=on -boot d -cdrom build/kernel/forge.iso
+# bypasses the IOMMU. Translation on, drv 403 returns an IOVA, grant-only slpt; default deny (only
+# kernel-claimed and granted requester IDs have context entries) and the 65536-entry context audit.
+$B kernel-iommu $L/iommu.log 200 "VT-d: 1 remapping unit|haw |bits, flags 0x|base 0x|translation on, 1 of 1 remapping unit programmed (default deny|drv 403 returns IOVA|slpt maps only the grant|VT-d: default deny: |scanned device(s) and every unscanned requester ID blocked|context audit: 65536 requester IDs, |0 stray, 0 missing|context audit catches a stray pass-through entry|KERNEL OK|debug-exit |ms after KERNEL OK" "$FB" -- $Q -machine q35 -device intel-iommu,intremap=off -drive file=$L/vdisk.img,format=raw,if=none,id=vd,readonly=on -device virtio-blk-pci,drive=vd,disable-legacy=on,iommu_platform=on -boot d -cdrom build/kernel/forge.iso
 cp $OVMF_VARS $L/vars.fd
 UEFI="-machine q35 -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE -drive if=pflash,format=raw,file=$L/vars.fd"
 $B kernel-uefi $L/uefi.log 360 "multiboot2 (UEFI)|ACPI rev 2 XSDT|$K" "$FB" -- $Q $UEFI $VD -cdrom build/kernel/forge.iso
