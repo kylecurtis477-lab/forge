@@ -99,6 +99,12 @@ def drv_died(p: ptr[Proc]):
     spin_unlock(addr(rq_lock))
     irq_restore(f)
 
+def drv_dma_check() -> u64:
+# drv 402 policy gate (iommu.fsi): EPERM when the strict DMA policy is on and no remapping unit is active
+    if iommu_grant_allowed() == 0:
+        return EPERM
+    return 0
+
 def drv_port_ok(port: u64, w: u64) -> u64:
     return port >= vb_io and port + w <= vb_io + DRV_IO_LEN and (w == 1 or w == 2 or w == 4)
 
@@ -155,6 +161,8 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
         return 0
     if nr == 402:
     # dma_alloc(npages): one contiguous region per driver, mapped user RW NX
+        if drv_dma_check() != 0:
+            return EPERM
         if p.dma_n != 0 or a == 0 or a > 16:
             return EINVAL
         pa = frame_alloc_contig(a)

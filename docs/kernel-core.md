@@ -164,7 +164,7 @@ refused: no proof manifest`, `tampered` / `forged` / `linuxabi` refusals; `os/se
 service. `os/kernel-iommu` boots q35 with `-device intel-iommu,intremap=off` and a modern
 virtio-blk (`disable-legacy=on,iommu_platform=on`) and requires `VT-d: 1 remapping unit`,
 `haw `, `bits, flags 0x`, `base 0x`, `translation on`, `drv 403 returns IOVA`,
-`slpt maps only the grant`, and `KERNEL OK`. Default deny and table coverage (A.2 gaps 1, 3, 6, closed): `translation on, 1 of 1 remapping unit programmed (default deny`, `VT-d: default deny: `, `scanned device(s) and every unscanned requester ID blocked`, `context audit: 65536 requester IDs, `, `0 stray, 0 missing`, and the negative case `context audit catches a stray pass-through entry`. Observed faults and aliasing (A.2 gaps 4, 5, closed): the same boot adds QEMU's `edu` device behind a root port and a PCIe-to-PCI bridge; `(alias via PCIe-to-PCI bridge `, `denied edu DMA faulted: source ` (an unclaimed device's DMA is recorded by the hardware model with the alias as source), `requester-ID context(s): 64 bytes into edu and back`, `identical, 0 faults` (DMA through the alias context arrives intact), and `out-of-grant edu DMA faulted at IOVA 0x0000000000810000: source ` (DMA outside the mapping faults at that address). The IOVA in that report is not the host PA
+`slpt maps only the grant`, and `KERNEL OK`. Default deny and table coverage (A.2 gaps 1, 3, 6, closed): `translation on, 1 of 1 remapping unit programmed (default deny`, `VT-d: default deny: `, `scanned device(s) and every unscanned requester ID blocked`, `context audit: 65536 requester IDs, `, `0 stray, 0 missing`, and the negative case `context audit catches a stray pass-through entry`. Observed faults and aliasing (A.2 gaps 4, 5, closed): the same boot adds QEMU's `edu` device behind a root port and a PCIe-to-PCI bridge; `(alias via PCIe-to-PCI bridge `, `denied edu DMA faulted: source ` (an unclaimed device's DMA is recorded by the hardware model with the alias as source), `requester-ID context(s): 64 bytes into edu and back`, `identical, 0 faults` (DMA through the alias context arrives intact), and `out-of-grant edu DMA faulted at IOVA 0x0000000000810000: source ` (DMA outside the mapping faults at that address). DMA policy (A.2 gap 7, closed): `VT-d policy: remapping active (deny by default, grants confined)` on `os/kernel-iommu`; `VT-d policy: no remapping unit, DMA unconfined (permissive default` and the negative case `strict mode refuses drv 402 without a remapping unit: EPERM` on `os/kernel-bios`, `os/kernel-uefi` and `os/efi-loader-gpt`. The IOVA in that report is not the host PA
 (`iommu_grant_ok` refuses an identity grant). Without a remapping unit the existing BIOS/UEFI
 boots still reach `KERNEL OK` and 403 still returns a host PA. Input and NVMe services,
 Forge FS and the object store have their own result names (`os/drivers`, `os/forgefs-*`,
@@ -191,10 +191,10 @@ is part of that baseline. Counts may shrink; they must not rise.
 
 The tests do not prove the kernel correct on every machine, under every interleaving, or against
 a formal model of x86, ACPI, PCI or VT-d. In particular they do not cover: timing or
-cache/side-channel behaviour; AArch64 or physical hardware; Secure Boot; a default-deny I/O
-policy; multiple outstanding virtio requests; packed virtqueues; interrupt remapping; DMA from
-devices other than the granted virtio-blk and the edu test device under translation; or a written policy for a machine
-that has no remapping unit. Commentary in SYSTEMS.md or BUILD_PLAN.md that is not pinned by a
+cache/side-channel behaviour; AArch64 or physical hardware; Secure Boot; multiple outstanding
+virtio requests; packed virtqueues; interrupt remapping; DMA under translation from devices other
+than the granted virtio-blk and the edu test device; or more than one remapping unit.
+Commentary in SYSTEMS.md or BUILD_PLAN.md that is not pinned by a
 named test or marker in A.1 is not a verification claim.
 
 **Known DMA/IOMMU gaps** (these are deliberate current limits, not omitted test bugs):
@@ -226,11 +226,12 @@ named test or marker in A.1 is not a verification claim.
    claimed and granted ones are present, with the right translation type and domain, and that
    nothing else is (unused entries are not present, never pass-through). A planted stray entry
    must be caught. Pinned in A.1.
-7. **No policy yet for a machine with no remapping unit.** If the ACPI DMAR table is missing,
-   empty, or unusable, the probe prints `VT-d: no DMAR table` (or a similar failure line),
-   translation stays off, and drv 403 returns the host physical address so existing disks keep
-   working. There is no "refuse to run drivers" or "deny all DMA" policy, and no test requires
-   one.
+7. **Closed: written policy for a machine with no remapping unit.** If the DMAR table is missing,
+   has no DRHD, or `iommu_enable` fails, translation stays off and the policy is permissive by
+   default: drivers keep working with host physical addresses (drv 403 returns the host PA) and
+   the boot log states that DMA is unconfined. The strict policy (`iommu_strict`) refuses drv 402
+   with `EPERM` in that case. Remaining limit: strict is a build-time default (the kernel has no
+   command line yet), and it gates user-mode driver grants only, not kernel-driven devices.
 
 QEMU's transitional virtio-blk bypasses the IOMMU unless `VIRTIO_F_ACCESS_PLATFORM` is negotiated.
 The IOMMU boot therefore uses a modern (non-transitional) device; a pass of `os/kernel-bios` does

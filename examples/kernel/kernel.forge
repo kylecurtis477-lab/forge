@@ -1023,6 +1023,7 @@ def user_test():
 def fs_test():
     pci_scan()
     iommu_enable()
+    iommu_policy_report()
     if vb_init() == 0:
         panic("no virtio-blk disk")
     if fs_mount() == 0:

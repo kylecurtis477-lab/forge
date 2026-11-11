@@ -979,3 +979,32 @@ def iommu_dma_selftest():
         panic("VT-d: context audit failed after the edu test")
     frame_free(apa)
     frame_free(apa + PAGE)
+
+# DMA policy (A.2 gap 7). With remapping active, deny is the default and grants are confined.
+# Without a usable remapping unit (no DMAR table, no DRHD, or iommu_enable failed) the written
+# policy is permissive: kernel drivers and drv 402 grants keep working with host physical
+# addresses, and the boot log says so. iommu_strict (IOMMU_STRICT_DEFAULT at build time; the kernel
+# has no command line yet) refuses drv 402 grants instead: drv_dma_check returns EPERM.
+IOMMU_STRICT_DEFAULT = 0
+iommu_strict: u64 = IOMMU_STRICT_DEFAULT
+
+def iommu_grant_allowed() -> u64:
+    if iommu_te != 0:
+        return 1
+    if iommu_strict != 0:
+        return 0
+    return 1
+
+def iommu_policy_report():
+    if iommu_te != 0:
+        puts("VT-d policy: remapping active (deny by default, grants confined)\n")
+        return
+    puts("VT-d policy: no remapping unit, DMA unconfined (permissive default: kernel drivers and drv 402 grants use host physical addresses)\n")
+    # negative case: the same check sys_drv 402 makes must refuse under the strict policy
+    old = iommu_strict
+    iommu_strict = 1
+    r = drv_dma_check()
+    iommu_strict = old
+    if r != EPERM or drv_dma_check() != 0:
+        panic("VT-d policy: strict mode did not refuse drv 402")
+    puts("VT-d policy: strict mode refuses drv 402 without a remapping unit: EPERM\n")
