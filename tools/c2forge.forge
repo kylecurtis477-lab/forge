@@ -30,9 +30,9 @@
 # works); array sizes that are not an integer literal or a #define expanding to one (constant
 # expressions are not folded). Also rejected: unions (Forge has none; the plan does not add them),
 # hex floats, long double, the comma operator, compound literals, continue in a switch, enum, goto,
-# varargs, local typedef, bit-fields, K&R, attributes, GNU statement-expressions, _Bool, _Complex.
-# Silent (wrong, no error): static locals are ordinary locals; same-name/same-type inner-block
-# declarations overwrite the outer variable.
+# varargs, local typedef, bit-fields, K&R, attributes, GNU statement-expressions, _Bool, _Complex,
+# static local variables, and an inner-block declaration of the same name and type as an outer
+# variable (a type mismatch was already a clean error; same-type shadowing no longer overwrites).
 # Preprocessor subset (step 6): a pass over the tokens before parsing. Object-like #define NAME body and
 # #undef; uses expand recursively, a macro is not re-expanded inside its own expansion (as in C), and
 # expanded tokens carry the line of the use. #include <stdint.h> / <stddef.h> / <sys/types.h> / <limits.h>
@@ -412,6 +412,7 @@ class Parser:
         self.tmp = 0
         self.structs = {}
         self.tdefs = {}
+        self.local_decl = False
         self.toks = preprocess(toks, self.tdefs)
 
     def peek(self, k=0):
@@ -471,6 +472,8 @@ class Parser:
         while True:
             t = self.peek()
             if t[0] == "kw" and t[1] in ["const", "volatile", "static", "inline", "extern", "register"]:
+                if t[1] == "static" and self.local_decl:
+                    self.err("static local variables are not supported yet")
                 self.pos += 1
             elif t[0] == "kw" and (t[1] == "signed" or t[1] == "unsigned"):
                 signed = t[1]
@@ -1418,7 +1421,9 @@ class Parser:
         self.expect("}")
 
     def declaration(self, ind):
+        self.local_decl = True
         bt = self.base_type()
+        self.local_decl = False
         while True:
             d = self.declarator(bt, False)
             n = d[0]
@@ -1427,18 +1432,16 @@ class Parser:
                 self.err("expected an identifier")
             if t == "void":
                 self.err("void variable")
-            again = False
             if n in self.vars:
+                self.pos -= 1
                 if self.vars[n] != t:
-                    self.pos -= 1
                     self.err("redeclaration of " + n + " with another type (block scoping is not supported yet)")
-                again = True
+                self.err("inner-block declaration of " + n + " shadows an outer variable (block scoping is not supported yet)")
             self.vars[n] = t
             v = fname(n)
             if not is_num(t) and not is_ptr(t):
                 self.flush(ind)
-                if not again:
-                    self.emit(ind, v + ": " + t)
+                self.emit(ind, v + ": " + t)
                 if self.is_op("="):
                     self.pos += 1
                     if self.is_op("{"):
@@ -1456,10 +1459,7 @@ class Parser:
                     self.pos += 1
                     init = self.conv(self.assign_expr(), t)
                 self.flush(ind)
-                if again:
-                    self.emit(ind, v + " = " + init)
-                else:
-                    self.emit(ind, v + ": " + t + " = " + init)
+                self.emit(ind, v + ": " + t + " = " + init)
             if self.is_op(","):
                 self.pos += 1
             else:

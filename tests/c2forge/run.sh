@@ -10,7 +10,8 @@
 # Step 7: lib.c, a first small real C library (zlib-style CRC-32 and Adler-32, the XTEA reference cipher),
 # translated and run against the gcc build, including the standard check values for "123456789".
 # 0.15.1: remaining subset gaps are clean errors (globals, string literals as values, ++/-- in
-# expressions, non-literal array sizes); listed in docs/BUILD_PLAN.md item 4.
+# expressions, non-literal array sizes, static locals, same-name/same-type inner-block
+# shadowing); listed in docs/BUILD_PLAN.md item 4.
 cd "$(dirname "$0")/../.." || exit 1
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
@@ -69,4 +70,10 @@ out=$($T/c2forge $T/hd.c $T/hd.forge); rc=$?
 printf 'uint32_t f(void) { return 1; }\n' > $T/td.c
 $T/c2forge $T/td.c $T/td.forge >/dev/null; rc=$?
 [ $rc = 1 ] && echo "PASS c2forge typedef-without-header" || { echo "FAIL c2forge typedef-without-header (rc=$rc)"; fail=1; }
+printf 'int main(void) { static int x = 0; return x; }\n' > $T/st.c
+out=$($T/c2forge $T/st.c $T/st.forge); rc=$?
+[ $rc = 1 ] && [ "$out" = "c2forge: line 1: static local variables are not supported yet (at 'static')" ] && echo "PASS c2forge static-local-error" || { echo "FAIL c2forge static-local-error (rc=$rc out=$out)"; fail=1; }
+printf 'int main(void) { int x = 1; { int x = 2; } return x; }\n' > $T/sh.c
+out=$($T/c2forge $T/sh.c $T/sh.forge); rc=$?
+[ $rc = 1 ] && [ "$out" = "c2forge: line 1: inner-block declaration of x shadows an outer variable (block scoping is not supported yet) (at 'x')" ] && echo "PASS c2forge shadow-error" || { echo "FAIL c2forge shadow-error (rc=$rc out=$out)"; fail=1; }
 exit $fail
