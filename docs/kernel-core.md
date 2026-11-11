@@ -164,7 +164,7 @@ refused: no proof manifest`, `tampered` / `forged` / `linuxabi` refusals; `os/se
 service. `os/kernel-iommu` boots q35 with `-device intel-iommu,intremap=off` and a modern
 virtio-blk (`disable-legacy=on,iommu_platform=on`) and requires `VT-d: 1 remapping unit`,
 `haw `, `bits, flags 0x`, `base 0x`, `translation on`, `drv 403 returns IOVA`,
-`slpt maps only the grant`, and `KERNEL OK`. Default deny and table coverage (A.2 gaps 1, 3, 6, closed): `translation on, 1 of 1 remapping unit programmed (default deny`, `VT-d: default deny: `, `scanned device(s) and every unscanned requester ID blocked`, `context audit: 65536 requester IDs, `, `0 stray, 0 missing`, and the negative case `context audit catches a stray pass-through entry`. The IOVA in that report is not the host PA
+`slpt maps only the grant`, and `KERNEL OK`. Default deny and table coverage (A.2 gaps 1, 3, 6, closed): `translation on, 1 of 1 remapping unit programmed (default deny`, `VT-d: default deny: `, `scanned device(s) and every unscanned requester ID blocked`, `context audit: 65536 requester IDs, `, `0 stray, 0 missing`, and the negative case `context audit catches a stray pass-through entry`. Observed faults and aliasing (A.2 gaps 4, 5, closed): the same boot adds QEMU's `edu` device behind a root port and a PCIe-to-PCI bridge; `(alias via PCIe-to-PCI bridge `, `denied edu DMA faulted: source ` (an unclaimed device's DMA is recorded by the hardware model with the alias as source), `requester-ID context(s): 64 bytes into edu and back`, `identical, 0 faults` (DMA through the alias context arrives intact), and `out-of-grant edu DMA faulted at IOVA 0x0000000000810000: source ` (DMA outside the mapping faults at that address). The IOVA in that report is not the host PA
 (`iommu_grant_ok` refuses an identity grant). Without a remapping unit the existing BIOS/UEFI
 boots still reach `KERNEL OK` and 403 still returns a host PA. Input and NVMe services,
 Forge FS and the object store have their own result names (`os/drivers`, `os/forgefs-*`,
@@ -193,7 +193,7 @@ The tests do not prove the kernel correct on every machine, under every interlea
 a formal model of x86, ACPI, PCI or VT-d. In particular they do not cover: timing or
 cache/side-channel behaviour; AArch64 or physical hardware; Secure Boot; a default-deny I/O
 policy; multiple outstanding virtio requests; packed virtqueues; interrupt remapping; DMA from
-devices other than the granted virtio-blk under translation; or a written policy for a machine
+devices other than the granted virtio-blk and the edu test device under translation; or a written policy for a machine
 that has no remapping unit. Commentary in SYSTEMS.md or BUILD_PLAN.md that is not pinned by a
 named test or marker in A.1 is not a verification claim.
 
@@ -212,14 +212,15 @@ named test or marker in A.1 is not a verification claim.
    width is one every unit supports. Remaining limit: the test topology has one unit (QEMU
    presents one), so the multi-unit path is not exercised by a boot, and device-scope entries are
    not parsed (sharing one root table is correct for any scope).
-4. **No DMAR fault logging.** The kernel does not read `FSTS` / `FRCD`, does not print a VT-d
-   fault, and does not have a test that injects DMA to an address outside the grant and expects
-   a hardware fault marker. `slpt maps only the grant` is a walk of the software-built
-   second-level page table, not an observed IOTLB miss or fault.
-5. **No requester-ID aliasing behind PCIe-to-PCI bridges.** Context entries are keyed by the
-   BDF the kernel scanned. A device behind a bridge that issues transactions under the bridge's
-   requester ID is not given a distinct context, and is not in the test topology (virtio-blk is
-   `00:02.0` on the root bus).
+4. **Closed: DMAR faults are read and tested.** `iommu_fault_drain` reads FSTS and every
+   fault-recording register, prints each fault (unit, source ID, reason, address) and clears it.
+   The edu self-test injects DMA from a denied device and DMA outside a mapping and requires the
+   matching fault records. Remaining limit: faults are polled by the self-test, not taken as an
+   interrupt, and nothing polls them in normal operation.
+5. **Closed: requester-ID aliasing.** `iommu_aliases` follows the bridges above a device (PCIe-to-PCI:
+   secondary bus, devfn 0; conventional PCI bridge: the bridge's ID); claims and grants install a
+   context entry for every alias. Pinned by the edu device behind a PCIe-to-PCI bridge. Remaining
+   limit: quirky devices that use other requester IDs (DMA-alias quirks) are not modelled.
 6. **Closed: context-table coverage is checked.** Context tables are allocated per bus on demand
    (up to 8 buses). `iommu_audit` walks all 65536 requester IDs and requires that exactly the
    claimed and granted ones are present, with the right translation type and domain, and that
@@ -241,7 +242,8 @@ not imply that device DMA was translated.
   `os/kernel-bios-smp1`; SeaBIOS or OVMF; a read-only virtio-blk ESP, plus the extra disks only
   on the driver/Forge-FS/object-store tests).
 - For A.1's VT-d claims: `-machine q35 -device intel-iommu,intremap=off` and
-  `virtio-blk-pci,disable-legacy=on,iommu_platform=on`. The firmware DMAR describes at least one
+  `virtio-blk-pci,disable-legacy=on,iommu_platform=on`, plus `pcie-root-port` -> `pcie-pci-bridge` -> `edu`
+  for the fault and aliasing claims. The firmware DMAR describes at least one
   DRHD whose register base the kernel can map, and the granted device is on bus 0 in that unit's
   scope.
 - ACPI tables, PCI configuration, and the IOMMU's register interface are those QEMU presents.
@@ -275,7 +277,8 @@ spec and the tests. They fit on one page; they are not themselves a proof system
    before `EFAULT`) as a failed claim even if some other test still passes.
 6. **Software table walks are not hardware observations.** `slpt maps only the grant` confirms
    the page table the kernel wrote. It does not, by itself, confirm that the IOMMU walked that
-   table or that an out-of-grant transaction faulted (see A.2.4).
+   table or that an out-of-grant transaction faulted. The edu fault markers (A.1, A.2.4) are the
+   hardware-model observations.
 7. **Default behaviour is stated, not inferred.** Under VT-d the default is deny (A.2.1): a
    requester ID with no claim and no grant has no context entry. Kernel-driven devices are
    pass-through, so do not read "DMA is confined" as applying to them; only a granted device is

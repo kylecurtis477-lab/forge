@@ -1279,6 +1279,9 @@ def drv_test():
     if ff != frames_free or hl != heap_live:
         panic("driver service leaks memory")
     puts("isolated driver service OK\n")
+    # after the blkd leak check: the edu self-test hooks a context table for the bridge's bus,
+    # which stays allocated by design (context tables are never freed)
+    iommu_dma_selftest()
 
 # ---- live patching test (Phase 2.5) ----
 lph_stop: u64

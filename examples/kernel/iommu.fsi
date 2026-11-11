@@ -54,6 +54,25 @@ iommu_grant_bdf: u64
 iommu_audit_present: u64
 iommu_audit_stray: u64
 iommu_audit_missing: u64
+# requester-ID aliases (iommu_aliases): [0] is the device itself, the last one is the ID its DMA
+# carries at the root complex; iommu_alias_br is the bridge that introduced the last alias + 1
+iommu_alias: u64[4]
+iommu_alias_n: u64
+iommu_alias_br: u64
+iommu_grant_rid: u64[4]
+iommu_grant_nrid: u64
+# DMA self-test domain (iommu_dma_selftest, QEMU edu device): translate, domain 3
+IOMMU_DID_TEST = 3
+IOMMU_TEST_IOVA = 0x0000000000800000
+iommu_test_rid: u64[4]
+iommu_test_nrid: u64
+iommu_tsl_va: u64[4]
+iommu_tsl_pa: u64[4]
+# last fault drained by iommu_fault_drain
+iommu_f_sid: u64
+iommu_f_reason: u64
+iommu_f_addr: u64
+iommu_f_read: u64
 
 # which=0 reads acpi_tmp, which=1 reads dmar_buf, which=2 reads rsdp_save
 def iommu_byte(which: u64, o: u64) -> u64:
@@ -249,11 +268,94 @@ def iommu_is_claimed(rid: u64) -> u64:
     return 0
 
 def iommu_is_granted(rid: u64) -> u64:
-    return iommu_grant_n != 0 and rid == iommu_grant_bdf
+    i: u64 = 0
+    if iommu_grant_n == 0:
+        return 0
+    while i < iommu_grant_nrid:
+        if iommu_grant_rid[i] == rid:
+            return 1
+        i += 1
+    return 0
+
+def iommu_is_test(rid: u64) -> u64:
+    i: u64 = 0
+    while i < iommu_test_nrid:
+        if iommu_test_rid[i] == rid:
+            return 1
+        i += 1
+    return 0
+
+def iommu_tsl_top_pa() -> u64:
+    if iommu_aw == 2:
+        return iommu_tsl_pa[0]
+    return iommu_tsl_pa[1]
+
+# offset of PCI capability `id` in bdf's config space (0 = none)
+def pci_cap_find(bdf: u64, id: u64) -> u64:
+    if ((pci_rd32(bdf, 4) >> 16) & 0x10) == 0:
+        return 0
+    p = pci_rd32(bdf, 0x34) & 0xFC
+    n: u64 = 0
+    while p >= 0x40 and n < 48:
+        w = pci_rd32(bdf, p)
+        if (w & 0xFF) == id:
+            return p
+        p = (w >> 8) & 0xFC
+        n += 1
+    return 0
+
+# PCI Express device/port type (0x7 = PCIe-to-PCI/PCI-X bridge), or 0xFF for a conventional device
+def pcie_type(bdf: u64) -> u64:
+    c = pci_cap_find(bdf, 0x10)
+    if c == 0:
+        return 0xFF
+    return (pci_rd32(bdf, c) >> 20) & 0xF
+
+# bdf + 1 of the PCI-to-PCI bridge whose secondary bus is `bus` (0 = none: a root bus)
+def pci_parent_bridge(bus: u64) -> u64:
+    i: u64 = 0
+    while i < pci_n:
+        if (pci_cls[i] >> 8) == 0x0604 and ((pci_rd32(pci_bdf[i], 0x18) >> 8) & 0xFF) == bus:
+            return pci_bdf[i] + 1
+        i += 1
+    return 0
+
+# The requester IDs a device's DMA can carry (PCI DMA aliasing). Walking up from the device: behind
+# a PCIe-to-PCI bridge, conventional transactions carry (secondary bus, devfn 0); behind a
+# conventional PCI-to-PCI bridge, the bridge's own ID; a PCIe port does not alias. Every ID on the
+# way is kept so a context entry can be installed for each. Returns the count (>= 1).
+def iommu_aliases(bdf: u64) -> u64:
+    iommu_alias[0] = bdf
+    iommu_alias_n = 1
+    iommu_alias_br = 0
+    cur = bdf
+    lv: u64 = 0
+    while lv < 8 and ((cur >> 8) & 0xFF) != 0:
+        bus = (cur >> 8) & 0xFF
+        br = pci_parent_bridge(bus)
+        if br == 0:
+            return iommu_alias_n
+        t = pcie_type(br - 1)
+        a: u64 = 0
+        if t == 7:
+            a = bus << 8
+        elif t == 0xFF:
+            a = br - 1
+        else:
+            return iommu_alias_n
+        if iommu_alias[iommu_alias_n - 1] != a and iommu_alias_n < 4:
+            iommu_alias[iommu_alias_n] = a
+            iommu_alias_n += 1
+            iommu_alias_br = br
+        cur = br - 1
+        lv += 1
+    return iommu_alias_n
 
 # the context entry a requester ID should have: [lo, hi] packed as lo (hi is derived from the
 # domain); 0 = no entry (DMA blocked)
 def iommu_want_lo(rid: u64) -> u64:
+    if iommu_is_test(rid):
+        return 1 | iommu_tsl_top_pa()
     if iommu_is_granted(rid):
         return 1 | iommu_sl_top_pa()
     if iommu_is_claimed(rid):
@@ -261,6 +363,8 @@ def iommu_want_lo(rid: u64) -> u64:
     return 0
 
 def iommu_want_hi(rid: u64) -> u64:
+    if iommu_is_test(rid):
+        return (IOMMU_DID_TEST << 8) | iommu_aw
     if iommu_is_granted(rid):
         return (IOMMU_DID_GRANT << 8) | iommu_aw
     if iommu_is_claimed(rid):
@@ -318,16 +422,24 @@ def iommu_apply(rid: u64) -> u64:
 
 # a kernel driver is about to enable bus mastering on bdf: give it a pass-through context
 # (claims made before iommu_enable are applied when the tables are built)
+# Each of the device's requester-ID aliases gets the same entry.
 def iommu_claim(bdf: u64):
-    if iommu_is_claimed(bdf) != 0:
-        return
-    if iommu_claim_n >= IOMMU_CLAIM_MAX:
-        puts("VT-d: claim table full\n")
-        return
-    iommu_claim_rid[iommu_claim_n] = bdf
-    iommu_claim_n += 1
-    if iommu_te != 0:
-        iommu_apply(bdf)
+    n = iommu_aliases(bdf)
+    i: u64 = 0
+    ch: u64 = 0
+    while i < n:
+        rid = iommu_alias[i]
+        if iommu_is_claimed(rid) == 0:
+            if iommu_claim_n >= IOMMU_CLAIM_MAX:
+                puts("VT-d: claim table full\n")
+                return
+            iommu_claim_rid[iommu_claim_n] = rid
+            iommu_claim_n += 1
+            if iommu_te != 0:
+                iommu_apply(rid)
+                ch = 1
+        i += 1
+    if ch != 0:
         iommu_inv()
 
 def iommu_enable():
@@ -379,10 +491,17 @@ def iommu_enable():
     while i < 4:
         iommu_sl_va[i] = iommu_page()
         iommu_sl_pa[i] = iommu_tmp_pa
-        if iommu_sl_va[i] == 0:
+        iommu_tsl_va[i] = iommu_page()
+        iommu_tsl_pa[i] = iommu_tmp_pa
+        if iommu_sl_va[i] == 0 or iommu_tsl_va[i] == 0:
             puts("VT-d: no frames for remapping tables\n")
             return
         i += 1
+    # fault events are polled (iommu_fault_drain), not delivered: keep the fault interrupt masked
+    u = 0
+    while u < iommu_n:
+        mmio_wr(iommu_regs[u] + 0x38, 4, u64(1) << 31)
+        u += 1
     # default deny: the root table starts empty; only claimed devices get (pass-through) entries
     iommu_ctx_n = 0
     iommu_grant_n = 0
@@ -457,24 +576,33 @@ def iommu_map_grant(bdf: u64, pa: u64, n: u64) -> u64:
     iommu_grant_pa = pa
     iommu_grant_n = n
     iommu_grant_bdf = bdf
-    if iommu_apply(bdf) == 0:
-        iommu_grant_n = 0
-        iommu_grant_iova = 0
-        return 0
+    iommu_grant_nrid = iommu_aliases(bdf)
+    i = 0
+    while i < iommu_grant_nrid:
+        iommu_grant_rid[i] = iommu_alias[i]
+        i += 1
+    i = 0
+    while i < iommu_grant_nrid:
+        if iommu_apply(iommu_grant_rid[i]) == 0:
+            iommu_grant_n = 0
+            iommu_grant_iova = 0
+            return 0
+        i += 1
     iommu_inv()
     return iova
 
 def iommu_unmap_grant():
     i: u64
-    bdf: u64
     if iommu_te == 0 or iommu_grant_n == 0:
         iommu_grant_n = 0
         iommu_grant_iova = 0
         return
-    bdf = iommu_grant_bdf
     iommu_grant_n = 0
     iommu_grant_iova = 0
-    iommu_apply(bdf)
+    i = 0
+    while i < iommu_grant_nrid:
+        iommu_apply(iommu_grant_rid[i])
+        i += 1
     i = 0
     while i < 16:
         mmio_wr(iommu_sl_va[3] + i * 8, 8, 0)
@@ -624,3 +752,230 @@ def iommu_report():
     puts("VT-d: context audit catches a stray pass-through entry for ")
     iommu_put_bdf((iommu_grant_bdf & 0xFF00) | d)
     putc(10)
+
+def iommu_reason_str(r: u64) -> ptr[u8]:
+    if r == 1:
+        return "root entry not present"
+    if r == 2:
+        return "context entry not present"
+    if r == 3:
+        return "invalid context entry"
+    if r == 4:
+        return "address beyond the guest width"
+    if r == 5:
+        return "write not permitted"
+    if r == 6:
+        return "read not permitted"
+    if r == 7:
+        return "second-level entry invalid"
+    return "other"
+
+# Read and clear every pending fault record on every unit (FSTS, then each FRCD at the
+# capability's fault-recording offset). Prints each fault unless quiet; the last one is kept in
+# iommu_f_*. Returns the number of records drained.
+def iommu_fault_drain(quiet: u64) -> u64:
+    u: u64 = 0
+    n: u64 = 0
+    while u < iommu_nprog:
+        reg = iommu_regs[u]
+        cap = iommu_caps[u]
+        nfr = ((cap >> 40) & 0xFF) + 1
+        fro = ((cap >> 24) & 0x3FF) * 16
+        i: u64 = 0
+        while i < nfr:
+            hi = mmio_rd(reg + fro + i * 16 + 8, 8)
+            if (hi >> 63) != 0:
+                lo = mmio_rd(reg + fro + i * 16, 8)
+                iommu_f_sid = hi & 0xFFFF
+                iommu_f_reason = (hi >> 32) & 0xFF
+                iommu_f_read = (hi >> 62) & 1
+                iommu_f_addr = lo & ~u64(0xFFF)
+                n += 1
+                if quiet == 0:
+                    puts("VT-d fault: unit ")
+                    put_u64(u)
+                    puts(", source ")
+                    iommu_put_bdf(iommu_f_sid)
+                    puts(", reason 0x")
+                    put_hex8(iommu_f_reason)
+                    puts(" (")
+                    puts(iommu_reason_str(iommu_f_reason))
+                    puts("), ")
+                    if iommu_f_read != 0:
+                        puts("read of ")
+                    else:
+                        puts("write to ")
+                    put_hex(iommu_f_addr)
+                    putc(10)
+                # F is write-1-to-clear (bit 127 of the record = bit 31 of its last dword)
+                mmio_wr(reg + fro + i * 16 + 12, 4, u64(1) << 31)
+            i += 1
+        # clear primary-fault overflow and the other write-1-to-clear status bits
+        mmio_wr(reg + 0x34, 4, mmio_rd(reg + 0x34, 4) & 0x7D)
+        u += 1
+    return n
+
+# the last drained fault came from rid with one of the reasons r1 / r2 (and at addr, unless 0)
+def iommu_fault_is(rid: u64, r1: u64, r2: u64, at: u64) -> u64:
+    if iommu_f_sid != rid:
+        return 0
+    if iommu_f_reason != r1 and iommu_f_reason != r2:
+        return 0
+    if at != 0 and iommu_f_addr != at:
+        return 0
+    return 1
+
+# QEMU's edu device (1234:11e8): DMA engine at BAR0 +0x80 src, +0x88 dst, +0x90 count, +0x98 cmd
+# (bit 0 start/busy, bit 1 edu-to-RAM); its 4 KiB buffer is at device address 0x40000.
+EDU_ID = 0x11E81234
+EDU_BUF = 0x40000
+
+def edu_dma(regs: u64, src: u64, dst: u64, cnt: u64, to_ram: u64) -> u64:
+    mmio_wr(regs + 0x80, 8, src)
+    mmio_wr(regs + 0x88, 8, dst)
+    mmio_wr(regs + 0x90, 8, cnt)
+    mmio_wr(regs + 0x98, 8, 1 | (to_ram << 1))
+    i: u64 = 0
+    while i < 200000000:
+        if (mmio_rd(regs + 0x98, 8) & 1) == 0:
+            return 1
+        i += 1
+    return 0
+
+def iommu_tsl_build(pa: u64, n: u64):
+# test second-level tree: IOMMU_TEST_IOVA + i*PAGE -> pa + i*PAGE for i < n, nothing else
+    i: u64 = 0
+    while i < 4:
+        k: u64 = 0
+        while k < PAGE:
+            mmio_wr(iommu_tsl_va[i] + k, 8, 0)
+            k += 8
+        i += 1
+    if iommu_aw == 2:
+        mmio_wr(iommu_tsl_va[0] + iommu_sl_idx(IOMMU_TEST_IOVA, 39) * 8, 8, iommu_tsl_pa[1] | 3)
+    mmio_wr(iommu_tsl_va[1] + iommu_sl_idx(IOMMU_TEST_IOVA, 30) * 8, 8, iommu_tsl_pa[2] | 3)
+    mmio_wr(iommu_tsl_va[2] + iommu_sl_idx(IOMMU_TEST_IOVA, 21) * 8, 8, iommu_tsl_pa[3] | 3)
+    off = iommu_sl_idx(IOMMU_TEST_IOVA, 12)
+    i = 0
+    while i < n:
+        mmio_wr(iommu_tsl_va[3] + (off + i) * 8, 8, (pa + i * PAGE) | 3)
+        i += 1
+
+def iommu_test_set(n: u64):
+# install (n = alias count) or remove (n = 0) the test domain for the aliases in iommu_alias
+    i: u64 = 0
+    old = iommu_test_nrid
+    k: u64 = 0
+    if n == 0:
+        iommu_test_nrid = 0
+        while k < old:
+            iommu_apply(iommu_test_rid[k])
+            k += 1
+    else:
+        while i < n:
+            iommu_test_rid[i] = iommu_alias[i]
+            i += 1
+        iommu_test_nrid = n
+        while k < n:
+            iommu_apply(iommu_test_rid[k])
+            k += 1
+    iommu_inv()
+
+# DMA fault recording and requester-ID aliasing, observed in hardware (QEMU's VT-d model): the edu
+# device sits behind a PCIe-to-PCI bridge, so its DMA carries the alias (secondary bus, devfn 0).
+# 1. edu is not claimed or granted: its DMA must fault, recorded with the alias as source.
+# 2. a test domain on every alias maps two pages at IOMMU_TEST_IOVA: 64 bytes go into edu and back
+#    out to the second page, identical, with no fault.
+# 3. DMA to IOMMU_TEST_IOVA + 16 pages (outside the mapping) must fault at that address.
+def iommu_dma_selftest():
+    sz: u64 = 0
+    apa: u64 = 0
+    if iommu_te == 0:
+        return
+    f = pci_find_id(EDU_ID)
+    if f == 0:
+        puts("VT-d: no edu test device, DMA fault tests skipped\n")
+        return
+    bdf = f - 1
+    na = iommu_aliases(bdf)
+    rid = iommu_alias[na - 1]
+    puts("VT-d: edu ")
+    iommu_put_bdf(bdf)
+    puts(" DMA requester ID ")
+    iommu_put_bdf(rid)
+    if iommu_alias_br != 0:
+        if pcie_type(iommu_alias_br - 1) == 7:
+            puts(" (alias via PCIe-to-PCI bridge ")
+        else:
+            puts(" (alias via PCI bridge ")
+        iommu_put_bdf(iommu_alias_br - 1)
+        putc(41)
+    putc(10)
+    pa = pci_bar(bdf, 0, addr(sz))
+    if pa == 0 or sz < 0x1000:
+        panic("VT-d: edu BAR0 missing")
+    regs = mmio_map(pa, 0x1000)
+    if regs == 0 or (mmio_rd(regs, 4) & 0xFF) != 0xED:
+        panic("VT-d: edu registers not readable")
+    # memory decoding + bus master, deliberately without iommu_claim: edu stays denied
+    pci_wr32(bdf, 4, pci_rd32(bdf, 4) | 6)
+    buf = dma_alloc(2, addr(apa))
+    if buf == 0:
+        panic("VT-d: no frames for the edu test")
+    i: u64 = 0
+    while i < 64:
+        mmio_wr(buf + i, 8, 0x0F1E2D3C4B5A6978 ^ (i * 0x0101010101010101))
+        i += 8
+    iommu_fault_drain(1)
+    # 1. denied
+    if edu_dma(regs, apa, EDU_BUF, 64, 0) == 0:
+        panic("VT-d: edu DMA timed out")
+    if iommu_fault_drain(0) == 0 or iommu_fault_is(rid, 1, 2, 0) == 0:
+        panic("VT-d: denied edu DMA did not fault with its requester ID")
+    puts("VT-d: denied edu DMA faulted: source ")
+    iommu_put_bdf(iommu_f_sid)
+    puts(", reason 0x")
+    put_hex8(iommu_f_reason)
+    puts(" (")
+    puts(iommu_reason_str(iommu_f_reason))
+    puts(")\n")
+    # 2. translated through the alias context
+    iommu_tsl_build(apa, 2)
+    iommu_test_set(na)
+    if iommu_audit() == 0:
+        panic("VT-d: context audit failed with the test domain")
+    if edu_dma(regs, IOMMU_TEST_IOVA, EDU_BUF, 64, 0) == 0 or edu_dma(regs, EDU_BUF, IOMMU_TEST_IOVA + PAGE, 64, 1) == 0:
+        panic("VT-d: edu DMA timed out")
+    nf = iommu_fault_drain(0)
+    i = 0
+    same: u64 = 1
+    while i < 64:
+        if mmio_rd(buf + PAGE + i, 8) != mmio_rd(buf + i, 8):
+            same = 0
+        i += 8
+    if nf != 0 or same == 0:
+        panic("VT-d: edu DMA through the test domain failed")
+    puts("VT-d: edu DMA through the ")
+    put_u64(na)
+    puts(" requester-ID context(s): 64 bytes into edu and back to the second page of a 2-page mapping, identical, 0 faults\n")
+    # 3. outside the mapping
+    if edu_dma(regs, IOMMU_TEST_IOVA + 16 * PAGE, EDU_BUF, 64, 0) == 0:
+        panic("VT-d: edu DMA timed out")
+    if iommu_fault_drain(0) == 0 or iommu_fault_is(rid, 6, 7, IOMMU_TEST_IOVA + 16 * PAGE) == 0:
+        panic("VT-d: out-of-mapping edu DMA did not fault at its IOVA")
+    puts("VT-d: out-of-grant edu DMA faulted at IOVA ")
+    put_hex(iommu_f_addr)
+    puts(": source ")
+    iommu_put_bdf(iommu_f_sid)
+    puts(", reason 0x")
+    put_hex8(iommu_f_reason)
+    puts(" (")
+    puts(iommu_reason_str(iommu_f_reason))
+    puts(")\n")
+    # tear down: bus mastering off, test domain removed, tables audited again, frames returned
+    pci_wr32(bdf, 4, pci_rd32(bdf, 4) & ~u64(4))
+    iommu_test_set(0)
+    if iommu_audit() == 0:
+        panic("VT-d: context audit failed after the edu test")
+    frame_free(apa)
+    frame_free(apa + PAGE)
