@@ -89,7 +89,8 @@ def main():
         exit(1)
     cp_file(b + "/kernel.elf", b + "/iso/boot/kernel.elf")
     cp_file("grub.cfg", b + "/iso/boot/grub/grub.cfg")
-    r = os.run(["grub-mkrescue", "-o", b + "/forge.iso", b + "/iso"])
+    # ISO UUID/date and the El Torito FAT serial: tools/repro-mkrescue pins them from SOURCE_DATE_EPOCH
+    r = os.run(["../../tools/repro-mkrescue", "-o", b + "/forge.iso", b + "/iso"])
     if r[0] != 0:
         exit(r[0])
     os.write(1, "built " + b + "/kernel.elf and " + b + "/forge.iso\n")

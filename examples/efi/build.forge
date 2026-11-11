@@ -45,7 +45,8 @@ def main():
     e = b + "/esp.fat"
     if os.path.isfile(e):
         os.remove(e)
-    step(["mformat", "-C", "-F", "-c", "1", "-i", e, "-T", "131072", "-v", "FORGE_ESP", "::"])
+    # volume serial: tools/repro-mformat uses SOURCE_DATE_EPOCH when set (else random, like mformat)
+    step(["../../tools/repro-mformat", "-C", "-F", "-c", "1", "-i", e, "-T", "131072", "-v", "FORGE_ESP", "::"])
     step(["mmd", "-i", e, "::/EFI", "::/EFI/BOOT", "::/EFI/Forge", "::/EFI/Microsoft", "::/EFI/debian"])
     step(["mcopy", "-i", e, b + "/forgex64.efi", "::/EFI/Forge/forgex64.efi"])
     step(["mcopy", "-i", e, "../../build/kernel/kernel.elf", "::/EFI/Forge/kernel.elf"])

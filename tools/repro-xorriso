@@ -1,0 +1,17 @@
+#!/bin/sh
+# xorriso wrapper used by tools/repro-mkrescue (--xorriso=): when
+# SOURCE_DATE_EPOCH is set, add --set_all_file_dates so file mtimes, atimes
+# and ctimes (including HFS+ / Rock Ridge) follow the epoch. xorriso honours
+# SOURCE_DATE_EPOCH for the volume date, but grub-mkrescue's tree is freshly
+# copied and --modification-date= alone leaves those per-file stamps as "now".
+set -e
+XORRISO=${XORRISO:-/usr/bin/xorriso}
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+    exec "$XORRISO" "$@"
+fi
+DATE=$(TZ=UTC date -u -d "@$SOURCE_DATE_EPOCH" +%Y%m%d%H%M%S00)
+if [ "$1" = "-as" ] && [ "$2" = "mkisofs" ]; then
+    shift 2
+    exec "$XORRISO" -as mkisofs --set_all_file_dates "$DATE" "$@"
+fi
+exec "$XORRISO" "$@"

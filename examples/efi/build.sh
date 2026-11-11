@@ -8,7 +8,8 @@ B=../../build/efi; mkdir -p $B
 ../../build/fld --format pe --subsystem 10 --image-base 0x10000000 -e efi_main -o $B/forgex64.efi $B/loader.o
 ../kernel/build.sh >/dev/null
 rm -f $B/esp.fat
-mformat -C -F -c 1 -i $B/esp.fat -T 131072 -v FORGE_ESP ::
+# volume serial: tools/repro-mformat uses SOURCE_DATE_EPOCH when set (else random, like mformat)
+../../tools/repro-mformat -C -F -c 1 -i $B/esp.fat -T 131072 -v FORGE_ESP ::
 mmd -i $B/esp.fat ::/EFI ::/EFI/BOOT ::/EFI/Forge ::/EFI/Microsoft ::/EFI/debian
 # our loader lives in its own vendor directory; BOOT/BOOTX64.EFI is only the removable-media fallback for this test disk
 mcopy -i $B/esp.fat $B/forgex64.efi ::/EFI/Forge/forgex64.efi

@@ -1,0 +1,20 @@
+#!/bin/sh
+# mformat wrapper: when SOURCE_DATE_EPOCH is set and -N was not already passed,
+# add -N <low 32 bits of the epoch as 8 hex digits> so the FAT volume serial is
+# deterministic. Used by examples/efi/build.sh and (via PATH) by
+# tools/repro-mkrescue for grub-mkrescue's efi.img. Unset: identical to mformat.
+set -e
+MFORMAT=${MFORMAT:-/usr/bin/mformat}
+hasN=0
+for a in "$@"; do
+    if [ "$a" = "-N" ]; then
+        hasN=1
+        break
+    fi
+done
+if [ -n "${SOURCE_DATE_EPOCH:-}" ] && [ "$hasN" = 0 ]; then
+    # 4294967295 = 0xffffffff; keep the serial in 32 bits.
+    N=$(printf '%08X' $(( SOURCE_DATE_EPOCH & 4294967295 )))
+    exec "$MFORMAT" -N "$N" "$@"
+fi
+exec "$MFORMAT" "$@"

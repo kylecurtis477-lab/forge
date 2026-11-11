@@ -30,5 +30,6 @@ klink $B/kernel-next
 cmp -s $B/kernel.elf $B/kernel-next.elf && { echo "kernel-next.elf is identical to kernel.elf"; exit 1; }
 cp $B/kernel.elf $B/iso/boot/kernel.elf
 cp grub.cfg $B/iso/boot/grub/grub.cfg
-grub-mkrescue -o $B/forge.iso $B/iso >/dev/null 2>&1
+# ISO UUID/date and the El Torito FAT serial: tools/repro-mkrescue pins them from SOURCE_DATE_EPOCH
+../../tools/repro-mkrescue -o $B/forge.iso $B/iso >/dev/null 2>&1
 echo "built $B/kernel.elf and $B/forge.iso"
