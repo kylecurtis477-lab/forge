@@ -29,8 +29,9 @@
 # integer constant expression initializer (see below) wrapped as C converts it, 1-D integer arrays with a
 # brace list of such expressions (zero padded), the rest zero; T a[] = {...} (local or global) takes its size
 # from the list; a global may be declared again with the same type (tentative definitions, extern), and the
-# one initializer, if any, is the definition; pointer globals, non-constant or float
-# initializers and a local named like a global are clean errors. String literals are interned as hidden i8[N]
+# one initializer, if any, is the definition; float/double globals and 1-D float arrays take float literals or
+# integer constant expressions (forgec stores the IEEE bits); pointer globals, non-constant initializers, a
+# float initializer for an integer global and a local named like a global are clean errors. String literals are interned as hidden i8[N]
 # globals (adjacent strings concatenate; char s[] = "..." and char s[N] = "..." copy the bytes, including a
 # NUL when it fits). ++/-- is supported in expressions
 # (prefix and postfix, including on pointers and dereferences) as well as in statement form.
@@ -1771,13 +1772,52 @@ class Parser:
                 x = x - (1 << bits)
         return x
 
+    def float_init(self, t):
+    # a float global's initializer (or one brace element): [+-]... then a float literal or an integer constant
+    # expression, as Forge literal text; forgec stores its IEEE bits for t (f32 rounded to nearest even from
+    # the double value, as C converts a double initializer; a `0.1f` literal goes the same way)
+        neg = False
+        while self.is_op("-") or self.is_op("+"):
+            if self.is_op("-"):
+                neg = not neg
+            self.pos += 1
+        c = self.peek()
+        code = ""
+        if c[0] == "float":
+            self.pos += 1
+            code = self.float_lit(c[1])[0]
+            if code.startswith("f32("):
+                code = code[4:len(code) - 1]
+        elif c[0] == "int" or c[0] == "char" or c[0] == "kw" and c[1] == "sizeof" or c[0] == "op" and c[1] == "(":
+            code = str(self.const_top("global initializer"))
+        else:
+            self.err("a float global initializer must be a constant")
+        if neg:
+            if code.startswith("-"):
+                code = code[1:]
+            else:
+                code = "-" + code
+        return code
+
     def global_brace(self, t):
-    # file-scope {a, b, ...} for a 1-D integer array -> a Forge array literal, zero padded; each element is an
-    # integer constant expression wrapped to the element type (float arrays: fs-mode globals take no float
-    # initializers yet)
+    # file-scope {a, b, ...} for a 1-D integer or float array -> a Forge array literal, zero padded; each element
+    # is an integer constant expression wrapped to the element type, or for float arrays a float_init value
         el = aelem(t)
         if is_flt(el):
-            self.err("float array initializers at file scope are not supported yet (a local array works)")
+            self.expect("{")
+            vals = []
+            while not self.is_op("}"):
+                if len(vals) >= alen(t):
+                    self.err("too many initializers")
+                vals.append(self.float_init(el))
+                if self.is_op(","):
+                    self.pos += 1
+                elif not self.is_op("}"):
+                    self.err("expected , or } in an initializer list")
+            self.expect("}")
+            if len(vals) == 0:
+                vals.append("0")
+            return " = [" + ", ".join(vals) + "]"
         if is_arr(el) or not is_int(el):
             self.err("a file-scope brace initializer needs a 1-D integer array (not supported yet)")
         self.expect("{")
@@ -1979,12 +2019,14 @@ class Parser:
                     self.pos += 1
                 c = self.peek()
                 self.pos = p0
-                if c[0] == "int" or c[0] == "char" or c[0] == "kw" and c[1] == "sizeof":
+                if is_flt(t) and not (c[0] == "op" and c[1] == "{"):
+                    init = " = " + self.float_init(t)
+                elif c[0] == "int" or c[0] == "char" or c[0] == "kw" and c[1] == "sizeof":
                     x = self.const_top("global initializer")
                     if not is_int(t):
                         if x != 0:
                             self.pos = p0
-                            self.err("a float, array or struct global may only be initialized to 0")
+                            self.err("an array or struct global may only be initialized to 0")
                     else:
                         init = " = " + str(self.wrap_int(x, t))
                 elif c[0] == "op" and c[1] == "{":
@@ -1994,9 +2036,7 @@ class Parser:
                         self.err("braces around a scalar initializer")
                     init = self.global_brace(t)
                 elif c[0] == "float":
-                    if not is_flt(t):
-                        self.err("a float initializer for an integer global needs a cast")
-                    self.err("float global initializers are not supported yet (omit it for 0)")
+                    self.err("a float initializer for an integer global needs a cast")
                 else:
                     self.pos = p0
                     self.err("global initializer must be an integer constant")
