@@ -1,4 +1,7 @@
-# Phase 8: NVMe, read-only. Admin queue + one I/O queue pair, polled completions. The driver has no
+# Phase 8: NVMe, read-only. Admin queue + one I/O queue pair. Admin commands (init only) are polled; I/O
+# completions arrive on MSI-X vector 0x53 once nv_irq_init has run: a reader with interrupts on and the
+# scheduler running sleeps on nv_wq until the completion queue entry's phase flips (the handler wakes it, both
+# under rq_lock, so no wakeup is lost); early boot and interrupts-off callers keep polling. The driver has no
 # write path: nvme_write (end of file) only writes inside the range Forge FS claimed (its validated GPT partition).
 nv_regs: u64
 nv_dstrd: u64
@@ -20,6 +23,12 @@ nv_lba_sz: u64
 nv_nsze: u64
 nv_reads: u64
 nvs_on: u64  # 1: I/O-queue commands go through the ring-3 nvmed service (nvsvc.fsi)
+nv_bdf: u64
+VEC_NVME = 0x53
+nv_msix: u64  # 1: the I/O completion queue interrupts on VEC_NVME
+nv_irqs: u64
+nv_sleeps: u64
+nv_wq: WaitQ
 NV_QD = 16
 
 def nv_db(q: u64, cq: u64) -> u64:
@@ -56,6 +65,15 @@ def nv_reap(q: u64) -> u64:
     if q == 1:
         cq = nv_iocq
     c = cq + nv_cq_head[q] * 16
+    if q == 1 and nv_msix and sched_on and (read_rflags() & 0x200) != 0:
+    # sleeping path: the handler wakes nv_wq under rq_lock, and the phase is checked under it
+        f = irq_save()
+        spin_lock(addr(rq_lock))
+        while ((mmio_rd(c + 12, 4) >> 16) & 1) != nv_phase[q]:
+            nv_sleeps += 1
+            wq_block_l(addr(nv_wq))
+        spin_unlock(addr(rq_lock))
+        irq_restore(f)
     t: u64 = 0
     while ((mmio_rd(c + 12, 4) >> 16) & 1) != nv_phase[q]:
         t += 1
@@ -104,6 +122,8 @@ def nvme_init() -> u64:
     if f == 0:
         puts("NVMe: not present\n")
         return 0
+    nv_bdf = f - 1
+    nv_msix = 0
     nv_regs = pci_map_bar(f - 1, 0, 0x4000)
     if nv_regs == 0:
         puts("NVMe: BAR0 not mappable\n")
@@ -160,7 +180,8 @@ def nvme_init() -> u64:
     if nv_lba_sz != 512 and nv_lba_sz != 4096:
         puts("NVMe: unsupported LBA size\n")
         return 0
-    if nv_cmd(0, 5, 0, nv_iocq_pa, ((NV_QD - 1) << 16) | 1, 1) != 0:
+    # I/O CQ: physically contiguous, interrupts enabled (IEN), interrupt vector 0 (MSI-X table entry 0)
+    if nv_cmd(0, 5, 0, nv_iocq_pa, ((NV_QD - 1) << 16) | 1, 3) != 0:
         puts("NVMe: create I/O CQ failed\n")
         return 0
     if nv_cmd(0, 1, 0, nv_iosq_pa, ((NV_QD - 1) << 16) | 1, (1 << 16) | 1) != 0:
@@ -170,8 +191,66 @@ def nvme_init() -> u64:
     put_u64(nv_nsze)
     puts(" blocks of ")
     put_u64(nv_lba_sz)
-    puts(" bytes, I/O queue pair 1 (depth 16, polled)\n")
+    puts(" bytes, I/O queue pair 1 (depth 16)\n")
+    nv_irq_init()
     return 1
+
+@interrupt
+def on_nvme(frame: ptr[u64]):
+    spin_lock(addr(rq_lock))
+    nv_irqs += 1
+    wq_wake_all_l(addr(nv_wq))
+    spin_unlock(addr(rq_lock))
+    lapic_eoi()
+
+def nv_irq_init():
+# MSI-X table entry 0 -> VEC_NVME on cpu0 (the admin queue shares entry 0 but issues no command after init)
+    if iommu_ir != 0:
+        puts("NVMe: interrupt remapping on and no IRTE for NVMe yet: completions stay polled\n")
+        return
+    c = pci_rd32(nv_bdf, 0x34) & 0xFC
+    g: u64 = 0
+    while c != 0 and g < 48:
+        h = pci_rd32(nv_bdf, c)
+        if (h & 0xFF) == 0x11:
+            break
+        c = (h >> 8) & 0xFC
+        g += 1
+    if c == 0 or g == 48:
+        puts("NVMe: no MSI-X, completions stay polled\n")
+        return
+    tb = pci_rd32(nv_bdf, c + 4)
+    bir = tb & 7
+    bar = pci_rd32(nv_bdf, 0x10 + bir * 4)
+    base = bar & 0xFFFFFFF0
+    if (bar & 6) == 4:
+        base = base | (pci_rd32(nv_bdf, 0x14 + bir * 4) << 32)
+    if (bar & 1) != 0 or base == 0 or base >= 0x100000000:
+        puts("NVMe: MSI-X table not reachable, completions stay polled\n")
+        return
+    t = base + (tb & 0xFFFFFFF8)
+    b0 = pci_rd32(nv_bdf, 0x10) & 0xFFFFFFF0
+    # inside the mapped part of BAR0 (16 KiB) use that mapping, otherwise register the table's 16 bytes
+    v = nv_regs + (t - b0)
+    if bir != 0 or t - b0 >= 0x4000:
+        v = mmio_add(p2v(t), 16)
+    idt_set(VEC_NVME, u64(on_nvme), 0)
+    mmio_wr(v, 4, 0xFEE00000 | (cpu_to_apic[0] << 12))
+    mmio_wr(v + 4, 4, 0)
+    mmio_wr(v + 8, 4, VEC_NVME)
+    mmio_wr(v + 12, 4, 0)  # vector control: unmasked
+    pci_wr32(nv_bdf, c, (pci_rd32(nv_bdf, c) | 0x80000000) & ~u64(0x40000000))
+    nv_msix = 1
+    puts("NVMe: I/O completions on MSI-X vector 0x53 -> cpu0, sleeping reads\n")
+
+def nv_irq_report():
+    puts("NVMe: ")
+    put_u64(nv_reads)
+    puts(" read(s), ")
+    put_u64(nv_irqs)
+    puts(" completion interrupt(s), ")
+    put_u64(nv_sleeps)
+    puts(" sleep(s)\n")
 
 def nv_str(a: u64, n: u64):
     e = n

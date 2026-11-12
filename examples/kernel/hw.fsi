@@ -21,6 +21,7 @@ def hw_test():
     net_init()
     if nvme_init():
         hw_report_read("NVMe", nvme_read(0))
+        nv_irq_test()
     if ahci_init():
         hw_report_read("AHCI", ahci_read(0))
     if xhci_init():
@@ -55,3 +56,18 @@ def hw_quiesce():
     if ah_port != 0:
         mmio_wr(ah_port + 0x18, 4, mmio_rd(ah_port + 0x18, 4) & ~u64(0x11))
         ah_wait_clear(ah_port + 0x18, 0xC000)
+
+def nv_irq_test():
+# 8 more reads (LBA 8..64 in 4 KiB steps); with MSI-X each completion must raise an interrupt
+    i0 = nv_irqs
+    ok: u64 = 0
+    k: u64 = 1
+    while k <= 8:
+        if nvme_read(k * (4096 / nv_lba_sz)) != 0:
+            ok += 1
+        k += 1
+    nv_irq_report()
+    if nv_msix and ok == 8 and nv_irqs - i0 >= 8:
+        puts("NVMe: interrupt-driven reads OK (8 of 8, ")
+        put_u64(nv_irqs - i0)
+        puts(" interrupts)\n")
