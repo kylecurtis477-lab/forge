@@ -1613,6 +1613,13 @@ def kbd_report():
     puts("input service: lost ")
     put_u64(lost)
     putc(10)
+    puts("input service: ")
+    put_u64(kb_held)
+    puts(" swap request(s) held until the new driver reached recv, ")
+    put_u64(kb_starved)
+    puts(" driver(s) quiesced before their first recv\n")
+    if kb_starved != 0:
+        panic("input service: a driver was told to quiesce before its first recv (swap starvation)")
     if lost != 0 or kb_dropped != 0 or kb_swaps < 10 or kb_restarts != 1 or kb_replayed == 0 or kb_commits == 0:
         panic("input service test failed")
     puts("input service hot-swap + supervised restart OK\n")

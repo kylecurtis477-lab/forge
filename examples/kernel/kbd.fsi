@@ -9,7 +9,14 @@
 # restarted (or swapped-in) driver replays them from the ack position with the last committed
 # decoder state (413). A swap asks the running driver to quiesce: its next 411 returns 0, it exits
 # 0, and the supervisor starts the other version, which restores the state word. Interrupts that
-# arrive while no driver runs just queue in the journal.
+# arrive while no driver runs just queue in the journal. A swap request waits until the running driver has
+# entered recv once (kb_ready), so every instance takes at least one batch: before, kbd_start_l marked the
+# service up before the spawn (which includes the image's Ed25519 seal check), and when a spawn took longer
+# than the 10-tick swap period (TCG under host load) the swapper set kb_quit first, the new driver's first
+# recv returned 0, it exited, and no driver ever took input (inv134 kernel-uefi hang: the shell waited for a
+# typed line while drivers were respawned back to back). kb_eager (test hook) asks for a swap right after each
+# of the first starts, the exact starving pattern; kbd_report fails the boot if any driver was quiesced before
+# its first recv (kb_starved).
 DRV_KBD = 2
 KB_JN = 256  # journal entries (power of two)
 KB_BATCH = 32
@@ -45,6 +52,10 @@ kb_restarts: u64
 kb_swaps: u64
 kb_swaps_queued: u64  # swaps with journal entries waiting
 kb_chars: u64
+kb_ready: u64  # 1 once the running driver has entered recv (411)
+kb_held: u64  # swap requests held because the driver had not entered recv yet
+kb_starved: u64  # drivers whose first recv was told to quiesce (must stay 0)
+kb_eager: u64  # test hook: request a swap right after the next kb_eager driver starts
 
 def kbd_event(kind: u64, b: u64):
 # interrupt context (interrupts off)
@@ -77,6 +88,9 @@ def sys_kbd(nr: u64, a: u64, b: u64, c: u64, d: u64) -> u64:
             return EFAULT
         f = irq_save()
         spin_lock(addr(rq_lock))
+        if kb_ready == 0 and kb_quit != 0 and kb_stop == 0:
+            kb_starved += 1
+        kb_ready = 1
         while kb_head == kb_ack and kb_quit == 0:
             wq_block_l(addr(kb_q))
         n: u64 = 0
@@ -162,6 +176,7 @@ def kbd_start_l(v: u64):
     kb_ver = v
     kb_quit = kb_stop
     kb_up = 1
+    kb_ready = 0
     spin_unlock(addr(rq_lock))
     irq_restore(f)
     t = kbd_spawn(v)
@@ -169,6 +184,24 @@ def kbd_start_l(v: u64):
         panic("input service: kbdd image rejected")
     kb_thread = t
     kb_pid = t.id
+    if kb_eager != 0:
+        kb_eager -= 1
+        f = irq_save()
+        spin_lock(addr(rq_lock))
+        kbd_swap_request_l()
+        spin_unlock(addr(rq_lock))
+        irq_restore(f)
+
+def kbd_swap_request_l() -> u64:
+# rq_lock held: ask the running driver to quiesce, once it has entered recv (see the top of this file)
+    if kb_up == 0 or kb_quit != 0 or kb_stop != 0:
+        return 0
+    if kb_ready == 0:
+        kb_held += 1
+        return 0
+    kb_quit = 1
+    wq_wake_all_l(addr(kb_q))
+    return 1
 
 def kbd_supervisor(arg: u64):
     while 1:
@@ -220,9 +253,7 @@ def kbd_swapper(arg: u64):
         sleep_ticks(10)
         f = irq_save()
         spin_lock(addr(rq_lock))
-        if kb_up and kb_quit == 0 and kb_stop == 0:
-            kb_quit = 1
-            wq_wake_all_l(addr(kb_q))
+        kbd_swap_request_l()
         spin_unlock(addr(rq_lock))
         irq_restore(f)
 
@@ -259,6 +290,7 @@ def kbd_service_start_from(carried: u64):
         kb_ack = 0
         kb_take = 0
         kb_state = KB_STATE_MAGIC << 8
+        kb_eager = 3
     kb_stop = 0
     if carried != 0:
         puts("kexec: input service: starting kbdd\n")
