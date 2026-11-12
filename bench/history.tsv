@@ -1,3 +1,4 @@
 # bench/history.tsv: one record per `bench run` (tools/bench.forge), newest last. `bench check` compares the
 # newest record with bench/baseline.tsv.
 2026-11-11 18:30 CST	2aba6e2	selfcompile_ms=2354	fib=11469/7588	loop=113736/86174	strbuild=46724/73851	lists=66048/93838	floats=18309/17949	strops=24922/23659
+2026-11-11 18:32 CST	e42065b	selfcompile_ms=1560	fib=10718/7075	loop=113788/90495	strbuild=44481/79595	lists=55145/64701	floats=18421/17646	strops=23643/21698

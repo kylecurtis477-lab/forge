@@ -15,7 +15,8 @@ port and extension of `bench/run_bench.py`, which is kept as the reference.
   the benches so that a faster or slower machine cancels out. It also prints how far each 12.4 target is.
 
 ## Record format
-One line, tab separated: `<local time> <git sha> selfcompile_ms=<ms> <bench>=<forge_us>/<ref_us> ...`.
+One line, tab separated: `<local time> <git sha> selfcompile_ms=<ms> <bench>=<forge_us>/<ref_us> ...`. The sha is
+HEAD when the run started, so a record taken before committing a change names the commit below it.
 Lines starting with `#`, and lines that aren't records, are ignored.
 
 ## Targets (BUILD_PLAN Phase 12.4)

@@ -4894,11 +4894,17 @@ def rank_regs(fi):
     res[0] = cnt
     fregn[fi] = res
 
+# declare_locals runs for every function on every pass; reusing these buffers (it is not re-entered)
+# instead of allocating two 32 KiB lists per call removes most of the compiler's GC work
+dl_nm = list(4096)
+dl_ty = list(4096)
+sm_names = list(64)
+
 def declare_locals(p0, p1, isfn):
 # predeclare every name assigned in tokens [p0, p1) (Python scoping)
     global nfglob
-    nm = list(4096)
-    ty = list(4096)
+    nm = dl_nm
+    ty = dl_ty
     n = scan_assigned(p0, p1, nm, ty, 4096)
     # global declarations
     p = p0
@@ -4955,7 +4961,7 @@ def scan_more(p0, p1, nm, ty, n0):
             # a, b, c = ...   or  NAME op= ...
                 q = p
                 ok = 1
-                names = list(64)
+                names = sm_names
                 nn = 0
                 while ok:
                     if tok_is_op(q, "("):

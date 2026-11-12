@@ -58,3 +58,8 @@ The hybrid-function recompile is replaced by in-place register compaction (hyb_c
 | strops | 24.9 ms | 23.6 ms | 1.05 |
 
 Self-compile 2354 ms (1.21 s on 2026-11-01; the compiler has grown since, and this box was loaded).
+
+## Self-compile speedup 1 (2026-11-11 18:32 CST)
+`declare_locals` and `scan_more` reuse their name buffers instead of allocating per function per pass (and per
+statement). The output assembly is unchanged; the GC share of a self-compile dropped from about 20% to under 5%.
+Self-compile best of 5: **1560 ms** (was 2354 ms on the same loaded box). bench/baseline.tsv was refreshed with this record.

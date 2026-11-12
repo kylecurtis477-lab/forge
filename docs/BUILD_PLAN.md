@@ -289,6 +289,10 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      The reference is rustc -O3 for now; a gcc -O2 column needs C bench sources, which the All-Forge rule keeps out.
      Baseline at 2aba6e2 (2026-11-11, shared box): self-compile 2354 ms; Forge/Rust run-time ratios
      fib 1.51, loop 1.31, strbuild 0.63, lists 0.70, floats 1.02, strops 1.05.
+   - *Self-compile speedup 1 (2026-11-11): 2354 ms to 1560 ms (-34%).* Sampling the compiler showed about a fifth of
+     its time in the GC, set off by `declare_locals` allocating two 32 KiB name lists for every function on every
+     inference pass (6 passes over about 830 functions) and `scan_more` allocating a list per statement. Both now
+     reuse module-level buffers; the generated code is byte-identical (69 test, tool and kernel sources compared).
 
 ## Phase 13 — Instant and declarative system
 *Pillar: D.*
