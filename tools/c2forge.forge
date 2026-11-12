@@ -27,8 +27,8 @@
 # internally (no deref, no arithmetic) and converts implicitly to and from any object pointer, as in C; the
 # output spells it ptr[u8]. Remaining gaps (0.15.1, listed in BUILD_PLAN item 4): globals; string
 # literals as values (and char s[] = "..." initializers); ++/-- inside an expression (statement form
-# works); array sizes that are not an integer literal or a #define expanding to one (constant
-# expressions are not folded). Also rejected: unions (Forge has none; the plan does not add them),
+# works). Array sizes may be an integer constant expression (literals, +, -, *, /, %, sizeof(type),
+# parentheses, and #define expanding to one of those). Also rejected: unions (Forge has none; the plan does not add them),
 # hex floats, long double, the comma operator, compound literals, continue in a switch, enum, goto,
 # varargs, local typedef, bit-fields, K&R, attributes, GNU statement-expressions, _Bool, _Complex,
 # static local variables, and an inner-block declaration of the same name and type as an outer
@@ -531,6 +531,82 @@ class Parser:
             return "u" + bits
         return "i" + bits
 
+    def type_bytes(self, ty):
+    # compile-time size of a Forge type for constant sizeof() in array sizes (64-bit System V)
+        if ty == "i8" or ty == "u8":
+            return 1
+        if ty == "i16" or ty == "u16":
+            return 2
+        if ty == "i32" or ty == "u32" or ty == "f32":
+            return 4
+        if ty == "i64" or ty == "u64" or ty == "f64":
+            return 8
+        if is_ptr(ty):
+            return 8
+        if is_arr(ty):
+            return self.type_bytes(aelem(ty)) * alen(ty)
+        self.err("sizeof that type is not a constant yet")
+        return 0
+
+    def const_unary(self):
+        if self.is_op("+"):
+            self.pos += 1
+            return self.const_unary()
+        if self.is_op("-"):
+            self.pos += 1
+            return -self.const_unary()
+        if self.is_kw("sizeof"):
+            self.pos += 1
+            if self.is_op("(") and self.type_at(1):
+                self.pos += 1
+                ty = self.type_name()
+                self.expect(")")
+                if ty == "void":
+                    self.err("sizeof void")
+                return self.type_bytes(ty)
+            self.err("array size must be an integer constant")
+        if self.is_op("("):
+            self.pos += 1
+            v = self.const_add()
+            self.expect(")")
+            return v
+        t = self.peek()
+        if t[0] == "int":
+            self.pos += 1
+            return int(self.int_lit(t[1])[0])
+        if t[0] == "char":
+            self.pos += 1
+            return self.char_val(t[1])
+        self.err("array size must be an integer constant")
+        return 0
+
+    def const_mul(self):
+        v = self.const_unary()
+        while self.is_op("*") or self.is_op("/") or self.is_op("%"):
+            op = self.next()[1]
+            r = self.const_unary()
+            if op == "*":
+                v = v * r
+            elif r == 0:
+                self.err("division by zero in array size")
+            elif op == "/":
+                v = v / r
+            else:
+                v = v % r
+        return v
+
+    def const_add(self):
+    # integer constant expression for array sizes: literals, +, -, *, /, %, sizeof(type), parentheses
+        v = self.const_mul()
+        while self.is_op("+") or self.is_op("-"):
+            op = self.next()[1]
+            r = self.const_mul()
+            if op == "+":
+                v = v + r
+            else:
+                v = v - r
+        return v
+
     def declarator(self, bt, param):
     # pointer stars, an optional name, array dimensions: returns [name, Forge type]
         t = bt
@@ -548,11 +624,7 @@ class Parser:
             if self.is_op("]"):
                 dims.append("")
             else:
-                d = self.next()
-                if d[0] != "int":
-                    self.pos -= 1
-                    self.err("array size must be an integer constant")
-                dims.append(self.int_lit(d[1])[0])
+                dims.append(str(self.const_add()))
             self.expect("]")
         if len(dims) > 0 and t == "void":
             self.err("array of void")

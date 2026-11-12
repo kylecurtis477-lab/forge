@@ -10,12 +10,12 @@
 # Step 7: lib.c, a first small real C library (zlib-style CRC-32 and Adler-32, the XTEA reference cipher),
 # translated and run against the gcc build, including the standard check values for "123456789".
 # 0.15.1: remaining subset gaps are clean errors (globals, string literals as values, ++/-- in
-# expressions, non-literal array sizes, static locals, same-name/same-type inner-block
-# shadowing); listed in docs/BUILD_PLAN.md item 4.
+# expressions, static locals, same-name/same-type inner-block shadowing); array sizes may be
+# integer constant expressions (arrconst.c). Listed in docs/BUILD_PLAN.md item 4.
 cd "$(dirname "$0")/../.." || exit 1
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
-PROGS="ints flow ptrs floats pp lib"
+PROGS="ints flow ptrs floats pp lib arrconst"
 build/forgec tools/c2forge.forge $T/c2.s && build/fas -o $T/c2.o $T/c2.s && build/fld --base 0x100000000000 -o $T/c2forge $T/c2.o || { echo "FAIL c2forge build"; exit 1; }
 $T/c2forge --tokens tests/c2forge/lex.c | cmp -s - tests/c2forge/lex.expected && echo "PASS c2forge lex" || { echo "FAIL c2forge lex"; fail=1; }
 printf 'int x = @;\n' > $T/bad.c
@@ -43,12 +43,9 @@ out=$($T/c2forge $T/sl.c $T/sl.forge); rc=$?
 printf 'int main(void) { char s[] = "hi"; return 0; }\n' > $T/sa.c
 out=$($T/c2forge $T/sa.c $T/sa.forge); rc=$?
 [ $rc = 1 ] && [ "$out" = "c2forge: line 1: array needs a positive size (at '=')" ] && echo "PASS c2forge strarr-error" || { echo "FAIL c2forge strarr-error (rc=$rc out=$out)"; fail=1; }
-printf 'int main(void) { int a[2+2]; return 0; }\n' > $T/ae.c
+printf 'int main(void) { int n = 4; int a[n]; return 0; }\n' > $T/ae.c
 out=$($T/c2forge $T/ae.c $T/ae.forge); rc=$?
-[ $rc = 1 ] && [ "$out" = "c2forge: line 1: expected ']' (at '+')" ] && echo "PASS c2forge arrsize-expr-error" || { echo "FAIL c2forge arrsize-expr-error (rc=$rc out=$out)"; fail=1; }
-printf 'int main(void) { int a[sizeof(int)]; return 0; }\n' > $T/as.c
-out=$($T/c2forge $T/as.c $T/as.forge); rc=$?
-[ $rc = 1 ] && [ "$out" = "c2forge: line 1: array size must be an integer constant (at 'sizeof')" ] && echo "PASS c2forge arrsize-sizeof-error" || { echo "FAIL c2forge arrsize-sizeof-error (rc=$rc out=$out)"; fail=1; }
+[ $rc = 1 ] && [ "$out" = "c2forge: line 1: array size must be an integer constant (at 'n')" ] && echo "PASS c2forge arrsize-vla-error" || { echo "FAIL c2forge arrsize-vla-error (rc=$rc out=$out)"; fail=1; }
 printf 'int main(void) { int *p = 5; return 0; }\n' > $T/pi.c
 out=$($T/c2forge $T/pi.c $T/pi.forge); rc=$?
 [ $rc = 1 ] && [ "$out" = "c2forge: line 1: cannot convert i32 to ptr[i32] without a cast (at ';')" ] && echo "PASS c2forge ptr-int-error" || { echo "FAIL c2forge ptr-int-error (rc=$rc)"; fail=1; }
