@@ -234,8 +234,11 @@ named test or marker in A.1 is not a verification claim.
    has no DRHD, or `iommu_enable` fails, translation stays off and the policy is permissive by
    default: drivers keep working with host physical addresses (drv 403 returns the host PA) and
    the boot log states that DMA is unconfined. The strict policy (`iommu_strict`) refuses drv 402
-   with `EPERM` in that case. Remaining limit: strict is a build-time default (the kernel has no
-   command line yet), and it gates user-mode driver grants only, not kernel-driven devices.
+   with `EPERM` in that case. Since 2026-11-12 the policy is chosen at boot (bootpol.fsi): the build
+   default (permissive), then a sealed `\EFI\Forge\boot.cfg` (`forgeseal --config`, either way), then
+   the command line, which can only tighten (`forge.iommu=strict`; `forge.iommu=permissive` is refused).
+   The command line lives in `BootInfo.cmdline` and survives kexec. Remaining limit: strict gates
+   user-mode driver grants only, not kernel-driven devices.
 
 QEMU's transitional virtio-blk bypasses the IOMMU unless `VIRTIO_F_ACCESS_PLATFORM` is negotiated.
 The IOMMU boot therefore uses a modern (non-transitional) device; a pass of `os/kernel-bios` does

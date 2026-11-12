@@ -1043,10 +1043,22 @@ def iommu_dma_selftest():
 # DMA policy (A.2 gap 7). With remapping active, deny is the default and grants are confined.
 # Without a usable remapping unit (no DMAR table, no DRHD, or iommu_enable failed) the written
 # policy is permissive: kernel drivers and drv 402 grants keep working with host physical
-# addresses, and the boot log says so. iommu_strict (IOMMU_STRICT_DEFAULT at build time; the kernel
-# has no command line yet) refuses drv 402 grants instead: drv_dma_check returns EPERM.
+# addresses, and the boot log says so. iommu_strict refuses drv 402 grants instead: drv_dma_check
+# returns EPERM. It starts at IOMMU_STRICT_DEFAULT; boot_policy (bootpol.fsi) then applies a sealed
+# \EFI\Forge\boot.cfg (either way) and the command line (`forge.iommu=strict` only tightens).
 IOMMU_STRICT_DEFAULT = 0
 iommu_strict: u64 = IOMMU_STRICT_DEFAULT
+POL_DEFAULT = 0
+POL_CONFIG = 1
+POL_CMDLINE = 2
+iommu_pol_src: u64 = POL_DEFAULT  # what set iommu_strict (boot_policy)
+
+def iommu_pol_src_name() -> ptr[u8]:
+    if iommu_pol_src == POL_CONFIG:
+        return "sealed boot config"
+    if iommu_pol_src == POL_CMDLINE:
+        return "command line"
+    return "build default"
 
 def iommu_grant_allowed() -> u64:
     if iommu_te != 0:
@@ -1059,13 +1071,21 @@ def iommu_policy_report():
     if iommu_te != 0:
         puts("VT-d policy: remapping active (deny by default, grants confined)\n")
         return
-    puts("VT-d policy: no remapping unit, DMA unconfined (permissive default: kernel drivers and drv 402 grants use host physical addresses)\n")
+    if iommu_strict == 0:
+        puts("VT-d policy: no remapping unit, DMA unconfined (permissive default: kernel drivers and drv 402 grants use host physical addresses)\n")
+    else:
+        puts("VT-d policy: no remapping unit, strict (")
+        puts(iommu_pol_src_name())
+        puts("): drv 402 DMA grants refused, kernel drivers keep host physical addresses\n")
     # negative case: the same check sys_drv 402 makes must refuse under the strict policy
     old = iommu_strict
     iommu_strict = 1
     r = drv_dma_check()
     iommu_strict = old
-    if r != EPERM or drv_dma_check() != 0:
+    want: u64 = 0
+    if old != 0:
+        want = EPERM
+    if r != EPERM or drv_dma_check() != want:
         panic("VT-d policy: strict mode did not refuse drv 402")
     puts("VT-d policy: strict mode refuses drv 402 without a remapping unit: EPERM\n")
 

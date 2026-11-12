@@ -13,6 +13,9 @@ os/seal-private-key-not-shipped
 os/kaslr
 os/drivers
 os/drivers-no-disk-write
+os/bootpol-cmdline-strict
+os/bootpol-iommu-kexec
+os/bootpol-config-strict
 os/forgefs-no-partition-no-write
 os/forgefs-tool-needs-flag
 os/forgefs-tool-keeps-partitions

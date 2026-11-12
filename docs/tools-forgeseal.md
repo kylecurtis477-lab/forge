@@ -5,6 +5,7 @@ it to `build/forgeseal`.
 
     forgeseal [--module] [--v2] [--extra-key KEY2] [--alg-id N] [--proof-byte] SRC.forge IMAGE KEYFILE BASELINE
     forgeseal --foreign IMAGE KEYFILE      level-3 seal of a Linux-ABI ELF (EI_OSABI = 3), caps 0
+    forgeseal --config FILE KEYFILE        kind-2 seal of a boot config (\EFI\Forge\boot.cfg); Forge only, no Python reference
     forgeseal --pub KEYFILE                the 32-byte Ed25519 public key on stdout
 
 Output is byte-identical to the Python version: the same appended trailer, the same `sealed NAME (vN): level L, U
@@ -61,3 +62,13 @@ Switched to `build/forgeseal`:
 
 The QEMU boot tests that load these images (tests/os) were not run for this port. `tools/forgeseal.py` stays as the
 reference.
+
+## Boot configs (`--config`)
+
+`--config` appends a v3 trailer with kind 2 (`SEAL_CONFIG`), level 0 and caps 0 to a text file. The kernel's
+`boot_policy` (examples/kernel/bootpol.fsi) reads `\EFI\Forge\boot.cfg` and accepts it only when `image_verify`
+passes with that kind, so no program image, module or edited config can stand in for it. The file must be at least
+64 bytes (the kernel's minimum for a sealed image; pad with a comment). An ELF or an already sealed file is refused.
+The option was added after the port, so it has no Python counterpart; tests/os/bootpol.sh seals real configs with it
+and boots them.
+

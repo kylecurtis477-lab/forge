@@ -2,6 +2,7 @@
 # Seal proof manifests (Phase 6.1, Seal v3): Forge port of tools/forgeseal.py, byte-identical output.
 #   forgeseal [--module] [--v2] [--extra-key KEY2] [--alg-id N] [--proof-byte] SRC.forge IMAGE KEYFILE BASELINE
 #   forgeseal --foreign IMAGE KEYFILE        level-3 seal of a Linux-ABI (EI_OSABI = 3) foreign ELF
+#   forgeseal --config FILE KEYFILE          kind-2 seal of a boot config (\EFI\Forge\boot.cfg, bootpol.fsi)
 #   forgeseal --pub KEYFILE                  32-byte Ed25519 public key on stdout
 # Runs build/forgec SRC /dev/null --unsafe-report in SRC's directory (the verifier), checks the counts
 # against the audited BASELINE, reads `# forge: caps(...)` and appends the 384-byte v3 trailer (or
@@ -622,6 +623,39 @@ def do_foreign(img: u64, kf: u64) -> u64:
     ws(1, ": level 3 (foreign), caps 0x0\n")
     return 0
 
+@unsafe
+def do_config(img: u64, kf: u64) -> u64:
+# v3 seal of a boot config (kind 2, level 0, caps 0) read by the kernel's bootpol.fsi; the kernel
+# refuses a sealed image shorter than 64 bytes plus the trailer, so a config must be at least 64 bytes
+    dg: Dig
+    n = img_info(img, addr(dg))
+    if n < 0:
+        return fail(img, ": cannot read image")
+    if u64(n) < 64:
+        return fail(img, ": --config needs at least 64 bytes (pad with a comment)")
+    if memeq(u64(addr(tmp.b[0])), u64("\x7fELF"), 4) != 0:
+        return fail(img, ": --config seals a text config, not an ELF")
+    if is_sealed(u64(n)):
+        return fail(img, ": already sealed")
+    if hash_seed(addr(key), kf) == 0:
+        return fail(kf, ": cannot read key file")
+    xkey.ok = 0
+    h: Stk
+    h.v[0] = 3
+    h.v[1] = 0
+    h.v[2] = 0
+    h.v[3] = 0
+    h.v[4] = u64(n)
+    h.v[5] = 0
+    h.v[6] = 2
+    build_v3(addr(h), addr(dg), 1, 0)
+    if append(img, 384) == 0:
+        return fail(img, ": cannot write image")
+    ws(1, "sealed ")
+    wz(1, basename(img))
+    ws(1, ": boot config\n")
+    return 0
+
 @export
 @unsafe
 def main(sp: u64) -> u64:
@@ -635,6 +669,8 @@ def main(sp: u64) -> u64:
         return do_pub(args.v[2])
     if argc == 4 and streq(args.v[1], "--foreign"):
         return do_foreign(args.v[2], args.v[3])
+    if argc == 4 and streq(args.v[1], "--config"):
+        return do_config(args.v[2], args.v[3])
     kind: u64 = 0
     ver: u64 = 3
     alg: u64 = 1

@@ -12,6 +12,7 @@ SEAL_ALG_ED25519 = 1  # the only signature algorithm implemented
 SEAL_OK = 0x8000000000000000
 SEAL_USER = 0
 SEAL_MODULE = 1  # trailer word +56: what the image is for (forgeseal.py --module)
+SEAL_CONFIG = 2  # trailer word +56 of a sealed boot config (forgeseal --config, bootpol.fsi); never an ELF
 SEAL_FOREIGN = 3  # 11.1e: trailer level of a foreign (non-Forge) program, forgeseal.py --foreign
 SEAL_COMPAT = 0x100  # 11.1: OR-ed into the kind by a sandboxed launch; only then may a Linux image pass
 
@@ -216,7 +217,7 @@ def seal_fail(code: u64) -> u64:
 
 @unsafe
 def image_verify(img: u64, len: u64, kind: u64) -> u64:
-# returns SEAL_OK | declared caps, or 0 (reason in seal_why); kind = SEAL_USER or SEAL_MODULE.
+# returns SEAL_OK | declared caps, or 0 (reason in seal_why); kind = SEAL_USER, SEAL_MODULE or SEAL_CONFIG.
 # Reads a v3 trailer (384 bytes) or a v2 one (160 bytes, still accepted); both are viewed through
 # one SealTail over the last 384 bytes (a v2 trailer sits at +224).
     if len < SEAL3_SIZE + 64:
@@ -310,6 +311,10 @@ def image_verify(img: u64, len: u64, kind: u64) -> u64:
         i += 1
     if d != 0:
         return seal_fail(5)
+    # a sealed boot config is data, not a program: no ELF header, no capabilities
+    if (kind & 0xFF) == SEAL_CONFIG:
+        seal_ok_count += 1
+        return SEAL_OK
     # 6.4: Linux-ABI images (EI_OSABI = 3) run only inside the explicit compat sandbox: the Linux
     # layer must be up (compat_sandbox_ready, linux.fsi) and the caller must be a sandboxed launch
     # (SEAL_COMPAT). Checked after the seal, so an unsealed or tampered Linux image is refused first.

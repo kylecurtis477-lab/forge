@@ -38,3 +38,6 @@ struct BootInfo:
     kx_gen: u64
     nregions: u64
     regions: MemRegion[256]
+    # boot command line, NUL-terminated: the multiboot2 tag (type 1) or empty (native loader); kexec copies
+    # the whole BootInfo, so a successor kernel sees the same line (bootpol.fsi)
+    cmdline: u8[256]

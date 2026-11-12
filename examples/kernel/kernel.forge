@@ -54,6 +54,7 @@ include "pstate.fsi"
 include "kexec.fsi"
 include "ed25519.fsi"
 include "seal.fsi"
+include "bootpol.fsi"
 include "linux.fsi"
 include "../../std/vec.fsi"
 include "../../std/map.fsi"
@@ -119,6 +120,18 @@ def add_region(base: u64, len: u64, typ: u64):
         r.typ = typ
         bi.nregions += 1
 
+def bi_cmdline_set(pa: u64, n: u64):
+# copy the multiboot2 command line (identity-mapped here, p2v_base = 0) into bi.cmdline, at most 255 bytes;
+# through le16 (fat.fsi, an existing @unsafe reader), so this safe function adds no unsafe operation
+    i: u64 = 0
+    while i < n and i < 255:
+        c = le16(pa + i) & 0xFF
+        if c == 0:
+            break
+        bi.cmdline[i] = u8(c)
+        i += 1
+    bi.cmdline[i] = 0
+
 @unsafe
 def mb2_parse(info: u64):
     total = u64(load32(info))
@@ -130,6 +143,8 @@ def mb2_parse(info: u64):
         size = u64(load32(p + 4))
         if typ == 0:
             break
+        if typ == 1:
+            bi_cmdline_set(p + 8, size - 8)
         if typ == 2:
             puts("bootloader: ")
             puts(ptr[u8](p + 8))
@@ -1023,11 +1038,13 @@ def user_test():
 def fs_test():
     pci_scan()
     iommu_enable()
-    iommu_policy_report()
     if vb_init() == 0:
         panic("no virtio-blk disk")
     if fs_mount() == 0:
         panic("no FAT32 ESP on the virtio disk")
+    # DMA policy: build default, then the sealed \EFI\Forge\boot.cfg, then the command line (tighten only)
+    boot_policy()
+    iommu_policy_report()
     puts("ESP \\EFI\\Forge:")
     fs_list("EFI/Forge")
     putc(10)
@@ -1224,10 +1241,41 @@ def blk_same(buf: u64, sz: u64) -> u64:
         i += 1
     return 1
 
+def drv_strict_test():
+# strict DMA policy without a remapping unit (bootpol.fsi): the user-mode block driver must be refused its
+# DMA region (drv 402 EPERM), exit 1, and leave the disk to the in-kernel virtio-blk driver
+    ff = frames_free
+    hl = heap_live
+    t = blkd_start(blkd_img, blkd_sz)
+    if u64(t) == 0:
+        panic("blkd rejected by the ELF loader")
+    code = proc_reap(t)
+    vb_reinit()
+    sz: u64 = 0
+    buf = fs_read_file("EFI/Forge/init.elf", addr(sz))
+    if code != 1 or buf == 0 or blk_same(buf, sz) == 0:
+        panic("strict DMA policy: blkd was not refused cleanly")
+    kfree(buf)
+    if rq_buf != 0:
+        kfree(rq_buf)
+        rq_buf = 0
+    puts("blkd: DMA region refused under the strict policy (no remapping unit), driver exit ")
+    put_u64(code)
+    puts("; the in-kernel driver reads \\EFI\\Forge\\init.elf, identical; frames leaked ")
+    put_u64(ff - frames_free)
+    puts(", heap leaked ")
+    put_u64(hl - heap_live)
+    putc(10)
+    if ff != frames_free or hl != heap_live:
+        panic("strict DMA policy: refused driver leaks memory")
+
 def drv_test():
     blkd_img = fs_read_file("EFI/Forge/bin/blkd", addr(blkd_sz))
     if blkd_img == 0:
         panic("cannot read \\EFI\\Forge\\bin\\blkd")
+    if iommu_grant_allowed() == 0:
+        drv_strict_test()
+        return
     ff = frames_free
     hl = heap_live
     t = blkd_start(blkd_img, blkd_sz)
@@ -1836,9 +1884,11 @@ def after_overflow():
     stop_machine_stress()
     if bi.handoff != 0:
         kexec_resume()
-    else:
+    elif iommu_grant_allowed() != 0:
         shell_test()
         kexec_test()
+    else:
+        puts("shell and kexec sessions skipped: both need the user-mode block driver, which the strict DMA policy refuses without a remapping unit\n")
     cli()
     if fb_base != 0:
         if fb_consistent() == 0:
