@@ -1,7 +1,8 @@
 # forge: no-runtime
-# Phase 12.1 step 1 (--fs-opt): leaf functions whose scalar locals move into caller-saved registers, and
-# the cases that must stay in memory. run_tests.sh runs every tests/fs program with and without the flag (same
-# output), and checks that ra_leaf is fully promoted and ra_addr is not.
+# Phase 12.1 steps 1-2 (--fs-opt): leaf functions whose scalar locals move into caller-saved registers,
+# functions with calls whose locals move into callee-saved ones (ra_calls, ra_rec), and the cases that must
+# stay in memory. run_tests.sh runs every tests/fs program with and without the flag (same output), and checks
+# that ra_leaf is fully promoted, ra_calls uses %rbx, and ra_addr is not promoted.
 include "linux.fsi"
 
 def ra_leaf(n: i64, k: i64) -> i64:
@@ -63,6 +64,28 @@ def ra_cmp(a: u64, b: u64) -> i64:
         r += 100
     return r
 
+def ra_calls(n: i64) -> i64:
+# step 2: locals live across calls go to callee-saved registers (saved in the frame, restored before leave)
+    acc: i64 = 0
+    i: i64 = 0
+    w: i64 = 3
+    while i < n:
+        acc += ra_leaf(i, w) - ra_cmp(u64(i), 5)
+        w += 1
+        i += 1
+    return acc + w
+
+def ra_rec(n: i64) -> i64:
+# recursion: each frame's locals must survive the nested calls
+    if n < 2:
+        return n
+    a: i64 = n * 3
+    b: i64 = ra_rec(n - 1)
+    c: i64 = ra_rec(n - 2)
+    a += b - c
+    a += b + c
+    return a % 1000003
+
 def main() -> i64:
     put_i64(ra_leaf(1000, 7))
     nl()
@@ -75,5 +98,9 @@ def main() -> i64:
     put_i64(ra_addr(37))
     nl()
     put_i64(ra_cmp(0xFFFFFFFFFFFFFFFF, 1) + ra_cmp(5, 5) + ra_cmp(1, 2))
+    nl()
+    put_i64(ra_calls(40))
+    nl()
+    put_i64(ra_rec(20))
     nl()
     return 0

@@ -15695,11 +15695,12 @@ nfsb = 0
 # fsgf_a[k]..fsgf_b[k] and starts at symbol fsgf_s[k], ends at .Lfsde<k>.
 fs_g = 0
 fs_ra = 0  # --fs-opt: opt-in fs optimizer (Phase 12.1); step 1 keeps scalar locals of leaf functions in registers
-FS_RAR = ["%r8", "%r9", "%r10", "%r11", "%rsi", "%rdi"]
-# text that means register FS_RAR[i / 3] is named somewhere in a line (all widths)
-FS_RAM = ["%r8", "%r8", "%r8", "%r9", "%r9", "%r9", "%r10", "%r10", "%r10", "%r11", "%r11", "%r11", "%rsi", "%esi", "%si", "%rdi", "%edi", "%di"]
+# caller-saved (0-5, leaf functions only) then callee-saved (6-10, saved in the frame on entry; step 2)
+FS_RAR = ["%r8", "%r9", "%r10", "%r11", "%rsi", "%rdi", "%rbx", "%r12", "%r13", "%r14", "%r15"]
+# text that means register FS_RAR[i // 4] is named somewhere in a line (all widths)
+FS_RAM = ["%r8", "%r8", "%r8", "%r8", "%r9", "%r9", "%r9", "%r9", "%r10", "%r10", "%r10", "%r10", "%r11", "%r11", "%r11", "%r11", "%rsi", "%esi", "%si", "%si", "%rdi", "%edi", "%di", "%di", "%rbx", "%ebx", "%bx", "%bl", "%r12", "%r12", "%r12", "%r12", "%r13", "%r13", "%r13", "%r13", "%r14", "%r14", "%r14", "%r14", "%r15", "%r15", "%r15", "%r15"]
 # instructions with no implicit use of any FS_RAR register (j* and set* are checked by prefix)
-FS_RAOK = ["mov", "movl", "movzbl", "movzwl", "movsbq", "movswq", "movslq", "movabs", "add", "sub", "imul", "mul", "and", "or", "xor", "cmp", "test", "neg", "not", "shl", "shr", "sar", "cqo", "idiv", "div", "push", "pop", "lea", "leave", "ret", "ud2"]
+FS_RAOK = ["mov", "movl", "movzbl", "movzwl", "movsbq", "movswq", "movslq", "movabs", "add", "sub", "imul", "mul", "and", "or", "xor", "cmp", "test", "neg", "not", "shl", "shr", "sar", "cqo", "idiv", "div", "push", "pop", "lea", "leave", "ret", "ud2", "call", "addq", "subq", "movq"]
 fs_hasasm = 0  # the function being compiled has an asm() statement: --fs-opt leaves its text alone
 fsr_o = list(4096)
 fsr_c = list(4096)
@@ -19694,12 +19695,14 @@ def fs_hasbuf():
         i += 1
     return 0
 
-# ---- --fs-opt (Phase 12.1 step 1) ----
-# A text-level pass over one finished function (out[s0:nout]). Promotion: the 8-byte frame slots of a leaf
-# function move into caller-saved registers its body never names (SysV lets any callee clobber those, so a leaf
-# may use them freely). It is conservative: any call, any instruction outside FS_RAOK / j* / set*, any line that
-# is not one instruction or one label, any use of %rbp other than the prologue and a plain `mov` between a
-# negative slot and %rax, or any use of %rsp other than the prologue and `sub/add $n,%rsp` leaves the function
+# ---- --fs-opt register promotion (Phase 12.1 steps 1-2) ----
+# A text-level pass over one finished function (out[s0:nout]). Promotion: 8-byte frame slots move into
+# registers the body never names. A leaf function may use the caller-saved r8-r11/rsi/rdi freely (SysV lets
+# any callee clobber them); any function may use the callee-saved rbx/r12-r15, which fs_ra_save stores in extra
+# frame words on entry and reloads before every `leave` (step 2). It is conservative: any instruction outside
+# FS_RAOK / j* / set*, any line that is not one instruction or one label, any use of %rbp other than the
+# prologue, `mov`/`cmp` between a slot and %rax/%rcx/%rdx and `addq/subq/movq $imm` into a slot, or any use
+# of %rsp other than the prologue, `sub/add $n,%rsp` and loads of pushed call arguments leaves the function
 # unpromoted. So a slot whose address is taken (lea), any aggregate, and every function with inline asm or a
 # stack protector stays in memory. Then fs_rapeep removes stack-machine push/pop pairs (in every function
 # without an asm() statement; functions with one are left exactly as written).
@@ -19747,12 +19750,15 @@ def fs_ra_use(o, nsl):
 def fs_ra_mnok(mn):
     if starts(mn, "set") or starts(mn, "j"):
         return 1
-    return find(FS_RAOK, 31, mn) >= 0
+    return find(FS_RAOK, 35, mn) >= 0
 
 def fs_regalloc(s0):
-    free = [1, 1, 1, 1, 1, 1]
+    free = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
     nsl = 0
     ok = 1
+    hascall = 0
+    nret = 0
+    nlv = 0
     i = s0
     while i < nout and ok:
         l = out[i]
@@ -19780,66 +19786,201 @@ def fs_regalloc(s0):
                     ops = substr(b, sp + 1, len(b))
                 if not fs_ra_mnok(mn):
                     ok = 0
+                if str_eq(mn, "call"):
+                    hascall = 1
+                if str_eq(mn, "ret"):
+                    nret += 1
+                if str_eq(mn, "leave"):
+                    nlv += 1
+                if starts(mn, "j") and not starts(ops, ".L"):
+                # a jump out of the function would skip the callee-saved restores
+                    nret += 1000
                 r = 0
-                while r < 18:
+                while r < 44:
                     if contains(l, FS_RAM[r]):
-                        free[r // 3] = 0
+                        free[r // 4] = 0
                     r += 1
                 if ok and contains(l, "%rbp"):
                     if str_eq(b, "push %rbp") or str_eq(b, "mov %rsp,%rbp"):
                         ok = 1
-                    elif str_eq(mn, "mov") and starts(ops, "%rax,"):
-                        nsl = fs_ra_use(substr(ops, 5, len(ops)), nsl)
-                    elif str_eq(mn, "mov") and ends(ops, ",%rax"):
-                        nsl = fs_ra_use(substr(ops, 0, len(ops) - 5), nsl)
+                    elif fs_ra_immq(mn, ops):
+                        nsl = fs_ra_use(substr(ops, fs_ra_comma(ops) + 1, len(ops)), nsl)
+                    elif (str_eq(mn, "mov") or str_eq(mn, "cmp")) and fs_ra_opnd(ops) >= 0:
+                        q = fs_ra_opnd(ops)
+                        if q == 0:
+                            nsl = fs_ra_use(substr(ops, 5, len(ops)), nsl)
+                        else:
+                            nsl = fs_ra_use(substr(ops, 0, len(ops) - 5), nsl)
                     else:
                         ok = 0
                     if nsl < 0:
                         ok = 0
                 if ok and contains(l, "%rsp"):
-                    if not (str_eq(b, "mov %rsp,%rbp") or (str_eq(mn, "sub") or str_eq(mn, "add")) and starts(ops, "$") and ends(ops, ",%rsp")):
+                # the prologue, sub/add $n,%rsp, and loads of pushed call arguments (`mov N(%rsp),reg`); a copy
+                # or address of %rsp (mov %rsp,x / lea ...(%rsp)) could reach the frame, so it stops promotion
+                    if str_eq(b, "mov %rsp,%rbp") or (str_eq(mn, "sub") or str_eq(mn, "add")) and starts(ops, "$") and ends(ops, ",%rsp"):
+                        ok = 1
+                    elif str_eq(mn, "mov") and fs_ra_rsparg(ops):
+                        ok = 1
+                    else:
                         ok = 0
         i += 1
+    if hascall:
+    # the caller-saved registers do not survive a call
+        r = 0
+        while r < 6:
+            free[r] = 0
+            r += 1
+    if nret != nlv:
+    # every exit must pass a `leave` (where fs_ra_save restores the callee-saved registers)
+        r = 6
+        while r < 11:
+            free[r] = 0
+            r += 1
     if ok and nsl > 0:
         fs_ra_assign(s0, nsl, free)
     fs_rapeep(s0)
 
+def fs_ra_opnd(ops):
+# which operand of a two-operand `mov`/`cmp` is the frame slot when the other one is %rax, %rcx or %rdx:
+# 0 = second (`%rax,N(%rbp)`), 1 = first (`N(%rbp),%rax`), -1 = neither form
+    if len(ops) < 6:
+        return -1
+    a = substr(ops, 0, 5)
+    z = substr(ops, len(ops) - 5, len(ops))
+    if (str_eq(a, "%rax,") or str_eq(a, "%rcx,") or str_eq(a, "%rdx,")) and fs_ra_slot(substr(ops, 5, len(ops))) != 2:
+        return 0
+    if (str_eq(z, ",%rax") or str_eq(z, ",%rcx") or str_eq(z, ",%rdx")) and contains(ops, "(%rbp)") and fs_ra_slot(substr(ops, 0, len(ops) - 5)) != 2:
+        return 1
+    return -1
+
+def fs_ra_rsparg(ops):
+# `N(%rsp),%reg` or `(%rsp),%reg`: a load from the pushed-argument area
+    k = 0
+    while k < len(ops) and char_at(ops, k) != 40:
+        k += 1
+    if k >= len(ops) or not starts(substr(ops, k, len(ops)), "(%rsp),%"):
+        return 0
+    j = 0
+    while j < k:
+        c = char_at(ops, j)
+        if (c < 48 or c > 57) and c != 45:
+            return 0
+        j += 1
+    return not contains(substr(ops, k + 8, len(ops)), "(")
+
 def fs_ra_assign(s0, nsl, free):
-# the most-used slots get the free registers, in FS_RAR order (ties: first seen)
+# the most-used slots get the free registers, in FS_RAR order (ties: first seen). A callee-saved register costs
+# a save and a restore, so it only takes a slot used at least 3 times, and only when the frame setup is the plain
+# `sub $n,%rsp` (out[s0 + 2]) that fs_ra_save can extend.
     k = 0
     while k < nsl:
         fsr_r[k] = ""
         k += 1
+    pl = out[s0 + 2]
+    cs_ok = starts(pl, "    sub $") and ends(pl, ",%rsp\n") and str_eq(out[s0], "    push %rbp\n")
+    nsv = 0
     r = 0
-    while r < 6:
-        if free[r]:
+    while r < 11:
+        if free[r] and (r < 6 or cs_ok):
             bk = -1
             k = 0
             while k < nsl:
                 if len(fsr_r[k]) == 0 and (bk < 0 or fsr_c[k] > fsr_c[bk]):
                     bk = k
                 k += 1
-            if bk >= 0:
+            if bk >= 0 and (r < 6 or fsr_c[bk] >= 3):
                 fsr_r[bk] = FS_RAR[r]
+                if r >= 6:
+                    nsv += 1
         r += 1
     i = s0
     while i < nout:
         l = out[i]
-        if starts(l, "    mov ") and contains(l, "(%rbp)"):
+        if (starts(l, "    addq $") or starts(l, "    subq $") or starts(l, "    movq $")) and ends(l, "(%rbp)\n") and fs_ra_1line(l):
+            ops = substr(l, 9, len(l) - 1)
+            c = fs_ra_comma(ops)
+            sl = substr(ops, c + 1, len(ops))
             k = 0
             while k < nsl:
-                if len(fsr_r[k]) > 0:
-                    m = concat(str(fsr_o[k]), "(%rbp)")
-                    if str_eq(l, c3("    mov ", m, ",%rax\n")):
-                        out[i] = c3("    mov ", fsr_r[k], ",%rax\n")
-                    elif str_eq(l, c3("    mov %rax,", m, "\n")):
-                        out[i] = c3("    mov %rax,", fsr_r[k], "\n")
+                if len(fsr_r[k]) > 0 and str_eq(sl, concat(str(fsr_o[k]), "(%rbp)")):
+                    out[i] = c4(substr(l, 0, 7), " ", substr(ops, 0, c + 1), concat(fsr_r[k], "\n"))
                 k += 1
+        if (starts(l, "    mov ") or starts(l, "    cmp ")) and contains(l, "(%rbp)") and fs_ra_1line(l):
+            mn = substr(l, 0, 8)
+            ops = substr(l, 8, len(l) - 1)
+            q = fs_ra_opnd(ops)
+            if q >= 0:
+                if q == 0:
+                    sl = substr(ops, 5, len(ops))
+                else:
+                    sl = substr(ops, 0, len(ops) - 5)
+                k = 0
+                while k < nsl:
+                    if len(fsr_r[k]) > 0 and str_eq(sl, concat(str(fsr_o[k]), "(%rbp)")):
+                        if q == 0:
+                            out[i] = c4(mn, substr(ops, 0, 5), fsr_r[k], "\n")
+                        else:
+                            out[i] = c4(mn, fsr_r[k], substr(ops, len(ops) - 5, len(ops)), "\n")
+                    k += 1
+        i += 1
+    if nsv > 0:
+        fs_ra_save(s0, nsl)
+
+def fs_ra_comma(ops):
+    k = 0
+    while k < len(ops) and char_at(ops, k) != 44:
+        k += 1
+    return k
+
+def fs_ra_immq(mn, ops):
+# `addq/subq/movq $imm,N(%rbp)`: an immediate into a frame slot (for-loop steps, zeroing)
+    if not (str_eq(mn, "addq") or str_eq(mn, "subq") or str_eq(mn, "movq")) or not starts(ops, "$"):
+        return 0
+    k = fs_ra_comma(ops)
+    if k >= len(ops):
+        return 0
+    return fs_ra_slot(substr(ops, k + 1, len(ops))) != 2 and not contains(substr(ops, 0, k), "%")
+
+def fs_ra_1line(l):
+# l is exactly one line (one newline, at the end)
+    j = 0
+    while j < len(l) - 1:
+        if char_at(l, j) == 10:
+            return 0
+        j += 1
+    return ends(l, "\n")
+
+def fs_ra_save(s0, nsl):
+# grow the frame by one word per callee-saved register used, save them after `sub $n,%rsp` and restore them
+# before every `leave` (16-byte frame alignment kept)
+    pl = out[s0 + 2]
+    n = fs_parse_dec(substr(pl, 9, len(pl) - 6))
+    sv = ""
+    rs = ""
+    m = n
+    r = 6
+    while r < 11:
+        k = 0
+        while k < nsl and not str_eq(fsr_r[k], FS_RAR[r]):
+            k += 1
+        if k < nsl:
+            m += 8
+            sv = concat(sv, c4("    mov ", FS_RAR[r], ",-", concat(str(m), "(%rbp)\n")))
+            rs = concat(rs, c4("    mov -", str(m), "(%rbp),", concat(FS_RAR[r], "\n")))
+        r += 1
+    while m % 16 != 0:
+        m += 1
+    out[s0 + 2] = concat(c3("    sub $", str(m), ",%rsp\n"), sv)
+    i = s0
+    while i < nout:
+        if str_eq(out[i], "    leave\n"):
+            out[i] = concat(rs, "    leave\n")
         i += 1
 
 def fs_ra_gpr(r):
 # a general register fs_rapeep may forward (never a control, debug or segment register)
-    return find(FS_RAR, 6, r) >= 0 or str_eq(r, "%rcx") or str_eq(r, "%rdx")
+    return find(FS_RAR, 11, r) >= 0 or str_eq(r, "%rcx") or str_eq(r, "%rdx")
 
 def fs_ra_src(x):
 # operands `mov X,%rax` may load straight into %rcx instead: an immediate, a general register, a frame slot,

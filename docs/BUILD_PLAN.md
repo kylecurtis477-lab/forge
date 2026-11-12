@@ -278,8 +278,8 @@ In plain terms: make Forge code and the Forge compiler fast. Kernel code gets re
 get vectorized, `parallel for` spreads work over all cores, and every speed claim is measured and tracked in bench/.
 1. Register allocator and IR backend for fs/kernel mode (today only hosted code uses the IR backend).
    - Plan for this item, in safe steps, each byte-identical for code built without the new flag:
-     1. `--fs-opt` (opt-in): leaf functions keep scalar locals in free caller-saved registers, plus a push/pop peephole.
-     2. Non-leaf functions: callee-saved registers (rbx, r12–r15), saved in the frame.
+     1. `--fs-opt` (opt-in): leaf functions keep scalar locals in free caller-saved registers, plus a push/pop peephole. Done.
+     2. Non-leaf functions: callee-saved registers (rbx, r12–r15), saved in the frame. Done.
      3. Turn `--fs-opt` on for the kernel, after auditing every hand-written asm routine that calls or is called
         by Forge code for SysV register discipline; QEMU boot suite at O2 and O0.
      4. A real IR for fs mode (SSA, liveness-based allocation), reusing the hosted IR passes where the
@@ -305,6 +305,16 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      i8–i64 and u8–u64 against division by a variable over 4,615 values (edges and a pseudo-random sweep): 0
      mismatches. `fs-opt-cdiv-shape` checks that only the divisions by a variable keep div/idiv.
      bench: fsloop 296.7 ms without `--fs-opt`, 184.2 ms with it (-38%; Rust -O3 83.3 ms).
+   - *Step 2 done (2026-11-11).* Functions with calls now promote too: their slots go to the callee-saved
+     registers (rbx, r12–r15) that the body never names, saved in extra frame words right after `sub $n,%rsp`
+     and restored before every `leave` (16-byte alignment kept). A callee-saved register only takes a slot used
+     at least 3 times (it costs a save and a restore). The caller-saved ones stay for leaf functions only.
+     Promotion now also accepts `mov`/`cmp` between a slot and %rax, %rcx or %rdx, `addq/subq/movq $imm` into a
+     slot, and loads of pushed call arguments (`mov N(%rsp),reg`); a jump out of the function, or a `ret`
+     without a `leave`, keeps callee-saved registers out. tests/fs/regalloc.forge adds ra_calls (accumulators
+     live across calls) and ra_rec (recursion with locals live across both calls); `fs-opt-shape` also checks
+     that ra_calls uses %rbx. Kernel frame accesses with the flag: 15,632 without it, 15,187 after step 1,
+     11,515 after step 2. Most remaining ones are in functions with arrays, structs or `addr()`.
 2. Auto-vectorization of simple loops (SSE2/AVX2, now that the kernel saves xsave state), plus explicit `simd[T, N]` types.
 3. `parallel for` over ranges and slices, with a work-stealing multicore runtime in both hosted and kernel modes. Test: speedup on 4 cores is ≥ 3× on bench kernels, with deterministic results.
 4. Perf targets:

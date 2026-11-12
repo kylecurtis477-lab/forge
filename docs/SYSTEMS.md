@@ -230,7 +230,7 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
 6. **Language and compiler:**
    - Weaker memory orderings (acquire/release) and `unsafe`-scoped raw pointers.
    - Slices with bounds checks, generics for containers, `defer`, and a register allocator for fs mode (the IR backend currently covers hosted code only).
-     Since started (Phase 12.1 step 1): `--fs-opt`, opt-in, keeps the scalar locals of leaf functions in free caller-saved registers and removes stack-machine push/pop pairs, and divides by literal constants with a multiply (see BUILD_PLAN Phase 12.1). The kernel is still built without it.
+     Since started (Phase 12.1 step 1): `--fs-opt`, opt-in, keeps scalar locals in registers (caller-saved ones in leaf functions, callee-saved ones saved in the frame elsewhere) and removes stack-machine push/pop pairs, and divides by literal constants with a multiply (see BUILD_PLAN Phase 12.1). The kernel is still built without it.
    - Debug info (DWARF line tables), so GDB works on QEMU's gdbstub.
 7. **Toolchain independence:** a built-in assembler and an ELF64/PE32+ writer and linker in Forge, which removes `as`/`ld`/`objcopy`, plus linker-script equivalents (section placement, entry, image base). Assembler done (Phase 7.1, `tools/fas.forge`); linker done (Phase 7.2, `tools/fld.forge`): the build no longer uses as/ld/objcopy past the bootstrap seed.
 8. **ARM64 target:** an AArch64 backend for fs mode, UEFI on ARM (AAVMF in QEMU `virt`), PL011 serial, GIC, and the generic timer.
