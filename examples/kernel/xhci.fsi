@@ -1,6 +1,9 @@
 # Phase 8: xHCI host controller. Reset and run with a command ring and one event ring (polled), scan
 # the root ports, reset connected USB2 ports, then for the first device: Enable Slot, Address Device
-# and a GET_DESCRIPTOR(device) control transfer on endpoint 0.
+# and a GET_DESCRIPTOR(device) control transfer on endpoint 0. Then (HID step 1) the configuration
+# descriptor is read and walked for a HID boot keyboard interface and its interrupt IN endpoint, and the
+# device is configured: SET_CONFIGURATION, SET_PROTOCOL(boot) and SET_IDLE(0). The interrupt endpoint
+# itself (Configure Endpoint, a transfer ring, key reports) is the next step.
 xh_cap: u64
 xh_op: u64
 xh_rt: u64
@@ -279,4 +282,104 @@ def xh_device(port: u64, speed: u64) -> u64:
     putc(58)
     put_hex16(mmio_rd(buf + 10, 2))
     putc(10)
+    xh_hid_setup(slot, buf, buf_pa)
+    return 1
+
+def xh_ctrl(slot: u64, req: u64, n: u64, pa: u64) -> u64:
+# one control transfer on EP0: req is the 8-byte setup packet without wLength; n > 0 reads n bytes to pa
+    if n > 0:
+        xh_ring_put(1, req | (n << 48), 8, (2 << 10) | (1 << 6) | (3 << 16))
+        xh_ring_put(1, pa, n, (3 << 10) | (1 << 16))
+        xh_ring_put(1, 0, 0, (4 << 10) | (1 << 5))
+    else:
+        xh_ring_put(1, req, 8, (2 << 10) | (1 << 6))
+        xh_ring_put(1, 0, 0, (4 << 10) | (1 << 5) | (1 << 16))
+    mmio_wr(xh_db + slot * 4, 4, 1)
+    cc = xh_event(32)
+    if cc == 13:
+        cc = 1
+    return cc
+
+xh_kbd_if: u64  # HID boot keyboard found on the first device: interface number, IN endpoint address, max packet, interval
+xh_kbd_ep: u64
+xh_kbd_mps: u64
+xh_kbd_ival: u64
+
+def xh_hid_setup(slot: u64, buf: u64, buf_pa: u64) -> u64:
+# GET_DESCRIPTOR(CONFIGURATION): 9 bytes for wTotalLength, then the whole set (at most 1024 bytes, at buf+1024)
+    cfg = buf + 1024
+    cfg_pa = buf_pa + 1024
+    if xh_ctrl(slot, 0x80 | (6 << 8) | (0x0200 << 16), 9, cfg_pa) != 1:
+        puts("xHCI: GET_DESCRIPTOR(configuration) failed\n")
+        return 0
+    tot = mmio_rd(cfg + 2, 2)
+    if tot < 9 or tot > 1024:
+        puts("xHCI: configuration descriptor length out of range\n")
+        return 0
+    if xh_ctrl(slot, 0x80 | (6 << 8) | (0x0200 << 16), tot, cfg_pa) != 1:
+        puts("xHCI: GET_DESCRIPTOR(configuration) failed\n")
+        return 0
+    cv = mmio_rd(cfg + 5, 1)
+    nif = mmio_rd(cfg + 4, 1)
+    # walk the descriptors: interface (4) and endpoint (5); the endpoint that follows a boot keyboard
+    # interface (class 3, subclass 1, protocol 1) and is interrupt IN is the keyboard's report endpoint
+    o: u64 = 0
+    cur: u64 = 0xFF
+    kif: u64 = 0xFF
+    kep: u64 = 0
+    while o + 2 <= tot:
+        ln = mmio_rd(cfg + o, 1)
+        ty = mmio_rd(cfg + o + 1, 1)
+        if ln < 2 or o + ln > tot:
+            break
+        if ty == 4 and ln >= 9:
+            cur = 0xFF
+            if mmio_rd(cfg + o + 5, 1) == 3 and mmio_rd(cfg + o + 6, 1) == 1 and mmio_rd(cfg + o + 7, 1) == 1:
+                cur = mmio_rd(cfg + o + 2, 1)
+        if ty == 5 and ln >= 7 and cur != 0xFF and kep == 0:
+            ea = mmio_rd(cfg + o + 2, 1)
+            if (ea & 0x80) != 0 and (mmio_rd(cfg + o + 3, 1) & 3) == 3:
+                kif = cur
+                kep = ea
+                # descriptors are byte-packed: wMaxPacketSize may be unaligned (mmio_rd requires alignment)
+                xh_kbd_mps = (mmio_rd(cfg + o + 4, 1) | (mmio_rd(cfg + o + 5, 1) << 8)) & 0x7FF
+                xh_kbd_ival = mmio_rd(cfg + o + 6, 1)
+        o += ln
+    puts("xHCI: configuration ")
+    put_u64(cv)
+    puts(", ")
+    put_u64(tot)
+    puts(" bytes, ")
+    put_u64(nif)
+    puts(" interface(s)\n")
+    if kep == 0:
+        puts("xHCI: no HID boot keyboard interface\n")
+        return 0
+    xh_kbd_if = kif
+    xh_kbd_ep = kep
+    puts("xHCI: HID boot keyboard: interface ")
+    put_u64(kif)
+    puts(", interrupt IN endpoint 0x")
+    put_hex8(kep)
+    puts(", max packet ")
+    put_u64(xh_kbd_mps)
+    puts(", interval ")
+    put_u64(xh_kbd_ival)
+    putc(10)
+    # SET_CONFIGURATION(cv); class requests to the interface: SET_PROTOCOL(0 = boot), SET_IDLE(0)
+    c1 = xh_ctrl(slot, (9 << 8) | (cv << 16), 0, 0)
+    c2 = xh_ctrl(slot, 0x21 | (0x0B << 8) | (kif << 32), 0, 0)
+    c3 = xh_ctrl(slot, 0x21 | (0x0A << 8) | (kif << 32), 0, 0)
+    if c1 != 1 or c2 != 1 or c3 != 1:
+        puts("xHCI: HID setup failed, codes ")
+        put_u64(c1)
+        putc(32)
+        put_u64(c2)
+        putc(32)
+        put_u64(c3)
+        putc(10)
+        return 0
+    puts("xHCI: SET_CONFIGURATION ")
+    put_u64(cv)
+    puts(" OK, SET_PROTOCOL(boot) OK, SET_IDLE(0) OK\n")
     return 1

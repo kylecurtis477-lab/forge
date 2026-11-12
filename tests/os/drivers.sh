@@ -1,6 +1,8 @@
 #!/bin/bash
 # Phase 8.7: NVMe, AHCI, xHCI, e1000 and virtio-net drivers on q35. Both test disks are
 # generated here, read through the drivers (LBA 0 hash must match), and must be byte-identical afterwards.
+# The xHCI controller has a usb-kbd: the kernel reads its configuration descriptor and configures it as a HID boot
+# keyboard (SET_CONFIGURATION, SET_PROTOCOL(boot), SET_IDLE(0)); the expected interface and endpoint are QEMU's.
 # Each NIC resolves the user-network gateway 10.0.2.2 by ARP, pings it (ICMP echo, checked reply), then
 # serves UDP echo on port 7. Each netdev forwards a free host UDP port to guest port 7, and a host-side
 # sender waits for the NIC's "listening" line, then sends a datagram every 0.25 s (at most 60 tries) until
@@ -81,6 +83,8 @@ wait $H 2>/dev/null
 S=$T/s.log; ok=1; miss=""
 for p in "NVMe: read LBA 0 (4096 bytes), fnv1a64=$(cat $T/nvme.h)" "AHCI: read LBA 0 (4096 bytes), fnv1a64=$(cat $T/ahci.h)" \
   "xHCI: command ring OK" "xHCI: Address Device OK" "xHCI: device descriptor: USB 0200" \
+  "xHCI: HID boot keyboard: interface 0, interrupt IN endpoint 0x81, max packet 8" \
+  "xHCI: SET_CONFIGURATION 1 OK, SET_PROTOCOL(boot) OK, SET_IDLE(0) OK" \
   "e1000: ARP reply: 10.0.2.2 is at" "virtio-net: ARP reply: 10.0.2.2 is at" \
   "e1000: ICMP echo reply from 10.0.2.2: seq 1, 56 data bytes, checksums ok" \
   "virtio-net: ICMP echo reply from 10.0.2.2: seq 1, 56 data bytes, checksums ok" "out-of-window accesses 0" \
@@ -92,7 +96,7 @@ for d in e1000 virtio-net; do
   grep -aqE "^host: $d echoed [0-9]+ bytes identical" $T/udp.out || { ok=0; miss="$miss [host: $(grep -a "$d" $T/udp.out)]"; }
 done
 grep -aq PANIC $S && { ok=0; miss="$miss [panic]"; }
-if [ $ok = 1 ]; then echo "PASS os/drivers (NVMe, AHCI, xHCI, e1000, virtio-net; ARP + ICMP echo + UDP echo)"; else echo "FAIL os/drivers:$miss"; fi
+if [ $ok = 1 ]; then echo "PASS os/drivers (NVMe, AHCI, xHCI + HID boot keyboard setup, e1000, virtio-net; ARP + ICMP echo + UDP echo)"; else echo "FAIL os/drivers:$miss"; fi
 if (cd $T && sha256sum -c --quiet before.sha); then echo "PASS os/drivers-no-disk-write"; else echo "FAIL os/drivers-no-disk-write"; fi
 mkdir -p build/os; grep -a "^host:" $T/udp.out > build/os/drivers-udp.txt
 rm -rf $T
