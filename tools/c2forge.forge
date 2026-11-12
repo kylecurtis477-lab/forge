@@ -26,8 +26,9 @@
 # integer -> pointer as ptr[T](u64(x)); pointer -> integer as T(u64(p)); (void)x. void * is ptr[void]
 # internally (no deref, no arithmetic) and converts implicitly to and from any object pointer, as in C; the
 # output spells it ptr[u8]. Remaining gaps (0.15.1, listed in BUILD_PLAN item 4): globals; string
-# literals as values (and char s[] = "..." initializers); ++/-- inside an expression (statement form
-# works). Array sizes may be an integer constant expression (literals, +, -, *, /, %, sizeof(type),
+# literals as values (and char s[] = "..." initializers). ++/-- is supported in expressions
+# (prefix and postfix, including on pointers and dereferences) as well as in statement form.
+# Array sizes may be an integer constant expression (literals, +, -, *, /, %, sizeof(type),
 # parentheses, and #define expanding to one of those). Also rejected: unions (Forge has none; the plan does not add them),
 # hex floats, long double, the comma operator, compound literals, continue in a switch, enum, goto,
 # varargs, local typedef, bit-fields, K&R, attributes, GNU statement-expressions, _Bool, _Complex,
@@ -887,6 +888,15 @@ class Parser:
             self.err("unexpected name in a type")
         return d[1]
 
+    def hoist_inc(self, lv, op):
+    # hoisted x = x +/- 1 (or pointer +/- 1) for ++/-- in an expression
+        if lv[2] or not is_lv(lv[0]):
+            self.err("++/-- needs an lvalue")
+        if is_arr(lv[1]):
+            self.err("++/-- on an array")
+        r = self.binop(op, lv, ["1", "i32", False])
+        self.pre.append([0, lv[0] + " = " + self.conv(r, lv[1])])
+
     def unary(self):
         t = self.peek()
         if t[0] == "op" and t[1] == "*":
@@ -940,10 +950,22 @@ class Parser:
                 return [self.conv(e, r), r, False]
             return ["(" + t[1] + self.conv(e, r) + ")", r, False]
         if t[0] == "op" and (t[1] == "++" or t[1] == "--"):
-            self.err("++/-- inside an expression is not supported yet")
+            op = self.next()[1]
+            e = self.unary()
+            self.hoist_inc(e, op[0:1])
+            return e
         e = self.postfix()
         if self.is_op("++") or self.is_op("--"):
-            self.err("++/-- inside an expression is not supported yet")
+            op = self.next()[1]
+            if e[2] or not is_lv(e[0]):
+                self.err("++/-- needs an lvalue")
+            if is_arr(e[1]):
+                self.err("++/-- on an array")
+            tnm = e[1]
+            tmp = self.new_tmp("c")
+            self.pre.append([0, tmp + ": " + tnm + " = " + e[0]])
+            self.hoist_inc(e, op[0:1])
+            return [tmp, tnm, False]
         return e
 
     def binop(self, op, a, b):

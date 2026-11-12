@@ -9,13 +9,14 @@
 # typedef-without-header are clean errors.
 # Step 7: lib.c, a first small real C library (zlib-style CRC-32 and Adler-32, the XTEA reference cipher),
 # translated and run against the gcc build, including the standard check values for "123456789".
-# 0.15.1: remaining subset gaps are clean errors (globals, string literals as values, ++/-- in
-# expressions, static locals, same-name/same-type inner-block shadowing); array sizes may be
-# integer constant expressions (arrconst.c). Listed in docs/BUILD_PLAN.md item 4.
+# 0.15.1: remaining subset gaps are clean errors (globals, string literals as values,
+# static locals, same-name/same-type inner-block shadowing).
+# Array sizes may be integer constant expressions (arrconst.c); ++/-- works in expressions (incdec.c).
+# Listed in docs/BUILD_PLAN.md item 4.
 cd "$(dirname "$0")/../.." || exit 1
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
-PROGS="ints flow ptrs floats pp lib arrconst"
+PROGS="ints flow ptrs floats pp lib arrconst incdec"
 build/forgec tools/c2forge.forge $T/c2.s && build/fas -o $T/c2.o $T/c2.s && build/fld --base 0x100000000000 -o $T/c2forge $T/c2.o || { echo "FAIL c2forge build"; exit 1; }
 $T/c2forge --tokens tests/c2forge/lex.c | cmp -s - tests/c2forge/lex.expected && echo "PASS c2forge lex" || { echo "FAIL c2forge lex"; fail=1; }
 printf 'int x = @;\n' > $T/bad.c
@@ -31,9 +32,9 @@ for p in $PROGS; do
   done
   [ $ok = 1 ] && echo "PASS c2forge $p (O2 and O0 output == gcc)" || { echo "FAIL c2forge $p"; fail=1; }
 done
-printf 'int main(void) { int x = 0; x = x++ + 1; return 0; }\n' > $T/inc.c
+printf 'int main(void) { int x = 0; int y = ++(x + 1); return 0; }\n' > $T/inc.c
 out=$($T/c2forge $T/inc.c $T/inc.forge); rc=$?
-[ $rc = 1 ] && [ "$out" = "c2forge: line 1: ++/-- inside an expression is not supported yet (at '++')" ] && echo "PASS c2forge expr-incdec-error" || { echo "FAIL c2forge expr-incdec-error (rc=$rc)"; fail=1; }
+[ $rc = 1 ] && [ "$out" = "c2forge: line 1: ++/-- needs an lvalue (at ';')" ] && echo "PASS c2forge incdec-lvalue-error" || { echo "FAIL c2forge incdec-lvalue-error (rc=$rc out=$out)"; fail=1; }
 printf 'int g = 1; int main(void) { return g; }\n' > $T/gv.c
 out=$($T/c2forge $T/gv.c $T/gv.forge); rc=$?
 [ $rc = 1 ] && [ "$out" = "c2forge: line 1: global variables are not supported yet (at '=')" ] && echo "PASS c2forge global-error" || { echo "FAIL c2forge global-error (rc=$rc out=$out)"; fail=1; }
