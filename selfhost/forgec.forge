@@ -19454,6 +19454,66 @@ def fs_dirw(t):
         return ".long"
     return ".quad"
 
+def fs_rshift_rne(x, k):
+# x >> k rounded to nearest, ties to even (x >= 0, 1 <= k <= 62)
+    q = x >> k
+    rem = x & ((1 << k) - 1)
+    half = 1 << (k - 1)
+    if rem > half or (rem == half and (q & 1) == 1):
+        q += 1
+    return q
+
+def fs_f32bits(b):
+# the IEEE single bits of the double with bits b, rounded to nearest even as cvtsd2ss does (MXCSR default):
+# overflow gives infinity, underflow a subnormal or zero, NaN stays a quiet NaN
+    sg = ((b >> 63) & 1) << 31
+    ex = (b >> 52) & 2047
+    m = b & 4503599627370495
+    if ex == 2047:
+        if m != 0:
+            return sg | 2143289344 | (m >> 29)
+        return sg | 2139095040
+    if ex == 0:
+        return sg
+    e2 = ex - 1023 + 127
+    if e2 >= 255:
+        return sg | 2139095040
+    full = m | 4503599627370496
+    if e2 <= 0:
+        sh = 29 + 1 - e2
+        if sh > 62:
+            return sg
+        return sg | fs_rshift_rne(full, sh)
+    r = fs_rshift_rne(full, 29)
+    if r == 16777216:
+        r = r >> 1
+        e2 += 1
+        if e2 >= 255:
+            return sg | 2139095040
+    return sg | (e2 << 23) | (r & 8388607)
+
+def fs_fconst(t):
+# a float global's initializer element: [-] float or integer literal, as the IEEE bits of type t (f64 or f32)
+    global fp
+    neg = 0
+    while fs_isop("-") or fs_isop("+"):
+        if fs_isop("-"):
+            neg = 1 - neg
+        fp += 1
+    bits: int = 0
+    if tk[fp] == K_FLT:
+        bits = __fbits(float(tv[fp]))
+    elif tk[fp] == K_NUM:
+        bits = __fbits(float(tv[fp]))
+    else:
+        fs_die("a float global's initializer must be a float or integer literal")
+    fp += 1
+    if neg:
+        bits = bits ^ (1 << 63)
+    if t == FT_F32:
+        return fs_f32bits(bits)
+    return bits
+
 def fs_gdata(g):
     global fp, nfsrod
     t = fsg_t[g]
@@ -19479,8 +19539,12 @@ def fs_gdata(g):
             fs_die("list initializer needs an array type")
         fp += 1
         n = 0
+        fe = ftel[t] == FT_F64 or ftel[t] == FT_F32
         while not fs_isop("]"):
-            emit_raw(c4("    ", fs_dirw(ftel[t]), " ", concat(str(fs_ceval()), "\n")))
+            if fe:
+                emit_raw(c4("    ", fs_dirw(ftel[t]), " ", concat(str(fs_fconst(ftel[t])), "\n")))
+            else:
+                emit_raw(c4("    ", fs_dirw(ftel[t]), " ", concat(str(fs_ceval()), "\n")))
             n += 1
             if fs_isop(","):
                 fp += 1
@@ -19514,6 +19578,9 @@ def fs_gdata(g):
         return 0
     if ft_agg(t):
         fs_die("aggregate globals take a [..] list or no initializer")
+    if t == FT_F64 or t == FT_F32:
+        emit_raw(c4("    ", fs_dirw(t), " ", concat(str(fs_fconst(t)), "\n")))
+        return 0
     emit_raw(c4("    ", fs_dirw(t), " ", concat(str(fs_ceval()), "\n")))
 
 def fs_function(f):

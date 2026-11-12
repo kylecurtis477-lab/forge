@@ -1,0 +1,67 @@
+# forge: no-runtime
+# Float globals (freestanding): f64 / f32 scalars and arrays initialized from float or integer literals. The
+# compiler stores IEEE bits (f32 rounded to nearest even at compile time); each must equal the same literal
+# converted at run time (cvtsd2ss for f32), bit for bit, including overflow, subnormals, ties and -0.0.
+include "linux.fsi"
+
+g64: f64 = 0.1
+gneg: f64 = -2.5
+gint: f64 = 3
+g32: f32 = 0.1
+a64: f64[4] = [1.5, -0.25, 1e300, 2]
+a32: f32[8] = [0.1, 3.4028235e38, 3.5e38, 1e-40, 1e-46, 16777217.0, -0.0, 1.0000001788139343]
+pad32: f32[3] = [-1]
+
+@unsafe
+def bits64(a: u64) -> u64:
+    return ptr[u64](a)[0]
+
+@unsafe
+def bits32(a: u64) -> u64:
+    return u64(ptr[u32](a)[0])
+
+bad: i64
+
+def chk64(name: ptr[u8], a: u64, want: f64):
+    w: f64 = want
+    puts(name)
+    puts(" ")
+    put_u64(bits64(a))
+    if bits64(a) != bits64(u64(addr(w))):
+        puts(" MISMATCH")
+        bad += 1
+    nl()
+
+def chk32(name: ptr[u8], a: u64, want: f64):
+    w: f32 = f32(want)
+    puts(name)
+    puts(" ")
+    put_u64(bits32(a))
+    if bits32(a) != bits32(u64(addr(w))):
+        puts(" MISMATCH")
+        bad += 1
+    nl()
+
+def main() -> i64:
+    chk64("g64", u64(addr(g64)), 0.1)
+    chk64("gneg", u64(addr(gneg)), -2.5)
+    chk64("gint", u64(addr(gint)), 3.0)
+    chk32("g32", u64(addr(g32)), 0.1)
+    chk64("a64[0]", u64(addr(a64[0])), 1.5)
+    chk64("a64[1]", u64(addr(a64[1])), -0.25)
+    chk64("a64[2]", u64(addr(a64[2])), 1e300)
+    chk64("a64[3]", u64(addr(a64[3])), 2.0)
+    chk32("a32[0]", u64(addr(a32[0])), 0.1)
+    chk32("a32[1] max", u64(addr(a32[1])), 3.4028235e38)
+    chk32("a32[2] overflow", u64(addr(a32[2])), 3.5e38)
+    chk32("a32[3] subnormal", u64(addr(a32[3])), 1e-40)
+    chk32("a32[4] underflow", u64(addr(a32[4])), 1e-46)
+    chk32("a32[5] tie-even", u64(addr(a32[5])), 16777217.0)
+    chk32("a32[6] -0", u64(addr(a32[6])), -0.0)
+    chk32("a32[7] tie-up", u64(addr(a32[7])), 1.0000001788139343)
+    chk32("pad32[0]", u64(addr(pad32[0])), -1.0)
+    chk32("pad32[2]", u64(addr(pad32[2])), 0.0)
+    puts("float globals: ")
+    put_i64(18 - bad)
+    puts(" of 18 match the run-time conversion\n")
+    return 0

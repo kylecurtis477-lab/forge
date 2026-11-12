@@ -100,6 +100,9 @@ done
 build/forgec tests/fs/regalloc.forge build/t_ra.s $FORGEC_FLAGS --fs-opt && [ "$(awk '/^ra_leaf:/,/ret$/' build/t_ra.s | grep -c '(%rbp)')" = 0 ] && [ "$(awk '/^ra_addr:/,/ret$/' build/t_ra.s | grep -c '(%rbp)')" -gt 0 ] && awk '/^ra_calls:/,/ret$/' build/t_ra.s | grep -q 'mov %rax,%rbx' && echo "PASS fs-opt-shape" || { echo "FAIL fs-opt-shape"; fail=1; }
 # constant division: in c_i64_7 and c_u64_641 only the three divisions by a variable keep div/idiv
 build/forgec tests/fs/cdiv.forge build/t_cd.s $FORGEC_FLAGS --fs-opt && [ "$(awk '/^c_i64_7:/,/ret$/' build/t_cd.s | grep -c '    idiv ')" = 3 ] && [ "$(awk '/^c_u64_641:/,/ret$/' build/t_cd.s | grep -c '    div ')" = 3 ] && echo "PASS fs-opt-cdiv-shape" || { echo "FAIL fs-opt-cdiv-shape"; fail=1; }
+# float globals take float or integer literals only (tests/fs/fglobals.forge checks the bits)
+printf '# forge: no-runtime\nK = 3\nx: f64 = K\n' > build/t_fgk.forge
+build/forgec build/t_fgk.forge build/t_fgk.s 2>&1 | grep -q "a float global's initializer must be a float or integer literal" && echo "PASS fs-float-global-literal-only" || { echo "FAIL fs-float-global-literal-only"; fail=1; }
 # missing input / include files: clean diagnostic, exit 1, no crash
 printf 'include "no_such_file.fsi"\n' > build/t_inc.forge
 build/forgec build/t_inc.forge build/t_inc.s --freestanding > build/t_inc.txt 2>&1; rc=$?
