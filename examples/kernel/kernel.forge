@@ -532,8 +532,13 @@ done_count: u64
 work_until: u64
 
 def worker(arg: u64):
+# 30 ticks of work (~300 ms); if lapic_ticks has not reached work_until 20 s (TSC) later, cpu0's timer
+# interrupt is not landing: report it (stall_report, sync.fsi) instead of spinning until the harness kills the boot
     t = cur_thread()
+    t_end = rdtsc() + tsc_per_ms * 20000
     while atomic_load(addr(lapic_ticks), acquire) < work_until:
+        if rdtsc() > t_end:
+            stall_report("scheduler test: lapic_ticks short of work_until", addr(work_until), 20000, atomic_load(addr(lapic_ticks), relaxed))
         f = irq_save()
         spin_lock(addr(counter_lock))
         shared_counter += 1

@@ -97,6 +97,12 @@ The efi-loader-gpt 60 s stall after `KERNEL OK` (open after inv78) was the guest
 harness's `q` while the LAPIC timer was not firing and COM1 had no RX interrupt, so the CPU slept
 through the character. The wait is now TSC-bounded and uses `cpu_relax()`; the kernel prints
 `debug-exit N ms after KERNEL OK` and `os/efi-loader-gpt-post-ok` requires N < 8000.
+Fail-fast stall checks (`sync.fsi`, after inv134): a spinlock wait longer than 10 s (TSC) and a
+scheduler-test worker whose `lapic_ticks` have not reached `work_until` 20 s later both print one
+`PANIC-STALL:` line (every CPU's lock wait as a link address, the lock word, the kernel slide applied,
+and whether `lapic_ticks` moved over 300 ms) and panic, so a lost lock or a stalled cpu0 timer fails in
+seconds with its own evidence instead of a 60 s HANG and a single register snapshot. (inv134 kernel-bios
+gen-3 dump: all 4 CPUs in the scheduler test, two in `spin_lock` on `counter_lock`, two in `irq_save`.)
 
 ## Compiler tooling (Phase 3)
 - `--diagnostics=json`: one schema-v1 JSON object per error (file/line/col span, code, message, fix-its); goldens in `tests/diag`.
