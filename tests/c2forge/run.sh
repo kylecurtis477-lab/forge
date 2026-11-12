@@ -11,12 +11,12 @@
 # translated and run against the gcc build, including the standard check values for "123456789".
 # 0.15.2: ints.c uses file-scope variables; pointer globals, non-constant global initializers and a local
 # named like a global are clean errors. Array sizes may be integer constant expressions (arrconst.c);
-# ++/-- works in expressions (incdec.c). Remaining subset gaps are clean errors (string literals as values,
-# static locals, same-name/same-type inner-block shadowing). Listed in docs/BUILD_PLAN.md item 4.
+# ++/-- works in expressions (incdec.c). String literals are values (strlit.c). Remaining named errors
+# are other rejected C, plus static locals and same-name inner-block shadowing. Listed in docs/BUILD_PLAN.md item 4.
 cd "$(dirname "$0")/../.." || exit 1
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
-PROGS="ints flow ptrs floats pp lib arrconst incdec"
+PROGS="ints flow ptrs floats pp lib arrconst incdec strlit"
 build/forgec tools/c2forge.forge $T/c2.s && build/fas -o $T/c2.o $T/c2.s && build/fld --base 0x100000000000 -o $T/c2forge $T/c2.o || { echo "FAIL c2forge build"; exit 1; }
 $T/c2forge --tokens tests/c2forge/lex.c | cmp -s - tests/c2forge/lex.expected && echo "PASS c2forge lex" || { echo "FAIL c2forge lex"; fail=1; }
 printf 'int x = @;\n' > $T/bad.c
@@ -44,12 +44,12 @@ out=$($T/c2forge $T/gs.c $T/gs.forge); rc=$?
 printf 'int n = 2; int g = n; int main(void) { return g; }\n' > $T/gi.c
 out=$($T/c2forge $T/gi.c $T/gi.forge); rc=$?
 [ $rc = 1 ] && [ "$out" = "c2forge: line 1: global initializer must be an integer constant (at 'n')" ] && echo "PASS c2forge global-init-error" || { echo "FAIL c2forge global-init-error (rc=$rc out=$out)"; fail=1; }
-printf 'int main(void) { const char *s = "hi"; return 0; }\n' > $T/sl.c
+printf 'int main(void) { char s[1] = "hi"; return 0; }\n' > $T/sl.c
 out=$($T/c2forge $T/sl.c $T/sl.forge); rc=$?
-[ $rc = 1 ] && [ "$out" = "c2forge: line 1: expected an expression (at '\"hi\"')" ] && echo "PASS c2forge strlit-error" || { echo "FAIL c2forge strlit-error (rc=$rc out=$out)"; fail=1; }
-printf 'int main(void) { char s[] = "hi"; return 0; }\n' > $T/sa.c
+[ $rc = 1 ] && [ "$out" = "c2forge: line 1: too many initializers (at ';')" ] && echo "PASS c2forge strlit-too-many-error" || { echo "FAIL c2forge strlit-too-many-error (rc=$rc out=$out)"; fail=1; }
+printf 'int main(void) { int a[]; return 0; }\n' > $T/sa.c
 out=$($T/c2forge $T/sa.c $T/sa.forge); rc=$?
-[ $rc = 1 ] && [ "$out" = "c2forge: line 1: array needs a positive size (at '=')" ] && echo "PASS c2forge strarr-error" || { echo "FAIL c2forge strarr-error (rc=$rc out=$out)"; fail=1; }
+[ $rc = 1 ] && [ "$out" = "c2forge: line 1: array needs a positive size (at ';')" ] && echo "PASS c2forge arrsize-unsized-error" || { echo "FAIL c2forge arrsize-unsized-error (rc=$rc out=$out)"; fail=1; }
 printf 'int main(void) { int n = 4; int a[n]; return 0; }\n' > $T/ae.c
 out=$($T/c2forge $T/ae.c $T/ae.forge); rc=$?
 [ $rc = 1 ] && [ "$out" = "c2forge: line 1: array size must be an integer constant (at 'n')" ] && echo "PASS c2forge arrsize-vla-error" || { echo "FAIL c2forge arrsize-vla-error (rc=$rc out=$out)"; fail=1; }

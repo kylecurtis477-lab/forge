@@ -27,11 +27,12 @@
 # internally (no deref, no arithmetic) and converts implicitly to and from any object pointer, as in C; the
 # output spells it ptr[u8]. Globals (0.15.2): file-scope integer/float/array/struct variables, integer scalars with an
 # integer-literal initializer wrapped as C converts it, the rest zero; pointer globals, non-constant or float
-# initializers and a local named like a global are clean errors. ++/-- is supported in expressions
+# initializers and a local named like a global are clean errors. String literals are interned as hidden i8[N]
+# globals (adjacent strings concatenate; char s[] = "..." and char s[N] = "..." copy the bytes, including a
+# NUL when it fits). ++/-- is supported in expressions
 # (prefix and postfix, including on pointers and dereferences) as well as in statement form.
 # Array sizes may be an integer constant expression (literals, +, -, *, /, %, sizeof(type),
-# parentheses, and #define expanding to one of those). Remaining gaps (BUILD_PLAN item 4): string
-# literals as values (and char s[] = "..." initializers). Also rejected: unions (Forge has none; the plan does not add them),
+# parentheses, and #define expanding to one of those). Also rejected: unions (Forge has none; the plan does not add them),
 # hex floats, long double, the comma operator, compound literals, continue in a switch, enum, goto,
 # varargs, local typedef, bit-fields, K&R, attributes, GNU statement-expressions, _Bool, _Complex,
 # static local variables, and an inner-block declaration of the same name and type as an outer
@@ -281,6 +282,18 @@ def is_ptr(t):
 def is_arr(t):
     return t.endswith("]") and not is_ptr(t)
 
+def is_incomplete(t):
+# unsized array "T[]" (first dimension omitted)
+    return t.endswith("[]") and not is_ptr(t)
+
+def i8_lit(b):
+    if b >= 128:
+        return str(b - 256)
+    return str(b)
+
+def is_hexch(c):
+    return (c >= "0" and c <= "9") or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")
+
 def pelem(t):
     return t[4:len(t) - 1]
 
@@ -409,6 +422,9 @@ class Parser:
         self.funcs = {}
         self.vars = {}
         self.globals = {}
+        self.gextra = []
+        self.str_map = {}
+        self.str_tmp = 0
         self.ret = "void"
         self.out = []
         self.pre = []
@@ -641,7 +657,9 @@ class Parser:
         if len(dims) > 0:
             if param:
                 t = "ptr[" + t + "]"
-            elif dims[0] == "" or dims[0] == "0":
+            elif dims[0] == "":
+                t = t + "[]"
+            elif dims[0] == "0":
                 self.err("array needs a positive size")
             else:
                 t = t + "[" + dims[0] + "]"
@@ -745,6 +763,11 @@ class Parser:
                 return [fname(n), self.globals[n], False]
             self.pos -= 1
             self.err("unknown variable")
+        if t[0] == "str":
+            self.pos -= 1
+            data = self.take_str()
+            data.append(0)
+            return self.intern_str(data)
         if t[0] == "op" and t[1] == "(":
             e = self.expr()
             self.expect(")")
@@ -1519,6 +1542,109 @@ class Parser:
                 break
         self.expect("}")
 
+    def str_bytes(self, s):
+    # C string token including quotes -> list of 0..255 byte values, no trailing NUL
+        i = 1
+        n = len(s) - 1
+        out = []
+        while i < n:
+            if s[i] != "\\":
+                out.append(ord(s[i]))
+                i += 1
+                continue
+            if i + 1 >= n:
+                self.err("unterminated escape in a string")
+            c = s[i + 1]
+            esc = {"n": 10, "t": 9, "r": 13, "0": 0, "\\": 92, "'": 39, "\"": 34, "a": 7, "b": 8, "f": 12, "v": 11}
+            if c == "x":
+                j = i + 2
+                if j >= n or not is_hexch(s[j]):
+                    self.err("invalid hex escape")
+                while j < n and is_hexch(s[j]):
+                    j += 1
+                out.append(parse_base(s[i + 2:j], 16) % 256)
+                i = j
+                continue
+            if c >= "0" and c <= "7":
+                j = i + 1
+                k = 0
+                while k < 3 and j < n and s[j] >= "0" and s[j] <= "7":
+                    j += 1
+                    k += 1
+                out.append(parse_base(s[i + 1:j], 8) % 256)
+                i = j
+                continue
+            if c in esc:
+                out.append(esc[c])
+            else:
+                out.append(ord(c))
+            i += 2
+        return out
+
+    def take_str(self):
+        if self.peek()[0] != "str":
+            self.err("expected a string literal")
+        data = self.str_bytes(self.next()[1])
+        while self.peek()[0] == "str":
+            more = self.str_bytes(self.next()[1])
+            for b in more:
+                data.append(b)
+        return data
+
+    def intern_str(self, data):
+        parts = []
+        for b in data:
+            parts.append(str(b))
+        key = ",".join(parts)
+        if key in self.str_map:
+            return self.str_map[key]
+        self.str_tmp += 1
+        name = "_cs" + str(self.str_tmp)
+        typ = "i8[" + str(len(data)) + "]"
+        nums = []
+        for b in data:
+            nums.append(i8_lit(b))
+        self.gextra.append(name + ": " + typ + " = [" + ", ".join(nums) + "]")
+        e = [name, typ, False]
+        self.str_map[key] = e
+        return e
+
+    def array_from_string(self, t, data):
+        if is_incomplete(t):
+            elem = aelem(t)
+        elif is_arr(t):
+            elem = aelem(t)
+        else:
+            self.err("string initializer for a non-array")
+            elem = "i8"
+        if elem != "i8" and elem != "u8":
+            self.err("string initializer for a non-character array")
+        if is_incomplete(t):
+            n = len(data) + 1
+            t = elem + "[" + str(n) + "]"
+        else:
+            n = alen(t)
+            if n < len(data):
+                self.err("too many initializers")
+        payload = []
+        for b in data:
+            payload.append(b)
+        while len(payload) < n:
+            payload.append(0)
+        return [t, payload]
+
+    def emit_str_copy(self, ind, v, t, payload):
+        src = self.intern_str(payload)
+        self.flush(ind)
+        self.emit(ind, "memset(addr(" + v + "), 0, sizeof(" + t + "))")
+        self.emit(ind, "memcpy(addr(" + v + "), addr(" + src[0] + "[0]), u64(" + str(len(payload)) + "))")
+
+    def forge_bytes(self, payload):
+        nums = []
+        for b in payload:
+            nums.append(i8_lit(b))
+        return "[" + ", ".join(nums) + "]"
+
     def declaration(self, ind):
         self.local_decl = True
         bt = self.base_type()
@@ -1534,6 +1660,15 @@ class Parser:
             if n in self.globals:
                 self.pos -= 1
                 self.err("local " + n + " shadows a global variable (not supported yet)")
+            str_payload = None
+            if self.is_op("=") and self.peek(1)[0] == "str":
+                if is_incomplete(t) or (is_arr(t) and (aelem(t) == "i8" or aelem(t) == "u8")):
+                    self.pos += 1
+                    r = self.array_from_string(t, self.take_str())
+                    t = r[0]
+                    str_payload = r[1]
+            if is_incomplete(t):
+                self.err("array needs a positive size")
             if n in self.vars:
                 self.pos -= 1
                 if self.vars[n] != t:
@@ -1541,7 +1676,11 @@ class Parser:
                 self.err("inner-block declaration of " + n + " shadows an outer variable (block scoping is not supported yet)")
             self.vars[n] = t
             v = fname(n)
-            if not is_num(t) and not is_ptr(t):
+            if str_payload != None:
+                self.flush(ind)
+                self.emit(ind, v + ": " + t)
+                self.emit_str_copy(ind, v, t, str_payload)
+            elif not is_num(t) and not is_ptr(t):
                 self.flush(ind)
                 self.emit(ind, v + ": " + t)
                 if self.is_op("="):
@@ -1632,9 +1771,27 @@ class Parser:
             if is_ptr(t) or is_arr(t) and is_ptr(aelem(t)):
                 self.pos -= 1
                 self.err("pointer global variables are not supported yet")
+            str_payload = None
+            if self.is_op("=") and self.peek(1)[0] == "str":
+                if is_incomplete(t) or (is_arr(t) and (aelem(t) == "i8" or aelem(t) == "u8")):
+                    self.pos += 1
+                    r = self.array_from_string(t, self.take_str())
+                    t = r[0]
+                    str_payload = r[1]
+            if is_incomplete(t):
+                self.err("array needs a positive size")
             if n in self.globals or n in self.funcs:
                 self.pos -= 1
                 self.err("redefinition of " + n)
+            if str_payload != None:
+                self.globals[n] = t
+                self.emit(0, "")
+                self.emit(0, fname(n) + ": " + t + " = " + self.forge_bytes(str_payload))
+                if self.is_op(","):
+                    self.pos += 1
+                    continue
+                else:
+                    break
             init = ""
             if self.is_op("="):
                 self.pos += 1
@@ -1746,7 +1903,14 @@ def translate(src, name):
     p.emit(0, "# translated from " + name + " by c2forge (tools/c2forge.forge)")
     p.emit(0, "include \"linux.fsi\"")
     p.toplevel()
-    return "\n".join(p.out).replace("ptr[void]", "ptr[u8]") + "\n"
+    out = p.out
+    if len(p.gextra) > 0:
+        extra = []
+        for line in p.gextra:
+            extra.append("")
+            extra.append(line)
+        out = p.out[0:3] + extra + p.out[3:]
+    return "\n".join(out).replace("ptr[void]", "ptr[u8]") + "\n"
 
 def main():
     if argc() == 3 and argv(1) == "--tokens":
