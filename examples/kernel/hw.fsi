@@ -24,6 +24,7 @@ def hw_test():
         nv_irq_test()
     if ahci_init():
         hw_report_read("AHCI", ahci_read(0))
+        ah_irq_test()
     if xhci_init():
         xhci_scan()
     if e1000_init():
@@ -54,6 +55,8 @@ def hw_quiesce():
         mmio_wr(nv_regs + 0x14, 4, 0)
         nv_wait_rdy(0)
     if ah_port != 0:
+        mmio_wr(ah_regs + 4, 4, mmio_rd(ah_regs + 4, 4) & ~u64(2))  # GHC.IE off before kexec
+        mmio_wr(ah_port + 0x14, 4, 0)
         mmio_wr(ah_port + 0x18, 4, mmio_rd(ah_port + 0x18, 4) & ~u64(0x11))
         ah_wait_clear(ah_port + 0x18, 0xC000)
 
@@ -70,4 +73,19 @@ def nv_irq_test():
     if nv_msix and ok == 8 and nv_irqs - i0 >= 8:
         puts("NVMe: interrupt-driven reads OK (8 of 8, ")
         put_u64(nv_irqs - i0)
+        puts(" interrupts)\n")
+
+def ah_irq_test():
+# 8 more reads (LBA 8..64 in 4 KiB steps); with MSI each command completion must raise an interrupt
+    i0 = ah_irqs
+    ok: u64 = 0
+    k: u64 = 1
+    while k <= 8:
+        if ahci_read(k * 8) != 0:
+            ok += 1
+        k += 1
+    ah_irq_report()
+    if ah_msi and ok == 8 and ah_irqs - i0 >= 8:
+        puts("AHCI: interrupt-driven reads OK (8 of 8, ")
+        put_u64(ah_irqs - i0)
         puts(" interrupts)\n")

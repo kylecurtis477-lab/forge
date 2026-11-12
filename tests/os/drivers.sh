@@ -1,6 +1,7 @@
 #!/bin/bash
 # Phase 8.7: NVMe, AHCI, xHCI, e1000 and virtio-net drivers on q35. NVMe I/O completions come by MSI-X
-# (vector 0x53): 8 more reads must each raise a completion interrupt. Both test disks are
+# (vector 0x53) and AHCI
+# command completions by MSI (vector 0x54): for each, 8 more reads must each raise a completion interrupt. Both test disks are
 # generated here, read through the drivers (LBA 0 hash must match), and must be byte-identical afterwards.
 # The xHCI controller has a usb-kbd: the kernel reads its configuration descriptor and configures it as a HID boot
 # keyboard (SET_CONFIGURATION, SET_PROTOCOL(boot), SET_IDLE(0)); the expected interface and endpoint are QEMU's.
@@ -119,7 +120,7 @@ kill $Q 2>/dev/null; wait $Q 2>/dev/null
 wait $H 2>/dev/null
 wait $KB 2>/dev/null
 S=$T/s.log; ok=1; miss=""
-for p in "NVMe: read LBA 0 (4096 bytes), fnv1a64=$(cat $T/nvme.h)" "NVMe: I/O completions on MSI-X vector 0x53 -> cpu0, sleeping reads" "NVMe: interrupt-driven reads OK (8 of 8, " "AHCI: read LBA 0 (4096 bytes), fnv1a64=$(cat $T/ahci.h)" \
+for p in "NVMe: read LBA 0 (4096 bytes), fnv1a64=$(cat $T/nvme.h)" "NVMe: I/O completions on MSI-X vector 0x53 -> cpu0, sleeping reads" "NVMe: interrupt-driven reads OK (8 of 8, " "AHCI: read LBA 0 (4096 bytes), fnv1a64=$(cat $T/ahci.h)" "AHCI: command completions on MSI vector 0x54 -> cpu0, sleeping reads" "AHCI: interrupt-driven reads OK (8 of 8, " \
   "xHCI: command ring OK" "xHCI: Address Device OK" "xHCI: device descriptor: USB 0200" \
   "xHCI: HID boot keyboard: interface 0, interrupt IN endpoint 0x81, max packet 8" \
   "xHCI: SET_CONFIGURATION 1 OK, SET_PROTOCOL(boot) OK, SET_IDLE(0) OK" \
@@ -137,7 +138,7 @@ for d in e1000 virtio-net; do
   grep -aqE "^host: $d echoed [0-9]+ bytes identical" $T/udp.out || { ok=0; miss="$miss [host: $(grep -a "$d" $T/udp.out)]"; }
 done
 grep -aq PANIC $S && { ok=0; miss="$miss [panic]"; }
-if [ $ok = 1 ]; then echo "PASS os/drivers (NVMe (MSI-X completions), AHCI, xHCI + HID boot keyboard (key reports read, MSI-X keys into the shell), e1000, virtio-net; ARP + ICMP echo + UDP echo)"; else echo "FAIL os/drivers:$miss"; fi
+if [ $ok = 1 ]; then echo "PASS os/drivers (NVMe (MSI-X completions), AHCI (MSI completions), xHCI + HID boot keyboard (key reports read, MSI-X keys into the shell), e1000, virtio-net; ARP + ICMP echo + UDP echo)"; else echo "FAIL os/drivers:$miss"; fi
 if (cd $T && sha256sum -c --quiet before.sha); then echo "PASS os/drivers-no-disk-write"; else echo "FAIL os/drivers-no-disk-write"; fi
 mkdir -p build/os; grep -a "^host:" $T/udp.out > build/os/drivers-udp.txt
 rm -rf $T

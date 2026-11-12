@@ -1,5 +1,9 @@
-# Phase 8: AHCI (SATA), read-only. One command slot per port, polled. The only commands the driver
-# can build are IDENTIFY DEVICE (0xEC) and READ DMA EXT (0x25); there is no write path.
+# Phase 8: AHCI (SATA), read-only. One command slot per port. The only commands the driver can build are
+# IDENTIFY DEVICE (0xEC) and READ DMA EXT (0x25); there is no write path. After IDENTIFY (polled), ah_irq_init
+# turns on the controller's MSI (vector 0x54 -> cpu0, D2H Register FIS + task-file-error interrupts): a reader
+# with interrupts on and the scheduler running sleeps on ah_wq until the slot's CI bit clears (the handler
+# acknowledges PxIS/IS and wakes it, both under rq_lock, so no wakeup is lost); early boot, interrupts-off
+# callers and interrupt remapping keep polling.
 ah_regs: u64
 ah_port: u64  # port register block of the first SATA disk
 ah_mem: u64  # one page: command list 0x000, received FIS 0x400, command table 0x800
@@ -8,6 +12,13 @@ ah_buf: u64
 ah_buf_pa: u64
 ah_sectors: u64
 ah_reads: u64
+ah_bdf: u64
+VEC_AHCI = 0x54
+ah_msi: u64  # 1: port interrupts arrive by MSI on VEC_AHCI
+ah_irqs: u64
+ah_sleeps: u64
+ah_err: u64  # set by the handler when PxIS reported a task file error
+ah_wq: WaitQ
 
 def ah_wait_clear(r: u64, bits: u64) -> u64:
     t: u64 = 0
@@ -39,10 +50,20 @@ def ah_cmd(cmd: u64, lba: u64, count: u64, bytes: u64) -> u64:
     mfence()
     if ah_wait_clear(p + 0x20, 0x88) == 0:  # TFD BSY/DRQ
         return 0
+    ah_err = 0
     mmio_wr(p + 0x38, 4, 1)
+    if ah_msi and sched_on and (read_rflags() & 0x200) != 0:
+    # sleeping path: the handler wakes ah_wq under rq_lock, and CI is checked under it
+        f = irq_save()
+        spin_lock(addr(rq_lock))
+        while (mmio_rd(p + 0x38, 4) & 1) != 0 and ah_err == 0:
+            ah_sleeps += 1
+            wq_block_l(addr(ah_wq))
+        spin_unlock(addr(rq_lock))
+        irq_restore(f)
     k: u64 = 0
-    while (mmio_rd(p + 0x38, 4) & 1) != 0:
-        if (mmio_rd(p + 0x10, 4) & 0x40000000) != 0:  # task file error
+    while (mmio_rd(p + 0x38, 4) & 1) != 0 or ah_err != 0:
+        if ah_err != 0 or (mmio_rd(p + 0x10, 4) & 0x40000000) != 0:  # task file error
             return 0
         k += 1
         if k > 1000000:
@@ -57,6 +78,8 @@ def ahci_init() -> u64:
     if f == 0:
         puts("AHCI: not present\n")
         return 0
+    ah_bdf = f - 1
+    ah_msi = 0
     ah_regs = pci_map_bar(f - 1, 5, 0x1100)
     if ah_regs == 0:
         puts("AHCI: ABAR not mappable\n")
@@ -123,7 +146,65 @@ def ahci_init() -> u64:
     puts("', ")
     put_u64(ah_sectors)
     puts(" sectors (LBA48)\n")
+    ah_irq_init()
     return 1
+
+@interrupt
+def on_ahci(frame: ptr[u64]):
+    spin_lock(addr(rq_lock))
+    ah_irqs += 1
+    if ah_port != 0:
+        s = mmio_rd(ah_port + 0x10, 4)
+        if (s & 0x40000000) != 0:
+            ah_err = 1
+        mmio_wr(ah_port + 0x10, 4, s)  # PxIS (RW1C)
+        mmio_wr(ah_regs + 8, 4, mmio_rd(ah_regs + 8, 4))  # IS (RW1C)
+    wq_wake_all_l(addr(ah_wq))
+    spin_unlock(addr(rq_lock))
+    lapic_eoi()
+
+def ah_irq_init():
+# PCI MSI (capability 0x05), single message -> VEC_AHCI on cpu0; port IE: DHRS (bit 0) + TFES (bit 30)
+    if iommu_ir != 0:
+        puts("AHCI: interrupt remapping on and no IRTE for AHCI yet: commands stay polled\n")
+        return
+    c = pci_rd32(ah_bdf, 0x34) & 0xFC
+    g: u64 = 0
+    while c != 0 and g < 48:
+        h = pci_rd32(ah_bdf, c)
+        if (h & 0xFF) == 0x05:
+            break
+        c = (h >> 8) & 0xFC
+        g += 1
+    if c == 0 or g == 48:
+        puts("AHCI: no MSI, commands stay polled\n")
+        return
+    h = pci_rd32(ah_bdf, c)
+    idt_set(VEC_AHCI, u64(on_ahci), 0)
+    pci_wr32(ah_bdf, c + 4, 0xFEE00000 | (cpu_to_apic[0] << 12))
+    d = c + 8
+    if ((h >> 16) & 0x80) != 0:  # 64-bit address
+        pci_wr32(ah_bdf, c + 8, 0)
+        d = c + 12
+    pci_wr32(ah_bdf, d, VEC_AHCI)
+    # MSI enable, one message (MME = 0)
+    pci_wr32(ah_bdf, c, (h & ~u64(0x700000)) | 0x10000)
+    p = ah_port
+    mmio_wr(p + 0x10, 4, 0xFFFFFFFF)
+    mmio_wr(ah_regs + 8, 4, 0xFFFFFFFF)
+    mmio_wr(p + 0x14, 4, 0x40000001)  # PxIE: TFES | DHRS
+    mmio_wr(ah_regs + 4, 4, mmio_rd(ah_regs + 4, 4) | 2)  # GHC.IE
+    ah_msi = 1
+    puts("AHCI: command completions on MSI vector 0x54 -> cpu0, sleeping reads\n")
+
+def ah_irq_report():
+    puts("AHCI: ")
+    put_u64(ah_reads)
+    puts(" read(s), ")
+    put_u64(ah_irqs)
+    puts(" completion interrupt(s), ")
+    put_u64(ah_sleeps)
+    puts(" sleep(s)\n")
 
 def ahci_read(lba: u64) -> u64:
 # 8 sectors (4 KiB) at lba; returns the DMA buffer, 0 on failure
