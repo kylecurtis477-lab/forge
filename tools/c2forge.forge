@@ -26,7 +26,9 @@
 # integer -> pointer as ptr[T](u64(x)); pointer -> integer as T(u64(p)); (void)x. void * is ptr[void]
 # internally (no deref, no arithmetic) and converts implicitly to and from any object pointer, as in C; the
 # output spells it ptr[u8]. Globals (0.15.2): file-scope integer/float/array/struct variables, integer scalars with an
-# integer constant expression initializer (see below) wrapped as C converts it, the rest zero; pointer globals, non-constant or float
+# integer constant expression initializer (see below) wrapped as C converts it, 1-D integer arrays with a
+# brace list of such expressions (zero padded), the rest zero; T a[] = {...} (local or global) takes its size
+# from the list; pointer globals, non-constant or float
 # initializers and a local named like a global are clean errors. String literals are interned as hidden i8[N]
 # globals (adjacent strings concatenate; char s[] = "..." and char s[N] = "..." copy the bytes, including a
 # NUL when it fits). ++/-- is supported in expressions
@@ -1723,6 +1725,74 @@ class Parser:
             nums.append(i8_lit(b))
         return "[" + ", ".join(nums) + "]"
 
+    def brace_count(self):
+    # number of top-level elements of the brace list at self.pos (not consumed); a trailing comma is allowed
+        k = self.pos
+        depth = 0
+        n = 0
+        last = ""
+        while k < len(self.toks):
+            tk = self.toks[k]
+            if tk[0] == "op" and tk[1] == "{":
+                depth += 1
+                if depth == 2:
+                    last = "x"
+            elif tk[0] == "op" and tk[1] == "}":
+                depth -= 1
+                if depth == 0:
+                    if last == "x":
+                        n += 1
+                    return n
+            elif depth == 1 and tk[0] == "op" and tk[1] == ",":
+                n += 1
+                last = ","
+            elif depth == 1:
+                last = "x"
+            k += 1
+        return n
+
+    def size_from_braces(self, t):
+    # T a[] = {...}: the element count gives the size (C infers it from the initializer)
+        n = self.brace_count()
+        if n == 0:
+            self.err("array needs a positive size")
+        return aelem(t) + "[" + str(n) + "]"
+
+    def wrap_int(self, x, t):
+    # an integer constant converted to integer type t as C converts it (two's complement wrap)
+        bits = tsize(t) * 8
+        if bits < 64:
+            x = x % (1 << bits)
+            if x < 0:
+                x = x + (1 << bits)
+            if tsigned(t) and x >= (1 << (bits - 1)):
+                x = x - (1 << bits)
+        return x
+
+    def global_brace(self, t):
+    # file-scope {a, b, ...} for a 1-D integer array -> a Forge array literal, zero padded; each element is an
+    # integer constant expression wrapped to the element type (float arrays: fs-mode globals take no float
+    # initializers yet)
+        el = aelem(t)
+        if is_flt(el):
+            self.err("float array initializers at file scope are not supported yet (a local array works)")
+        if is_arr(el) or not is_int(el):
+            self.err("a file-scope brace initializer needs a 1-D integer array (not supported yet)")
+        self.expect("{")
+        vals = []
+        while not self.is_op("}"):
+            if len(vals) >= alen(t):
+                self.err("too many initializers")
+            vals.append(str(self.wrap_int(self.const_top("global initializer"), el)))
+            if self.is_op(","):
+                self.pos += 1
+            elif not self.is_op("}"):
+                self.err("expected , or } in an initializer list")
+        self.expect("}")
+        while len(vals) < alen(t):
+            vals.append("0")
+        return " = [" + ", ".join(vals) + "]"
+
     def declaration(self, ind):
         self.local_decl = True
         bt = self.base_type()
@@ -1745,6 +1815,10 @@ class Parser:
                     r = self.array_from_string(t, self.take_str())
                     t = r[0]
                     str_payload = r[1]
+            if is_incomplete(t) and self.is_op("=") and self.peek(1)[0] == "op" and self.peek(1)[1] == "{":
+                self.pos += 1
+                t = self.size_from_braces(t)
+                self.pos -= 1
             if is_incomplete(t):
                 self.err("array needs a positive size")
             if n in self.vars:
@@ -1856,6 +1930,10 @@ class Parser:
                     r = self.array_from_string(t, self.take_str())
                     t = r[0]
                     str_payload = r[1]
+            if is_incomplete(t) and self.is_op("=") and self.peek(1)[0] == "op" and self.peek(1)[1] == "{":
+                self.pos += 1
+                t = self.size_from_braces(t)
+                self.pos -= 1
             if is_incomplete(t):
                 self.err("array needs a positive size")
             if n in self.globals or n in self.funcs:
@@ -1885,14 +1963,13 @@ class Parser:
                             self.pos = p0
                             self.err("a float, array or struct global may only be initialized to 0")
                     else:
-                        bits = tsize(t) * 8
-                        if bits < 64:
-                            x = x % (1 << bits)
-                            if x < 0:
-                                x = x + (1 << bits)
-                            if tsigned(t) and x >= (1 << (bits - 1)):
-                                x = x - (1 << bits)
-                        init = " = " + str(x)
+                        init = " = " + str(self.wrap_int(x, t))
+                elif c[0] == "op" and c[1] == "{":
+                    if is_incomplete(t):
+                        t = self.size_from_braces(t)
+                    if not is_arr(t):
+                        self.err("braces around a scalar initializer")
+                    init = self.global_brace(t)
                 elif c[0] == "float":
                     if not is_flt(t):
                         self.err("a float initializer for an integer global needs a cast")
