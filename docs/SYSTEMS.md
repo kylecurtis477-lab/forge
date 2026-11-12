@@ -103,6 +103,11 @@ scheduler-test worker whose `lapic_ticks` have not reached `work_until` 20 s lat
 and whether `lapic_ticks` moved over 300 ms) and panic, so a lost lock or a stalled cpu0 timer fails in
 seconds with its own evidence instead of a 60 s HANG and a single register snapshot. (inv134 kernel-bios
 gen-3 dump: all 4 CPUs in the scheduler test, two in `spin_lock` on `counter_lock`, two in `irq_save`.)
+Both checks count only check-to-check TSC gaps up to 1 s (`tsc_counted`): the box running QEMU is itself a
+VM that is at times suspended whole (90-145 s), and the guest TSC jumps by the freeze on resume. Without this, a
+freeze during a lock wait or the worker window would raise a false PANIC-STALL. Skipped jumps are counted in
+`clock_jumps` and printed on the PANIC-STALL line; a boot self-test (`stall_clock_test`, before the scheduler
+test) checks that a 2000 ms jump is skipped and 5 ms counted.
 
 ## Compiler tooling (Phase 3)
 - `--diagnostics=json`: one schema-v1 JSON object per error (file/line/col span, code, message, fix-its); goldens in `tests/diag`.
