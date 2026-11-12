@@ -1,7 +1,7 @@
 # tests/os/boot.forge: Forge port of tests/os/boot.py (kept as the reference) — boot one QEMU configuration,
 # check serial markers and (optionally) OCR the framebuffer.
 # usage: boot NAME LOG TIMEOUT 'marker|marker|...' FBTEXT -- qemu args...
-#        boot --self-test   pipe-drain and stall-predicate checks (no QEMU)
+#        boot --self-test   pipe-drain, stall-predicate and settled-screendump checks (no QEMU)
 # Same behaviour and PASS/FAIL/HANG/SLOW lines as boot.py; see its docstring. Differences: QEMU runs via
 # os.fork/os.execv with its serial console on two pipes, and the HMP monitor is a `-chardev pipe` (the FIFOs
 # MON.in / MON.out made with os.mkfifo, opened O_RDWR so neither side blocks) read with os.poll, instead of a
@@ -347,7 +347,7 @@ def boot(h, attempt):
                     os.write(sin, concat(line, "\r"))
             except Exception as ex:
                 buf += f"[harness: send failed: {ex}]"
-        if not shot_ok and "KERNEL OK" in buf:
+        if not shot_ok and "KERNEL OK\n" in buf:
             shot_ok = True
             if FBTEXT[0] != "":
                 fbmsg = screenshot(h)
@@ -410,27 +410,65 @@ def fix1(x):
     t: int = int(x * 10 + 0.5)
     return f"{t // 10}.{t % 10}"
 
+def grab_rows(h):
+# one QEMU monitor screendump, decoded to [w, h, rows] (rows are the rstripped text of each 16-pixel cell row)
+    if os.path.exists(h.shot):
+        os.remove(h.shot)
+    monitor(h, f"screendump {h.shot}", 0.5)
+    k: int = 0
+    while k < 50:
+        if os.path.exists(h.shot) and len(read_file(h.shot)) > 0:
+            break
+        time.sleep(0.1)
+        k += 1
+    time.sleep(0.3)
+    ppm = read_ppm(h.shot)
+    f = font(h)
+    rows = []
+    r: int = 0
+    while r < ppm[1] // 16:
+        rows.append(rstrip(decode_row(f, ppm, r)))
+        r += 1
+    return [ppm[0], ppm[1], rows]
+
+def rows_stable(a, b):
+# two decoded screendumps agree row for row (the console is no longer being redrawn)
+    if len(a) != len(b):
+        return 0
+    i: int = 0
+    while i < len(a):
+        if a[i] != b[i]:
+            return 0
+        i += 1
+    return 1
+
+SHOT_MAX = 4
+
 def screenshot(h):
+# Screendump race (inv128 O0 efi-loader-gpt): the kernel writes each character to serial before the
+# framebuffer, and the newline after KERNEL OK scrolls the console, redrawing every changed cell left to
+# right. A single dump taken as soon as the serial line arrived caught row 46 half redrawn ("KERNEL OK"
+# followed by the tail of the previous row). The kernel draws nothing more until the harness sends 'q', so
+# dump until two consecutive dumps decode identically (at most SHOT_MAX = 4, about 3.5 s, inside the kernel's 5 s wait), then check that settled screen.
+# A real rendering bug still fails: its wrong text is stable.
     try:
-        if os.path.exists(h.shot):
-            os.remove(h.shot)
-        monitor(h, f"screendump {h.shot}", 0.5)
-        k: int = 0
-        while k < 50:
-            if os.path.exists(h.shot) and len(read_file(h.shot)) > 0:
+        g = grab_rows(h)
+        n: int = 1
+        ok: int = 0
+        while n < SHOT_MAX:
+            g2 = grab_rows(h)
+            n += 1
+            if rows_stable(g[2], g2[2]) == 1:
+                g = g2
+                ok = 1
                 break
-            time.sleep(0.1)
-            k += 1
-        time.sleep(0.3)
-        ppm = read_ppm(h.shot)
-        w: int = ppm[0]
-        hh: int = ppm[1]
-        f = font(h)
-        rows = []
-        r: int = 0
-        while r < hh // 16:
-            rows.append(rstrip(decode_row(f, ppm, r)))
-            r += 1
+            g = g2
+        w: int = g[0]
+        hh: int = g[1]
+        rows = g[2]
+        how = f" (settled after {n} dumps)"
+        if ok == 0:
+            how = f" (not settled after {n} dumps)"
         want = split(FBTEXT[0], "^")
         last = want[len(want) - 1]
         hit: int = -1
@@ -440,11 +478,11 @@ def screenshot(h):
                 hit = i
             i += 1
         if hit < 0:
-            return f"{w}x{hh} text not found, last row=\"{rows[len(rows) - 1]}\""
+            return f"{w}x{hh} text not found, last row=\"{rows[len(rows) - 1]}\"{how}"
         pre = ""
         if len(want) > 1:
             pre = f"{w}x{hh} row{hit - 1}=\"{rows[hit - 1]}\" "
-        return f"{pre}{w}x{hh} row{hit}=\"{rows[hit]}\""
+        return f"{pre}{w}x{hh} row{hit}=\"{rows[hit]}\"{how}"
     except Exception as ex:
         return f"screendump failed: {ex}"
 
@@ -466,6 +504,11 @@ def self_test():
     r = drain_avail(pr[0], "", 0.0)
     os.close(pr[0])
     os.close(pr[1])
+    if rows_stable(["a", "KERNEL OK"], ["a", "KERNEL OK"]) == 1 and rows_stable(["a", "KERNEL OK      ck == front"], ["a", "KERNEL OK"]) == 0 and rows_stable(["a"], ["a", "b"]) == 0:
+        print("PASS boot-harness rows-stable")
+    else:
+        print("FAIL boot-harness rows-stable")
+        fail = 1
     if "hello\nuser W^X: refused\n" in r[0] and last_line(r[0]) == "user W^X: refused" and r[1] > 0.0:
         print("PASS boot-harness drain-avail")
     else:
