@@ -32,7 +32,9 @@ def main():
     b = "../../build/efi"
     if not os.path.isdir(b):
         os.mkdir(b)
-    flags = []
+    # 12.1 step 3b: the loader is built with --fs-opt (it has no hand-written asm; the UEFI entry wrapper
+    # saves rdi/rsi and firmware calls preserve rbx/rsi/rdi/r12-r15, a superset of what SysV needs)
+    flags = ["--fs-opt"]
     for f in os.getenv("FORGEC_FLAGS", "").split():
         flags.append(f)
     step(["../../build/forgec", "loader.forge", b + "/loader.s"] + flags)

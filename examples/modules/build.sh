@@ -7,7 +7,7 @@ B=../../build/modules; mkdir -p $B
 S=../../build/forgeseal
 ../../build/forgec ../../tools/forgeseal.forge $S.s && ../../build/fas -o $S.o $S.s && ../../build/fld --base 0x100000000000 -o $S $S.o
 for m in hello badabi unresolved newer tty1 tty2 getpid2; do
-  ../../build/forgec $m.forge $B/$m.s $FORGEC_FLAGS
+  ../../build/forgec $m.forge $B/$m.s --fs-opt $FORGEC_FLAGS
   ../../build/fas -o $B/$m.ko $B/$m.s
   cp $B/$m.ko $B/$m.raw
   $S --module $m.forge $B/$m.ko ../../build/user/seal.key ../../tests/unsafe/baseline.txt >/dev/null

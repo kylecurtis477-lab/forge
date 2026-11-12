@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")"
 B=../../build/efi; mkdir -p $B
-../../build/forgec loader.forge $B/loader.s $FORGEC_FLAGS
+../../build/forgec loader.forge $B/loader.s --fs-opt $FORGEC_FLAGS
 ../../build/fas -o $B/loader.o $B/loader.s
 ../../build/fld --format pe --subsystem 10 --image-base 0x10000000 -e efi_main -o $B/forgex64.efi $B/loader.o
 ../kernel/build.sh >/dev/null

@@ -45,7 +45,9 @@ def main():
         out = "../../build/modules"
     if not os.path.isdir(out):
         os.mkdir(out)
-    flags = []
+    # 12.1 step 3b: the modules are built with --fs-opt (no hand-written asm; they call and are called by
+    # the kernel through the SysV ABI, which the kernel's --fs-opt code keeps too)
+    flags = ["--fs-opt"]
     for f in os.getenv("FORGEC_FLAGS", "").split():
         flags.append(f)
     s = "../../build/forgeseal"

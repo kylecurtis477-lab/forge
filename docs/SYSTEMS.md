@@ -262,8 +262,10 @@ Audit of every top-level `asm(...)` block and `@naked` function in examples/kern
 | `@interrupt` wrappers | compiler (`fs_wrapper`) | push all nine caller-saved registers before the body, pop after |
 | `read_rsp`, `ksym`, `ap_off`, `read_rflags`, `uimg`, `*_addr` | various | rax and their argument only |
 
-Modules (examples/modules) have no asm and are built without the flag; they follow the same ABI, so mixing
-is fine. Tests: the full QEMU boot suite (BIOS, UEFI, native loader, SMP and single CPU, IOMMU, kexec,
+Modules (examples/modules) and the native UEFI loader (examples/efi/loader.forge) have no asm and are
+built with the flag too since step 3b; the loader's Microsoft-ABI entry wrapper saves rdi/rsi, and firmware
+preserves rbx, rsi, rdi and r12–r15. User programs are still built without it (see BUILD_PLAN 12.1 step 3b:
+a resumed page-fault signal handler returns by sysret, which clobbers rcx and r11). Tests: the full QEMU boot suite (BIOS, UEFI, native loader, SMP and single CPU, IOMMU, kexec,
 live patching, drivers, forgefs, objstore) at O2 and O0 with the `--fs-opt` kernel, and `dwarf/*` builds
 the `-g` kernel with `--fs-opt` too (the image must not change with `-g`).
 

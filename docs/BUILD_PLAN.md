@@ -323,6 +323,16 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      `smep_blocked` fixup path too. Kernel code 534,272 to 495,157 bytes (-7.3%), frame accesses in kernel.s
      16,312 to 11,860, div/idiv 150 to 25; 436 functions keep locals in callee-saved registers. The QEMU boot
      suite passes at O2 and O0 with this kernel (SMEP still blocks the probe: `SMEP blocks kernel exec: 1`).
+   - *Step 3b done (2026-11-12): the native UEFI loader and the kernel modules.* examples/efi/build.forge
+     (and build.sh) build loader.forge with `--fs-opt`, examples/modules/build.forge (and build.sh) build the
+     seven test modules with it. Neither has hand-written asm. The loader's UEFI entry wrapper saves rdi/rsi
+     (callee-saved under the Microsoft ABI) and firmware calls preserve rbx, rsi, rdi and r12–r15, a superset
+     of what the SysV body keeps; modules call and are called by the kernel through the SysV ABI. Loader code
+     11,171 to 10,195 bytes (-8.7%, div/idiv 8 to 0); module code 5,197 to 4,471 bytes (-14.0%), frame accesses
+     112 to 11. Still without the flag: the user programs. A page-fault SIGSEGV handler that resumes the
+     faulting instruction gets rcx and r11 back clobbered (rt_sigreturn returns by sysret), and `--fs-opt`
+     keeps leaf locals in r11 for whole loops, so the user build waits for either an iretq signal return or
+     an allocator option without r11.
 2. Auto-vectorization of simple loops (SSE2/AVX2, now that the kernel saves xsave state), plus explicit `simd[T, N]` types.
 3. `parallel for` over ranges and slices, with a work-stealing multicore runtime in both hosted and kernel modes. Test: speedup on 4 cores is ≥ 3× on bench kernels, with deterministic results.
 4. Perf targets:
