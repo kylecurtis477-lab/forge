@@ -339,6 +339,23 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      across a call. Code 175,859 to 168,467 bytes (-4.2%; sh 13,070 to 12,329, lxfs 14,008 to 13,334), frame
      accesses 4,867 to 3,891 (-20%), asm lines 59,362 to 54,842. Every Forge-compiled image now uses the
      flag; BusyBox is C (gcc, musl) and is unaffected.
+   - *Step 4a done (2026-11-12): promotion next to frame aggregates.* The first slice of step 4. Before, any
+     `lea` of the frame (an array or struct local, `addr()` of a local) or any other `%rbp` form kept the whole
+     function in memory. Now, in a function with no unsafe operation (`fs_unsafe_op` never called, so no raw
+     load/store, int-to-pointer cast or inline asm can reach the frame), such a line pins every frame offset it
+     names, and the pass promotes only offsets that are scalar locals (8 bytes or narrower, recorded by
+     `fs_newlocal`; scopes never reuse an offset) and not pinned. A struct field or array word read as an
+     8-byte slot is never a local's offset, and safe code cannot index past an aggregate (bounds checks), so
+     the promoted slots are reached only through the rewritten lines. `rep movsb`/`rep stosb` (array
+     parameter copies, zero fills) are accepted and take rsi/rdi out of the free set; `lock`, `xchgq`,
+     `pause`, `mfence`, `rdtsc` and `cld` join the whitelist (they name only explicit operands or rax/rcx/rdx,
+     which are never allocated). Code built without `--fs-opt` is byte-identical (all tests/fs programs and
+     the kernel compared). tests/fs/regalloc.forge adds ra_arr (frame array, frame refs 25 to 11), ra_cpy
+     (array parameter copy plus a struct, 29 to 20) and ra_mix (`addr()` of one local, 18 to 4; that local
+     stays in memory), each checked by `fs-opt-shape`. Kernel: frame accesses 12,040 to 11,553 (-4.0%) in 40
+     functions (sys_fork 79 to 23, smp_init 57 to 23, acpi_init 64 to 34), none worse; code 566,100 to
+     566,260 bytes (+160, callee-saved saves). Loader frame accesses 401 to 388; user programs and modules
+     unchanged (their aggregate functions use unsafe operations). Reseed.
 2. Auto-vectorization of simple loops (SSE2/AVX2, now that the kernel saves xsave state), plus explicit `simd[T, N]` types.
 3. `parallel for` over ranges and slices, with a work-stealing multicore runtime in both hosted and kernel modes. Test: speedup on 4 cores is ≥ 3× on bench kernels, with deterministic results.
 4. Perf targets:

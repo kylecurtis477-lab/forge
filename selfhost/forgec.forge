@@ -15700,11 +15700,16 @@ FS_RAR = ["%r8", "%r9", "%r10", "%r11", "%rsi", "%rdi", "%rbx", "%r12", "%r13", 
 # text that means register FS_RAR[i // 4] is named somewhere in a line (all widths)
 FS_RAM = ["%r8", "%r8", "%r8", "%r8", "%r9", "%r9", "%r9", "%r9", "%r10", "%r10", "%r10", "%r10", "%r11", "%r11", "%r11", "%r11", "%rsi", "%esi", "%si", "%si", "%rdi", "%edi", "%di", "%di", "%rbx", "%ebx", "%bx", "%bl", "%r12", "%r12", "%r12", "%r12", "%r13", "%r13", "%r13", "%r13", "%r14", "%r14", "%r14", "%r14", "%r15", "%r15", "%r15", "%r15"]
 # instructions with no implicit use of any FS_RAR register (j* and set* are checked by prefix)
-FS_RAOK = ["mov", "movl", "movzbl", "movzwl", "movsbq", "movswq", "movslq", "movabs", "add", "sub", "imul", "mul", "and", "or", "xor", "cmp", "test", "neg", "not", "shl", "shr", "sar", "cqo", "idiv", "div", "push", "pop", "lea", "leave", "ret", "ud2", "call", "addq", "subq", "movq"]
+FS_RAOK = ["mov", "movl", "movzbl", "movzwl", "movsbq", "movswq", "movslq", "movabs", "add", "sub", "imul", "mul", "and", "or", "xor", "cmp", "test", "neg", "not", "shl", "shr", "sar", "cqo", "idiv", "div", "push", "pop", "lea", "leave", "ret", "ud2", "call", "addq", "subq", "movq", "lock", "xchgq", "pause", "mfence", "rdtsc", "cld"]
 fs_hasasm = 0  # the function being compiled has an asm() statement: --fs-opt leaves its text alone
 fsr_o = list(4096)
 fsr_c = list(4096)
 fsr_r = list(4096)
+fsx_o = list(4096)  # step 4a: frame offset of every local of the function being compiled (scopes never reuse one)
+fsx_k = list(4096)  # 1: an 8-byte-or-narrower scalar local (the only kind a pinned-frame function may promote)
+nfsx = 0
+fs_fnu = 0  # unsafe operations in the function being compiled (step 4a needs 0)
+fsp_pin = list(4096)  # step 4a: frame offsets named by a %rbp form other than the promotable ones
 fs_gon = 0
 nfsd = 0
 fsd_ln = list(262144)
@@ -15852,7 +15857,8 @@ FS_UNSAFE_FNS = ["asm", "load8", "load16", "load32", "load64", "vload8", "vload1
 
 def fs_unsafe_op(what):
 # one unsafe operation at fp: allowed only in an unsafe region
-    global fs_uops, fs_utot, fs_ufixed
+    global fs_uops, fs_utot, fs_ufixed, fs_fnu
+    fs_fnu += 1
     if fs_unsafe > 0:
         fs_uops += 1
         fs_utot += 1
@@ -16270,7 +16276,7 @@ def fs_local(nm):
     return -1
 
 def fs_newlocal(nm, t):
-    global nfsl, fs_frame
+    global nfsl, fs_frame, nfsx
     a = ftal[t]
     if a < 8:
         a = 8
@@ -16291,6 +16297,12 @@ def fs_newlocal(nm, t):
     fsl_mu[nfsl] = 0
     fsl_bl[nfsl] = 0
     fsl_dead[nfsl] = 0
+    if nfsx < 4096:
+        fsx_o[nfsx] = 0 - fs_frame
+        fsx_k[nfsx] = 0
+        if ftsz[t] <= 8 and fsk[t] != 2 and fsk[t] != 3 and fsk[t] != 5:
+            fsx_k[nfsx] = 1
+        nfsx += 1
     nfsl += 1
     return nfsl - 1
 
@@ -19618,7 +19630,7 @@ def fs_function1(f):
     fs_genv_pop(old)
 
 def fs_function2(f):
-    global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop, nfsdf, fs_sdep, fs_term, fs_spn, fs_gon, nfsgf, fs_rslot, fs_hasasm
+    global fp, nfsl, fs_frame, fs_ret, fs_rty, fs_dep, nfsloop, nfsdf, fs_sdep, fs_term, fs_spn, fs_gon, nfsgf, fs_rslot, fs_hasasm, nfsx, fs_fnu
     at = fsf_at[f]
     nm = fsf_n[f]
     sec = fsf_sec[f]
@@ -19654,6 +19666,8 @@ def fs_function2(f):
     pidx = nout
     e("sub $0,%rsp")
     nfsl = 0
+    nfsx = 0
+    fs_fnu = 0
     fs_frame = 0
     if fs_sp:
         fs_frame = 8
@@ -19773,6 +19787,8 @@ def fs_hasbuf():
 # unpromoted. So a slot whose address is taken (lea), any aggregate, and every function with inline asm or a
 # stack protector stays in memory. Then fs_rapeep removes stack-machine push/pop pairs (in every function
 # without an asm() statement; functions with one are left exactly as written).
+# Step 4a: in a function with no unsafe operation, a frame address (lea) or another %rbp form no longer stops
+# promotion; it pins the offsets it names, and only unpinned scalar locals (fsx_o/fsx_k) are promoted.
 def fs_ra_slot(o):
 # "N(%rbp)" -> N if N < 0; 1 for N >= 0; 2 if o is not that form
     if not ends(o, "(%rbp)"):
@@ -19822,6 +19838,7 @@ def fs_ra_mnok(mn):
 def fs_regalloc(s0):
     free = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
     nsl = 0
+    npin = 0
     ok = 1
     hascall = 0
     nret = 0
@@ -19851,7 +19868,14 @@ def fs_regalloc(s0):
                 ops = ""
                 if sp < len(b):
                     ops = substr(b, sp + 1, len(b))
-                if not fs_ra_mnok(mn):
+                if str_eq(mn, "rep"):
+                # step 4a: string copies and fills use rsi/rdi (and rcx/rax) implicitly
+                    if str_eq(ops, "movsb") or str_eq(ops, "stosb"):
+                        free[4] = 0
+                        free[5] = 0
+                    else:
+                        ok = 0
+                elif not fs_ra_mnok(mn):
                     ok = 0
                 if str_eq(mn, "call"):
                     hascall = 1
@@ -19878,6 +19902,12 @@ def fs_regalloc(s0):
                             nsl = fs_ra_use(substr(ops, 5, len(ops)), nsl)
                         else:
                             nsl = fs_ra_use(substr(ops, 0, len(ops) - 5), nsl)
+                    elif fs_fnu == 0:
+                    # step 4a: a function with no unsafe op may also take frame addresses (arrays, structs,
+                    # addr()) or use other %rbp forms; every offset such a line names is pinned in memory
+                        npin = fs_ra_pin(ops, npin)
+                        if npin < 0:
+                            ok = 0
                     else:
                         ok = 0
                     if nsl < 0:
@@ -19904,9 +19934,56 @@ def fs_regalloc(s0):
         while r < 11:
             free[r] = 0
             r += 1
+    if ok and nsl > 0 and npin > 0:
+    # pinned frame: only offsets that are scalar locals, and not pinned, may move to a register (a struct
+    # field or array word read as an 8-byte slot is not a local's offset; safe code cannot index past an
+    # aggregate, so the scalar slots are reached only through these lines)
+        k = 0
+        while k < nsl:
+            if not fs_ra_scalar(fsr_o[k]) or fs_ra_pinned(fsr_o[k], npin):
+                fsr_c[k] = 0
+            k += 1
     if ok and nsl > 0:
         fs_ra_assign(s0, nsl, free)
     fs_rapeep(s0)
+
+def fs_ra_pin(ops, npin):
+# record every N(%rbp...) offset named in ops (an empty N is 0); returns the new count, -1 when full
+    p = 0
+    while p < len(ops):
+        q = p
+        while q + 5 <= len(ops) and not str_eq(substr(ops, q, q + 5), "(%rbp"):
+            q += 1
+        if q + 5 > len(ops):
+            return npin
+        b = q
+        while b > 0 and (char_at(ops, b - 1) == 45 or (char_at(ops, b - 1) >= 48 and char_at(ops, b - 1) <= 57)):
+            b -= 1
+        v = 0
+        if b < q:
+            v = fs_parse_int(substr(ops, b, q))
+        if npin >= 4096:
+            return -1
+        fsp_pin[npin] = v
+        npin += 1
+        p = q + 5
+    return npin
+
+def fs_ra_pinned(o, npin):
+    k = 0
+    while k < npin:
+        if fsp_pin[k] == o:
+            return 1
+        k += 1
+    return 0
+
+def fs_ra_scalar(o):
+    k = 0
+    while k < nfsx:
+        if fsx_o[k] == o:
+            return fsx_k[k]
+        k += 1
+    return 0
 
 def fs_ra_opnd(ops):
 # which operand of a two-operand `mov`/`cmp` is the frame slot when the other one is %rax, %rcx or %rdx:
@@ -19953,7 +20030,7 @@ def fs_ra_assign(s0, nsl, free):
             bk = -1
             k = 0
             while k < nsl:
-                if len(fsr_r[k]) == 0 and (bk < 0 or fsr_c[k] > fsr_c[bk]):
+                if len(fsr_r[k]) == 0 and fsr_c[k] > 0 and (bk < 0 or fsr_c[k] > fsr_c[bk]):
                     bk = k
                 k += 1
             if bk >= 0 and (r < 6 or fsr_c[bk] >= 3):

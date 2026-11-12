@@ -270,6 +270,11 @@ back clobbered by sysret, went away when rt_sigreturn started leaving by iretq. 
 live patching, drivers, forgefs, objstore) at O2 and O0 with the `--fs-opt` kernel, and `dwarf/*` builds
 the `-g` kernel with `--fs-opt` too (the image must not change with `-g`).
 
+Step 4a (promotion next to frame aggregates) adds `rep movsb`/`rep stosb` (rsi/rdi then stay out of the free
+set), `lock`, `xchgq`, `pause`, `mfence`, `rdtsc` and `cld` to the instructions the pass accepts; none of them
+touches an allocatable register implicitly. Functions with unsafe operations (all hand-written asm callers)
+keep the step 1-3 rules: any frame address still stops promotion there.
+
 ## User W^X (Phase 5.4a)
 - `elf_load` (user.fsi) rejects a PT_LOAD with PF_W|PF_X, and rejects a segment that lands on an already-mapped page whose W/NX bits differ from its own, so no page is ever writable and executable or silently gets weaker permissions. Rejections bump `elf_wx_rejects`.
 - Text pages are mapped read-only + executable; everything else (data, bss, stack, brk, mmap) is NX. User programs are linked with `-z separate-code -z noexecstack`.

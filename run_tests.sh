@@ -92,12 +92,13 @@ for t in tests/fs/*.forge; do
 done
 # --fs-opt (Phase 12.1 step 1, opt-in): every freestanding program must print the same with the flag, and
 # tests/fs/regalloc.forge must come out with ra_leaf fully in registers, ra_calls using a callee-saved register
-# and ra_addr (address taken) untouched
+# and ra_addr (address taken) untouched; step 4a: ra_arr (frame array), ra_cpy (rep movsb) and ra_mix (addr() of
+# one local) still promote their other scalars
 for t in tests/fs/*.forge; do
   c=""; [ -f "${t%.forge}.c" ] && gcc -O1 -ffreestanding -fno-pic -fno-stack-protector -c -o build/t_fsc.o "${t%.forge}.c" && c=build/t_fsc.o
   build/forgec "$t" build/t_fs.s $FORGEC_FLAGS --fs-opt && build/fas -o build/t_fs.o build/t_fs.s && build/fld -o build/t_fs build/t_fs.o $c && build/t_fs | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS fs-opt $t" || { echo "FAIL fs-opt $t"; fail=1; }
 done
-build/forgec tests/fs/regalloc.forge build/t_ra.s $FORGEC_FLAGS --fs-opt && [ "$(awk '/^ra_leaf:/,/ret$/' build/t_ra.s | grep -c '(%rbp)')" = 0 ] && [ "$(awk '/^ra_addr:/,/ret$/' build/t_ra.s | grep -c '(%rbp)')" -gt 0 ] && awk '/^ra_calls:/,/ret$/' build/t_ra.s | grep -q 'mov %rax,%rbx' && echo "PASS fs-opt-shape" || { echo "FAIL fs-opt-shape"; fail=1; }
+build/forgec tests/fs/regalloc.forge build/t_ra.s $FORGEC_FLAGS --fs-opt && [ "$(awk '/^ra_leaf:/,/ret$/' build/t_ra.s | grep -c '(%rbp)')" = 0 ] && [ "$(awk '/^ra_addr:/,/ret$/' build/t_ra.s | grep -c '(%rbp)')" -gt 0 ] && awk '/^ra_calls:/,/ret$/' build/t_ra.s | grep -q 'mov %rax,%rbx' && awk '/^ra_arr:/,/ret$/' build/t_ra.s | grep -q '%rbx' && awk '/^ra_cpy:/,/ret$/' build/t_ra.s | grep -q 'rep movsb' && awk '/^ra_cpy:/,/ret$/' build/t_ra.s | grep -q '%rbx' && awk '/^ra_mix:/,/ret$/' build/t_ra.s | grep -q 'lea -[0-9]*(%rbp)' && awk '/^ra_mix:/,/ret$/' build/t_ra.s | grep -q '%r8' && echo "PASS fs-opt-shape" || { echo "FAIL fs-opt-shape"; fail=1; }
 # constant division: in c_i64_7 and c_u64_641 only the three divisions by a variable keep div/idiv
 build/forgec tests/fs/cdiv.forge build/t_cd.s $FORGEC_FLAGS --fs-opt && [ "$(awk '/^c_i64_7:/,/ret$/' build/t_cd.s | grep -c '    idiv ')" = 3 ] && [ "$(awk '/^c_u64_641:/,/ret$/' build/t_cd.s | grep -c '    div ')" = 3 ] && echo "PASS fs-opt-cdiv-shape" || { echo "FAIL fs-opt-cdiv-shape"; fail=1; }
 # float globals take float or integer literals only (tests/fs/fglobals.forge checks the bits)

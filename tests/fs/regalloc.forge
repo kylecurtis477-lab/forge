@@ -3,7 +3,13 @@
 # functions with calls whose locals move into callee-saved ones (ra_calls, ra_rec), and the cases that must
 # stay in memory. run_tests.sh runs every tests/fs program with and without the flag (same output), and checks
 # that ra_leaf is fully promoted, ra_calls uses %rbx, and ra_addr is not promoted.
+# Step 4a: functions with frame arrays, structs or addr() promote their scalar locals too (ra_arr, ra_cpy,
+# ra_mix); the aggregates and any address-taken scalar stay in memory (ra_mix's x).
 include "linux.fsi"
+
+struct RaPair:
+    a: i64
+    b: i64
 
 def ra_leaf(n: i64, k: i64) -> i64:
 # loop counter, accumulator and bound all in registers; shifts use %cl, % and / use %rdx
@@ -86,6 +92,49 @@ def ra_rec(n: i64) -> i64:
     a += b + c
     return a % 1000003
 
+def ra_arr(n: i64) -> i64:
+# step 4a: a frame array (lea of the frame) no longer stops i, s and t from moving to registers
+    v: i64[16]
+    i: i64 = 0
+    while i < 16:
+        v[i] = i * i - n
+        i += 1
+    s: i64 = 0
+    t: i64 = 1
+    i = 0
+    while i < 16:
+        s += v[i] * t
+        t = (t * 3) % 101
+        i += 1
+    return s
+
+def ra_cpy(w: i64[4], n: i64) -> i64:
+# step 4a: an array parameter is copied into the frame with rep movsb (which names rsi/rdi implicitly, so a
+# leaf keeps r8-r11 only); the struct's fields stay in memory, k and acc move to registers
+    p: RaPair
+    p.a = n
+    p.b = n + 1
+    acc: i64 = 0
+    k: i64 = 0
+    while k < 10:
+        w[k % 4] = w[k % 4] + k
+        p.a = p.a + w[k % 4]
+        acc += p.a - p.b
+        k += 1
+    return acc + w[3]
+
+def ra_mix(n: i64) -> i64:
+# step 4a: x's address is taken, so x stays in memory; j and acc may still be promoted
+    x: i64 = n
+    p: ptr[i64] = addr(x)
+    acc: i64 = 0
+    j: i64 = 0
+    while j < 7:
+        p[0] = p[0] + j
+        acc += x * 2
+        j += 1
+    return acc + x
+
 def main() -> i64:
     put_i64(ra_leaf(1000, 7))
     nl()
@@ -102,5 +151,16 @@ def main() -> i64:
     put_i64(ra_calls(40))
     nl()
     put_i64(ra_rec(20))
+    nl()
+    put_i64(ra_arr(5))
+    nl()
+    wv: i64[4]
+    wv[0] = 1
+    wv[1] = 2
+    wv[2] = 3
+    wv[3] = 4
+    put_i64(ra_cpy(wv, 9) + wv[0])
+    nl()
+    put_i64(ra_mix(4))
     nl()
     return 0
