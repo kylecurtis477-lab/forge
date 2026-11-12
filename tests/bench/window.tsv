@@ -1,0 +1,3 @@
+2026-11-11 18:00 CST	aaa	selfcompile_ms=2050	fib=10000/8000	loop=100000/80000
+2026-11-11 18:30 CST	bbb	selfcompile_ms=2700	fib=10000/8000	loop=140000/80000
+2026-11-11 19:00 CST	ccc	selfcompile_ms=2600	fib=10000/8000	loop=130000/80000

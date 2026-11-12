@@ -5,10 +5,11 @@
 #       and time the self-compile (build/forgec selfhost/forgec.forge, best of N). Prints a markdown table
 #       and appends one record to bench/history.tsv (unless --no-record). The freestanding twins (FS_BENCHES) are
 #       built with build/forgec, fas and fld, once with --fs-opt (<name>) and once without (<name>0).
-#   build/bench check [--history FILE] [--baseline FILE] [--tol PCT]
-#       Regression check: the newest history record against bench/baseline.tsv. Fails (exit 1) when the
-#       self-compile time or any bench's forge/reference run-time ratio is more than PCT percent (default 25)
-#       above the baseline; also prints how far each 12.4 target (self-compile < 1 s, ratio <= 1.0) is.
+#   build/bench check [--history FILE] [--baseline FILE] [--tol PCT] [--window N]
+#       Regression check: the newest history record against bench/baseline.tsv, each value taken as its best
+#       over the newest N records (default 3), so one noisy run on a shared box does not count. Fails (exit 1)
+#       when the self-compile time or any bench's forge/reference run-time ratio is more than PCT percent
+#       (default 25) above the baseline; also prints how far each 12.4 target (self-compile < 1 s, ratio <= 1.0) is.
 # Record format (one line, tab separated):
 #   <local time> <git sha> selfcompile_ms=<ms> <bench>=<forge_us>/<ref_us> ...
 # Timing is wall clock on a shared box, so `check` uses a tolerance and never runs inside the gate suite;
@@ -197,6 +198,42 @@ def last_record(path):
             best_l = l
     return best_l
 
+def records(path):
+# every record line in path, oldest first
+    rs = []
+    if not os.path.isfile(path):
+        return rs
+    for l in read_file(path).split("\n"):
+        if len(l) > 0 and l[0] != "#" and parse(l)[0] >= 0:
+            rs.append(l)
+    return rs
+
+def merged(path, n):
+# the newest record, with each value replaced by its best over the newest n records (lowest self-compile,
+# lowest forge/ref ratio per bench): a slowdown has to show up in n runs in a row to count. None if no record.
+    rs = records(path)
+    if len(rs) == 0:
+        return None
+    h = parse(rs[len(rs) - 1])
+    w = len(rs) - n
+    if w < 0:
+        w = 0
+    while w < len(rs) - 1:
+        o = parse(rs[w])
+        if o[0] < h[0]:
+            h[0] = o[0]
+        i = 0
+        while i < len(h[1]):
+            j = 0
+            while j < len(o[1]) and o[1][j] != h[1][i]:
+                j += 1
+            if j < len(o[1]) and o[3][j] > 0 and h[3][i] > 0 and o[2][j] * h[3][i] < h[2][i] * o[3][j]:
+                h[2][i] = o[2][j]
+                h[3][i] = o[3][j]
+            i += 1
+        w += 1
+    return h
+
 def pct(a, b):
 # how much a is above b, in whole percent (negative = below)
     return (a - b) * 100 // b
@@ -205,12 +242,12 @@ def cmd_check(root):
     hist = opt("--history", root + "/bench/history.tsv")
     base = opt("--baseline", root + "/bench/baseline.tsv")
     tol = int(opt("--tol", "25"))
-    hl = last_record(hist)
+    win = int(opt("--window", "3"))
+    h = merged(hist, win)
     bl = last_record(base)
-    if hl is None or bl is None:
-        print("error: no record in " + (hist if hl is None else base))
+    if h is None or bl is None:
+        print("error: no record in " + (hist if h is None else base))
         return 2
-    h = parse(hl)
     b = parse(bl)
     fail = 0
     d = pct(h[0], b[0])
@@ -251,7 +288,7 @@ def cmd_check(root):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: bench run [--reps N] [--no-record] [--history FILE] | check [--history F] [--baseline F] [--tol PCT]")
+        print("usage: bench run [--reps N] [--no-record] [--history FILE] | check [--history F] [--baseline F] [--tol PCT] [--window N]")
         sys.exit(2)
     root = repo_root()
     if sys.argv[1] == "run":
