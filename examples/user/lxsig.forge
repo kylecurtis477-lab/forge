@@ -7,7 +7,8 @@
 #                   through rt_sigreturn); rt_sigprocmask block / unblock (delivery when unblocked);
 #                   SIG_IGN, ignore-by-default and SA_RESETHAND; kill / tgkill of any other pid
 #                   -> EPERM (the sandbox); SIGSEGV from a read of an unmapped page and a write to
-#                   its own code, each resumed past the faulting instruction by editing the frame.
+#                   its own code, each resumed past the faulting instruction by editing the frame; and
+#                   rcx / r11 set before a faulting load still hold their values after the resume.
 #   run lxsig term  SIGTERM to itself with the default action: the process ends, status 143.
 
 EINVAL = 0xFFFFFFFFFFFFFFEA
@@ -46,10 +47,13 @@ def lsys(n: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64:
 def restorer():
     asm("mov $15, %eax", "syscall", "ud2")
 
-# loads from a; the 3-byte mov is what faults
+# loads from a with rcx = 0x5A5A0000 and r11 = 0xA5A5 set first; the 3-byte mov is what faults. Returns
+# the loaded rax + rcx + r11 (RX_SUM more than rax when both registers survive the resumed fault)
+RX_SUM = 0x5A5AA5A5
 @naked
 def probe_rd(a: u64) -> u64:
-    asm("mov (%rdi), %rax", "ret")
+    asm("mov $0x5A5A0000, %ecx", "mov $0xA5A5, %r11d", "mov (%rdi), %rax", "add %rcx, %rax", "add %r11, %rax",
+        "ret")
 
 # stores 1 to a; the 7-byte movq is what faults
 @naked
@@ -210,13 +214,19 @@ def lx_main(sp: u64):
     check(act(SIGSEGV, h, SA_SIGINFO | SA_RESTORER) == 0, "install SIGSEGV")
     skipn = 3
     rax_set = 0xDEAD
-    v = probe_rd(0x10)
+    raw = probe_rd(0x10)
+    v = raw - RX_SUM
     check(v == 0xDEAD and hits[SIGSEGV] == 1, "read of 0x10 -> SIGSEGV handler, resumed")
+    # rt_sigreturn leaves by iretq, so rcx and r11 come back as they were at the fault (sysret clobbered them)
+    check(raw - 0xDEAD == RX_SUM, "rcx and r11 survive the resumed SIGSEGV")
     check(lsig == SIGSEGV and lcode == 1 and lval == 0x10, "siginfo: SEGV_MAPERR, si_addr 0x10")
     check(((lmask >> SIGSEGV) & 1) == 1 and mask() == 0, "SIGSEGV blocked in its handler, unblocked after")
     put("lxsig: read of 0x10 -> SIGSEGV (SEGV_MAPERR) -> handler skipped the load, rax ")
     putn(v)
     put("\n")
+    put("lxsig: rcx + r11 after the resumed fault: ")
+    putn(raw - 0xDEAD)
+    put(" (want 1515890085)\n")
     flush()
     skipn = 7
     rax_set = 0xBEEF

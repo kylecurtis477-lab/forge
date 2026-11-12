@@ -35,6 +35,7 @@ struct Thread:
     fx_addr: u64
     sig_mask: u64  # 11.1d: Linux blocked signals (bit n = signal n)
     sig_pend: u64  # 11.1d: thread-directed pending signals (tgkill)
+    sig_rx: u64[2]  # rcx, r11 that rt_sigreturn restores (the iretq exit in user.fsi reads them via SF pad)
 
 asm(
     ".text",

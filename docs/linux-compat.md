@@ -211,6 +211,9 @@ across execve (handlers reset to SIG_DFL, as on Linux).
   rsi rdi r8 r9 r10 r11, 12 rip, 13 rsp, 14 rflags, 16..19 siginfo. A handler may edit rip / rax
   (lxsig does, to step over a faulting instruction); rt_sigreturn keeps rflags to the arithmetic
   flags + IF and refuses a kernel rip / rsp. Callee-saved registers survive through the handler's ABI.
+  rt_sigreturn restores rcx and r11 as well: it stores them in the thread (`sig_rx`) and sets the
+  syscall frame's pad word to point there, and the exit path (user.fsi `sigret_exit`) then leaves by
+  iretq, since sysret would need rcx = rip and r11 = rflags. Every other syscall still leaves by sysret.
 - A user page fault with a SIGSEGV handler installed and unblocked runs it
   (`linux: pid N SIGSEGV at rip=.. addr=.. -> its handler`); otherwise the process is killed as before.
 - Default actions: SIGCHLD, SIGURG, SIGWINCH, SIGCONT and the stop signals are ignored (no job
@@ -219,12 +222,13 @@ across execve (handlers reset to SIG_DFL, as on Linux).
 
 ## Test: lxsig
 
-`run lxsig` (34 checks): rt_sigaction refusals; a SA_SIGINFO handler run by kill(self) (siginfo,
+`run lxsig` (35 checks): rt_sigaction refusals; a SA_SIGINFO handler run by kill(self) (siginfo,
 the signal blocked inside the handler, the mask and kill's result restored by rt_sigreturn);
 SIG_BLOCK keeps SIGUSR1 pending until SIG_SETMASK; SIGKILL / SIGSTOP unblockable; tgkill of its own
 tid (SI_TKILL), an unknown tid -> ESRCH, pid 1 -> EPERM; SIG_IGN, SIGCHLD ignored by default,
 SA_RESETHAND; a read of 0x10 (SEGV_MAPERR) and a write to its own code (SEGV_ACCERR), each resumed
-by the handler past the instruction with a new rax. `run lxsig term` sends itself SIGTERM with the
+by the handler past the instruction with a new rax; and a load that faults with rcx = 0x5A5A0000 and
+r11 = 0xA5A5 sees both intact after the resume (`rcx + r11 ... 1515890085`). `run lxsig term` sends itself SIGTERM with the
 default action and exits 143.
 
 ## Not yet

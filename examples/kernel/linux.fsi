@@ -989,9 +989,9 @@ def lx_execve(frame: u64, dirfd: u64, upath: u64, uargv: u64, flags: u64) -> u64
 # The handler gets rdi = signal, rsi = &siginfo, rdx = &frame; it may edit words 3..14 (to resume
 # a faulting instruction elsewhere). rt_sigreturn (the restorer's syscall, rsp = frame + 8) checks
 # the magic, restores rip / rsp / rflags (user flags only; rip and rsp must be user addresses) and
-# rax, rdi, rsi, rdx, r8, r9, r10, and the blocked set. rcx and r11 are not restored (the return is
-# a sysret, as from any syscall); rbx, rbp, r12..r15 are the handler's callee-saved registers and
-# so already hold the interrupted values. A bad frame ends the process (status 128 + SIGSEGV).
+# rax, rcx, rdx, rsi, rdi, r8..r11, and the blocked set: the frame's pad word points the syscall exit at
+# thread.sig_rx (rcx, r11) and it leaves by iretq instead of sysret (which needs rcx = rip, r11 = rflags);
+# rbx, rbp, r12..r15 are the handler's callee-saved registers and so already hold the interrupted values. A bad frame ends the process (status 128 + SIGSEGV).
 # Delivery is at syscall exit only: a thread parked in futex wait is not interrupted.
 
 ESRCH = 0xFFFFFFFFFFFFFFFD
@@ -1273,6 +1273,9 @@ def lx_sigreturn(sf: ptr[SFrame]) -> u64:
     sf.r8 = w[8]
     sf.r9 = w[9]
     sf.r10 = w[10]
+    t.sig_rx[0] = w[4]
+    t.sig_rx[1] = w[11]
+    sf.pad = u64(addr(t.sig_rx[0]))  # leave by iretq so rcx and r11 come back too
     t.sig_mask = w[2] & ~LX_UNCATCH & 0xFFFFFFFE
     return w[3]
 
