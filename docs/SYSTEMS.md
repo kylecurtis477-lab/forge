@@ -80,6 +80,10 @@ being reported as a bare `qemu rc=-9` (which was just the harness's own SIGKILL)
   the monitor needs QEMU's global lock and earlier stalled guests resumed right after the monitor dump.
   It also records the box side over the same window (steal ticks per box CPU, since the box is itself a
   VM; memory/cpu/io pressure; load; other QEMU processes; the top CPU users).
+  The box is at times suspended whole by its own hypervisor (90-145 s seen; its kernel logs "crng reseeded
+  due to virtual machine fork"), and QEMU stops with it. The harness counts a loop pass over 3 s as such a
+  freeze: that time is not guest silence, run time or timeout, and the log gets "[harness: box frozen Ns, not
+  counted]". Before this, every freeze longer than the 60 s silence limit was reported as a guest HANG.
 The kills seen so far (g11 bios, g52 bios-smp1, g64 uefi) were all of this second kind: the serial log
 stops mid-boot at different points (after the blkd restart, after the Linux personality line, inside the
 module load/unload cycles) and nothing follows for minutes, while the same boot alone takes 65-85 s and

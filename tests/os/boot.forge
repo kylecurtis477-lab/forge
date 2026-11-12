@@ -315,7 +315,22 @@ def boot(h, attempt):
     dump = ""
     rc = None
     eof = False
+    tprev = t0
+    frozen = 0.0
     while rc is None:
+    # The box running this harness is itself a VM that is at times suspended whole (90-145 s seen; its kernel
+    # logs "crng reseeded due to virtual machine fork"). QEMU stops with it, so wall time jumps with no serial
+    # output. One loop pass takes ~0.05 s plus the actions below (which reset tprev); a pass over 3 s means the
+    # box was frozen, so that time is not counted as guest silence, run time or timeout.
+        tn = time.time()
+        if tn - tprev > 3.0:
+            g = tn - tprev - 0.05
+            frozen += g
+            tlast += g
+            t0 += g
+            deadline += g
+            buf += f"[harness: box frozen {fix(g)}s, not counted]"
+        tprev = tn
         w = os.waitpid(pid, 1)
         if w[0] == pid:
             rc = os.waitstatus_to_exitcode(w[1])
@@ -341,6 +356,7 @@ def boot(h, attempt):
                 dump = f"{h.log}.hang{attempt}"
                 load = split__1(proc_text("/proc/loadavg"))[0]
                 hdr = f"hang: no serial output for {fix(now - tlast)}s (stopped at +{fix(tlast - t0)}s), load {load}\nlast line: {last_line(buf)}\n\n"
+                hdr = concat(hdr, f"box frozen {fix(frozen)}s in total before this (not counted)\n\n")
                 host = host_capture(pid, concat(dump, ".host"))
                 regs = monitor(h, "info registers -a", 2.0)
                 write_file(dump, concat(concat(concat(hdr, host), monitor(h, "info cpus")), concat(concat("\n", regs), concat("\n", stack_dump(h, regs)))))
@@ -362,6 +378,7 @@ def boot(h, attempt):
                     os.write(sin, concat(line, "\r"))
             except Exception as ex:
                 buf += f"[harness: send failed: {ex}]"
+            tprev = time.time()
         if not shot_ok and "KERNEL OK\n" in buf:
             shot_ok = True
             if FBTEXT[0] != "":
@@ -370,6 +387,7 @@ def boot(h, attempt):
                 os.write(sin, "q")
             except Exception:
                 pass
+            tprev = time.time()
         time.sleep(0.05)
     if rc is None:
         __syscall(62, pid, 9, 0)
