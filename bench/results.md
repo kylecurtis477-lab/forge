@@ -44,3 +44,17 @@ Note: the IR backend only takes plain int functions with int params, so 1 of 622
 The hybrid-function recompile is replaced by in-place register compaction (hyb_compact): registers held by IR-only vars are released without a second compile.
 - Self-compile best of 5: **1.21s** (was 1.66s).
 - Runtimes unchanged: fib 0.010, loop 0.093, strbuild 0.035, lists 0.042, floats 0.015, strops 0.019 (Rust 0.007/0.072/0.058/0.057/0.015/0.017).
+
+## Tracking starts (2026-11-11 18:30 CST, at 2aba6e2)
+`./forge bench run` (tools/bench.forge) replaces hand runs of run_bench.py; records go to bench/history.tsv and
+`./forge bench check` compares them with bench/baseline.tsv. Best of 5 on the shared box while another worker ran QEMU:
+| bench | Forge run | Rust -O3 run | ratio |
+|---|---|---|---|
+| fib | 11.4 ms | 7.5 ms | 1.51 |
+| loop | 113.7 ms | 86.1 ms | 1.31 |
+| strbuild | 46.7 ms | 73.8 ms | 0.63 |
+| lists | 66.0 ms | 93.8 ms | 0.70 |
+| floats | 18.3 ms | 17.9 ms | 1.02 |
+| strops | 24.9 ms | 23.6 ms | 1.05 |
+
+Self-compile 2354 ms (1.21 s on 2026-11-01; the compiler has grown since, and this box was loaded).

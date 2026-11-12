@@ -1,0 +1,6 @@
+ok selfcompile 900 ms (baseline 2000 ms, -55%)
+ok fib ratio 875/1000 (baseline 1250/1000, -30%)
+REGRESSION loop ratio 1625/1000 (baseline 1250/1000, 30%)
+target self-compile < 1000 ms: met
+target native parity (forge <= reference): 1/2 benches
+exit 1

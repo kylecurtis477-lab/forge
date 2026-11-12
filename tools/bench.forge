@@ -1,0 +1,221 @@
+# bench: Phase 12.4 performance tracking (Forge port and extension of bench/run_bench.py, kept as the reference).
+#   build/bench run [--reps N] [--no-record] [--history FILE]
+#       Compile every bench/<name>.forge with ./forge and its native reference bench/<name>.rs with
+#       rustc -C opt-level=3, check that both print the same output, time each binary (best of N, default 5)
+#       and time the self-compile (build/forgec selfhost/forgec.forge, best of N). Prints a markdown table
+#       and appends one record to bench/history.tsv (unless --no-record).
+#   build/bench check [--history FILE] [--baseline FILE] [--tol PCT]
+#       Regression check: the newest history record against bench/baseline.tsv. Fails (exit 1) when the
+#       self-compile time or any bench's forge/reference run-time ratio is more than PCT percent (default 25)
+#       above the baseline; also prints how far each 12.4 target (self-compile < 1 s, ratio <= 1.0) is.
+# Record format (one line, tab separated):
+#   <local time> <git sha> selfcompile_ms=<ms> <bench>=<forge_us>/<ref_us> ...
+# Timing is wall clock on a shared box, so `check` uses a tolerance and never runs inside the gate suite;
+# run_tests.sh only checks the record parser and the comparison logic on fixed inputs (tests/bench/).
+import os
+import sys
+import time
+
+BENCHES = ["fib", "loop", "strbuild", "lists", "floats", "strops"]
+
+def repo_root():
+    me = sys.argv[0]
+    here = os.getcwd()
+    if me.find("/") >= 0:
+        os.chdir(os.path.dirname(me) + "/..")
+    else:
+        os.chdir("..")
+    d = os.getcwd()
+    os.chdir(here)
+    return d
+
+def timed(args):
+# [elapsed ns, exit code, stdout]
+    s = time.perf_counter_ns()
+    r = os.run(args)
+    return [time.perf_counter_ns() - s, r[0], r[1].strip()]
+
+def best(args, reps):
+    b = -1
+    i = 0
+    while i < reps:
+        t = timed(args)
+        if t[1] != 0:
+            return -1
+        if b < 0 or t[0] < b:
+            b = t[0]
+        i += 1
+    return b
+
+def sh1(args):
+    r = os.run(args)
+    return r[1].strip()
+
+def opt(name, dflt):
+    i = 2
+    while i < len(sys.argv) - 1:
+        if sys.argv[i] == name:
+            return sys.argv[i + 1]
+        i += 1
+    return dflt
+
+def flag(name):
+    i = 2
+    while i < len(sys.argv):
+        if sys.argv[i] == name:
+            return True
+        i += 1
+    return False
+
+def ms3(ns):
+# ns as milliseconds with one decimal
+    t = ns // 100000
+    return str(t // 10) + "." + str(t % 10)
+
+def cmd_run(root):
+    reps = int(opt("--reps", "5"))
+    hist = opt("--history", root + "/bench/history.tsv")
+    if not os.path.isdir(root + "/bench/out"):
+        os.mkdir(root + "/bench/out")
+    rustc = "/usr/bin/rustc"
+    have_ref = os.path.isfile(rustc)
+    print("| bench | Forge run | Rust -O3 run | ratio | output |")
+    print("|---|---|---|---|---|")
+    rec = ""
+    bad = 0
+    for b in BENCHES:
+        src = root + "/bench/" + b + ".forge"
+        fb = root + "/bench/out/" + b + "-forge"
+        rb = root + "/bench/out/" + b + "-rust"
+        r = os.run([root + "/forge", src, "-o", fb])
+        if r[0] != 0:
+            print("error: " + b + ".forge failed to compile")
+            bad = 1
+            continue
+        fo = timed([fb])[2]
+        ft = best([fb], reps)
+        rt = 0
+        agree = fo
+        if have_ref:
+            r = os.run([rustc, "-C", "opt-level=3", "-o", rb, root + "/bench/" + b + ".rs"])
+            if r[0] == 0:
+                if timed([rb])[2] != fo:
+                    agree = "MISMATCH"
+                    bad = 1
+                rt = best([rb], reps)
+        ratio = "-"
+        if rt > 0:
+            q = ft * 100 // rt
+            ratio = str(q // 100) + "." + str(q // 10 % 10) + str(q % 10)
+        print("| " + b + " | " + ms3(ft) + " ms | " + ms3(rt) + " ms | " + ratio + " | " + agree + " |")
+        rec = rec + "\t" + b + "=" + str(ft // 1000) + "/" + str(rt // 1000)
+    sc = best([root + "/build/forgec", root + "/selfhost/forgec.forge", root + "/bench/out/selfcompile.s"], reps)
+    print("")
+    print("self-compile (build/forgec selfhost/forgec.forge, best of " + str(reps) + "): " + ms3(sc) + " ms")
+    when = sh1(["/bin/date", "+%Y-%m-%d %H:%M %Z"])
+    sha = sh1(["/usr/bin/git", "-C", root, "rev-parse", "--short", "HEAD"])
+    line = when + "\t" + sha + "\tselfcompile_ms=" + str(sc // 1000000) + rec + "\n"
+    if not flag("--no-record") and not bad:
+        old = ""
+        if os.path.isfile(hist):
+            old = read_file(hist)
+        write_file(hist, old + line)
+        print("recorded in " + hist)
+    return bad
+
+def parse(line):
+# record -> [selfcompile_ms, names, forge_us, ref_us]; selfcompile_ms is -1 if the line is not a record
+    f = line.split("\t")
+    sc = -1
+    names = []
+    fu = []
+    ru = []
+    i = 2
+    while i < len(f):
+        kv = f[i].split("=")
+        if len(kv) == 2:
+            if kv[0] == "selfcompile_ms":
+                sc = int(kv[1])
+            else:
+                p = kv[1].split("/")
+                if len(p) == 2:
+                    names.append(kv[0])
+                    fu.append(int(p[0]))
+                    ru.append(int(p[1]))
+        i += 1
+    return [sc, names, fu, ru]
+
+def last_record(path):
+    if not os.path.isfile(path):
+        return None
+    best_l = None
+    for l in read_file(path).split("\n"):
+        if len(l) > 0 and l[0] != "#" and parse(l)[0] >= 0:
+            best_l = l
+    return best_l
+
+def pct(a, b):
+# how much a is above b, in whole percent (negative = below)
+    return (a - b) * 100 // b
+
+def cmd_check(root):
+    hist = opt("--history", root + "/bench/history.tsv")
+    base = opt("--baseline", root + "/bench/baseline.tsv")
+    tol = int(opt("--tol", "25"))
+    hl = last_record(hist)
+    bl = last_record(base)
+    if hl is None or bl is None:
+        print("error: no record in " + (hist if hl is None else base))
+        return 2
+    h = parse(hl)
+    b = parse(bl)
+    fail = 0
+    d = pct(h[0], b[0])
+    st = "ok"
+    if d > tol:
+        st = "REGRESSION"
+        fail = 1
+    print(st + " selfcompile " + str(h[0]) + " ms (baseline " + str(b[0]) + " ms, " + str(d) + "%)")
+    i = 0
+    while i < len(h[1]):
+        j = 0
+        while j < len(b[1]) and b[1][j] != h[1][i]:
+            j += 1
+        if j < len(b[1]) and h[3][i] > 0 and b[3][j] > 0:
+        # compare forge/ref ratios (x1000) so a slower or faster box cancels out
+            hr = h[2][i] * 1000 // h[3][i]
+            br = b[2][j] * 1000 // b[3][j]
+            d = pct(hr, br)
+            st = "ok"
+            if d > tol:
+                st = "REGRESSION"
+                fail = 1
+            print(st + " " + h[1][i] + " ratio " + str(hr) + "/1000 (baseline " + str(br) + "/1000, " + str(d) + "%)")
+        i += 1
+    # Phase 12.4 targets: measured, reported, not gating
+    met = 0
+    if h[0] < 1000:
+        met = 1
+    print("target self-compile < 1000 ms: " + ("met" if met else "not met (" + str(h[0]) + " ms)"))
+    nm = 0
+    i = 0
+    while i < len(h[1]):
+        if h[3][i] > 0 and h[2][i] > h[3][i]:
+            nm += 1
+        i += 1
+    print("target native parity (forge <= reference): " + str(len(h[1]) - nm) + "/" + str(len(h[1])) + " benches")
+    return fail
+
+def main():
+    if len(sys.argv) < 2:
+        print("usage: bench run [--reps N] [--no-record] [--history FILE] | check [--history F] [--baseline F] [--tol PCT]")
+        sys.exit(2)
+    root = repo_root()
+    if sys.argv[1] == "run":
+        sys.exit(cmd_run(root))
+    if sys.argv[1] == "check":
+        sys.exit(cmd_check(root))
+    print("error: unknown command " + sys.argv[1])
+    sys.exit(2)
+
+main()

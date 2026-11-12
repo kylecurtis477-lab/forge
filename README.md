@@ -12,7 +12,7 @@ Forge is a small language with Python-like syntax. It is compiled ahead of time 
 ./build.sh                 # seed compiler -> stage2..stage4, checks fixpoint, installs build/forgec
 ./forge prog.forge -o prog # compile with self-hosted forgec + as + ld
 ./run_tests.sh
-bench/run_bench.py         # Forge vs Rust vs CPython
+bench/run_bench.py         # Forge vs Rust vs CPython (reference; tools/bench.forge is the Forge tracker)
 ```
 Optional bootstrap: `target/release/mylang file.forge [-o out] [-S]`, or `-e 'src'`.
 
@@ -110,6 +110,10 @@ Best of 5 wall clock. Rust: rustc -C opt-level=3 (unstripped binaries). Phase 1 
 
 (Run 2026-11-01 20:08 CST with the default -O, including the 2**62 band checks; self-compile 1.25s. Full history and -O0 numbers in bench/results.md.)
 
+Performance is tracked by `./forge bench run` (tools/bench.forge): each bench against its Rust -O3 reference, plus the
+self-compile time, appended to bench/history.tsv. `./forge bench check` compares the newest record with
+bench/baseline.tsv (fails above +25%) and reports the Phase 12.4 targets. See docs/tools-bench.md.
+
 ### Optimizing backend (default; `-O0` turns it off)
 Eligible functions are plain int functions with int params. They are lowered to a three-address IR with virtual registers and basic blocks. The passes are const/copy propagation with folding, unreachable-block and jump cleanup, local CSE, liveness-based DCE, and elimination of tag and bounds checks for typed non-escaping `list[int]` locals. Registers are assigned by linear scan over rsi/rdi/r8-r10 and rbx/r12-r15, with spilling. Division by a constant uses magic numbers. Any function that is not eligible uses the direct code generator.
 
@@ -132,6 +136,7 @@ Subsystem docs (design, formats, APIs, tests, limits):
 - docs/kernel-core.md: kernel core interface spec v1 (scheduler, IPC channels, capabilities), with Appendix A (verification scope: what the tests pin, what they do not, assumptions, DMA/IOMMU gaps, verifier-ready conventions)
 - docs/SYSTEMS.md "Process-state format": process-state v1 (examples/kernel/pstate.fsi), the single versioned per-process record; the kexec handoff (format v5) carries exactly these
 - docs/SYSTEMS.md "Nondeterminism hook": the kernel's single hook point for syscall results, timer interrupts, scheduler choices and random values (examples/kernel/nondet.fsi), recording off by default
+- docs/tools-bench.md: the Phase 12.4 performance tracker (bench records, baseline, regression check, targets)
 - docs/rfc/incremental.md: RFC (proposed, design only) for a query-based incremental compiler: module/function queries, dependency graph with early cutoff, content-addressed cache, LSP integration, byte-identical output (FIXPOINT, seals unaffected) and the test plan
 
 ## Limitations

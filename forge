@@ -16,6 +16,12 @@ if [ "$1" = "verify" ]; then
   [ "$D/build/forge_verify" -nt "$D/tools/forge_verify.forge" ] || "$0" "$D/tools/forge_verify.forge" -o "$D/build/forge_verify" >&2
   exec "$D/build/forge_verify" "$@"
 fi
+# forge bench run|check [...] : Phase 12.4 performance tracking (tools/bench.forge; bench/run_bench.py is the reference)
+if [ "$1" = "bench" ]; then
+  shift
+  [ "$D/build/bench" -nt "$D/tools/bench.forge" ] || "$0" "$D/tools/bench.forge" -o "$D/build/bench" >&2
+  exec "$D/build/bench" "$@"
+fi
 # forge pkg [--registry DIR] lock | build [-o OUT] | sha256 FILE... : package manager (tools/pkg.forge).
 # Run in a project directory (forge.toml). Registry: --registry, else $FORGE_REGISTRY, else ./registry.
 # build stages the locked sources into target/stage, compiles the main module to target/<main>

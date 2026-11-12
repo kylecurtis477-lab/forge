@@ -1,0 +1,2 @@
+# fixed baseline for the bench check logic test (run_tests.sh)
+2026-11-11 18:00 CST	abc1234	selfcompile_ms=2000	fib=10000/8000	loop=100000/80000

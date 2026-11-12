@@ -273,12 +273,22 @@ Each driver gets its own boot test, and none of them writes to disks it does not
 
 ## Phase 12 — Parallelism and performance
 *Pillar: E. Also the compiler perf list.*
+
+In plain terms: make Forge code and the Forge compiler fast. Kernel code gets real register allocation, loops
+get vectorized, `parallel for` spreads work over all cores, and every speed claim is measured and tracked in bench/.
 1. Register allocator and IR backend for fs/kernel mode (today only hosted code uses the IR backend).
 2. Auto-vectorization of simple loops (SSE2/AVX2, now that the kernel saves xsave state), plus explicit `simd[T, N]` types.
 3. `parallel for` over ranges and slices, with a work-stealing multicore runtime in both hosted and kernel modes. Test: speedup on 4 cores is ≥ 3× on bench kernels, with deterministic results.
 4. Perf targets:
    - self-compile under 1 s;
    - bench parity with gcc -O2 on the bench suite (tracked in bench/).
+   - *Status: tracking in place, targets not met yet.* `./forge bench run` (tools/bench.forge, docs/tools-bench.md)
+     records the self-compile time and each bench against its native reference in bench/history.tsv.
+     `./forge bench check` compares the newest record with bench/baseline.tsv: more than +25% fails.
+     run_tests.sh checks the comparison logic on fixed records (tests/bench), never live timing.
+     The reference is rustc -O3 for now; a gcc -O2 column needs C bench sources, which the All-Forge rule keeps out.
+     Baseline at 2aba6e2 (2026-11-11, shared box): self-compile 2354 ms; Forge/Rust run-time ratios
+     fib 1.51, loop 1.31, strbuild 0.63, lists 0.70, floats 1.02, strops 1.05.
 
 ## Phase 13 — Instant and declarative system
 *Pillar: D.*

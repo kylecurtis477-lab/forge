@@ -8,6 +8,7 @@
 # tests/grammar/: docs/GRAMMAR.md conformance (valid/ parse, invalid/ rejected) + grammar-based fuzzer
 # tests/diag/*.forge: --diagnostics=json output must match the golden .json (one object per error, schema v1)
 # tests/typeerrors/*.forge: static type errors; full diagnostic (line, col, source, caret) must match .expected
+# tests/bench/: tools/bench.forge regression-check logic on fixed records (bench timing never gates)
 cd "$(dirname "$0")"; fail=0; mkdir -p build
 for t in tests/*.forge; do
   case "$t" in tests/mod_*) continue;; esac
@@ -77,6 +78,11 @@ tests/generic/run.sh || fail=1
 tests/ed25519/run.sh || fail=1
 tests/atomic/run.sh || fail=1
 tests/ast/selfpp.sh || fail=1
+# tests/bench: tools/bench.forge record parser and regression logic on fixed records (timing itself never gates)
+./forge tools/bench.forge -o build/bench >/dev/null 2>&1 || { echo "FAIL bench-build"; fail=1; }
+for c in ok slow ratio; do
+  (build/bench check --history tests/bench/$c.tsv --baseline tests/bench/base.tsv; echo "exit $?") | diff -q - tests/bench/$c.expected >/dev/null && echo "PASS bench-check-$c" || { echo "FAIL bench-check-$c"; fail=1; }
+done
 build/forgec tests/tuples.forge build/t_ast.json --emit=ast-json && python3 -c 'import json;d=json.load(open("build/t_ast.json"));assert d["forge_ast"]==1 and d["root"]["k"]=="Module"' && echo "PASS ast-json-schema" || { echo "FAIL ast-json-schema"; fail=1; }
 for t in tests/fs/*.forge; do
   c=""; [ -f "${t%.forge}.c" ] && gcc -O1 -ffreestanding -fno-pic -fno-stack-protector -c -o build/t_fsc.o "${t%.forge}.c" && c=build/t_fsc.o

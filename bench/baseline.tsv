@@ -1,0 +1,3 @@
+# bench/baseline.tsv: the reference record for `bench check` (tools/bench.forge). Refresh it deliberately
+# (copy a fresh `bench run` record here) when a commit is meant to change performance; never to hide a regression.
+2026-11-11 18:30 CST	2aba6e2	selfcompile_ms=2354	fib=11469/7588	loop=113736/86174	strbuild=46724/73851	lists=66048/93838	floats=18309/17949	strops=24922/23659
