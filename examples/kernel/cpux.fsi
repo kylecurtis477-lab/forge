@@ -83,13 +83,19 @@ asm(".text",
     "  xor %eax, %eax", "ret",
     "probe_blocked:",
     "  mov $1, %eax", "ret",
-    # smep_probe(ufn): kernel call into user code -> 1 if blocked, 0 if it ran
+    # smep_probe(ufn): kernel call into user code -> 1 if blocked, 0 if it ran. The callee-saved registers
+    # are saved around the call (12.1 step 3): if SMEP did not block, the user bytes ran in ring 0 and may
+    # have clobbered them, and the kernel is built with --fs-opt, which keeps locals in rbx/r12-r15
     ".globl smep_probe",
     "smep_probe:",
+    "  push %rbp", "push %rbx", "push %r12", "push %r13", "push %r14", "push %r15",
     "  call *%rdi",
+    "  pop %r15", "pop %r14", "pop %r13", "pop %r12", "pop %rbx", "pop %rbp",
     "  xor %eax, %eax", "ret",
     "smep_blocked:",
-    "  add $8, %rsp", "mov $1, %eax", "ret",
+    "  add $8, %rsp",
+    "  pop %r15", "pop %r14", "pop %r13", "pop %r12", "pop %rbx", "pop %rbp",
+    "  mov $1, %eax", "ret",
     ".globl uaccess_labels",
     "uaccess_labels:",             # uaccess_labels(i) -> address of label i
     "  lea uaccess_tab(%rip), %rax", "mov (%rax,%rdi,8), %rax", "ret",

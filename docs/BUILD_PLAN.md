@@ -281,7 +281,7 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      1. `--fs-opt` (opt-in): leaf functions keep scalar locals in free caller-saved registers, plus a push/pop peephole. Done.
      2. Non-leaf functions: callee-saved registers (rbx, r12–r15), saved in the frame. Done.
      3. Turn `--fs-opt` on for the kernel, after auditing every hand-written asm routine that calls or is called
-        by Forge code for SysV register discipline; QEMU boot suite at O2 and O0.
+        by Forge code for SysV register discipline; QEMU boot suite at O2 and O0. Done.
      4. A real IR for fs mode (SSA, liveness-based allocation), reusing the hosted IR passes where the
         value model allows.
    - *Status: step 1 done (2026-11-11).* `forgec --fs-opt` works on each finished function's assembly text and is
@@ -315,6 +315,14 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      live across calls) and ra_rec (recursion with locals live across both calls); `fs-opt-shape` also checks
      that ra_calls uses %rbx. Kernel frame accesses with the flag: 15,632 without it, 15,187 after step 1,
      11,515 after step 2. Most remaining ones are in functions with arrays, structs or `addr()`.
+   - *Step 3 done (2026-11-12).* The kernel and kernel-next are built with `--fs-opt` (examples/kernel/build.forge
+     and build.sh; tests/dwarf/run.sh builds its `-g` kernel the same way so dwarf/image-unchanged-by-g still
+     compares like with like). Every top-level asm block and `@naked` function was audited for SysV register
+     discipline (table in docs/SYSTEMS.md, "Kernel asm and --fs-opt"); one fix: `smep_probe`, which calls user
+     bytes in ring 0 as a self-test, now saves rbp, rbx and r12–r15 around the call and restores them on the
+     `smep_blocked` fixup path too. Kernel code 534,272 to 495,157 bytes (-7.3%), frame accesses in kernel.s
+     16,312 to 11,860, div/idiv 150 to 25; 436 functions keep locals in callee-saved registers. The QEMU boot
+     suite passes at O2 and O0 with this kernel (SMEP still blocks the probe: `SMEP blocks kernel exec: 1`).
 2. Auto-vectorization of simple loops (SSE2/AVX2, now that the kernel saves xsave state), plus explicit `simd[T, N]` types.
 3. `parallel for` over ranges and slices, with a work-stealing multicore runtime in both hosted and kernel modes. Test: speedup on 4 cores is ≥ 3× on bench kernels, with deterministic results.
 4. Perf targets:

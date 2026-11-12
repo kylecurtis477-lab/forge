@@ -230,12 +230,42 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
 6. **Language and compiler:**
    - Weaker memory orderings (acquire/release) and `unsafe`-scoped raw pointers.
    - Slices with bounds checks, generics for containers, `defer`, and a register allocator for fs mode (the IR backend currently covers hosted code only).
-     Since started (Phase 12.1 step 1): `--fs-opt`, opt-in, keeps scalar locals in registers (caller-saved ones in leaf functions, callee-saved ones saved in the frame elsewhere) and removes stack-machine push/pop pairs, and divides by literal constants with a multiply (see BUILD_PLAN Phase 12.1). The kernel is still built without it.
+     Since started (Phase 12.1 step 1): `--fs-opt`, opt-in, keeps scalar locals in registers (caller-saved ones in leaf functions, callee-saved ones saved in the frame elsewhere) and removes stack-machine push/pop pairs, and divides by literal constants with a multiply (see BUILD_PLAN Phase 12.1). Since step 3 the kernel and kernel-next are built with it (examples/kernel/build.forge, build.sh and tests/dwarf/run.sh pass `--fs-opt`); see "Kernel asm and --fs-opt" below.
    - Debug info (DWARF line tables), so GDB works on QEMU's gdbstub.
 7. **Toolchain independence:** a built-in assembler and an ELF64/PE32+ writer and linker in Forge, which removes `as`/`ld`/`objcopy`, plus linker-script equivalents (section placement, entry, image base). Assembler done (Phase 7.1, `tools/fas.forge`); linker done (Phase 7.2, `tools/fld.forge`): the build no longer uses as/ld/objcopy past the bootstrap seed.
 8. **ARM64 target:** an AArch64 backend for fs mode, UEFI on ARM (AAVMF in QEMU `virt`), PL011 serial, GIC, and the generic timer.
 9. **Secure Boot:** sign `forgex64.efi` (sbsign/MOK) or chain through shim so it coexists with distro and Windows Secure Boot setups.
 10. **Never reboot (BUILD_PLAN Phase 2):** 1 module ABI, 2 isolated driver services, 3 supervisor restart, 4 tty hot-swap, 5 live patching, 6 kexec handoff — done.
+
+## Kernel asm and --fs-opt (Phase 12.1 step 3)
+
+`--fs-opt` keeps Forge locals in caller-saved registers (r8–r11, rsi, rdi) in leaf functions and in
+callee-saved registers (rbx, r12–r15, saved in the frame) elsewhere. That is only safe if every piece of
+hand-written assembly the kernel runs keeps the SysV rules: an asm routine called from Forge must preserve
+rbx, rbp and r12–r15, and anything that interrupts Forge code must save every caller-saved register. The
+compiler side is conservative: a function with any instruction outside a short whitelist (so every `cpuid`,
+`rdmsr`, `rep movs`, `lretq`, port I/O or other intrinsic or inline asm) is left alone, a register the body
+names anywhere is never used, and a jump out of the function keeps callee-saved registers out.
+
+Audit of every top-level `asm(...)` block and `@naked` function in examples/kernel (2026-11-12):
+
+| Routine | File | Verdict |
+|---|---|---|
+| `_start`, `kentry64`, `switch_stack`, `enter_ring3`, `ap_tramp` | boot.fsi, user.fsi, smp.fsi | never return to Forge; no contract |
+| `krel_apply` | boot.fsi | touches rax, rcx, rdx, r8, r9 only (caller-saved) |
+| `cpuid4` | cpux.fsi | saves and restores rbx around `cpuid` |
+| `xsetbv0`, `fpu_save`, `fpu_restore`, `fpu_reset` | cpux.fsi | rax, rcx, rdx only |
+| `copy_user`, `copy_str_user`, `smap_probe`, `uaccess_labels` | cpux.fsi | rax, rcx, rdx, rsi, rdi, r8, r9 only; the #PF fixups only rewrite rip |
+| `smep_probe` | cpux.fsi | **fixed**: it calls user bytes in ring 0 (a self-test that SMEP blocks it); it now saves rbp, rbx, r12–r15 around the call and restores them on both the return and the `smep_blocked` fixup path, so a CPU without SMEP cannot corrupt kernel registers |
+| `ctx_switch`, `thread_start` | sched.fsi | saves all callee-saved registers on the thread stack; `thread_start` only calls Forge |
+| `syscall_entry`, `fork_child_entry`, `kx_resume_entry`, `kx_restart_entry` | user.fsi | the frame holds every user register; `syscall_dispatch` is ordinary Forge |
+| `@interrupt` wrappers | compiler (`fs_wrapper`) | push all nine caller-saved registers before the body, pop after |
+| `read_rsp`, `ksym`, `ap_off`, `read_rflags`, `uimg`, `*_addr` | various | rax and their argument only |
+
+Modules (examples/modules) have no asm and are built without the flag; they follow the same ABI, so mixing
+is fine. Tests: the full QEMU boot suite (BIOS, UEFI, native loader, SMP and single CPU, IOMMU, kexec,
+live patching, drivers, forgefs, objstore) at O2 and O0 with the `--fs-opt` kernel, and `dwarf/*` builds
+the `-g` kernel with `--fs-opt` too (the image must not change with `-g`).
 
 ## User W^X (Phase 5.4a)
 - `elf_load` (user.fsi) rejects a PT_LOAD with PF_W|PF_X, and rejects a segment that lands on an already-mapped page whose W/NX bits differ from its own, so no page is ever writable and executable or silently gets weaker permissions. Rejections bump `elf_wx_rejects`.

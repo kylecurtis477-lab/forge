@@ -47,7 +47,9 @@ def main():
     os.chdir(root + "/examples/kernel")
     b = "../../build/kernel"
     mkdirs(b + "/iso/boot/grub")
-    flags = []
+    # 12.1 step 3: the kernel (and kernel-next) are built with --fs-opt (register allocation and constant
+    # division); every hand-written asm routine was audited for SysV register discipline (docs/SYSTEMS.md)
+    flags = ["--fs-opt"]
     for f in os.getenv("FORGEC_FLAGS", "").split():
         flags.append(f)
     # the user programs and BusyBox (examples/user/build.forge, tools/busybox/build.forge)
