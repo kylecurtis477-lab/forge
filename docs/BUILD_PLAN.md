@@ -356,6 +356,16 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      functions (sys_fork 79 to 23, smp_init 57 to 23, acpi_init 64 to 34), none worse; code 566,100 to
      566,260 bytes (+160, callee-saved saves). Loader frame accesses 401 to 388; user programs and modules
      unchanged (their aggregate functions use unsafe operations). Reseed.
+   - *Differential fuzzing for `--fs-opt` (2026-11-12).* Gate before any further step 4 work. tools/fsfuzz.forge
+     generates random, well-typed, terminating freestanding programs aimed at what the pass rewrites (up to 8
+     parameters, more scalar locals than free registers, `w: i64[4]` array parameters, frame arrays, `addr()` of
+     a local, calls to earlier functions, nested loops with read-only counters, wrapping arithmetic, shifts,
+     narrow casts, division by constants and by positive variables, signed and unsigned compares) and builds each
+     four ways: O2, -O0, `--fs-opt`, -O0 `--fs-opt`. The stdout plus exit status of all four must match; any diff
+     fails and prints the four results (`--keep` leaves the sources and binaries in build/fsfuzz). run_tests runs
+     `fs-opt-fuzz` (seed 1, 20 programs, about 10 s). Before landing: seeds 1-4, 305 programs (about 61,700
+     lines), 0 diffs; in the `--fs-opt` builds frame accesses drop (seed 7, program 0: 738 to 619) and rbx/r12/r8
+     are allocated, so promotion is exercised. See docs/tools-fsfuzz.md.
 2. Auto-vectorization of simple loops (SSE2/AVX2, now that the kernel saves xsave state), plus explicit `simd[T, N]` types.
 3. `parallel for` over ranges and slices, with a work-stealing multicore runtime in both hosted and kernel modes. Test: speedup on 4 cores is ≥ 3× on bench kernels, with deterministic results.
 4. Perf targets:

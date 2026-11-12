@@ -1,0 +1,288 @@
+# fsfuzz: differential fuzzer for the freestanding backend's --fs-opt (Phase 12.1).
+# usage: build/fsfuzz [--seed N] [--n COUNT] [--keep]
+# Generates COUNT random, well-typed, deterministic freestanding programs (build/fsfuzz/pK.forge) and builds
+# each four ways with build/forgec + build/fas + build/fld: default (O2), -O0, --fs-opt and -O0 --fs-opt.
+# Every build must print the same output and exit with the same code; any difference (or a compile or link
+# failure) is reported with the seed and program index and fails the run (exit 1).
+# The programs exercise what --fs-opt rewrites: many scalar locals (more than the free registers), up to 8
+# parameters (stack arguments), calls between functions (callee-saved promotion), bounded loops, narrow casts,
+# unsigned shifts and compares, division and modulo by constants (magic numbers) and by variables, frame arrays
+# indexed by masked values, array parameters (rep movsb copies) and addr() of a local (step 4a pinning).
+# No undefined behaviour: ints wrap, divisors are positive, shift counts are masked, indices are masked, every
+# loop has a constant bound. Deterministic: the same seed writes the same programs.
+import os
+import sys
+
+seed = [1]
+
+def rnd(n):
+# LCG (glibc constants) mod 2^31, kept small so hosted ints never leave 62 bits
+    seed[0] = (seed[0] * 1103515245 + 12345) % 2147483648
+    return (seed[0] // 65536) % n
+
+def pick(xs):
+    return xs[rnd(len(xs))]
+
+CONSTS = ["0", "1", "2", "3", "7", "10", "255", "1000", "65535", "123456789", "4294967295", "9223372036854775807", "6148914691236517205"]
+DIVS = ["3", "7", "10", "16", "100", "641", "65537", "1000000007"]
+
+def expr(vs, d):
+# an i64 expression over the variables vs
+    k = rnd(14)
+    if d <= 0 or k < 4:
+        if rnd(3) == 0 or len(vs) == 0:
+            return pick(CONSTS)
+        return pick(vs)
+    a = expr(vs, d - 1)
+    b = expr(vs, d - 1)
+    if k == 4:
+        return "(" + a + " + " + b + ")"
+    if k == 5:
+        return "(" + a + " - " + b + ")"
+    if k == 6:
+        return "(" + a + " * " + b + ")"
+    if k == 7:
+        return "(" + a + " " + pick(["&", "|", "^"]) + " " + b + ")"
+    if k == 8:
+        return "(" + a + " " + pick(["<<", ">>"]) + " (" + b + " & 63))"
+    if k == 9:
+        return "(" + a + " " + pick(["/", "%"]) + " " + pick(DIVS) + ")"
+    if k == 10:
+        return "(" + a + " " + pick(["/", "%"]) + " ((" + b + " & 1023) + 1))"
+    if k == 11:
+        return pick(["i64(u8(", "i64(i8(", "i64(u16(", "i64(i32(", "i64(u32("]) + a + "))"
+    if k == 12:
+        return "i64(u64(" + a + ") >> " + str(1 + rnd(62)) + ")"
+    return "(0 - " + a + ")"
+
+def cond(vs):
+    a = expr(vs, 1)
+    b = expr(vs, 1)
+    if rnd(2) == 0:
+        return "u64(" + a + ") " + pick(["<", ">", "<=", ">="]) + " u64(" + b + ")"
+    return a + " " + pick(["<", ">", "<=", ">=", "==", "!="]) + " " + b
+
+def block(lines, vs, rv, arrs, ind, d, nloop):
+# vs: assignable locals; rv: also readable (vs plus enclosing loop counters, which are never assigned)
+    n = 1 + rnd(5)
+    i = 0
+    while i < n:
+        k = rnd(12)
+        if k < 4 or d <= 0:
+            v = pick(vs)
+            if rnd(2) == 0:
+                lines.append(ind + v + " = " + expr(rv, 2))
+            else:
+                lines.append(ind + v + " " + pick(["+=", "-=", "^=", "|="]) + " " + expr(rv, 2))
+        elif k < 6:
+            lines.append(ind + "if " + cond(rv) + ":")
+            block(lines, vs, rv, arrs, ind + "    ", d - 1, nloop)
+            if rnd(2) == 0:
+                lines.append(ind + "else:")
+                block(lines, vs, rv, arrs, ind + "    ", d - 1, nloop)
+        elif k < 8:
+            c = "i" + str(nloop[0])
+            nloop[0] += 1
+            lines.append(ind + c + ": i64 = 0")
+            lines.append(ind + "while " + c + " < " + str(2 + rnd(12)) + ":")
+            block(lines, vs, rv + [c], arrs, ind + "    ", d - 1, nloop)
+            lines.append(ind + "    " + c + " += 1")
+        elif k < 10 and len(arrs) > 0:
+            a = pick(arrs)
+            m = a[1] - 1
+            if rnd(2) == 0:
+                lines.append(ind + a[0] + "[(" + expr(rv, 1) + ") & " + str(m) + "] = " + expr(rv, 2))
+            else:
+                lines.append(ind + pick(vs) + " += " + a[0] + "[(" + expr(rv, 1) + ") & " + str(m) + "]")
+        else:
+            v = pick(vs)
+            lines.append(ind + v + " = (" + v + " * 31 + " + expr(rv, 1) + ") ^ (" + v + " >> 7)")
+        i += 1
+
+NP = []
+HASARR = []
+
+def gen_func(k):
+# function fK(p0..pN-1: i64 [, w: i64[4]]) -> i64; may call one of f0..f(K-1)
+    np = 1 + rnd(8)
+    ps = []
+    j = 0
+    while j < np:
+        ps.append("p" + str(j))
+        j += 1
+    arrp = rnd(3) == 0
+    sig = ""
+    j = 0
+    while j < np:
+        if j > 0:
+            sig = sig + ", "
+        sig = sig + ps[j] + ": i64"
+        j += 1
+    if arrp:
+        sig = sig + ", w: i64[4]"
+    lines = ["def f" + str(k) + "(" + sig + ") -> i64:"]
+    vs = []
+    for p in ps:
+        vs.append(p)
+    nl = 2 + rnd(12)
+    j = 0
+    while j < nl:
+        v = "v" + str(j)
+        lines.append("    " + v + ": i64 = " + expr(vs, 2))
+        vs.append(v)
+        j += 1
+    arrs = []
+    if arrp:
+        arrs.append(["w", 4])
+    if rnd(2) == 0:
+        lines.append("    t: i64[8]")
+        lines.append("    tz: i64 = 0")
+        lines.append("    while tz < 8:")
+        lines.append("        t[tz] = tz * " + pick(CONSTS))
+        lines.append("        tz += 1")
+        arrs.append(["t", 8])
+    if rnd(3) == 0:
+    # step 4a: one local's address is taken (it must stay in memory); the others may still be promoted
+        lines.append("    q: ptr[i64] = addr(" + vs[len(vs) - 1] + ")")
+        lines.append("    q[0] = q[0] + " + expr(ps, 1))
+    if k > 0:
+        m = rnd(k)
+        args = ""
+        j = 0
+        while j < NP[m]:
+            if j > 0:
+                args = args + ", "
+            args = args + expr(vs, 1)
+            j += 1
+        if HASARR[m]:
+            lines.append("    ca: i64[4]")
+            lines.append("    ca[0] = " + expr(vs, 1))
+            lines.append("    ca[1] = 5")
+            lines.append("    ca[2] = " + expr(vs, 1))
+            lines.append("    ca[3] = 0 - 9")
+            args = args + ", ca"
+        lines.append("    c0: i64 = f" + str(m) + "(" + args + ")")
+        vs.append("c0")
+    nloop = [0]
+    block(lines, vs, vs, arrs, "    ", 3, nloop)
+    n = len(vs)
+    lines.append("    return (" + vs[n - 1] + " ^ " + vs[n - 2 if n > 1 else 0] + ") + " + expr(vs, 2))
+    NP.append(np)
+    HASARR.append(arrp)
+    return "\n".join(lines) + "\n"
+
+def gen_prog():
+    while len(NP) > 0:
+        NP.pop()
+        HASARR.pop()
+    nf = 2 + rnd(6)
+    # (the pragma is split so this tool's own source does not read as freestanding)
+    src = "# forge" + ": no-runtime\n# generated by tools/fsfuzz.forge\ninclude \"linux.fsi\"\n\n"
+    k = 0
+    while k < nf:
+        src = src + gen_func(k) + "\n"
+        k += 1
+    src = src + "def main() -> i64:\n    s: i64 = 0\n    wa: i64[4]\n    wa[0] = 3\n    wa[1] = 0 - 4\n    wa[2] = 77\n    wa[3] = 1\n"
+    k = 0
+    while k < nf:
+        args = ""
+        j = 0
+        while j < NP[k]:
+            if j > 0:
+                args = args + ", "
+            if rnd(2) == 0:
+                args = args + pick(CONSTS)
+            else:
+                args = args + str(rnd(100000))
+            j += 1
+        if HASARR[k]:
+            args = args + ", wa"
+        src = src + "    r" + str(k) + ": i64 = f" + str(k) + "(" + args + ")\n"
+        src = src + "    put_i64(r" + str(k) + ")\n    nl()\n    s = s * 3 + r" + str(k) + "\n"
+        k += 1
+    src = src + "    put_i64(s)\n    nl()\n    return s & 63\n"
+    return src
+
+CONFIGS = [[], ["-O0"], ["--fs-opt"], ["-O0", "--fs-opt"]]
+CNAMES = ["O2", "O0", "O2 --fs-opt", "O0 --fs-opt"]
+
+def build_run(d, name, cfg, tag):
+# [ok, "exit N | output"] for one configuration
+    s = d + "/" + name + "." + tag + ".s"
+    o = d + "/" + name + "." + tag + ".o"
+    b = d + "/" + name + "." + tag
+    r = os.run(["build/forgec", d + "/" + name + ".forge", s] + cfg)
+    if r[0] != 0:
+        return [False, "compile failed: " + r[1].strip()]
+    r = os.run(["build/fas", "-o", o, s])
+    if r[0] != 0:
+        return [False, "fas failed"]
+    r = os.run(["build/fld", "-o", b, o])
+    if r[0] != 0:
+        return [False, "fld failed"]
+    r = os.run(["/usr/bin/timeout", "10", b])
+    if r[0] == 124:
+        return [False, "timed out after 10 s"]
+    return [True, "exit " + str(r[0]) + " | " + r[1].replace("\n", " ")]
+
+def opt(name, dflt):
+    i = 1
+    while i < len(sys.argv) - 1:
+        if sys.argv[i] == name:
+            return sys.argv[i + 1]
+        i += 1
+    return dflt
+
+def main():
+    s0 = int(opt("--seed", "1"))
+    n = int(opt("--n", "50"))
+    keep = "--keep" in sys.argv
+    seed[0] = s0
+    d = "build/fsfuzz"
+    if not os.path.isdir(d):
+        os.mkdir(d)
+    write_file(d + "/linux.fsi", read_file("tests/fs/linux.fsi"))
+    bad = 0
+    lines = 0
+    i = 0
+    while i < n:
+        src = gen_prog()
+        lines += len(src.split("\n"))
+        name = "p" + str(i)
+        write_file(d + "/" + name + ".forge", src)
+        outs = []
+        ok = True
+        c = 0
+        while c < len(CONFIGS):
+            r = build_run(d, name, CONFIGS[c], str(c))
+            if not r[0]:
+                ok = False
+            outs.append(r[1])
+            c += 1
+        c = 1
+        while c < len(outs):
+            if outs[c] != outs[0]:
+                ok = False
+            c += 1
+        if not ok:
+            bad += 1
+            print("FAIL fsfuzz seed " + str(s0) + " program " + str(i) + " (" + d + "/" + name + ".forge)")
+            c = 0
+            while c < len(outs):
+                print("  " + CNAMES[c] + ": " + outs[c][:300])
+                c += 1
+        elif not keep:
+            c = 0
+            while c < len(CONFIGS):
+                for ext in [".s", ".o", ""]:
+                    f = d + "/" + name + "." + str(c) + ext
+                    if os.path.exists(f):
+                        os.remove(f)
+                c += 1
+        i += 1
+    print("fsfuzz: seed " + str(s0) + ", " + str(n) + " programs (" + str(lines) + " lines), 4 builds each (O2, O0, --fs-opt, -O0 --fs-opt): " + str(n - bad) + " agree, " + str(bad) + " differ")
+    if bad:
+        sys.exit(1)
+    sys.exit(0)
+
+main()
