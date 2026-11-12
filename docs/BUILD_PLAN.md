@@ -366,6 +366,15 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      `fs-opt-fuzz` (seed 1, 20 programs, about 10 s). Before landing: seeds 1-4, 305 programs (about 61,700
      lines), 0 diffs; in the `--fs-opt` builds frame accesses drop (seed 7, program 0: 738 to 619) and rbx/r12/r8
      are allocated, so promotion is exercised. See docs/tools-fsfuzz.md.
+   - *Asm audit as a checked list (2026-11-12).* The step 3 audit table in docs/SYSTEMS.md ("Kernel asm and
+     --fs-opt") is now a `- [x]` checklist covering the kernel and the user programs, and tests/asm-audit/run.sh
+     keeps it complete: it lists every `@naked` function, every top-level `asm(...)` block (its `.globl` symbols,
+     or its first label) and every ordinary function with inline asm, and fails on a routine missing from a
+     checked line, an unchecked `- [ ]` line, a stale name, or any asm in examples/modules or examples/efi. The
+     rewrite found one routine the table missed, `gdt_load` (cpu.fsi: far return to reload cs, rax only, and
+     `lretq` keeps it out of the pass), and added the 15 user routines (syscall shims, `regs_kept`,
+     `xmm_yield_check`, the lxthreads atomics, `tclone`). run_tests: asm-audit-kernel (31), asm-audit-user (15),
+     asm-audit-stale, asm-audit-none.
 2. Auto-vectorization of simple loops (SSE2/AVX2, now that the kernel saves xsave state), plus explicit `simd[T, N]` types.
 3. `parallel for` over ranges and slices, with a work-stealing multicore runtime in both hosted and kernel modes. Test: speedup on 4 cores is ≥ 3× on bench kernels, with deterministic results.
 4. Perf targets:

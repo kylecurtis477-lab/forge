@@ -87,6 +87,8 @@ done
 (build/bench check --history tests/bench/window.tsv --baseline tests/bench/base.tsv --window 1; echo "exit $?") | diff -q - tests/bench/window1.expected >/dev/null && echo "PASS bench-check-window1" || { echo "FAIL bench-check-window1"; fail=1; }
 # record integrity: full sha, dirty-tree refusal (scratch git repo, no timing)
 tests/bench/tree.sh build/bench || fail=1
+# --fs-opt asm discipline: every asm routine in examples/ must be checked off in docs/SYSTEMS.md (no build, no QEMU)
+tests/asm-audit/run.sh || fail=1
 build/forgec tests/tuples.forge build/t_ast.json --emit=ast-json && python3 -c 'import json;d=json.load(open("build/t_ast.json"));assert d["forge_ast"]==1 and d["root"]["k"]=="Module"' && echo "PASS ast-json-schema" || { echo "FAIL ast-json-schema"; fail=1; }
 for t in tests/fs/*.forge; do
   c=""; [ -f "${t%.forge}.c" ] && gcc -O1 -ffreestanding -fno-pic -fno-stack-protector -c -o build/t_fsc.o "${t%.forge}.c" && c=build/t_fsc.o

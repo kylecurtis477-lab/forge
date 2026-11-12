@@ -247,20 +247,35 @@ compiler side is conservative: a function with any instruction outside a short w
 `rdmsr`, `rep movs`, `lretq`, port I/O or other intrinsic or inline asm) is left alone, a register the body
 names anywhere is never used, and a jump out of the function keeps callee-saved registers out.
 
-Audit of every top-level `asm(...)` block and `@naked` function in examples/kernel (2026-11-12):
+Audit checklist (2026-11-12; kept complete by tests/asm-audit/run.sh, which lists every `@naked` function, every
+top-level `asm(...)` block and every ordinary function with inline asm, and fails on any routine missing here, any
+unchecked `- [ ]` line, any name no longer in examples/ or the compiler, or any asm in examples/modules or examples/efi):
 
-| Routine | File | Verdict |
-|---|---|---|
-| `_start`, `kentry64`, `switch_stack`, `enter_ring3`, `ap_tramp` | boot.fsi, user.fsi, smp.fsi | never return to Forge; no contract |
-| `krel_apply` | boot.fsi | touches rax, rcx, rdx, r8, r9 only (caller-saved) |
-| `cpuid4` | cpux.fsi | saves and restores rbx around `cpuid` |
-| `xsetbv0`, `fpu_save`, `fpu_restore`, `fpu_reset` | cpux.fsi | rax, rcx, rdx only |
-| `copy_user`, `copy_str_user`, `smap_probe`, `uaccess_labels` | cpux.fsi | rax, rcx, rdx, rsi, rdi, r8, r9 only; the #PF fixups only rewrite rip |
-| `smep_probe` | cpux.fsi | **fixed**: it calls user bytes in ring 0 (a self-test that SMEP blocks it); it now saves rbp, rbx, r12–r15 around the call and restores them on both the return and the `smep_blocked` fixup path, so a CPU without SMEP cannot corrupt kernel registers |
-| `ctx_switch`, `thread_start` | sched.fsi | saves all callee-saved registers on the thread stack; `thread_start` only calls Forge |
-| `syscall_entry`, `fork_child_entry`, `kx_resume_entry`, `kx_restart_entry` | user.fsi | the frame holds every user register; `syscall_dispatch` is ordinary Forge |
-| `@interrupt` wrappers | compiler (`fs_wrapper`) | push all nine caller-saved registers before the body, pop after |
-| `read_rsp`, `ksym`, `ap_off`, `read_rflags`, `uimg`, `*_addr` | various | rax and their argument only |
+Kernel (examples/kernel):
+
+- [x] `_start`, `kentry64`, `switch_stack` (boot.fsi), `enter_ring3` (user.fsi), `ap_tramp` (smp.fsi): never return to Forge; no contract.
+- [x] `krel_apply` (boot.fsi): touches rax, rcx, rdx, r8, r9 only (caller-saved).
+- [x] `cpuid4` (cpux.fsi): saves and restores rbx around `cpuid`.
+- [x] `xsetbv0`, `fpu_save`, `fpu_restore`, `fpu_reset` (cpux.fsi): rax, rcx, rdx only.
+- [x] `copy_user`, `copy_str_user`, `smap_probe`, `uaccess_labels` (cpux.fsi): rax, rcx, rdx, rsi, rdi, r8, r9 only; the #PF fixups only rewrite rip.
+- [x] `smep_probe` (cpux.fsi): **fixed** in step 3. It calls user bytes in ring 0 (a self-test that SMEP blocks it), so it saves rbp, rbx, r12–r15 around the call and restores them on both the return and the `smep_blocked` fixup path; a CPU without SMEP cannot corrupt kernel registers.
+- [x] `ctx_switch`, `thread_start_addr` (sched.fsi): `ctx_switch` saves all callee-saved registers on the thread stack; `thread_start` only calls Forge.
+- [x] `syscall_entry`, `syscall_entry_addr`, `fork_child_entry_addr`, `kx_resume_entry_addr`, `kx_restart_entry_addr` (user.fsi): the entry frames hold every user register and `syscall_dispatch` is ordinary Forge; the `*_addr` helpers return a label address in rax.
+- [x] `read_rsp`, `uimg` (kernel.forge), `ksym` (mm.fsi), `ap_off` (smp.fsi), `read_rflags` (sync.fsi): rax and their argument only.
+- [x] `gdt_load` (cpu.fsi): an ordinary function with inline asm (far return to reload cs, then the data segment registers); rax only, and `lretq` is outside the pass's whitelist, so the function keeps every local in memory.
+- [x] `user_hello_elf` (kernel.forge), `ksyms` (mm.fsi): data-only blocks (embedded images, the symbol table); no code.
+- [x] `@interrupt` wrappers (compiler, `fs_wrapper`): push all nine caller-saved registers before the body and pop them after (generated, so not listed by the test).
+
+User programs (examples/user, built with `--fs-opt` since step 3c):
+
+- [x] `syscall4`, `user_nop`, `read_cs` (ulib.fsi): caller-saved registers only (`syscall` itself clobbers rcx and r11).
+- [x] `xmm_yield_check` (ulib.fsi): pushes rbx and r12 before using them and pops them before `ret`.
+- [x] `lsys`, `fs_read`, `_start` (lxtest, lxfs, lxexec, lxsig, lxthreads): syscall shim and `%fs` load use caller-saved registers only; `_start` never returns.
+- [x] `regs_kept` (lxtest.forge): pushes rbx, rbp, r12–r15 first and pops them before `ret`.
+- [x] `restorer` (lxsig.forge): signal trampoline, `rt_sigreturn` then `ud2`; never returns.
+- [x] `probe_rd`, `probe_wr` (lxsig.forge): rax, rcx, r11 and the argument only.
+- [x] `cas32`, `xchg32`, `dec32` (lxthreads.forge): rax and the arguments only.
+- [x] `tclone` (lxthreads.forge): the parent returns rax; the child clears rbp, calls the thread function and exits, never returning.
 
 Modules (examples/modules) and the native UEFI loader (examples/efi/loader.forge) have no asm and are
 built with the flag too since step 3b; the loader's Microsoft-ABI entry wrapper saves rdi/rsi, and firmware
