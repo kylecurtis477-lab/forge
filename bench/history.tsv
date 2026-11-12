@@ -1,6 +1,10 @@
 # bench/history.tsv: one record per `bench run` (tools/bench.forge), newest last. `bench check` compares the
 # newest record with bench/baseline.tsv.
+# note=orphan (e42065b, 836c322, 207d8e7): the sha is not a commit in this repository; those runs were taken on
+# commits that were rewritten before landing (the sha names the work tree, not a landed commit). Kept for the
+# timings; never use them as a baseline. Since the integrity change, `bench run` records the full sha and refuses
+# a dirty tree (or marks it "+dirty" with --allow-dirty).
 2026-11-11 18:30 CST	2aba6e2	selfcompile_ms=2354	fib=11469/7588	loop=113736/86174	strbuild=46724/73851	lists=66048/93838	floats=18309/17949	strops=24922/23659
-2026-11-11 18:32 CST	e42065b	selfcompile_ms=1560	fib=10718/7075	loop=113788/90495	strbuild=44481/79595	lists=55145/64701	floats=18421/17646	strops=23643/21698
-2026-11-11 18:38 CST	836c322	selfcompile_ms=1719	fib=10717/7380	loop=113174/85260	strbuild=45984/80628	lists=69134/89184	floats=17877/17059	strops=22677/19703	fsloop=292240/86839	fsloop0=297521/86839	fsfib=18193/9336	fsfib0=18904/9336
-2026-11-11 18:46 CST	207d8e7	selfcompile_ms=1647	fib=10419/7525	loop=106433/83554	strbuild=44741/80683	lists=77329/60565	floats=17208/17005	strops=23818/21394	fsloop=184226/83313	fsloop0=296782/83313	fsfib=17562/7250	fsfib0=23691/7250
+2026-11-11 18:32 CST	e42065b	selfcompile_ms=1560	fib=10718/7075	loop=113788/90495	strbuild=44481/79595	lists=55145/64701	floats=18421/17646	strops=23643/21698	note=orphan
+2026-11-11 18:38 CST	836c322	selfcompile_ms=1719	fib=10717/7380	loop=113174/85260	strbuild=45984/80628	lists=69134/89184	floats=17877/17059	strops=22677/19703	fsloop=292240/86839	fsloop0=297521/86839	fsfib=18193/9336	fsfib0=18904/9336	note=orphan
+2026-11-11 18:46 CST	207d8e7	selfcompile_ms=1647	fib=10419/7525	loop=106433/83554	strbuild=44741/80683	lists=77329/60565	floats=17208/17005	strops=23818/21394	fsloop=184226/83313	fsloop0=296782/83313	fsfib=17562/7250	fsfib0=23691/7250	note=orphan

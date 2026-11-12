@@ -1,17 +1,23 @@
 # bench: Phase 12.4 performance tracking (Forge port and extension of bench/run_bench.py, kept as the reference).
-#   build/bench run [--reps N] [--no-record] [--history FILE]
+#   build/bench run [--reps N] [--no-record] [--allow-dirty] [--history FILE] [--root DIR]
 #       Compile every bench/<name>.forge with ./forge and its native reference bench/<name>.rs with
 #       rustc -C opt-level=3, check that both print the same output, time each binary (best of N, default 5)
 #       and time the self-compile (build/forgec selfhost/forgec.forge, best of N). Prints a markdown table
 #       and appends one record to bench/history.tsv (unless --no-record). The freestanding twins (FS_BENCHES) are
 #       built with build/forgec, fas and fld, once with --fs-opt (<name>) and once without (<name>0).
+#       The record names the full 40-hex HEAD sha. A tree with uncommitted changes to tracked files (other than
+#       bench/history.tsv and bench/baseline.tsv) is refused before anything runs (exit 2), so a record always
+#       describes a commit; --allow-dirty records it anyway with the sha marked "+dirty"; --no-record just times.
+#   build/bench tree [--root DIR]
+#       Print "<full sha> clean" or "<full sha> dirty: <files>" (the check `run` makes; tests/bench/tree.sh).
 #   build/bench check [--history FILE] [--baseline FILE] [--tol PCT] [--window N]
 #       Regression check: the newest history record against bench/baseline.tsv, each value taken as its best
 #       over the newest N records (default 3), so one noisy run on a shared box does not count. Fails (exit 1)
 #       when the self-compile time or any bench's forge/reference run-time ratio is more than PCT percent
 #       (default 25) above the baseline; also prints how far each 12.4 target (self-compile < 1 s, ratio <= 1.0) is.
 # Record format (one line, tab separated):
-#   <local time> <git sha> selfcompile_ms=<ms> <bench>=<forge_us>/<ref_us> ...
+#   <local time> <git sha> selfcompile_ms=<ms> <bench>=<forge_us>/<ref_us> ... [note=<word>]
+#   (records before the integrity change carry a short sha; note= fields are ignored by parse)
 # Timing is wall clock on a shared box, so `check` uses a tolerance and never runs inside the gate suite;
 # run_tests.sh only checks the record parser and the comparison logic on fixed inputs (tests/bench/).
 import os
@@ -78,8 +84,41 @@ def ms3(ns):
     t = ns // 100000
     return str(t // 10) + "." + str(t % 10)
 
+def tree_state(root):
+# [full HEAD sha, tracked files with uncommitted changes]; the bench's own output files do not count
+    sha = sh1(["/usr/bin/git", "-C", root, "rev-parse", "HEAD"])
+    r = os.run(["/usr/bin/git", "-C", root, "status", "--porcelain", "--untracked-files=no"])
+    dirty = []
+    for l in r[1].split("\n"):
+        if len(l) > 3:
+            f = l[3:]
+            if f != "bench/history.tsv" and f != "bench/baseline.tsv":
+                dirty.append(f)
+    return [sha, dirty]
+
+def cmd_tree(root):
+    ts = tree_state(root)
+    if len(ts[0]) != 40:
+        print("error: " + root + " is not a git work tree with a commit")
+        return 2
+    if len(ts[1]) == 0:
+        print(ts[0] + " clean")
+        return 0
+    print(ts[0] + " dirty: " + ", ".join(ts[1]))
+    return 1
+
 def cmd_run(root):
     reps = int(opt("--reps", "5"))
+    ts = tree_state(root)
+    if len(ts[0]) != 40:
+        print("error: " + root + " is not a git work tree with a commit")
+        return 2
+    mark = ""
+    if len(ts[1]) > 0 and not flag("--no-record"):
+        if not flag("--allow-dirty"):
+            print("error: refusing to record a bench run on uncommitted changes (" + ", ".join(ts[1]) + "): commit first, or use --allow-dirty (recorded with the sha marked +dirty) or --no-record")
+            return 2
+        mark = "+dirty"
     hist = opt("--history", root + "/bench/history.tsv")
     if not os.path.isdir(root + "/bench/out"):
         os.mkdir(root + "/bench/out")
@@ -144,8 +183,7 @@ def cmd_run(root):
     print("")
     print("self-compile (build/forgec selfhost/forgec.forge, best of " + str(reps) + "): " + ms3(sc) + " ms")
     when = sh1(["/bin/date", "+%Y-%m-%d %H:%M %Z"])
-    sha = sh1(["/usr/bin/git", "-C", root, "rev-parse", "--short", "HEAD"])
-    line = when + "\t" + sha + "\tselfcompile_ms=" + str(sc // 1000000) + rec + "\n"
+    line = when + "\t" + ts[0] + mark + "\tselfcompile_ms=" + str(sc // 1000000) + rec + "\n"
     if not flag("--no-record") and not bad:
         old = ""
         if os.path.isfile(hist):
@@ -288,11 +326,15 @@ def cmd_check(root):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: bench run [--reps N] [--no-record] [--history FILE] | check [--history F] [--baseline F] [--tol PCT] [--window N]")
+        print("usage: bench run [--reps N] [--no-record] [--allow-dirty] [--history FILE] [--root DIR] | check [--history F] [--baseline F] [--tol PCT] [--window N] | tree [--root DIR]")
         sys.exit(2)
-    root = repo_root()
+    root = opt("--root", "")
+    if root == "":
+        root = repo_root()
     if sys.argv[1] == "run":
         sys.exit(cmd_run(root))
+    if sys.argv[1] == "tree":
+        sys.exit(cmd_tree(root))
     if sys.argv[1] == "check":
         sys.exit(cmd_check(root))
     print("error: unknown command " + sys.argv[1])

@@ -365,6 +365,9 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      records the self-compile time and each bench against its native reference in bench/history.tsv.
      `./forge bench check` compares the newest record with bench/baseline.tsv: more than +25% fails.
      run_tests.sh checks the comparison logic on fixed records (tests/bench), never live timing.
+     Record integrity (2026-11-12): records carry the full HEAD sha; `bench run` refuses a tree with uncommitted
+     tracked changes (`--allow-dirty` records it marked `+dirty`); the three orphan records whose short shas are not
+     in the repository (e42065b, 836c322, 207d8e7) are annotated `note=orphan`. tests/bench/tree.sh, 4 checks.
      The reference is rustc -O3 for now; a gcc -O2 column needs C bench sources, which the All-Forge rule keeps out.
      Baseline at 2aba6e2 (2026-11-11, shared box): self-compile 2354 ms; Forge/Rust run-time ratios
      fib 1.51, loop 1.31, strbuild 0.63, lists 0.70, floats 1.02, strops 1.05.

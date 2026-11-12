@@ -111,7 +111,7 @@ Best of 5 wall clock. Rust: rustc -C opt-level=3 (unstripped binaries). Phase 1 
 (Run 2026-11-01 20:08 CST with the default -O, including the 2**62 band checks; self-compile 1.25s. Full history and -O0 numbers in bench/results.md.)
 
 Performance is tracked by `./forge bench run` (tools/bench.forge): each bench against its Rust -O3 reference, plus the
-self-compile time, appended to bench/history.tsv. `./forge bench check` compares the newest record with
+self-compile time, appended to bench/history.tsv under the full commit sha (a tree with uncommitted changes is refused, or recorded marked `+dirty` with `--allow-dirty`). `./forge bench check` compares the newest record with
 bench/baseline.tsv (fails above +25%) and reports the Phase 12.4 targets. See docs/tools-bench.md.
 
 ### Optimizing backend (default; `-O0` turns it off)

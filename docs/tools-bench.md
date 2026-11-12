@@ -18,8 +18,15 @@ port and extension of `bench/run_bench.py`, which is kept as the reference.
   the benches so that a faster or slower machine cancels out. It also prints how far each 12.4 target is.
 
 ## Record format
-One line, tab separated: `<local time> <git sha> selfcompile_ms=<ms> <bench>=<forge_us>/<ref_us> ...`. The sha is
-HEAD when the run started, so a record taken before committing a change names the commit below it.
+One line, tab separated: `<local time> <git sha> selfcompile_ms=<ms> <bench>=<forge_us>/<ref_us> ... [note=<word>]`.
+The sha is the full 40-hex HEAD when the run started. `bench run` refuses (exit 2, before timing anything) when a
+tracked file other than `bench/history.tsv` or `bench/baseline.tsv` has uncommitted changes, so a record always
+describes a commit; `--allow-dirty` records anyway with the sha marked `+dirty`, and `--no-record` only times.
+Untracked files (such as `bench/out/`) do not count. `bench tree [--root DIR]` prints `<sha> clean` or
+`<sha> dirty: <files>` (exit 0/1), the same check. Older records carry a short sha.
+`note=` fields are ignored by the parser. The three records marked `note=orphan` (e42065b, 836c322, 207d8e7)
+name commits that are not in the repository: they were taken on commits rewritten before landing. They are kept
+for their timings but must not be used as a baseline.
 Lines starting with `#`, and lines that aren't records, are ignored.
 
 ## Targets (BUILD_PLAN Phase 12.4)
@@ -35,7 +42,7 @@ programs that were already in bench/ stand in for it.
 `bench run` record into it in the same commit. Never refresh it to hide a regression.
 
 ## Tests
-Timing on a shared machine is noisy, so `run_tests.sh` never runs `bench run`. It checks the record parser and
+Timing on a shared machine is noisy, so `run_tests.sh` never runs `bench run`. `tests/bench/tree.sh` checks the record integrity rules in a scratch git repo (clean tree, own output and untracked files ignored, a tracked change is dirty, `run` refuses it and leaves the history unchanged). It checks the record parser and
 the comparison logic on fixed records in `tests/bench/`: `ok` (within tolerance, exit 0), `slow` (self-compile
 +30%, exit 1, with a non-record line that must be skipped) and `ratio` (one bench ratio +30%, exit 1, and the
 self-compile target reported as met), and `window` (three records where only the oldest is fast: ok with the
