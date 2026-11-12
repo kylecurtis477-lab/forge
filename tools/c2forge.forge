@@ -31,7 +31,7 @@
 # globals (adjacent strings concatenate; char s[] = "..." and char s[N] = "..." copy the bytes, including a
 # NUL when it fits). ++/-- is supported in expressions
 # (prefix and postfix, including on pointers and dereferences) as well as in statement form.
-# Array sizes may be an integer constant expression (literals, +, -, *, /, %, sizeof(type),
+# Array sizes may be an integer constant expression (literals, +, -, *, / and % as in C (truncating), sizeof(type),
 # parentheses, and #define expanding to one of those). Also rejected: unions (Forge has none; the plan does not add them),
 # hex floats, long double, the comma operator, compound literals, continue in a switch, enum, goto,
 # varargs, local typedef, bit-fields, K&R, attributes, GNU statement-expressions, _Bool, _Complex,
@@ -247,6 +247,14 @@ def preprocess(toks, tdefs):
         else:
             pp_error(line, "#" + w[0] + " is not supported (only #define, #undef, #include <standard header>)")
     return out
+def c_div(a, b):
+# C integer division truncates toward zero (Forge `/` on ints gives a float and `//` floors); the
+# remainder is a - c_div(a, b) * b, so its sign follows the dividend as in C
+    q = abs(a) // abs(b)
+    if (a < 0) != (b < 0):
+        q = 0 - q
+    return q
+
 FORGE_RESERVED = ["and", "or", "not", "def", "in", "is", "pass", "None", "True", "False", "elif", "lambda", "class", "import", "from", "as", "with", "try", "except", "finally", "raise", "yield", "global", "nonlocal", "del", "assert", "print", "len", "ptr", "addr", "sizeof", "struct", "include", "extern", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64", "match", "case"]
 
 INTS = ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"]
@@ -610,9 +618,9 @@ class Parser:
             elif r == 0:
                 self.err("division by zero in array size")
             elif op == "/":
-                v = v / r
+                v = c_div(v, r)
             else:
-                v = v % r
+                v = v - c_div(v, r) * r
         return v
 
     def const_add(self):

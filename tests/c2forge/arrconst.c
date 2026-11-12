@@ -14,6 +14,9 @@ int main(void) {
     int d[(1 + 2) * 3];
     int e[0x10 - 6];
     unsigned char buf[sizeof(int) + sizeof(long)];
+    int f[7 / 2];
+    int g[(0 - 7) % 4 + 5];
+    int h[-7 / 2 + 6];
     int i;
     int sa = 0;
     int sb = 0;
@@ -55,5 +58,9 @@ int main(void) {
     show((long)(sizeof(b) / sizeof(b[0])));
     show((long)(sizeof(c) / sizeof(c[0])));
     show((long)(sizeof(buf)));
+    /* C division truncates toward zero and % takes the dividend's sign: 3, 2, 3 */
+    show((long)(sizeof(f) / sizeof(f[0])));
+    show((long)(sizeof(g) / sizeof(g[0])));
+    show((long)(sizeof(h) / sizeof(h[0])));
     return 0;
 }
