@@ -333,6 +333,12 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      faulting instruction got rcx and r11 back clobbered (rt_sigreturn returned by sysret), and `--fs-opt`
      keeps leaf locals in r11 for whole loops. Fixed in the kernel: rt_sigreturn now leaves by iretq and
      restores both (lxsig checks it), which unblocks the user build.
+   - *Step 3c done (2026-11-12): the user programs.* examples/user/build.forge (and build.sh) build all 25
+     Forge user programs (the 20 native ones and the 5 Linux-ABI tests) with `--fs-opt`. Their asm is naked
+     syscall stubs that touch only caller-saved registers, and callers never keep a caller-saved register
+     across a call. Code 175,859 to 168,467 bytes (-4.2%; sh 13,070 to 12,329, lxfs 14,008 to 13,334), frame
+     accesses 4,867 to 3,891 (-20%), asm lines 59,362 to 54,842. Every Forge-compiled image now uses the
+     flag; BusyBox is C (gcc, musl) and is unaffected.
 2. Auto-vectorization of simple loops (SSE2/AVX2, now that the kernel saves xsave state), plus explicit `simd[T, N]` types.
 3. `parallel for` over ranges and slices, with a work-stealing multicore runtime in both hosted and kernel modes. Test: speedup on 4 cores is ≥ 3× on bench kernels, with deterministic results.
 4. Perf targets:

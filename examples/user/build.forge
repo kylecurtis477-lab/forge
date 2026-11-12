@@ -9,7 +9,8 @@
 # are done here in Forge.
 # usage: build/user-build [OUTDIR]  (default build/user). The binary lives in build/, so the repo is the
 # parent of its directory; it runs from examples/user like the shell script. Stops at the first failing
-# step with that step's exit code (sh -e). $FORGEC_FLAGS is passed to forgec for the programs.
+# step with that step's exit code (sh -e). The programs are built with --fs-opt (Phase 12.1 step 3c: register
+# allocation in fs mode; safe since rt_sigreturn restores rcx and r11), then $FORGEC_FLAGS.
 import os
 import sys
 
@@ -74,7 +75,7 @@ def main():
         out = "../../build/user"
     if not os.path.isdir(out):
         os.mkdir(out)
-    flags = []
+    flags = ["--fs-opt"]  # step 3c: user programs get fs-mode register allocation too
     for f in os.getenv("FORGEC_FLAGS", "").split():
         flags.append(f)
     s = "../../build/forgeseal"

@@ -264,8 +264,9 @@ Audit of every top-level `asm(...)` block and `@naked` function in examples/kern
 
 Modules (examples/modules) and the native UEFI loader (examples/efi/loader.forge) have no asm and are
 built with the flag too since step 3b; the loader's Microsoft-ABI entry wrapper saves rdi/rsi, and firmware
-preserves rbx, rsi, rdi and r12–r15. User programs are still built without it (see BUILD_PLAN 12.1 step 3b:
-a resumed page-fault signal handler returned by sysret, which clobbered rcx and r11; rt_sigreturn now leaves by iretq). Tests: the full QEMU boot suite (BIOS, UEFI, native loader, SMP and single CPU, IOMMU, kexec,
+preserves rbx, rsi, rdi and r12–r15. User programs (examples/user) are built with it since step 3c: their
+only asm is naked syscall stubs, and the one hazard, a resumed page-fault signal handler getting rcx and r11
+back clobbered by sysret, went away when rt_sigreturn started leaving by iretq. Tests: the full QEMU boot suite (BIOS, UEFI, native loader, SMP and single CPU, IOMMU, kexec,
 live patching, drivers, forgefs, objstore) at O2 and O0 with the `--fs-opt` kernel, and `dwarf/*` builds
 the `-g` kernel with `--fs-opt` too (the image must not change with `-g`).
 
