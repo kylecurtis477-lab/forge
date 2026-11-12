@@ -117,25 +117,34 @@ def boot(attempt):
     buf, t0, shot_ok, fbmsg, sent = b'', time.time(), False, '', 0
     tlast, deadline, kind, dump = t0, t0 + float(tmo), '', ''
     while p.poll() is None:
-        now = time.time()
-        if now >= deadline:
-            if now - tlast < STALL and now < t0 + 2 * float(tmo):
-                deadline = min(now + STALL, t0 + 2 * float(tmo)); kind = 'slow'  # still progressing
-            else:
-                if now - tlast >= STALL:
-                    kind = 'hang'
-                    dump = f'{log}.hang{attempt}'
-                    open(dump, 'w').write(f'hang: no serial output for {now - tlast:.0f}s (stopped at +{tlast - t0:.0f}s), '
-                        f'load {open("/proc/loadavg").read().split()[0]}\nlast line: {last_line(buf.decode("latin-1"))}\n\n'
-                        + monitor('info cpus') + '\n' + (regs := monitor('info registers -a', 2.0))
-                        + '\n' + stack_dump(regs))
-                break
         try:
             chunk = p.stdout.read()
         except Exception:
             chunk = None
         if chunk:
             buf += chunk; tlast = time.time()
+        now = time.time()
+        if now - tlast >= STALL:
+            # Drain once more before HMP so a full stdio pipe cannot block QEMU, and so last_line is current.
+            try:
+                chunk = p.stdout.read()
+            except Exception:
+                chunk = None
+            if chunk:
+                buf += chunk; tlast = time.time(); now = time.time()
+            if now - tlast >= STALL:
+                kind = 'hang'
+                dump = f'{log}.hang{attempt}'
+                open(dump, 'w').write(f'hang: no serial output for {now - tlast:.0f}s (stopped at +{tlast - t0:.0f}s), '
+                    f'load {open("/proc/loadavg").read().split()[0]}\nlast line: {last_line(buf.decode("latin-1"))}\n\n'
+                    + monitor('info cpus') + '\n' + (regs := monitor('info registers -a', 2.0))
+                    + '\n' + stack_dump(regs))
+                break
+        if now >= deadline:
+            if now < t0 + 2 * float(tmo):
+                deadline = min(now + STALL, t0 + 2 * float(tmo)); kind = 'slow'  # still progressing
+            else:
+                break
         # a third element holds the line back until that text has appeared (a background program's progress)
         if buf.count(b'sh$ ') > sent and sent < len(SCRIPT) and (len(SCRIPT[sent]) < 3 or SCRIPT[sent][2].encode() in buf):
             how, line = SCRIPT[sent][:2]; sent += 1

@@ -1,10 +1,14 @@
 # tests/os/boot.forge: Forge port of tests/os/boot.py (kept as the reference) — boot one QEMU configuration,
 # check serial markers and (optionally) OCR the framebuffer.
 # usage: boot NAME LOG TIMEOUT 'marker|marker|...' FBTEXT -- qemu args...
+#        boot --self-test   pipe-drain and stall-predicate checks (no QEMU)
 # Same behaviour and PASS/FAIL/HANG/SLOW lines as boot.py; see its docstring. Differences: QEMU runs via
 # os.fork/os.execv with its serial console on two pipes, and the HMP monitor is a `-chardev pipe` (the FIFOs
 # MON.in / MON.out made with os.mkfifo, opened O_RDWR so neither side blocks) read with os.poll, instead of a
 # Unix socket per command. Built with `fld --base 0x100000000000` like the other hosted tools.
+# Hang path (inv118b os/kernel-bios-smp1): drain QEMU stdio before any HMP command, and apply
+# FORGE_BOOT_STALL (default 60 s, not raised) every loop iteration rather than only at the timeout
+# deadline, so a full serial pipe cannot wedge serial_putc while the harness waits until 2x timeout.
 import os
 import sys
 import time
@@ -223,6 +227,28 @@ def last_line(text):
             last = l
     return last[0:120]
 
+def stall_expired(now, tlast, stall) -> i64:
+# 1 if serial has been silent for `stall` seconds (FORGE_BOOT_STALL, default 60; never raised here)
+    if now - tlast >= stall:
+        return 1
+    return 0
+
+def drain_avail(fd, buf, tlast):
+# Non-blocking drain of QEMU stdio (or any pipe). Returns [buf, tlast, eof].
+    eof = 0
+    while len(os.poll([[fd, 1]], 0)) > 0:
+        chunk = ""
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            chunk = ""
+        if chunk == "":
+            eof = 1
+            break
+        buf = concat(buf, chunk)
+        tlast = time.time()
+    return [buf, tlast, eof]
+
 def type_keys(h, line):
     w = os.open(concat(h.mon, ".in"), 2048 | 1)
     for ch in concat(line, "\n"):
@@ -280,29 +306,36 @@ def boot(h, attempt):
         if w[0] == pid:
             rc = os.waitstatus_to_exitcode(w[1])
             break
+        if not eof:
+            d = drain_avail(sout, buf, tlast)
+            buf = d[0]
+            tlast = d[1]
+            if d[2] != 0:
+                eof = True
         now = time.time()
+        if stall_expired(now, tlast, h.stall) == 1:
+        # Drain once more before HMP so a full stdio pipe cannot block QEMU, and so last_line is current.
+            if not eof:
+                d = drain_avail(sout, buf, tlast)
+                buf = d[0]
+                tlast = d[1]
+                if d[2] != 0:
+                    eof = True
+            now = time.time()
+            if stall_expired(now, tlast, h.stall) == 1:
+                kind = "hang"
+                dump = f"{h.log}.hang{attempt}"
+                load = split__1(proc_text("/proc/loadavg"))[0]
+                hdr = f"hang: no serial output for {fix(now - tlast)}s (stopped at +{fix(tlast - t0)}s), load {load}\nlast line: {last_line(buf)}\n\n"
+                regs = monitor(h, "info registers -a", 2.0)
+                write_file(dump, concat(concat(hdr, monitor(h, "info cpus")), concat(concat("\n", regs), concat("\n", stack_dump(h, regs)))))
+                break
         if now >= deadline:
-            if now - tlast < h.stall and now < t0 + 2 * h.tmo:
+            if now < t0 + 2 * h.tmo:
                 deadline = min(now + h.stall, t0 + 2 * h.tmo)
                 kind = "slow"
             else:
-                if now - tlast >= h.stall:
-                    kind = "hang"
-                    dump = f"{h.log}.hang{attempt}"
-                    load = split__1(proc_text("/proc/loadavg"))[0]
-                    hdr = f"hang: no serial output for {fix(now - tlast)}s (stopped at +{fix(tlast - t0)}s), load {load}\nlast line: {last_line(buf)}\n\n"
-                    regs = monitor(h, "info registers -a", 2.0)
-                    write_file(dump, concat(concat(hdr, monitor(h, "info cpus")), concat(concat("\n", regs), concat("\n", stack_dump(h, regs)))))
                 break
-        if not eof and len(os.poll([[sout, 1]], 0)) > 0:
-            chunk = ""
-            try:
-                chunk = os.read(sout, 65536)
-            except OSError:
-                chunk = ""
-            if chunk != "":
-                buf += chunk
-                tlast = time.time()
         if nocount(buf, "sh$ ") > sent and sent < len(sc) and (len(sc[sent]) < 3 or sc[sent][2] in buf):
             how = sc[sent][0]
             line = sc[sent][1]
@@ -419,8 +452,32 @@ MARKERS = [""]
 FBTEXT = [""]
 TMO = [""]
 
+def self_test():
+# No QEMU: stall predicate and pipe drain only (regression for the inv118b hang-dump path).
+    fail = 0
+    if stall_expired(100.0, 30.0, 60.0) == 1 and stall_expired(89.0, 30.0, 60.0) == 0 and stall_expired(90.0, 30.0, 60.0) == 1:
+        print("PASS boot-harness stall-expired")
+    else:
+        print("FAIL boot-harness stall-expired")
+        fail = 1
+    pr = os.pipe()
+    os.set_blocking(pr[0], False)
+    os.write(pr[1], "hello\nuser W^X: refused\n")
+    r = drain_avail(pr[0], "", 0.0)
+    os.close(pr[0])
+    os.close(pr[1])
+    if "hello\nuser W^X: refused\n" in r[0] and last_line(r[0]) == "user W^X: refused" and r[1] > 0.0:
+        print("PASS boot-harness drain-avail")
+    else:
+        print("FAIL boot-harness drain-avail")
+        fail = 1
+    exit(fail)
+
 def main():
     a = sys.argv
+    if len(a) >= 2 and a[1] == "--self-test":
+        self_test()
+        return
     h = H()
     h.name = a[1]
     h.log = a[2]

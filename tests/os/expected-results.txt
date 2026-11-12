@@ -1,6 +1,7 @@
 # tests/os/expected-results.txt: every result name tests/os/run.sh must report (PASS or FAIL) in one run.
 # run_tests.sh fails os/result-count if any is missing, so lost output can never look like a smaller passing run.
 os/kernel-wx
+os/boot-harness-self-test
 os/kernel-bios
 os/kernel-bios-smp1
 os/kernel-iommu
