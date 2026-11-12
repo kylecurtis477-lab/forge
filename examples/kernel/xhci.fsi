@@ -5,7 +5,9 @@
 # device is configured: SET_CONFIGURATION, SET_PROTOCOL(boot) and SET_IDLE(0). HID step 2: Configure Endpoint
 # adds the interrupt IN endpoint with its own transfer ring of Normal TRBs (8-byte boot reports), and
 # xh_kbd_poll reads the reports (polled, bounded), decoding newly pressed keys to text; tests/os/drivers.sh
-# types into QEMU's usb-kbd through the monitor.
+# types into QEMU's usb-kbd through the monitor. HID step 3: the controller then switches to MSI-X (vector
+# 0x52, cpu0): on_xhci drains the event ring under rq_lock and pushes each new key into the tty input path
+# (tty_push_l, like the PS/2 and COM1 handlers), so a USB keyboard types into the shell.
 xh_cap: u64
 xh_op: u64
 xh_rt: u64
@@ -25,6 +27,7 @@ xh_erst: u64
 xh_erst_pa: u64
 xh_ev: u64[4]  # last event TRB
 xh_connected: u64
+xh_bdf: u64
 
 xh_rb: u64[3]  # producer rings: 0 = command ring, 1 = EP0 transfer ring of the probed device, 2 = its keyboard IN endpoint
 xh_rpa: u64[3]
@@ -94,6 +97,7 @@ def xhci_init() -> u64:
     if f == 0:
         puts("xHCI: not present\n")
         return 0
+    xh_bdf = f - 1
     xh_cap = pci_map_bar(f - 1, 0, 0x10000)
     if xh_cap == 0:
         puts("xHCI: BAR0 not mappable\n")
@@ -289,6 +293,7 @@ def xh_device(port: u64, speed: u64) -> u64:
     putc(10)
     if xh_hid_setup(slot, buf, buf_pa) != 0 and xh_hid_endpoint(slot, inc, in_pa, outc, speed, port) != 0:
         xh_kbd_poll(8000)
+        xh_irq_init()
     return 1
 
 def xh_ctrl(slot: u64, req: u64, n: u64, pa: u64) -> u64:
@@ -481,12 +486,47 @@ def xh_usage_char(u: u64, shift: u64) -> u64:
         return 46
     return 0
 
+xh_text: u8[64]  # text decoded by the polled check (sink 0)
+xh_nt: u64
+
+def xh_kbd_report(b: u64, tty: u64) -> u64:
+# decode one 8-byte boot report at b: each key usage absent from the previous report is a new key press.
+# Sink 0 appends to xh_text (Enter ends the polled check: returns 1); sink 1 pushes into the tty input path
+# (rq_lock held, interrupt context). Then the report becomes the previous one.
+    enter: u64 = 0
+    shift = mmio_rd(b, 1) & 0x22
+    k: u64 = 2
+    while k < 8:
+        u = mmio_rd(b + k, 1)
+        if u >= 4:
+            seen: u64 = 0
+            j: u64 = 0
+            while j < 6:
+                if xh_kbd_last[j] == u:
+                    seen = 1
+                j += 1
+            if seen == 0:
+                ch = xh_usage_char(u, shift)
+                if tty != 0 and ch != 0:
+                    xh_keys += 1
+                    tty_push_l(ch)
+                elif ch == 10:
+                    enter = 1
+                elif ch != 0 and xh_nt < 63:
+                    xh_text[xh_nt] = u8(ch)
+                    xh_nt += 1
+        k += 1
+    k = 0
+    while k < 6:
+        xh_kbd_last[k] = mmio_rd(b + 2 + k, 1)
+        k += 1
+    return enter
+
 def xh_kbd_poll(ms: u64):
 # read reports for up to ms milliseconds or until Enter; each newly pressed key (absent from the previous
 # report) is decoded; every completed TRB is re-queued with its own buffer
     puts("xHCI: HID boot keyboard: waiting for key reports\n")
-    text: u8[64]
-    nt: u64 = 0
+    xh_nt = 0
     nrep: u64 = 0
     nerr: u64 = 0
     done: u64 = 0
@@ -508,43 +548,110 @@ def xh_kbd_poll(ms: u64):
             continue
         if cc == 1 or cc == 13:
             nrep += 1
-            b = xh_rep + (bpa - xh_rep_pa)
-            mods = mmio_rd(b, 1)
-            shift = mods & 0x22
-            k: u64 = 2
-            while k < 8:
-                u = mmio_rd(b + k, 1)
-                if u >= 4:
-                    seen: u64 = 0
-                    j: u64 = 0
-                    while j < 6:
-                        if xh_kbd_last[j] == u:
-                            seen = 1
-                        j += 1
-                    if seen == 0:
-                        ch = xh_usage_char(u, shift)
-                        if ch == 10:
-                            done = 1
-                        elif ch != 0 and nt < 63:
-                            text[nt] = u8(ch)
-                            nt += 1
-                k += 1
-            k = 0
-            while k < 6:
-                xh_kbd_last[k] = mmio_rd(b + 2 + k, 1)
-                k += 1
+            if xh_kbd_report(xh_rep + (bpa - xh_rep_pa), 0) != 0:
+                done = 1
         else:
             nerr += 1
         xh_kbd_queue(bpa)
         mmio_wr(xh_db + xh_kbd_slot * 4, 4, xh_kbd_dci)
-    text[nt] = 0
+    xh_text[xh_nt] = 0
     puts("xHCI: HID boot keyboard: ")
     put_u64(nrep)
     puts(" reports, ")
     put_u64(nerr)
     puts(" errors, typed \"")
-    puts(addr(text[0]))
+    puts(addr(xh_text[0]))
     puts("\"")
     if done != 0:
         puts(" + Enter")
     putc(10)
+
+# ---- HID step 3: MSI-X and the tty ----
+VEC_XHCI = 0x52
+xh_irqs: u64
+xh_keys: u64  # keys pushed into the tty from interrupts
+xh_irq_on: u64
+
+@interrupt
+def on_xhci(frame: ptr[u64]):
+    spin_lock(addr(rq_lock))
+    xh_irqs += 1
+    ir = xh_rt + 0x20
+    mmio_wr(ir, 4, 3)  # IMAN: clear IP (write 1), keep IE
+    mmio_wr(xh_op + 4, 4, 8)  # USBSTS.EINT (write 1 to clear)
+    xh_irq_drain()
+    spin_unlock(addr(rq_lock))
+    lapic_eoi()
+
+def xh_irq_drain():
+# rq_lock held: consume every pending event; keyboard reports go to the tty, their TRBs are re-queued
+    n: u64 = 0
+    while n < 256:
+        e = xh_er + xh_er_i * 16
+        c = mmio_rd(e + 12, 4)
+        if (c & 1) != xh_er_c:
+            break
+        tp = mmio_rd(e, 8)
+        cc = mmio_rd(e + 8, 4) >> 24
+        xh_er_i += 1
+        if xh_er_i == 256:
+            xh_er_i = 0
+            xh_er_c ^= 1
+        n += 1
+        if ((c >> 10) & 0x3F) == 32 and tp >= xh_rpa[2] and tp < xh_rpa[2] + 4096:
+            bpa = mmio_rd(xh_rb[2] + (tp - xh_rpa[2]), 8)
+            if bpa >= xh_rep_pa and bpa < xh_rep_pa + XH_KBD_NTRB * 8:
+                if cc == 1 or cc == 13:
+                    xh_kbd_report(xh_rep + (bpa - xh_rep_pa), 1)
+                xh_kbd_queue(bpa)
+                mmio_wr(xh_db + xh_kbd_slot * 4, 4, xh_kbd_dci)
+    mmio_wr(xh_rt + 0x38, 8, (xh_er_pa + xh_er_i * 16) | 8)  # ERDP, clear EHB
+
+def xh_irq_init():
+# after the polled check: MSI-X table entry 0 -> vector 0x52 on cpu0, interrupter 0 enabled, USBCMD.INTE.
+# The event ring has a single consumer from here on (on_xhci); no command is issued after this.
+    if iommu_ir != 0:
+        puts("xHCI: interrupt remapping on and no IRTE for xHCI yet: keyboard stays polled\n")
+        return
+    c = pci_rd32(xh_bdf, 0x34) & 0xFC
+    g: u64 = 0
+    while c != 0 and g < 48:
+        h = pci_rd32(xh_bdf, c)
+        if (h & 0xFF) == 0x11:
+            break
+        c = (h >> 8) & 0xFC
+        g += 1
+    if c == 0 or g == 48:
+        puts("xHCI: no MSI-X, keyboard stays polled\n")
+        return
+    tb = pci_rd32(xh_bdf, c + 4)
+    bir = tb & 7
+    bar = pci_rd32(xh_bdf, 0x10 + bir * 4)
+    base = bar & 0xFFFFFFF0
+    if (bar & 6) == 4:
+        base = base | (pci_rd32(xh_bdf, 0x14 + bir * 4) << 32)
+    if (bar & 1) != 0 or base == 0 or base >= 0x100000000:
+        puts("xHCI: MSI-X table not reachable, keyboard stays polled\n")
+        return
+    t = base + (tb & 0xFFFFFFF8)
+    # the table usually sits inside BAR0, which is mapped already; otherwise map its 16 bytes
+    v = xh_cap + (t - (pci_rd32(xh_bdf, 0x10) & 0xFFFFFFF0))
+    if bir != 0 or t - (pci_rd32(xh_bdf, 0x10) & 0xFFFFFFF0) >= 0x10000:
+        v = mmio_add(p2v(t), 16)
+    idt_set(VEC_XHCI, u64(on_xhci), 0)
+    mmio_wr(v, 4, 0xFEE00000 | (cpu_to_apic[0] << 12))
+    mmio_wr(v + 4, 4, 0)
+    mmio_wr(v + 8, 4, VEC_XHCI)
+    mmio_wr(v + 12, 4, 0)  # vector control: unmasked
+    pci_wr32(xh_bdf, c, (pci_rd32(xh_bdf, c) | 0x80000000) & ~u64(0x40000000))
+    f = irq_save()
+    spin_lock(addr(rq_lock))
+    xh_irq_drain()  # anything left from the polled phase
+    ir = xh_rt + 0x20
+    mmio_wr(ir + 4, 4, 4000)  # IMOD: 1 ms moderation (250 ns units)
+    mmio_wr(ir, 4, 3)  # IMAN: IE, clear IP
+    mmio_wr(xh_op, 4, mmio_rd(xh_op, 4) | 4)  # USBCMD.INTE
+    xh_irq_on = 1
+    spin_unlock(addr(rq_lock))
+    irq_restore(f)
+    puts("xHCI: HID boot keyboard on MSI-X vector 0x52 -> cpu0; key presses go to the tty\n")
