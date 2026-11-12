@@ -9,10 +9,10 @@
 # typedef-without-header are clean errors.
 # Step 7: lib.c, a first small real C library (zlib-style CRC-32 and Adler-32, the XTEA reference cipher),
 # translated and run against the gcc build, including the standard check values for "123456789".
-# 0.15.1: remaining subset gaps are clean errors (globals, string literals as values,
-# static locals, same-name/same-type inner-block shadowing).
-# Array sizes may be integer constant expressions (arrconst.c); ++/-- works in expressions (incdec.c).
-# Listed in docs/BUILD_PLAN.md item 4.
+# 0.15.2: ints.c uses file-scope variables; pointer globals, non-constant global initializers and a local
+# named like a global are clean errors. Array sizes may be integer constant expressions (arrconst.c);
+# ++/-- works in expressions (incdec.c). Remaining subset gaps are clean errors (string literals as values,
+# static locals, same-name/same-type inner-block shadowing). Listed in docs/BUILD_PLAN.md item 4.
 cd "$(dirname "$0")/../.." || exit 1
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
@@ -35,9 +35,15 @@ done
 printf 'int main(void) { int x = 0; int y = ++(x + 1); return 0; }\n' > $T/inc.c
 out=$($T/c2forge $T/inc.c $T/inc.forge); rc=$?
 [ $rc = 1 ] && [ "$out" = "c2forge: line 1: ++/-- needs an lvalue (at ';')" ] && echo "PASS c2forge incdec-lvalue-error" || { echo "FAIL c2forge incdec-lvalue-error (rc=$rc out=$out)"; fail=1; }
-printf 'int g = 1; int main(void) { return g; }\n' > $T/gv.c
+printf 'int *gp; int main(void) { return 0; }\n' > $T/gv.c
 out=$($T/c2forge $T/gv.c $T/gv.forge); rc=$?
-[ $rc = 1 ] && [ "$out" = "c2forge: line 1: global variables are not supported yet (at '=')" ] && echo "PASS c2forge global-error" || { echo "FAIL c2forge global-error (rc=$rc out=$out)"; fail=1; }
+[ $rc = 1 ] && [ "$out" = "c2forge: line 1: pointer global variables are not supported yet (at 'gp')" ] && echo "PASS c2forge global-pointer-error" || { echo "FAIL c2forge global-pointer-error (rc=$rc out=$out)"; fail=1; }
+printf 'int g = 1; int main(void) { int g = 2; return g; }\n' > $T/gs.c
+out=$($T/c2forge $T/gs.c $T/gs.forge); rc=$?
+[ $rc = 1 ] && [ "$out" = "c2forge: line 1: local g shadows a global variable (not supported yet) (at 'g')" ] && echo "PASS c2forge global-shadow-error" || { echo "FAIL c2forge global-shadow-error (rc=$rc out=$out)"; fail=1; }
+printf 'int n = 2; int g = n; int main(void) { return g; }\n' > $T/gi.c
+out=$($T/c2forge $T/gi.c $T/gi.forge); rc=$?
+[ $rc = 1 ] && [ "$out" = "c2forge: line 1: global initializer must be an integer constant (at 'n')" ] && echo "PASS c2forge global-init-error" || { echo "FAIL c2forge global-init-error (rc=$rc out=$out)"; fail=1; }
 printf 'int main(void) { const char *s = "hi"; return 0; }\n' > $T/sl.c
 out=$($T/c2forge $T/sl.c $T/sl.forge); rc=$?
 [ $rc = 1 ] && [ "$out" = "c2forge: line 1: expected an expression (at '\"hi\"')" ] && echo "PASS c2forge strlit-error" || { echo "FAIL c2forge strlit-error (rc=$rc out=$out)"; fail=1; }

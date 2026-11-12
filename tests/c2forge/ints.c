@@ -5,6 +5,15 @@ void put_u64(unsigned long v);
 void nl(void);
 static int gcd(int a, int b);
 
+/* 0.15.2: file-scope variables (integer constant initializers, wrapped as C converts; the rest zero) */
+static int counter = -3;
+unsigned char wrapped = 300, small = -1;
+long gbig = 0x7fffffffffffffffL;
+unsigned long gall = -1;
+short gneg = -40000;
+static unsigned hist[4];
+double acc;
+
 static void show(long v) {
     put_i64(v);
     nl();
@@ -42,6 +51,11 @@ int classify(int x) {
     return 2;
 }
 
+static void bump(int k) {
+    hist[k] = hist[k] + 1;
+    counter++;
+}
+
 int main(void) {
     unsigned char a = 200, b = 100;
     int s = a + b;
@@ -76,5 +90,17 @@ int main(void) {
     show(classify(-4) * 1000 + classify(0) * 100 + classify(5) * 10 + classify(3));
     show(017 + 0x10 + 10L);
     show(2147483647 + 1L);
+    counter = counter + 10;
+    bump(2);
+    bump(2);
+    bump(3);
+    show(counter);
+    show(wrapped * 1000 + small);
+    show(gbig);
+    put_u64(gall >> 60); nl();
+    show(gneg);
+    show(hist[0] * 100 + hist[2] * 10 + hist[3]);
+    acc = acc + 2.5;
+    show((long)(acc * 4.0));
     return 0;
 }

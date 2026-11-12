@@ -25,11 +25,13 @@
 # (float -> integer truncates, as in C). Casts: (T)x between numbers; pointer <-> pointer as ptr[U](p);
 # integer -> pointer as ptr[T](u64(x)); pointer -> integer as T(u64(p)); (void)x. void * is ptr[void]
 # internally (no deref, no arithmetic) and converts implicitly to and from any object pointer, as in C; the
-# output spells it ptr[u8]. Remaining gaps (0.15.1, listed in BUILD_PLAN item 4): globals; string
-# literals as values (and char s[] = "..." initializers). ++/-- is supported in expressions
+# output spells it ptr[u8]. Globals (0.15.2): file-scope integer/float/array/struct variables, integer scalars with an
+# integer-literal initializer wrapped as C converts it, the rest zero; pointer globals, non-constant or float
+# initializers and a local named like a global are clean errors. ++/-- is supported in expressions
 # (prefix and postfix, including on pointers and dereferences) as well as in statement form.
 # Array sizes may be an integer constant expression (literals, +, -, *, /, %, sizeof(type),
-# parentheses, and #define expanding to one of those). Also rejected: unions (Forge has none; the plan does not add them),
+# parentheses, and #define expanding to one of those). Remaining gaps (BUILD_PLAN item 4): string
+# literals as values (and char s[] = "..." initializers). Also rejected: unions (Forge has none; the plan does not add them),
 # hex floats, long double, the comma operator, compound literals, continue in a switch, enum, goto,
 # varargs, local typedef, bit-fields, K&R, attributes, GNU statement-expressions, _Bool, _Complex,
 # static local variables, and an inner-block declaration of the same name and type as an outer
@@ -406,6 +408,7 @@ class Parser:
         self.pos = 0
         self.funcs = {}
         self.vars = {}
+        self.globals = {}
         self.ret = "void"
         self.out = []
         self.pre = []
@@ -736,10 +739,12 @@ class Parser:
             n = t[1]
             if self.is_op("("):
                 return self.call(n)
-            if n not in self.vars:
-                self.pos -= 1
-                self.err("unknown variable")
-            return [fname(n), self.vars[n], False]
+            if n in self.vars:
+                return [fname(n), self.vars[n], False]
+            if n in self.globals:
+                return [fname(n), self.globals[n], False]
+            self.pos -= 1
+            self.err("unknown variable")
         if t[0] == "op" and t[1] == "(":
             e = self.expr()
             self.expect(")")
@@ -1526,6 +1531,9 @@ class Parser:
                 self.err("expected an identifier")
             if t == "void":
                 self.err("void variable")
+            if n in self.globals:
+                self.pos -= 1
+                self.err("local " + n + " shadows a global variable (not supported yet)")
             if n in self.vars:
                 self.pos -= 1
                 if self.vars[n] != t:
@@ -1583,13 +1591,19 @@ class Parser:
             if self.is_kw("struct") and self.peek(1)[0] == "id" and self.peek(2)[1] == "{":
                 self.struct_def()
                 continue
-            rt = self.base_type()
+            bt = self.base_type()
+            save = self.pos
+            rt = bt
             while self.is_op("*"):
                 self.pos += 1
                 rt = "ptr[" + rt + "]"
             n = self.ident()
             if not self.is_op("("):
-                self.err("global variables are not supported yet")
+                self.pos = save
+                self.global_decl(bt)
+                continue
+            if n in self.globals:
+                self.err(n + " is already a global variable")
             ps = self.params()
             pts = []
             for p in ps:
@@ -1601,6 +1615,67 @@ class Parser:
                 self.pos += 1
                 continue
             self.function(n, rt, ps)
+
+    def global_decl(self, bt):
+    # file-scope variables -> Forge globals (zero-initialized unless given an integer constant):
+    # integer scalars may have an integer-literal initializer (optionally negated, wrapped to the type as
+    # C converts it); float scalars, arrays and structs are zero-initialized and may only be given 0 or
+    # nothing; pointer globals are rejected (Forge ptr[T] globals need a non-null initializer)
+        while True:
+            d = self.declarator(bt, False)
+            n = d[0]
+            t = d[1]
+            if n == "":
+                self.err("expected an identifier")
+            if t == "void":
+                self.err("void variable")
+            if is_ptr(t) or is_arr(t) and is_ptr(aelem(t)):
+                self.pos -= 1
+                self.err("pointer global variables are not supported yet")
+            if n in self.globals or n in self.funcs:
+                self.pos -= 1
+                self.err("redefinition of " + n)
+            init = ""
+            if self.is_op("="):
+                self.pos += 1
+                neg = False
+                if self.is_op("-") or self.is_op("+"):
+                    neg = self.is_op("-")
+                    self.pos += 1
+                c = self.peek()
+                if c[0] == "int":
+                    self.pos += 1
+                    v = self.int_lit(c[1])
+                    if not is_int(t):
+                        if v[0] != "0":
+                            self.pos -= 1
+                            self.err("a float, array or struct global may only be initialized to 0")
+                    else:
+                        x = int(v[0])
+                        if neg:
+                            x = 0 - x
+                        bits = tsize(t) * 8
+                        if bits < 64:
+                            x = x % (1 << bits)
+                            if x < 0:
+                                x = x + (1 << bits)
+                            if tsigned(t) and x >= (1 << (bits - 1)):
+                                x = x - (1 << bits)
+                        init = " = " + str(x)
+                elif c[0] == "float":
+                    if not is_flt(t):
+                        self.err("a float initializer for an integer global needs a cast")
+                    self.err("float global initializers are not supported yet (omit it for 0)")
+                else:
+                    self.err("global initializer must be an integer constant")
+            self.globals[n] = t
+            self.emit(0, "")
+            self.emit(0, fname(n) + ": " + t + init)
+            if self.is_op(","):
+                self.pos += 1
+            else:
+                break
+        self.expect(";")
 
     def struct_def(self):
     # struct S { members; };  -> a Forge struct (same C layout)
@@ -1646,6 +1721,8 @@ class Parser:
         for p in ps:
             if p[0] == "":
                 self.err("unnamed parameter in a definition")
+            if p[0] in self.globals:
+                self.err("parameter " + p[0] + " shadows a global variable (not supported yet)")
             self.vars[p[0]] = p[1]
             sig.append(fname(p[0]) + ": " + p[1])
         self.emit(0, "")
