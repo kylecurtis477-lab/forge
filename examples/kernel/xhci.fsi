@@ -2,8 +2,10 @@
 # the root ports, reset connected USB2 ports, then for the first device: Enable Slot, Address Device
 # and a GET_DESCRIPTOR(device) control transfer on endpoint 0. Then (HID step 1) the configuration
 # descriptor is read and walked for a HID boot keyboard interface and its interrupt IN endpoint, and the
-# device is configured: SET_CONFIGURATION, SET_PROTOCOL(boot) and SET_IDLE(0). The interrupt endpoint
-# itself (Configure Endpoint, a transfer ring, key reports) is the next step.
+# device is configured: SET_CONFIGURATION, SET_PROTOCOL(boot) and SET_IDLE(0). HID step 2: Configure Endpoint
+# adds the interrupt IN endpoint with its own transfer ring of Normal TRBs (8-byte boot reports), and
+# xh_kbd_poll reads the reports (polled, bounded), decoding newly pressed keys to text; tests/os/drivers.sh
+# types into QEMU's usb-kbd through the monitor.
 xh_cap: u64
 xh_op: u64
 xh_rt: u64
@@ -24,10 +26,10 @@ xh_erst_pa: u64
 xh_ev: u64[4]  # last event TRB
 xh_connected: u64
 
-xh_rb: u64[2]  # producer rings: 0 = command ring, 1 = EP0 transfer ring of the probed device
-xh_rpa: u64[2]
-xh_ri: u64[2]
-xh_rc: u64[2]
+xh_rb: u64[3]  # producer rings: 0 = command ring, 1 = EP0 transfer ring of the probed device, 2 = its keyboard IN endpoint
+xh_rpa: u64[3]
+xh_ri: u64[3]
+xh_rc: u64[3]
 
 def xh_ring_put(r: u64, p: u64, s: u64, c: u64):
 # write one TRB; wraps through a link TRB in the last slot (toggle cycle)
@@ -48,9 +50,12 @@ def xh_ring_put(r: u64, p: u64, s: u64, c: u64):
         xh_rc[r] ^= 1
 
 def xh_event(want: u64) -> u64:
-# poll the event ring for a TRB of type want; returns its completion code (0xFF on timeout)
+    return xh_event_us(want, 1000000)
+
+def xh_event_us(want: u64, us: u64) -> u64:
+# poll the event ring for a TRB of type want for about us microseconds; returns its completion code (0xFF on timeout)
     t: u64 = 0
-    while t < 1000000:
+    while t < us:
         e = xh_er + xh_er_i * 16
         c = mmio_rd(e + 12, 4)
         if (c & 1) == xh_er_c:
@@ -282,7 +287,8 @@ def xh_device(port: u64, speed: u64) -> u64:
     putc(58)
     put_hex16(mmio_rd(buf + 10, 2))
     putc(10)
-    xh_hid_setup(slot, buf, buf_pa)
+    if xh_hid_setup(slot, buf, buf_pa) != 0 and xh_hid_endpoint(slot, inc, in_pa, outc, speed, port) != 0:
+        xh_kbd_poll(8000)
     return 1
 
 def xh_ctrl(slot: u64, req: u64, n: u64, pa: u64) -> u64:
@@ -383,3 +389,162 @@ def xh_hid_setup(slot: u64, buf: u64, buf_pa: u64) -> u64:
     put_u64(cv)
     puts(" OK, SET_PROTOCOL(boot) OK, SET_IDLE(0) OK\n")
     return 1
+
+# ---- HID step 2: the interrupt IN endpoint ----
+XH_KBD_NTRB = 8  # Normal TRBs kept queued, one 8-byte report buffer each
+xh_rep: u64  # report buffers (one DMA page)
+xh_rep_pa: u64
+xh_kbd_slot: u64
+xh_kbd_dci: u64
+xh_kbd_last: u64[6]  # key usages of the previous report
+
+def xh_kbd_queue(pa: u64):
+# one Normal TRB for an 8-byte report: interrupt on completion and on a short packet
+    xh_ring_put(2, pa, 8, (1 << 10) | (1 << 5) | (1 << 2))
+
+def xh_hid_endpoint(slot: u64, inc: u64, in_pa: u64, outc: u64, speed: u64, port: u64) -> u64:
+# Configure Endpoint: input context adds the slot context (Context Entries = DCI) and the endpoint context
+    dci = 2 * (xh_kbd_ep & 0xF) + 1
+    tr_pa: u64 = 0
+    tr = dma_alloc(1, addr(tr_pa))
+    xh_rep = dma_alloc(1, addr(xh_rep_pa))
+    if tr == 0 or xh_rep == 0:
+        panic("xHCI: out of DMA memory")
+    # bInterval is in frames (ms) at full/low speed, an exponent at high speed and above; the endpoint
+    # context wants 125 us units as an exponent: 2^e * 125 us
+    e: u64 = 3
+    if speed >= 3:
+        e = xh_kbd_ival - 1
+    else:
+        while e < 10 and (u64(1) << (e + 1)) <= xh_kbd_ival * 8:
+            e += 1
+    if e > 15:
+        e = 15
+    mmio_wr(inc, 4, 0)
+    mmio_wr(inc + 4, 4, 1 | (u64(1) << dci))
+    sc = inc + xh_csz
+    mmio_wr(sc, 4, (speed << 20) | (dci << 27))
+    mmio_wr(sc + 4, 4, port << 16)
+    ep = inc + (dci + 1) * xh_csz
+    mmio_wr(ep, 4, e << 16)
+    mmio_wr(ep + 4, 4, (3 << 1) | (7 << 3) | (xh_kbd_mps << 16))  # CErr 3, Interrupt IN
+    mmio_wr(ep + 8, 8, tr_pa | 1)
+    mmio_wr(ep + 16, 4, 8 | (xh_kbd_mps << 16))  # average TRB length, max ESIT payload
+    xh_rb[2] = tr
+    xh_rpa[2] = tr_pa
+    xh_ri[2] = 0
+    xh_rc[2] = 1
+    cc = xh_command(in_pa, 0, (12 << 10) | (slot << 24))
+    st = mmio_rd(outc + dci * xh_csz, 4) & 7
+    if cc != 1 or st != 1:
+        puts("xHCI: Configure Endpoint failed, code ")
+        put_u64(cc)
+        puts(", endpoint state ")
+        put_u64(st)
+        putc(10)
+        return 0
+    xh_kbd_slot = slot
+    xh_kbd_dci = dci
+    i: u64 = 0
+    while i < XH_KBD_NTRB:
+        xh_kbd_queue(xh_rep_pa + i * 8)
+        i += 1
+    mmio_wr(xh_db + slot * 4, 4, dci)
+    puts("xHCI: Configure Endpoint OK: endpoint 0x")
+    put_hex8(xh_kbd_ep)
+    puts(" -> DCI ")
+    put_u64(dci)
+    puts(", interrupt IN, interval 2^")
+    put_u64(e)
+    puts(" x 125 us, state running; ")
+    put_u64(XH_KBD_NTRB)
+    puts(" report TRBs queued\n")
+    return 1
+
+def xh_usage_char(u: u64, shift: u64) -> u64:
+# HID boot keyboard usage -> ASCII (letters, digits, space, enter, a few marks); 0 if not printable here
+    if u >= 4 and u <= 29:
+        if shift != 0:
+            return 65 + u - 4
+        return 97 + u - 4
+    if u >= 30 and u <= 38:
+        return 49 + u - 30
+    if u == 39:
+        return 48
+    if u == 40:
+        return 10
+    if u == 44:
+        return 32
+    if u == 45:
+        return 45
+    if u == 55:
+        return 46
+    return 0
+
+def xh_kbd_poll(ms: u64):
+# read reports for up to ms milliseconds or until Enter; each newly pressed key (absent from the previous
+# report) is decoded; every completed TRB is re-queued with its own buffer
+    puts("xHCI: HID boot keyboard: waiting for key reports\n")
+    text: u8[64]
+    nt: u64 = 0
+    nrep: u64 = 0
+    nerr: u64 = 0
+    done: u64 = 0
+    i: u64 = 0
+    while i < 6:
+        xh_kbd_last[i] = 0
+        i += 1
+    t: u64 = 0
+    while t < ms and done == 0:
+        cc = xh_event_us(32, 1000)
+        if cc == 0xFF:
+            t += 1
+            continue
+        tp = xh_ev[0] | (xh_ev[1] << 32)
+        if tp < xh_rpa[2] or tp >= xh_rpa[2] + 4096:
+            continue
+        bpa = mmio_rd(xh_rb[2] + (tp - xh_rpa[2]), 8)
+        if bpa < xh_rep_pa or bpa >= xh_rep_pa + XH_KBD_NTRB * 8:
+            continue
+        if cc == 1 or cc == 13:
+            nrep += 1
+            b = xh_rep + (bpa - xh_rep_pa)
+            mods = mmio_rd(b, 1)
+            shift = mods & 0x22
+            k: u64 = 2
+            while k < 8:
+                u = mmio_rd(b + k, 1)
+                if u >= 4:
+                    seen: u64 = 0
+                    j: u64 = 0
+                    while j < 6:
+                        if xh_kbd_last[j] == u:
+                            seen = 1
+                        j += 1
+                    if seen == 0:
+                        ch = xh_usage_char(u, shift)
+                        if ch == 10:
+                            done = 1
+                        elif ch != 0 and nt < 63:
+                            text[nt] = u8(ch)
+                            nt += 1
+                k += 1
+            k = 0
+            while k < 6:
+                xh_kbd_last[k] = mmio_rd(b + 2 + k, 1)
+                k += 1
+        else:
+            nerr += 1
+        xh_kbd_queue(bpa)
+        mmio_wr(xh_db + xh_kbd_slot * 4, 4, xh_kbd_dci)
+    text[nt] = 0
+    puts("xHCI: HID boot keyboard: ")
+    put_u64(nrep)
+    puts(" reports, ")
+    put_u64(nerr)
+    puts(" errors, typed \"")
+    puts(addr(text[0]))
+    puts("\"")
+    if done != 0:
+        puts(" + Enter")
+    putc(10)
