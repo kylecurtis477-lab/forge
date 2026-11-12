@@ -63,3 +63,16 @@ Self-compile 2354 ms (1.21 s on 2026-11-01; the compiler has grown since, and th
 `declare_locals` and `scan_more` reuse their name buffers instead of allocating per function per pass (and per
 statement). The output assembly is unchanged; the GC share of a self-compile dropped from about 20% to under 5%.
 Self-compile best of 5: **1560 ms** (was 2354 ms on the same loaded box). bench/baseline.tsv was refreshed with this record.
+
+## Freestanding twins and --fs-opt step 1 (2026-11-11 18:47 CST)
+bench/fsloop.forge and bench/fsfib.forge are freestanding copies of loop and fib (same output; their Rust
+references are loop.rs and fib.rs). `bench run` builds each with `--fs-opt` (fsloop, fsfib) and without (fsloop0, fsfib0).
+| bench | Forge run | Rust -O3 run | ratio |
+|---|---|---|---|
+| fsloop (--fs-opt) | 292.2 ms | 86.8 ms | 3.36 |
+| fsloop0 | 297.5 ms | 86.8 ms | 3.42 |
+| fsfib (--fs-opt) | 18.1 ms | 9.3 ms | 1.94 |
+| fsfib0 | 18.9 ms | 9.3 ms | 2.02 |
+
+The fs backend is far behind the hosted IR backend on loop (hosted 113 ms): its `idiv` by the constant 7 costs
+more than all the stack traffic that step 1 removes.

@@ -277,6 +277,26 @@ Each driver gets its own boot test, and none of them writes to disks it does not
 In plain terms: make Forge code and the Forge compiler fast. Kernel code gets real register allocation, loops
 get vectorized, `parallel for` spreads work over all cores, and every speed claim is measured and tracked in bench/.
 1. Register allocator and IR backend for fs/kernel mode (today only hosted code uses the IR backend).
+   - Plan for this item, in safe steps, each byte-identical for code built without the new flag:
+     1. `--fs-opt` (opt-in): leaf functions keep scalar locals in free caller-saved registers, plus a push/pop peephole.
+     2. Non-leaf functions: callee-saved registers (rbx, r12–r15), saved in the frame.
+     3. Turn `--fs-opt` on for the kernel, after auditing every hand-written asm routine that calls or is called
+        by Forge code for SysV register discipline; QEMU boot suite at O2 and O0.
+     4. A real IR for fs mode (SSA, liveness-based allocation), reusing the hosted IR passes where the
+        value model allows.
+   - *Status: step 1 done (2026-11-11).* `forgec --fs-opt` works on each finished function's assembly text and is
+     conservative: any call, any instruction outside a short whitelist, any inline asm, any `lea` of the frame,
+     any use of %rbp other than a plain 8-byte `mov` between a slot and %rax, or a stack protector leaves the
+     function unpromoted. The most-used slots get the caller-saved registers (r8–r11, rsi, rdi) that the body never
+     names. A peephole then turns `push %rax; mov X,%rax; mov %rax,%rcx; pop %rax` into `mov X,%rcx`, drops
+     `push %rax; pop %rax`, and drops a reload right after a store to the same register; it runs in every function
+     without inline asm. The kernel assembly gets 14% shorter with the flag (167,471 to 143,557 lines), but the
+     kernel and every other build stay byte-identical without it. Tests: every tests/fs program runs again with
+     `--fs-opt` and must print the same (`PASS fs-opt ...`); tests/fs/regalloc.forge covers loops, %cl shifts,
+     division, narrow wrapping types, more locals than registers, six parameters, an address-taken local and
+     unsigned compares, and `fs-opt-shape` checks that ra_leaf has no frame access and ra_addr keeps its slots.
+     bench: fsloop 297.5 to 292.2 ms, fsfib 18.9 to 18.1 ms. The loop's `idiv` by 7 dominates (hosted code divides
+     by a constant with a multiply), so the next speedup is constant division.
 2. Auto-vectorization of simple loops (SSE2/AVX2, now that the kernel saves xsave state), plus explicit `simd[T, N]` types.
 3. `parallel for` over ranges and slices, with a work-stealing multicore runtime in both hosted and kernel modes. Test: speedup on 4 cores is ≥ 3× on bench kernels, with deterministic results.
 4. Perf targets:

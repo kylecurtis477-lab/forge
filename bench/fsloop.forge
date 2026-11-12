@@ -1,0 +1,17 @@
+# forge: no-runtime
+# Freestanding twin of bench/loop.forge (same arithmetic and output; reference bench/fsloop.rs). Tracks the
+# fs/kernel-mode backend for Phase 12.1: tools/bench.forge builds it with --fs-opt and without.
+include "../tests/fs/linux.fsi"
+
+def run(n: i64) -> i64:
+    s: i64 = 0
+    i: i64 = 0
+    while i < n:
+        s += i * i % 7
+        i += 1
+    return s
+
+def main() -> i64:
+    put_i64(run(100000000))
+    nl()
+    return 0

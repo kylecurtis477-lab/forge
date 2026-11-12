@@ -1,0 +1,79 @@
+# forge: no-runtime
+# Phase 12.1 step 1 (--fs-opt): leaf functions whose scalar locals move into caller-saved registers, and
+# the cases that must stay in memory. run_tests.sh runs every tests/fs program with and without the flag (same
+# output), and checks that ra_leaf is fully promoted and ra_addr is not.
+include "linux.fsi"
+
+def ra_leaf(n: i64, k: i64) -> i64:
+# loop counter, accumulator and bound all in registers; shifts use %cl, % and / use %rdx
+    s: i64 = 0
+    i: i64 = 0
+    while i < n:
+        s += (i * k) % 13 + (i << (k % 5)) / 3
+        i += 1
+    return s
+
+def ra_narrow(a: u8, b: i8, c: u32) -> i64:
+# narrow types wrap the same in a register as in a slot
+    x: u8 = a
+    x += 100
+    y: i8 = b
+    y += 1
+    z: u32 = c
+    z -= 1
+    return i64(x) * 1000000 + i64(y) * 1000 + i64(z % 1000)
+
+def ra_many(a: i64) -> i64:
+# more live locals than free registers: the most-used ones get registers, the rest stay in slots
+    v1: i64 = a + 1
+    v2: i64 = a + 2
+    v3: i64 = a + 3
+    v4: i64 = a + 4
+    v5: i64 = a + 5
+    v6: i64 = a + 6
+    v7: i64 = a + 7
+    v8: i64 = a + 8
+    t: i64 = 0
+    j: i64 = 0
+    while j < 10:
+        t += v1 * v2 - v3 + v4 * v5 - v6 + v7 * v8 + j
+        j += 1
+    return t
+
+def ra_six(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64:
+# all six argument registers are named by the prologue, so none is free
+    s: i64 = a * b + c * d + e * f
+    u: u64 = u64(s) >> 1
+    return i64(u) - a
+
+def ra_addr(n: i64) -> i64:
+# x's address is taken, so the function keeps every local in memory
+    x: i64 = n
+    p: ptr[i64] = addr(x)
+    p[0] = p[0] + 5
+    return x
+
+def ra_cmp(a: u64, b: u64) -> i64:
+    r: i64 = 0
+    if a > b:
+        r += 1
+    if a == b:
+        r += 10
+    if a < b and b != 0:
+        r += 100
+    return r
+
+def main() -> i64:
+    put_i64(ra_leaf(1000, 7))
+    nl()
+    put_i64(ra_narrow(200, 127, 0))
+    nl()
+    put_i64(ra_many(3))
+    nl()
+    put_i64(ra_six(1, 2, 3, 4, 5, 6))
+    nl()
+    put_i64(ra_addr(37))
+    nl()
+    put_i64(ra_cmp(0xFFFFFFFFFFFFFFFF, 1) + ra_cmp(5, 5) + ra_cmp(1, 2))
+    nl()
+    return 0

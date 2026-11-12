@@ -4,6 +4,7 @@
 # tests/errors/*.forge: compiler must fail with "error: line N: ..."
 # tests/os/run.sh: QEMU boot tests (kernel via multiboot2 on BIOS and OVMF, native PE32+ EFI app on a GPT disk)
 # tests/fs/*.forge: freestanding (--freestanding / no-runtime pragma) programs linked with plain ld, no runtime
+#   (each one again with --fs-opt, which must not change its output)
 # tests/ast/*.sh: --emit=ast-json / --emit=pretty round trips (AST equal, pretty fixpoint, same behaviour, self-host)
 # tests/grammar/: docs/GRAMMAR.md conformance (valid/ parse, invalid/ rejected) + grammar-based fuzzer
 # tests/diag/*.forge: --diagnostics=json output must match the golden .json (one object per error, schema v1)
@@ -88,6 +89,13 @@ for t in tests/fs/*.forge; do
   c=""; [ -f "${t%.forge}.c" ] && gcc -O1 -ffreestanding -fno-pic -fno-stack-protector -c -o build/t_fsc.o "${t%.forge}.c" && c=build/t_fsc.o
   build/forgec "$t" build/t_fs.s $FORGEC_FLAGS && build/fas -o build/t_fs.o build/t_fs.s && build/fld -o build/t_fs build/t_fs.o $c && build/t_fs | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS $t" || { echo "FAIL $t"; fail=1; }
 done
+# --fs-opt (Phase 12.1 step 1, opt-in): every freestanding program must print the same with the flag, and
+# tests/fs/regalloc.forge must come out with ra_leaf fully in registers and ra_addr (address taken) untouched
+for t in tests/fs/*.forge; do
+  c=""; [ -f "${t%.forge}.c" ] && gcc -O1 -ffreestanding -fno-pic -fno-stack-protector -c -o build/t_fsc.o "${t%.forge}.c" && c=build/t_fsc.o
+  build/forgec "$t" build/t_fs.s $FORGEC_FLAGS --fs-opt && build/fas -o build/t_fs.o build/t_fs.s && build/fld -o build/t_fs build/t_fs.o $c && build/t_fs | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS fs-opt $t" || { echo "FAIL fs-opt $t"; fail=1; }
+done
+build/forgec tests/fs/regalloc.forge build/t_ra.s $FORGEC_FLAGS --fs-opt && [ "$(awk '/^ra_leaf:/,/ret$/' build/t_ra.s | grep -c '(%rbp)')" = 0 ] && [ "$(awk '/^ra_addr:/,/ret$/' build/t_ra.s | grep -c '(%rbp)')" -gt 0 ] && echo "PASS fs-opt-shape" || { echo "FAIL fs-opt-shape"; fail=1; }
 # missing input / include files: clean diagnostic, exit 1, no crash
 printf 'include "no_such_file.fsi"\n' > build/t_inc.forge
 build/forgec build/t_inc.forge build/t_inc.s --freestanding > build/t_inc.txt 2>&1; rc=$?

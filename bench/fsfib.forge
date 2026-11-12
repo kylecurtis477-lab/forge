@@ -1,0 +1,14 @@
+# forge: no-runtime
+# Freestanding twin of bench/fib.forge (same recursion and output; reference bench/fsfib.rs). Tracks the
+# fs/kernel-mode backend for Phase 12.1: tools/bench.forge builds it with --fs-opt and without.
+include "../tests/fs/linux.fsi"
+
+def fib(n: i64) -> i64:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+def main() -> i64:
+    put_i64(fib(32))
+    nl()
+    return 0

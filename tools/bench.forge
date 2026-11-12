@@ -3,7 +3,8 @@
 #       Compile every bench/<name>.forge with ./forge and its native reference bench/<name>.rs with
 #       rustc -C opt-level=3, check that both print the same output, time each binary (best of N, default 5)
 #       and time the self-compile (build/forgec selfhost/forgec.forge, best of N). Prints a markdown table
-#       and appends one record to bench/history.tsv (unless --no-record).
+#       and appends one record to bench/history.tsv (unless --no-record). The freestanding twins (FS_BENCHES) are
+#       built with build/forgec, fas and fld, once with --fs-opt (<name>) and once without (<name>0).
 #   build/bench check [--history FILE] [--baseline FILE] [--tol PCT]
 #       Regression check: the newest history record against bench/baseline.tsv. Fails (exit 1) when the
 #       self-compile time or any bench's forge/reference run-time ratio is more than PCT percent (default 25)
@@ -17,6 +18,10 @@ import sys
 import time
 
 BENCHES = ["fib", "loop", "strbuild", "lists", "floats", "strops"]
+# freestanding (fs/kernel-mode backend) twins and the hosted bench whose Rust program is their reference.
+# Each is recorded twice: <name> built with --fs-opt, <name>0 without (Phase 12.1).
+FS_BENCHES = ["fsloop", "fsfib"]
+FS_REFS = ["loop", "fib"]
 
 def repo_root():
     me = sys.argv[0]
@@ -109,6 +114,31 @@ def cmd_run(root):
             ratio = str(q // 100) + "." + str(q // 10 % 10) + str(q % 10)
         print("| " + b + " | " + ms3(ft) + " ms | " + ms3(rt) + " ms | " + ratio + " | " + agree + " |")
         rec = rec + "\t" + b + "=" + str(ft // 1000) + "/" + str(rt // 1000)
+    k = 0
+    while k < len(FS_BENCHES):
+        b = FS_BENCHES[k]
+        rt = best([root + "/bench/out/" + FS_REFS[k] + "-rust"], reps) if have_ref else 0
+        for v in ["", "0"]:
+            r = fs_build(root, b, v)
+            if r[0] != 0:
+                print("error: " + b + ".forge failed to build" + ("" if v == "" else " without --fs-opt"))
+                bad = 1
+                continue
+            fb = root + "/bench/out/" + b + v + "-forge"
+            fo = timed([fb])[2]
+            agree = fo
+            if have_ref and rt > 0 and timed([root + "/bench/out/" + FS_REFS[k] + "-rust"])[2] != fo:
+                agree = "MISMATCH"
+                bad = 1
+            ft = best([fb], reps)
+            ratio = "-"
+            if rt > 0:
+                q = ft * 100 // rt
+                ratio = str(q // 100) + "." + str(q // 10 % 10) + str(q % 10)
+            nm = b + v
+            print("| " + nm + " | " + ms3(ft) + " ms | " + ms3(rt) + " ms | " + ratio + " | " + agree + " |")
+            rec = rec + "\t" + nm + "=" + str(ft // 1000) + "/" + str(rt // 1000)
+        k += 1
     sc = best([root + "/build/forgec", root + "/selfhost/forgec.forge", root + "/bench/out/selfcompile.s"], reps)
     print("")
     print("self-compile (build/forgec selfhost/forgec.forge, best of " + str(reps) + "): " + ms3(sc) + " ms")
@@ -122,6 +152,19 @@ def cmd_run(root):
         write_file(hist, old + line)
         print("recorded in " + hist)
     return bad
+
+def fs_build(root, b, v):
+# freestanding bench: build/forgec (+ --fs-opt unless v == "0"), then build/fas and build/fld
+    o = root + "/bench/out/" + b + v
+    args = [root + "/build/forgec", root + "/bench/" + b + ".forge", o + ".s"]
+    if v == "":
+        args.append("--fs-opt")
+    r = os.run(args)
+    if r[0] == 0:
+        r = os.run([root + "/build/fas", "-o", o + ".o", o + ".s"])
+    if r[0] == 0:
+        r = os.run([root + "/build/fld", "-o", o + "-forge", o + ".o"])
+    return r
 
 def parse(line):
 # record -> [selfcompile_ms, names, forge_us, ref_us]; selfcompile_ms is -1 if the line is not a record
