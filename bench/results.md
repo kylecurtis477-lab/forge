@@ -76,3 +76,13 @@ references are loop.rs and fib.rs). `bench run` builds each with `--fs-opt` (fsl
 
 The fs backend is far behind the hosted IR backend on loop (hosted 113 ms): its `idiv` by the constant 7 costs
 more than all the stack traffic that step 1 removes.
+
+## --fs-opt constant division (2026-11-11 18:52 CST)
+| bench | Forge run | Rust -O3 run | ratio |
+|---|---|---|---|
+| fsloop (--fs-opt) | 184.2 ms | 83.3 ms | 2.21 |
+| fsloop0 | 296.7 ms | 83.3 ms | 3.56 |
+| fsfib (--fs-opt) | 17.5 ms | 7.2 ms | 2.42 |
+| fsfib0 | 23.6 ms | 7.2 ms | 3.26 |
+
+fsloop's `% 7` is now a multiply. fsfib has no division; its spread between runs is noise on the shared box.

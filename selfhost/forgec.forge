@@ -18306,6 +18306,130 @@ def fs_binop(o, lt, rt):
     fs_norm(t)
     fs_ety = t
 
+# ---- --fs-opt: integer division and modulo by a constant (Phase 12.1) ----
+# x / d, x // d and x % d with a literal 0 < d < 2^31 and an integer x become multiply-and-shift sequences
+# instead of div/idiv. Freestanding division truncates toward zero (C semantics), so signed x is divided as
+# |x| (an unsigned 64-bit value, 2^63 for the minimum) and the sign is put back; the remainder is
+# x - q*d. Unsigned magic: k = ceil(log2 d), m = ceil(2^(64+k) / d) (65 bits); with m' = m - 2^64 and
+# t = high64(x * m'), q = (t + ((x - t) >> 1)) >> (k - 1), exact for every 64-bit x (Granlund-Montgomery).
+# Signed |x| <= 2^63 uses the 64-bit magic m = floor(2^(63+k) / d) + 1 and q = high64(|x| * m) >> (k - 1).
+# Powers of two use shifts (with the round-toward-zero bias for signed x) and masks.
+def fs_cdiv_lit(n0):
+# the literal d if the right operand compiled to exactly `mov $d,%rax` with 0 < d < 2^31, else 0
+    if nout != n0 + 1 or not str_eq(out[n0 - 1], "    push %rax\n"):
+        return 0
+    l = out[n0]
+    if not starts(l, "    mov $") or not ends(l, ",%rax\n"):
+        return 0
+    t = substr(l, 9, len(l) - 6)
+    if len(t) == 0 or len(t) > 10:
+        return 0
+    i = 0
+    while i < len(t):
+        c = char_at(t, i)
+        if c < 48 or c > 57:
+            return 0
+        i += 1
+    v = fs_parse_dec(t)
+    if v <= 0 or v >= 2147483648:
+        return 0
+    return v
+
+def fs_magic(d, s):
+# floor(2^s / d) mod 2^64, by long division (r stays below d)
+    r = 0
+    q = 0
+    b = s
+    while b >= 0:
+        r = r * 2
+        if b == s:
+            r += 1
+        q = q * 2
+        if r >= d:
+            r -= d
+            q += 1
+        b -= 1
+    return q
+
+def fs_cdiv_try(o, lt, rt, n0):
+    global fs_ety, fs_dep
+    if not (str_eq(o, "/") or str_eq(o, "//") or str_eq(o, "%")):
+        return 0
+    if fsk[lt] != 0 or fsk[rt] != 0:
+        return 0
+    d = fs_cdiv_lit(n0)
+    if d == 0:
+        return 0
+    t = ft_join(lt, rt)
+    sg = ft_sg(t)
+    ismod = str_eq(o, "%")
+    # drop the operand push and the literal load: x is still in rax
+    out[n0 - 1] = ""
+    out[n0] = ""
+    fs_dep -= 1
+    k = 0
+    p = 1
+    while p < d:
+        p = p * 2
+        k += 1
+    if d == 1:
+        if ismod:
+            e("xor %eax,%eax")
+    elif p == d and not sg:
+        if ismod:
+            e(c3("and $", str(d - 1), ",%rax"))
+        else:
+            e(c3("shr $", str(k), ",%rax"))
+    elif p == d:
+        if ismod:
+            e("push %rax")
+        e("mov %rax,%rdx")
+        e("sar $63,%rdx")
+        e(c3("shr $", str(64 - k), ",%rdx"))
+        e("add %rdx,%rax")
+        e(c3("sar $", str(k), ",%rax"))
+        if ismod:
+            e(c3("shl $", str(k), ",%rax"))
+            e("mov %rax,%rcx")
+            e("pop %rax")
+            e("sub %rcx,%rax")
+    else:
+        if ismod:
+            e("push %rax")
+        if sg:
+            m = fs_magic(d, 63 + k) + 1
+            e("cqo")
+            e("xor %rdx,%rax")
+            e("sub %rdx,%rax")
+            e("push %rdx")
+            e(c3("mov $", str(m), ",%rcx"))
+            e("mul %rcx")
+            if k > 1:
+                e(c3("shr $", str(k - 1), ",%rdx"))
+            e("mov %rdx,%rax")
+            e("pop %rdx")
+            e("xor %rdx,%rax")
+            e("sub %rdx,%rax")
+        else:
+            m = fs_magic(d, 64 + k) + 1
+            e("push %rax")
+            e(c3("mov $", str(m), ",%rcx"))
+            e("mul %rcx")
+            e("pop %rax")
+            e("sub %rdx,%rax")
+            e("shr $1,%rax")
+            e("add %rdx,%rax")
+            if k > 1:
+                e(c3("shr $", str(k - 1), ",%rax"))
+        if ismod:
+            e(c3("imul $", str(d), ",%rax,%rax"))
+            e("mov %rax,%rcx")
+            e("pop %rax")
+            e("sub %rcx,%rax")
+    fs_norm(t)
+    fs_ety = t
+    return 1
+
 FS_PREC = ["|", "^", "&", "<<>>", "+-", "*///%"]
 
 def fs_level_has(lv, o):
@@ -18333,9 +18457,12 @@ def fs_bin(lv):
         fs_rv()
         lt = fs_ety
         fs_push()
+        n0 = nout
         fs_bin(lv + 1)
         fs_rv()
         rt = fs_ety
+        if fs_ra and lv == 5 and not str_eq(o, "*") and fs_cdiv_try(o, lt, rt, n0):
+            continue
         e("mov %rax,%rcx")
         fs_pop("%rax")
         fs_binop(o, lt, rt)

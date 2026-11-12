@@ -297,6 +297,14 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      unsigned compares, and `fs-opt-shape` checks that ra_leaf has no frame access and ra_addr keeps its slots.
      bench: fsloop 297.5 to 292.2 ms, fsfib 18.9 to 18.1 ms. The loop's `idiv` by 7 dominates (hosted code divides
      by a constant with a multiply), so the next speedup is constant division.
+   - *Constant division under `--fs-opt` (2026-11-11).* `x / d`, `x // d` and `x % d` with a literal 0 < d < 2^31
+     become multiply-and-shift code instead of `div`/`idiv`. Freestanding division truncates toward zero, so signed
+     x is divided as |x| with the 64-bit magic floor(2^(63+k)/d) + 1 and the sign is put back; unsigned x uses the
+     65-bit round-up magic (high64(x·m') plus the halving add). Powers of two become shifts (with the
+     round-toward-zero bias for signed x) and masks. tests/fs/cdiv.forge compares 90 (type, d) pairs across
+     i8–i64 and u8–u64 against division by a variable over 4,615 values (edges and a pseudo-random sweep): 0
+     mismatches. `fs-opt-cdiv-shape` checks that only the divisions by a variable keep div/idiv.
+     bench: fsloop 296.7 ms without `--fs-opt`, 184.2 ms with it (-38%; Rust -O3 83.3 ms).
 2. Auto-vectorization of simple loops (SSE2/AVX2, now that the kernel saves xsave state), plus explicit `simd[T, N]` types.
 3. `parallel for` over ranges and slices, with a work-stealing multicore runtime in both hosted and kernel modes. Test: speedup on 4 cores is ≥ 3× on bench kernels, with deterministic results.
 4. Perf targets:

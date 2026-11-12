@@ -1,0 +1,1073 @@
+# forge: no-runtime
+# --fs-opt constant division (Phase 12.1): x / d, x // d and x % d with a literal d must equal the same
+# operation with d in a variable (div/idiv), for signed and unsigned types of every width, over edge values
+# (0, +-1, min, max, near powers of two) and a pseudo-random sweep. Generated function per (type, d).
+include "linux.fsi"
+
+def c_i64_1(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 1 != x / dv:
+        bad += 1
+    if x // 1 != x // dv:
+        bad += 1
+    if x % 1 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_2(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 2 != x / dv:
+        bad += 1
+    if x // 2 != x // dv:
+        bad += 1
+    if x % 2 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_3(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 3 != x / dv:
+        bad += 1
+    if x // 3 != x // dv:
+        bad += 1
+    if x % 3 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_5(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 5 != x / dv:
+        bad += 1
+    if x // 5 != x // dv:
+        bad += 1
+    if x % 5 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_7(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 7 != x / dv:
+        bad += 1
+    if x // 7 != x // dv:
+        bad += 1
+    if x % 7 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_8(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 8 != x / dv:
+        bad += 1
+    if x // 8 != x // dv:
+        bad += 1
+    if x % 8 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_10(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 10 != x / dv:
+        bad += 1
+    if x // 10 != x // dv:
+        bad += 1
+    if x % 10 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_16(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 16 != x / dv:
+        bad += 1
+    if x // 16 != x // dv:
+        bad += 1
+    if x % 16 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_100(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 100 != x / dv:
+        bad += 1
+    if x // 100 != x // dv:
+        bad += 1
+    if x % 100 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_641(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 641 != x / dv:
+        bad += 1
+    if x // 641 != x // dv:
+        bad += 1
+    if x % 641 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_1000(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 1000 != x / dv:
+        bad += 1
+    if x // 1000 != x // dv:
+        bad += 1
+    if x % 1000 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_4096(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 4096 != x / dv:
+        bad += 1
+    if x // 4096 != x // dv:
+        bad += 1
+    if x % 4096 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_65537(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 65537 != x / dv:
+        bad += 1
+    if x // 65537 != x // dv:
+        bad += 1
+    if x % 65537 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_1073741824(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 1073741824 != x / dv:
+        bad += 1
+    if x // 1073741824 != x // dv:
+        bad += 1
+    if x % 1073741824 != x % dv:
+        bad += 1
+    return bad
+
+def c_i64_2147483647(x: i64, dv: i64) -> i64:
+    bad: i64 = 0
+    if x / 2147483647 != x / dv:
+        bad += 1
+    if x // 2147483647 != x // dv:
+        bad += 1
+    if x % 2147483647 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_1(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 1 != x / dv:
+        bad += 1
+    if x // 1 != x // dv:
+        bad += 1
+    if x % 1 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_2(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 2 != x / dv:
+        bad += 1
+    if x // 2 != x // dv:
+        bad += 1
+    if x % 2 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_3(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 3 != x / dv:
+        bad += 1
+    if x // 3 != x // dv:
+        bad += 1
+    if x % 3 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_5(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 5 != x / dv:
+        bad += 1
+    if x // 5 != x // dv:
+        bad += 1
+    if x % 5 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_7(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 7 != x / dv:
+        bad += 1
+    if x // 7 != x // dv:
+        bad += 1
+    if x % 7 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_8(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 8 != x / dv:
+        bad += 1
+    if x // 8 != x // dv:
+        bad += 1
+    if x % 8 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_10(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 10 != x / dv:
+        bad += 1
+    if x // 10 != x // dv:
+        bad += 1
+    if x % 10 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_16(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 16 != x / dv:
+        bad += 1
+    if x // 16 != x // dv:
+        bad += 1
+    if x % 16 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_100(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 100 != x / dv:
+        bad += 1
+    if x // 100 != x // dv:
+        bad += 1
+    if x % 100 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_641(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 641 != x / dv:
+        bad += 1
+    if x // 641 != x // dv:
+        bad += 1
+    if x % 641 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_1000(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 1000 != x / dv:
+        bad += 1
+    if x // 1000 != x // dv:
+        bad += 1
+    if x % 1000 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_4096(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 4096 != x / dv:
+        bad += 1
+    if x // 4096 != x // dv:
+        bad += 1
+    if x % 4096 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_65537(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 65537 != x / dv:
+        bad += 1
+    if x // 65537 != x // dv:
+        bad += 1
+    if x % 65537 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_1073741824(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 1073741824 != x / dv:
+        bad += 1
+    if x // 1073741824 != x // dv:
+        bad += 1
+    if x % 1073741824 != x % dv:
+        bad += 1
+    return bad
+
+def c_u64_2147483647(x: u64, dv: u64) -> i64:
+    bad: i64 = 0
+    if x / 2147483647 != x / dv:
+        bad += 1
+    if x // 2147483647 != x // dv:
+        bad += 1
+    if x % 2147483647 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_1(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 1 != x / dv:
+        bad += 1
+    if x // 1 != x // dv:
+        bad += 1
+    if x % 1 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_2(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 2 != x / dv:
+        bad += 1
+    if x // 2 != x // dv:
+        bad += 1
+    if x % 2 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_3(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 3 != x / dv:
+        bad += 1
+    if x // 3 != x // dv:
+        bad += 1
+    if x % 3 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_5(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 5 != x / dv:
+        bad += 1
+    if x // 5 != x // dv:
+        bad += 1
+    if x % 5 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_7(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 7 != x / dv:
+        bad += 1
+    if x // 7 != x // dv:
+        bad += 1
+    if x % 7 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_8(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 8 != x / dv:
+        bad += 1
+    if x // 8 != x // dv:
+        bad += 1
+    if x % 8 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_10(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 10 != x / dv:
+        bad += 1
+    if x // 10 != x // dv:
+        bad += 1
+    if x % 10 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_16(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 16 != x / dv:
+        bad += 1
+    if x // 16 != x // dv:
+        bad += 1
+    if x % 16 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_100(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 100 != x / dv:
+        bad += 1
+    if x // 100 != x // dv:
+        bad += 1
+    if x % 100 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_641(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 641 != x / dv:
+        bad += 1
+    if x // 641 != x // dv:
+        bad += 1
+    if x % 641 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_1000(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 1000 != x / dv:
+        bad += 1
+    if x // 1000 != x // dv:
+        bad += 1
+    if x % 1000 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_4096(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 4096 != x / dv:
+        bad += 1
+    if x // 4096 != x // dv:
+        bad += 1
+    if x % 4096 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_65537(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 65537 != x / dv:
+        bad += 1
+    if x // 65537 != x // dv:
+        bad += 1
+    if x % 65537 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_1073741824(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 1073741824 != x / dv:
+        bad += 1
+    if x // 1073741824 != x // dv:
+        bad += 1
+    if x % 1073741824 != x % dv:
+        bad += 1
+    return bad
+
+def c_i32_2147483647(x: i32, dv: i32) -> i64:
+    bad: i64 = 0
+    if x / 2147483647 != x / dv:
+        bad += 1
+    if x // 2147483647 != x // dv:
+        bad += 1
+    if x % 2147483647 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_1(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 1 != x / dv:
+        bad += 1
+    if x // 1 != x // dv:
+        bad += 1
+    if x % 1 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_2(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 2 != x / dv:
+        bad += 1
+    if x // 2 != x // dv:
+        bad += 1
+    if x % 2 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_3(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 3 != x / dv:
+        bad += 1
+    if x // 3 != x // dv:
+        bad += 1
+    if x % 3 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_5(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 5 != x / dv:
+        bad += 1
+    if x // 5 != x // dv:
+        bad += 1
+    if x % 5 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_7(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 7 != x / dv:
+        bad += 1
+    if x // 7 != x // dv:
+        bad += 1
+    if x % 7 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_8(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 8 != x / dv:
+        bad += 1
+    if x // 8 != x // dv:
+        bad += 1
+    if x % 8 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_10(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 10 != x / dv:
+        bad += 1
+    if x // 10 != x // dv:
+        bad += 1
+    if x % 10 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_16(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 16 != x / dv:
+        bad += 1
+    if x // 16 != x // dv:
+        bad += 1
+    if x % 16 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_100(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 100 != x / dv:
+        bad += 1
+    if x // 100 != x // dv:
+        bad += 1
+    if x % 100 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_641(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 641 != x / dv:
+        bad += 1
+    if x // 641 != x // dv:
+        bad += 1
+    if x % 641 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_1000(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 1000 != x / dv:
+        bad += 1
+    if x // 1000 != x // dv:
+        bad += 1
+    if x % 1000 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_4096(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 4096 != x / dv:
+        bad += 1
+    if x // 4096 != x // dv:
+        bad += 1
+    if x % 4096 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_65537(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 65537 != x / dv:
+        bad += 1
+    if x // 65537 != x // dv:
+        bad += 1
+    if x % 65537 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_1073741824(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 1073741824 != x / dv:
+        bad += 1
+    if x // 1073741824 != x // dv:
+        bad += 1
+    if x % 1073741824 != x % dv:
+        bad += 1
+    return bad
+
+def c_u32_2147483647(x: u32, dv: u32) -> i64:
+    bad: i64 = 0
+    if x / 2147483647 != x / dv:
+        bad += 1
+    if x // 2147483647 != x // dv:
+        bad += 1
+    if x % 2147483647 != x % dv:
+        bad += 1
+    return bad
+
+def c_i8_1(x: i8, dv: i8) -> i64:
+    bad: i64 = 0
+    if x / 1 != x / dv:
+        bad += 1
+    if x // 1 != x // dv:
+        bad += 1
+    if x % 1 != x % dv:
+        bad += 1
+    return bad
+
+def c_i8_2(x: i8, dv: i8) -> i64:
+    bad: i64 = 0
+    if x / 2 != x / dv:
+        bad += 1
+    if x // 2 != x // dv:
+        bad += 1
+    if x % 2 != x % dv:
+        bad += 1
+    return bad
+
+def c_i8_3(x: i8, dv: i8) -> i64:
+    bad: i64 = 0
+    if x / 3 != x / dv:
+        bad += 1
+    if x // 3 != x // dv:
+        bad += 1
+    if x % 3 != x % dv:
+        bad += 1
+    return bad
+
+def c_i8_5(x: i8, dv: i8) -> i64:
+    bad: i64 = 0
+    if x / 5 != x / dv:
+        bad += 1
+    if x // 5 != x // dv:
+        bad += 1
+    if x % 5 != x % dv:
+        bad += 1
+    return bad
+
+def c_i8_7(x: i8, dv: i8) -> i64:
+    bad: i64 = 0
+    if x / 7 != x / dv:
+        bad += 1
+    if x // 7 != x // dv:
+        bad += 1
+    if x % 7 != x % dv:
+        bad += 1
+    return bad
+
+def c_i8_8(x: i8, dv: i8) -> i64:
+    bad: i64 = 0
+    if x / 8 != x / dv:
+        bad += 1
+    if x // 8 != x // dv:
+        bad += 1
+    if x % 8 != x % dv:
+        bad += 1
+    return bad
+
+def c_i8_10(x: i8, dv: i8) -> i64:
+    bad: i64 = 0
+    if x / 10 != x / dv:
+        bad += 1
+    if x // 10 != x // dv:
+        bad += 1
+    if x % 10 != x % dv:
+        bad += 1
+    return bad
+
+def c_i8_16(x: i8, dv: i8) -> i64:
+    bad: i64 = 0
+    if x / 16 != x / dv:
+        bad += 1
+    if x // 16 != x // dv:
+        bad += 1
+    if x % 16 != x % dv:
+        bad += 1
+    return bad
+
+def c_i8_100(x: i8, dv: i8) -> i64:
+    bad: i64 = 0
+    if x / 100 != x / dv:
+        bad += 1
+    if x // 100 != x // dv:
+        bad += 1
+    if x % 100 != x % dv:
+        bad += 1
+    return bad
+
+def c_u8_1(x: u8, dv: u8) -> i64:
+    bad: i64 = 0
+    if x / 1 != x / dv:
+        bad += 1
+    if x // 1 != x // dv:
+        bad += 1
+    if x % 1 != x % dv:
+        bad += 1
+    return bad
+
+def c_u8_2(x: u8, dv: u8) -> i64:
+    bad: i64 = 0
+    if x / 2 != x / dv:
+        bad += 1
+    if x // 2 != x // dv:
+        bad += 1
+    if x % 2 != x % dv:
+        bad += 1
+    return bad
+
+def c_u8_3(x: u8, dv: u8) -> i64:
+    bad: i64 = 0
+    if x / 3 != x / dv:
+        bad += 1
+    if x // 3 != x // dv:
+        bad += 1
+    if x % 3 != x % dv:
+        bad += 1
+    return bad
+
+def c_u8_5(x: u8, dv: u8) -> i64:
+    bad: i64 = 0
+    if x / 5 != x / dv:
+        bad += 1
+    if x // 5 != x // dv:
+        bad += 1
+    if x % 5 != x % dv:
+        bad += 1
+    return bad
+
+def c_u8_7(x: u8, dv: u8) -> i64:
+    bad: i64 = 0
+    if x / 7 != x / dv:
+        bad += 1
+    if x // 7 != x // dv:
+        bad += 1
+    if x % 7 != x % dv:
+        bad += 1
+    return bad
+
+def c_u8_8(x: u8, dv: u8) -> i64:
+    bad: i64 = 0
+    if x / 8 != x / dv:
+        bad += 1
+    if x // 8 != x // dv:
+        bad += 1
+    if x % 8 != x % dv:
+        bad += 1
+    return bad
+
+def c_u8_10(x: u8, dv: u8) -> i64:
+    bad: i64 = 0
+    if x / 10 != x / dv:
+        bad += 1
+    if x // 10 != x // dv:
+        bad += 1
+    if x % 10 != x % dv:
+        bad += 1
+    return bad
+
+def c_u8_16(x: u8, dv: u8) -> i64:
+    bad: i64 = 0
+    if x / 16 != x / dv:
+        bad += 1
+    if x // 16 != x // dv:
+        bad += 1
+    if x % 16 != x % dv:
+        bad += 1
+    return bad
+
+def c_u8_100(x: u8, dv: u8) -> i64:
+    bad: i64 = 0
+    if x / 100 != x / dv:
+        bad += 1
+    if x // 100 != x // dv:
+        bad += 1
+    if x % 100 != x % dv:
+        bad += 1
+    return bad
+
+def c_i16_1(x: i16, dv: i16) -> i64:
+    bad: i64 = 0
+    if x / 1 != x / dv:
+        bad += 1
+    if x // 1 != x // dv:
+        bad += 1
+    if x % 1 != x % dv:
+        bad += 1
+    return bad
+
+def c_i16_2(x: i16, dv: i16) -> i64:
+    bad: i64 = 0
+    if x / 2 != x / dv:
+        bad += 1
+    if x // 2 != x // dv:
+        bad += 1
+    if x % 2 != x % dv:
+        bad += 1
+    return bad
+
+def c_i16_3(x: i16, dv: i16) -> i64:
+    bad: i64 = 0
+    if x / 3 != x / dv:
+        bad += 1
+    if x // 3 != x // dv:
+        bad += 1
+    if x % 3 != x % dv:
+        bad += 1
+    return bad
+
+def c_i16_5(x: i16, dv: i16) -> i64:
+    bad: i64 = 0
+    if x / 5 != x / dv:
+        bad += 1
+    if x // 5 != x // dv:
+        bad += 1
+    if x % 5 != x % dv:
+        bad += 1
+    return bad
+
+def c_i16_7(x: i16, dv: i16) -> i64:
+    bad: i64 = 0
+    if x / 7 != x / dv:
+        bad += 1
+    if x // 7 != x // dv:
+        bad += 1
+    if x % 7 != x % dv:
+        bad += 1
+    return bad
+
+def c_i16_8(x: i16, dv: i16) -> i64:
+    bad: i64 = 0
+    if x / 8 != x / dv:
+        bad += 1
+    if x // 8 != x // dv:
+        bad += 1
+    if x % 8 != x % dv:
+        bad += 1
+    return bad
+
+def c_i16_10(x: i16, dv: i16) -> i64:
+    bad: i64 = 0
+    if x / 10 != x / dv:
+        bad += 1
+    if x // 10 != x // dv:
+        bad += 1
+    if x % 10 != x % dv:
+        bad += 1
+    return bad
+
+def c_i16_16(x: i16, dv: i16) -> i64:
+    bad: i64 = 0
+    if x / 16 != x / dv:
+        bad += 1
+    if x // 16 != x // dv:
+        bad += 1
+    if x % 16 != x % dv:
+        bad += 1
+    return bad
+
+def c_i16_100(x: i16, dv: i16) -> i64:
+    bad: i64 = 0
+    if x / 100 != x / dv:
+        bad += 1
+    if x // 100 != x // dv:
+        bad += 1
+    if x % 100 != x % dv:
+        bad += 1
+    return bad
+
+def c_i16_641(x: i16, dv: i16) -> i64:
+    bad: i64 = 0
+    if x / 641 != x / dv:
+        bad += 1
+    if x // 641 != x // dv:
+        bad += 1
+    if x % 641 != x % dv:
+        bad += 1
+    return bad
+
+def c_i16_1000(x: i16, dv: i16) -> i64:
+    bad: i64 = 0
+    if x / 1000 != x / dv:
+        bad += 1
+    if x // 1000 != x // dv:
+        bad += 1
+    if x % 1000 != x % dv:
+        bad += 1
+    return bad
+
+def c_i16_4096(x: i16, dv: i16) -> i64:
+    bad: i64 = 0
+    if x / 4096 != x / dv:
+        bad += 1
+    if x // 4096 != x // dv:
+        bad += 1
+    if x % 4096 != x % dv:
+        bad += 1
+    return bad
+
+def run_i64(x: i64) -> i64:
+    bad: i64 = 0
+    bad += c_i64_1(x, i64(1))
+    bad += c_i64_2(x, i64(2))
+    bad += c_i64_3(x, i64(3))
+    bad += c_i64_5(x, i64(5))
+    bad += c_i64_7(x, i64(7))
+    bad += c_i64_8(x, i64(8))
+    bad += c_i64_10(x, i64(10))
+    bad += c_i64_16(x, i64(16))
+    bad += c_i64_100(x, i64(100))
+    bad += c_i64_641(x, i64(641))
+    bad += c_i64_1000(x, i64(1000))
+    bad += c_i64_4096(x, i64(4096))
+    bad += c_i64_65537(x, i64(65537))
+    bad += c_i64_1073741824(x, i64(1073741824))
+    bad += c_i64_2147483647(x, i64(2147483647))
+    return bad
+
+def run_u64(x: u64) -> i64:
+    bad: i64 = 0
+    bad += c_u64_1(x, u64(1))
+    bad += c_u64_2(x, u64(2))
+    bad += c_u64_3(x, u64(3))
+    bad += c_u64_5(x, u64(5))
+    bad += c_u64_7(x, u64(7))
+    bad += c_u64_8(x, u64(8))
+    bad += c_u64_10(x, u64(10))
+    bad += c_u64_16(x, u64(16))
+    bad += c_u64_100(x, u64(100))
+    bad += c_u64_641(x, u64(641))
+    bad += c_u64_1000(x, u64(1000))
+    bad += c_u64_4096(x, u64(4096))
+    bad += c_u64_65537(x, u64(65537))
+    bad += c_u64_1073741824(x, u64(1073741824))
+    bad += c_u64_2147483647(x, u64(2147483647))
+    return bad
+
+def run_i32(x: i32) -> i64:
+    bad: i64 = 0
+    bad += c_i32_1(x, i32(1))
+    bad += c_i32_2(x, i32(2))
+    bad += c_i32_3(x, i32(3))
+    bad += c_i32_5(x, i32(5))
+    bad += c_i32_7(x, i32(7))
+    bad += c_i32_8(x, i32(8))
+    bad += c_i32_10(x, i32(10))
+    bad += c_i32_16(x, i32(16))
+    bad += c_i32_100(x, i32(100))
+    bad += c_i32_641(x, i32(641))
+    bad += c_i32_1000(x, i32(1000))
+    bad += c_i32_4096(x, i32(4096))
+    bad += c_i32_65537(x, i32(65537))
+    bad += c_i32_1073741824(x, i32(1073741824))
+    bad += c_i32_2147483647(x, i32(2147483647))
+    return bad
+
+def run_u32(x: u32) -> i64:
+    bad: i64 = 0
+    bad += c_u32_1(x, u32(1))
+    bad += c_u32_2(x, u32(2))
+    bad += c_u32_3(x, u32(3))
+    bad += c_u32_5(x, u32(5))
+    bad += c_u32_7(x, u32(7))
+    bad += c_u32_8(x, u32(8))
+    bad += c_u32_10(x, u32(10))
+    bad += c_u32_16(x, u32(16))
+    bad += c_u32_100(x, u32(100))
+    bad += c_u32_641(x, u32(641))
+    bad += c_u32_1000(x, u32(1000))
+    bad += c_u32_4096(x, u32(4096))
+    bad += c_u32_65537(x, u32(65537))
+    bad += c_u32_1073741824(x, u32(1073741824))
+    bad += c_u32_2147483647(x, u32(2147483647))
+    return bad
+
+def run_i8(x: i8) -> i64:
+    bad: i64 = 0
+    bad += c_i8_1(x, i8(1))
+    bad += c_i8_2(x, i8(2))
+    bad += c_i8_3(x, i8(3))
+    bad += c_i8_5(x, i8(5))
+    bad += c_i8_7(x, i8(7))
+    bad += c_i8_8(x, i8(8))
+    bad += c_i8_10(x, i8(10))
+    bad += c_i8_16(x, i8(16))
+    bad += c_i8_100(x, i8(100))
+    return bad
+
+def run_u8(x: u8) -> i64:
+    bad: i64 = 0
+    bad += c_u8_1(x, u8(1))
+    bad += c_u8_2(x, u8(2))
+    bad += c_u8_3(x, u8(3))
+    bad += c_u8_5(x, u8(5))
+    bad += c_u8_7(x, u8(7))
+    bad += c_u8_8(x, u8(8))
+    bad += c_u8_10(x, u8(10))
+    bad += c_u8_16(x, u8(16))
+    bad += c_u8_100(x, u8(100))
+    return bad
+
+def run_i16(x: i16) -> i64:
+    bad: i64 = 0
+    bad += c_i16_1(x, i16(1))
+    bad += c_i16_2(x, i16(2))
+    bad += c_i16_3(x, i16(3))
+    bad += c_i16_5(x, i16(5))
+    bad += c_i16_7(x, i16(7))
+    bad += c_i16_8(x, i16(8))
+    bad += c_i16_10(x, i16(10))
+    bad += c_i16_16(x, i16(16))
+    bad += c_i16_100(x, i16(100))
+    bad += c_i16_641(x, i16(641))
+    bad += c_i16_1000(x, i16(1000))
+    bad += c_i16_4096(x, i16(4096))
+    return bad
+
+def sweep(x: u64) -> i64:
+    bad: i64 = 0
+    bad += run_i64(i64(x))
+    bad += run_u64(u64(x))
+    bad += run_i32(i32(x))
+    bad += run_u32(u32(x))
+    bad += run_i8(i8(x))
+    bad += run_u8(u8(x))
+    bad += run_i16(i16(x))
+    return bad
+
+def main() -> i64:
+    edges: u64 = 0
+    bad: i64 = 0
+    n: i64 = 0
+    bad += sweep(0)
+    bad += sweep(1)
+    bad += sweep(0xFFFFFFFFFFFFFFFF)
+    bad += sweep(0x8000000000000000)
+    bad += sweep(0x7FFFFFFFFFFFFFFF)
+    bad += sweep(0x8000000000000001)
+    bad += sweep(0xFFFFFFFF)
+    bad += sweep(0x80000000)
+    bad += sweep(0x7FFFFFFF)
+    bad += sweep(0xFF)
+    bad += sweep(0x80)
+    bad += sweep(0x7F)
+    bad += sweep(0xFFFF)
+    bad += sweep(0x8000)
+    i: i64 = -300
+    while i <= 300:
+        bad += sweep(u64(i))
+        n += 1
+        i += 1
+    s: u64 = 0x9E3779B97F4A7C15
+    j: i64 = 0
+    while j < 2000:
+        s = s * 6364136223846793005 + 1442695040888963407
+        bad += sweep(s)
+        bad += sweep(s >> (u64(j) % 64))
+        n += 2
+        j += 1
+    puts("constant division mismatches: ")
+    put_i64(bad)
+    nl()
+    puts("values: ")
+    put_i64(n + 14)
+    nl()
+    return 0
