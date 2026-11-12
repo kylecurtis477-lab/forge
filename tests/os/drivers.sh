@@ -1,6 +1,7 @@
 #!/bin/bash
 # Phase 8.7: NVMe, AHCI, xHCI, e1000 and virtio-net drivers on q35. Both test disks are
 # generated here, read through the drivers (LBA 0 hash must match), and must be byte-identical afterwards.
+# Each NIC resolves the user-network gateway 10.0.2.2 by ARP, then pings it (ICMP echo, checked reply).
 cd "$(dirname "$0")/../.."
 T=$(mktemp -d /tmp/forge-drv.XXXXXX)
 python3 - "$T" <<'P'
@@ -36,10 +37,12 @@ kill $Q 2>/dev/null; wait $Q 2>/dev/null
 S=$T/s.log; ok=1; miss=""
 for p in "NVMe: read LBA 0 (4096 bytes), fnv1a64=$(cat $T/nvme.h)" "AHCI: read LBA 0 (4096 bytes), fnv1a64=$(cat $T/ahci.h)" \
   "xHCI: command ring OK" "xHCI: Address Device OK" "xHCI: device descriptor: USB 0200" \
-  "e1000: ARP reply: 10.0.2.2 is at" "virtio-net: ARP reply: 10.0.2.2 is at" "out-of-window accesses 0"; do
+  "e1000: ARP reply: 10.0.2.2 is at" "virtio-net: ARP reply: 10.0.2.2 is at" \
+  "e1000: ICMP echo reply from 10.0.2.2: seq 1, 56 data bytes, checksums ok" \
+  "virtio-net: ICMP echo reply from 10.0.2.2: seq 1, 56 data bytes, checksums ok" "out-of-window accesses 0"; do
   grep -aqF "$p" $S || { ok=0; miss="$miss [$p]"; }
 done
 grep -aq PANIC $S && { ok=0; miss="$miss [panic]"; }
-if [ $ok = 1 ]; then echo "PASS os/drivers (NVMe, AHCI, xHCI, e1000, virtio-net)"; else echo "FAIL os/drivers:$miss"; fi
+if [ $ok = 1 ]; then echo "PASS os/drivers (NVMe, AHCI, xHCI, e1000, virtio-net; ARP + ICMP echo)"; else echo "FAIL os/drivers:$miss"; fi
 if (cd $T && sha256sum -c --quiet before.sha); then echo "PASS os/drivers-no-disk-write"; else echo "FAIL os/drivers-no-disk-write"; fi
 rm -rf $T

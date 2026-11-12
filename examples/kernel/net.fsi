@@ -1,6 +1,7 @@
 # Phase 8: network interfaces. e1000 (82540EM, MMIO BAR0) and virtio-net (legacy transitional, I/O
 # BAR0), polled. Each sends one ARP request for the QEMU user-network gateway 10.0.2.2 and waits
-# for the reply.
+# for the reply, then pings the gateway: an IPv4 ICMP echo request (id 0x4647, 56 bytes of data)
+# to the MAC that ARP returned, and the echo reply must come back with the same id, sequence and data.
 NET_IP = 0x0A00020F  # 10.0.2.15
 NET_GW = 0x0A000202  # 10.0.2.2
 net_mac: u64
@@ -68,6 +69,85 @@ def net_arp_reply(a: u64, len: u64, mac: u64) -> u64:
     if net_mac_rd(a + 32) != mac:
         return 0
     return net_mac_rd(a + 22)
+
+NET_ICMP_ID = 0x4647  # "FG"
+NET_ICMP_DATA = 56
+
+def net_csum(a: u64, n: u64) -> u64:
+# the Internet checksum (RFC 1071) of the n bytes at a (n even)
+    s: u64 = 0
+    i: u64 = 0
+    while i < n:
+        s += net_rd_be(a + i, 2)
+        i += 2
+    while (s >> 16) != 0:
+        s = (s & 0xFFFF) + (s >> 16)
+    return ~s & 0xFFFF
+
+def net_icmp_build(a: u64, mac: u64, gw: u64, seq: u64) -> u64:
+# ICMP echo request NET_IP -> NET_GW (to gateway MAC gw) with sequence seq; returns the frame length
+    n = 14 + 20 + 8 + NET_ICMP_DATA
+    net_mac_wr(a, gw)
+    net_mac_wr(a + 6, mac)
+    net_be(a + 12, 0x0800, 2)
+    net_be(a + 14, 0x4500, 2)  # IPv4, 20-byte header, TOS 0
+    net_be(a + 16, 20 + 8 + NET_ICMP_DATA, 2)
+    net_be(a + 18, seq, 2)  # identification
+    net_be(a + 20, 0x4000, 2)  # don't fragment
+    net_be(a + 22, 0x4001, 2)  # TTL 64, protocol ICMP
+    net_be(a + 24, 0, 2)
+    net_be(a + 26, NET_IP, 4)
+    net_be(a + 30, NET_GW, 4)
+    net_be(a + 24, net_csum(a + 14, 20), 2)
+    net_be(a + 34, 0x0800, 2)  # echo request, code 0
+    net_be(a + 36, 0, 2)
+    net_be(a + 38, NET_ICMP_ID, 2)
+    net_be(a + 40, seq, 2)
+    i: u64 = 0
+    while i < NET_ICMP_DATA:
+        mmio_wr(a + 42 + i, 1, (i * 7 + seq) & 0xFF)
+        i += 1
+    net_be(a + 36, net_csum(a + 34, 8 + NET_ICMP_DATA), 2)
+    return n
+
+def net_icmp_reply(a: u64, len: u64, mac: u64, seq: u64) -> u64:
+# 1 if frame a is NET_GW's echo reply to our request seq (to our MAC, checksums valid, data intact)
+    if len < 42 + NET_ICMP_DATA or net_mac_rd(a) != mac or net_rd_be(a + 12, 2) != 0x0800:
+        return 0
+    if mmio_rd(a + 14, 1) != 0x45 or mmio_rd(a + 23, 1) != 1 or net_csum(a + 14, 20) != 0:
+        return 0
+    if net_rd_be(a + 26, 4) != NET_GW or net_rd_be(a + 30, 4) != NET_IP:
+        return 0
+    if net_rd_be(a + 16, 2) != 20 + 8 + NET_ICMP_DATA or net_csum(a + 34, 8 + NET_ICMP_DATA) != 0:
+        return 0
+    if net_rd_be(a + 34, 2) != 0 or net_rd_be(a + 38, 2) != NET_ICMP_ID or net_rd_be(a + 40, 2) != seq:
+        return 0
+    i: u64 = 0
+    while i < NET_ICMP_DATA:
+        if mmio_rd(a + 42 + i, 1) != ((i * 7 + seq) & 0xFF):
+            return 0
+        i += 1
+    return 1
+
+def net_match(kind: u64, a: u64, len: u64, mac: u64, seq: u64) -> u64:
+# kind 0: the gateway MAC from an ARP reply (0 if not one); kind 1: 1 for the echo reply to seq
+    if kind == 0:
+        return net_arp_reply(a, len, mac)
+    return net_icmp_reply(a, len, mac, seq)
+
+def net_ping_say(dev: ptr[u8], seq: u64, t0: u64):
+# the round trip is timed from just before the request was built (t0, a TSC value)
+    us: u64 = 0
+    if tsc_per_ms != 0:
+        us = (rdtsc() - t0) * 1000 / tsc_per_ms
+    puts(dev)
+    puts(": ICMP echo reply from 10.0.2.2: seq ")
+    put_u64(seq)
+    puts(", ")
+    put_u64(NET_ICMP_DATA)
+    puts(" data bytes, checksums ok, ")
+    put_u64(us)
+    puts(" us\n")
 
 # ---- e1000 ----
 E1_RX_N = 32
@@ -170,34 +250,49 @@ def e1_recv(len_out: ptr[u64]) -> u64:
     e1_rx_i = (e1_rx_i + 1) % E1_RX_N
     return a
 
-def e1000_arp() -> u64:
-    if e1_regs == 0:
-        return 0
-    n = net_arp_build(net_frame, net_mac)
+def e1_xchg(n: u64, kind: u64, seq: u64) -> u64:
+# send the n-byte frame at net_frame (up to 3 tries) and wait for the reply net_match(kind) accepts:
+# its result, 0 if none came, 1 << 63 if the transmit timed out
     tries: u64 = 0
     while tries < 3:
         if e1_send(net_frame_pa, n) == 0:
             puts("e1000: transmit timed out\n")
-            return 0
+            return u64(1) << 63
         t: u64 = 0
         while t < 200000:
             len: u64 = 0
             a = e1_recv(addr(len))
             if a != 0:
-                gw = net_arp_reply(a, len, net_mac)
-                if gw != 0:
-                    puts("e1000: ARP reply: 10.0.2.2 is at ")
-                    net_put_mac(gw)
-                    puts(" (")
-                    put_u64(e1_rd(0x40D0))
-                    puts(" frames received)\n")
-                    return 1
+                r = net_match(kind, a, len, net_mac, seq)
+                if r != 0:
+                    return r
             else:
                 t += 1
                 tsc_delay_us(10)
         tries += 1
-    puts("e1000: no ARP reply\n")
     return 0
+
+def e1000_arp() -> u64:
+    if e1_regs == 0:
+        return 0
+    gw = e1_xchg(net_arp_build(net_frame, net_mac), 0, 0)
+    if gw == u64(1) << 63:
+        return 0
+    if gw == 0:
+        puts("e1000: no ARP reply\n")
+        return 0
+    puts("e1000: ARP reply: 10.0.2.2 is at ")
+    net_put_mac(gw)
+    puts(" (")
+    put_u64(e1_rd(0x40D0))
+    puts(" frames received)\n")
+    t0 = rdtsc()
+    r = e1_xchg(net_icmp_build(net_frame, net_mac, gw, 1), 1, 1)
+    if r == 1:
+        net_ping_say("e1000", 1, t0)
+    elif r == 0:
+        puts("e1000: no ICMP echo reply\n")
+    return 1
 
 # ---- virtio-net (legacy) ----
 vn_io: u64
@@ -297,16 +392,15 @@ def virtio_net_init() -> u64:
     putc(10)
     return 1
 
-def virtio_net_arp() -> u64:
-    if vn_io == 0:
-        return 0
+def vn_xchg(n: u64, kind: u64, seq: u64) -> u64:
+# send the n-byte frame at net_frame (copied behind a zero virtio-net header, up to 3 tries) and wait
+# for the reply net_match(kind) accepts: its result, 0 if none came, 1 << 63 if the transmit timed out
     tx = net_frame + 2048
     txpa = net_frame_pa + 2048
     i: u64 = 0
     while i < 16:
         mmio_wr(tx + i, 1, 0)
         i += 1
-    n = net_arp_build(net_frame, vn_mac)
     i = 0
     while i < n:
         mmio_wr(tx + 10 + i, 1, mmio_rd(net_frame + i, 1))
@@ -320,7 +414,7 @@ def virtio_net_arp() -> u64:
             t += 1
         if t >= 100000:
             puts("virtio-net: transmit timed out\n")
-            return 0
+            return u64(1) << 63
         vn_last[1] = (vn_last[1] + 1) & 0xFFFF
         t = 0
         while t < 200000:
@@ -329,21 +423,37 @@ def virtio_net_arp() -> u64:
                 d = mmio_rd(e, 4)
                 len = mmio_rd(e + 4, 4)
                 vn_last[0] = (vn_last[0] + 1) & 0xFFFF
-                gw: u64 = 0
+                r: u64 = 0
                 if d < 8 and len > 10:
-                    gw = net_arp_reply(vn_rxb + d * 2048 + 10, len - 10, vn_mac)
+                    r = net_match(kind, vn_rxb + d * 2048 + 10, len - 10, vn_mac, seq)
                     vn_add(0, d, vn_rxb_pa + d * 2048, 2048, 2)
-                if gw != 0:
-                    puts("virtio-net: ARP reply: 10.0.2.2 is at ")
-                    net_put_mac(gw)
-                    putc(10)
-                    return 1
+                if r != 0:
+                    return r
             else:
                 t += 1
                 tsc_delay_us(10)
         tries += 1
-    puts("virtio-net: no ARP reply\n")
     return 0
+
+def virtio_net_arp() -> u64:
+    if vn_io == 0:
+        return 0
+    gw = vn_xchg(net_arp_build(net_frame, vn_mac), 0, 0)
+    if gw == u64(1) << 63:
+        return 0
+    if gw == 0:
+        puts("virtio-net: no ARP reply\n")
+        return 0
+    puts("virtio-net: ARP reply: 10.0.2.2 is at ")
+    net_put_mac(gw)
+    putc(10)
+    t0 = rdtsc()
+    r = vn_xchg(net_icmp_build(net_frame, vn_mac, gw, 1), 1, 1)
+    if r == 1:
+        net_ping_say("virtio-net", 1, t0)
+    elif r == 0:
+        puts("virtio-net: no ICMP echo reply\n")
+    return 1
 
 def net_init():
     if net_frame == 0:
