@@ -26,13 +26,15 @@
 # integer -> pointer as ptr[T](u64(x)); pointer -> integer as T(u64(p)); (void)x. void * is ptr[void]
 # internally (no deref, no arithmetic) and converts implicitly to and from any object pointer, as in C; the
 # output spells it ptr[u8]. Globals (0.15.2): file-scope integer/float/array/struct variables, integer scalars with an
-# integer-literal initializer wrapped as C converts it, the rest zero; pointer globals, non-constant or float
+# integer constant expression initializer (see below) wrapped as C converts it, the rest zero; pointer globals, non-constant or float
 # initializers and a local named like a global are clean errors. String literals are interned as hidden i8[N]
 # globals (adjacent strings concatenate; char s[] = "..." and char s[N] = "..." copy the bytes, including a
 # NUL when it fits). ++/-- is supported in expressions
 # (prefix and postfix, including on pointers and dereferences) as well as in statement form.
-# Array sizes may be an integer constant expression (literals, +, -, *, / and % as in C (truncating), sizeof(type),
-# parentheses, and #define expanding to one of those). Also rejected: unions (Forge has none; the plan does not add them),
+# Array sizes and integer global initializers may be integer constant expressions (literals, character
+# constants, sizeof(type), parentheses, unary + - ~, * / % as in C (truncating), + -, << >>, &, ^, |, and
+# #define expanding to those), evaluated in 64-bit; an unsigned operand mixed with a negative value is a
+# clean error (C's unsigned conversions are not modelled). Also rejected: unions (Forge has none; the plan does not add them),
 # hex floats, long double, the comma operator, compound literals, continue in a switch, enum, goto,
 # varargs, local typedef, bit-fields, K&R, attributes, GNU statement-expressions, _Bool, _Complex,
 # static local variables, and an inner-block declaration of the same name and type as an outer
@@ -430,6 +432,9 @@ class Parser:
         self.funcs = {}
         self.vars = {}
         self.globals = {}
+        self.cctx = "array size"
+        self.c_uns = False
+        self.c_negv = False
         self.gextra = []
         self.str_map = {}
         self.str_tmp = 0
@@ -582,7 +587,10 @@ class Parser:
             return self.const_unary()
         if self.is_op("-"):
             self.pos += 1
-            return -self.const_unary()
+            return self.cneg(0 - self.const_unary())
+        if self.is_op("~"):
+            self.pos += 1
+            return self.cneg(-1 - self.const_unary())
         if self.is_kw("sizeof"):
             self.pos += 1
             if self.is_op("(") and self.type_at(1):
@@ -592,21 +600,30 @@ class Parser:
                 if ty == "void":
                     self.err("sizeof void")
                 return self.type_bytes(ty)
-            self.err("array size must be an integer constant")
+            self.err(self.cctx + " must be an integer constant")
         if self.is_op("("):
             self.pos += 1
-            v = self.const_add()
+            v = self.const_expr()
             self.expect(")")
             return v
         t = self.peek()
         if t[0] == "int":
             self.pos += 1
-            return int(self.int_lit(t[1])[0])
+            v = self.int_lit(t[1])
+            if v[1].startswith("u"):
+                self.c_uns = True
+            return int(v[0])
         if t[0] == "char":
             self.pos += 1
             return self.char_val(t[1])
-        self.err("array size must be an integer constant")
+        self.err(self.cctx + " must be an integer constant")
         return 0
+
+    def cneg(self, v):
+    # note a negative intermediate: with an unsigned operand C would convert it (not modelled yet)
+        if v < 0:
+            self.c_negv = True
+        return v
 
     def const_mul(self):
         v = self.const_unary()
@@ -616,11 +633,12 @@ class Parser:
             if op == "*":
                 v = v * r
             elif r == 0:
-                self.err("division by zero in array size")
+                self.err("division by zero in " + self.cctx)
             elif op == "/":
                 v = c_div(v, r)
             else:
                 v = v - c_div(v, r) * r
+            v = self.cneg(v)
         return v
 
     def const_add(self):
@@ -633,6 +651,58 @@ class Parser:
                 v = v + r
             else:
                 v = v - r
+            v = self.cneg(v)
+        return v
+
+    def const_shift(self):
+        v = self.const_add()
+        while self.is_op("<<") or self.is_op(">>"):
+            op = self.next()[1]
+            r = self.const_add()
+            if r < 0 or r > 63:
+                self.err("shift count out of range in " + self.cctx)
+            if op == "<<":
+                v = v << r
+            else:
+                v = v >> r
+            v = self.cneg(v)
+        return v
+
+    def const_band(self):
+        v = self.const_shift()
+        while self.is_op("&"):
+            self.pos += 1
+            v = self.cneg(v & self.const_shift())
+        return v
+
+    def const_bxor(self):
+        v = self.const_band()
+        while self.is_op("^"):
+            self.pos += 1
+            v = self.cneg(v ^ self.const_band())
+        return v
+
+    def const_expr(self):
+    # integer constant expression: literals, character constants, sizeof(type), parentheses, unary + - ~,
+    # * / % (C truncating division), + -, << >>, &, ^, |; evaluated in 64-bit two's complement
+        v = self.const_bxor()
+        while self.is_op("|"):
+            self.pos += 1
+            v = self.cneg(v | self.const_bxor())
+        return v
+
+    def const_top(self, ctx):
+    # a whole constant expression in context ctx ("array size", "global initializer"); an unsigned operand
+    # together with a negative value is rejected, since C's unsigned conversions are not modelled
+        self.cctx = ctx
+        self.c_uns = False
+        self.c_negv = False
+        p0 = self.pos
+        v = self.const_expr()
+        if self.c_uns and self.c_negv:
+            self.pos = p0
+            self.err("unsigned operand with a negative value in " + ctx + " is not supported yet")
+        self.cctx = "array size"
         return v
 
     def declarator(self, bt, param):
@@ -652,7 +722,7 @@ class Parser:
             if self.is_op("]"):
                 dims.append("")
             else:
-                dims.append(str(self.const_add()))
+                dims.append(str(self.const_top("array size")))
             self.expect("]")
         if len(dims) > 0 and t == "void":
             self.err("array of void")
@@ -1803,22 +1873,18 @@ class Parser:
             init = ""
             if self.is_op("="):
                 self.pos += 1
-                neg = False
-                if self.is_op("-") or self.is_op("+"):
-                    neg = self.is_op("-")
+                p0 = self.pos
+                while self.is_op("-") or self.is_op("+") or self.is_op("~") or self.is_op("("):
                     self.pos += 1
                 c = self.peek()
-                if c[0] == "int":
-                    self.pos += 1
-                    v = self.int_lit(c[1])
+                self.pos = p0
+                if c[0] == "int" or c[0] == "char" or c[0] == "kw" and c[1] == "sizeof":
+                    x = self.const_top("global initializer")
                     if not is_int(t):
-                        if v[0] != "0":
-                            self.pos -= 1
+                        if x != 0:
+                            self.pos = p0
                             self.err("a float, array or struct global may only be initialized to 0")
                     else:
-                        x = int(v[0])
-                        if neg:
-                            x = 0 - x
                         bits = tsize(t) * 8
                         if bits < 64:
                             x = x % (1 << bits)
@@ -1832,6 +1898,7 @@ class Parser:
                         self.err("a float initializer for an integer global needs a cast")
                     self.err("float global initializers are not supported yet (omit it for 0)")
                 else:
+                    self.pos = p0
                     self.err("global initializer must be an integer constant")
             self.globals[n] = t
             self.emit(0, "")
