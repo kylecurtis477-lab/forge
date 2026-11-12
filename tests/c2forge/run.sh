@@ -14,12 +14,13 @@
 # ++/-- works in expressions (incdec.c). String literals are values (strlit.c). Integer global initializers
 # may be constant expressions (cinit.c), with clean errors for unsigned-and-negative, /0 and bad shifts.
 # File-scope 1-D integer arrays take brace lists and T a[] = {...} takes its size from the list (braces.c);
-# float or multi-dimensional file-scope brace lists and too many elements are clean errors. Remaining named errors
+# float or multi-dimensional file-scope brace lists and too many elements are clean errors. Tentative and
+# extern redeclarations of a global merge (tentative.c); a second initializer or another type is an error. Remaining named errors
 # are other rejected C, plus static locals and same-name inner-block shadowing. Listed in docs/BUILD_PLAN.md item 4.
 cd "$(dirname "$0")/../.." || exit 1
 T=$(mktemp -d); trap 'rm -rf $T' EXIT
 fail=0
-PROGS="ints flow ptrs floats pp lib arrconst incdec strlit cinit braces"
+PROGS="ints flow ptrs floats pp lib arrconst incdec strlit cinit braces tentative"
 build/forgec tools/c2forge.forge $T/c2.s && build/fas -o $T/c2.o $T/c2.s && build/fld --base 0x100000000000 -o $T/c2forge $T/c2.o || { echo "FAIL c2forge build"; exit 1; }
 $T/c2forge --tokens tests/c2forge/lex.c | cmp -s - tests/c2forge/lex.expected && echo "PASS c2forge lex" || { echo "FAIL c2forge lex"; fail=1; }
 printf 'int x = @;\n' > $T/bad.c
@@ -58,6 +59,12 @@ for c in "many|int t[2] = {1, 2, 3};|too many initializers (at '3')" "float|doub
   printf '%s int main(void) { return 0; }\n' "$src" > $T/be.c
   out=$($T/c2forge $T/be.c $T/be.forge); rc=$?
   [ $rc = 1 ] && [ "$out" = "c2forge: line 1: $want" ] && echo "PASS c2forge braces-$n-error" || { echo "FAIL c2forge braces-$n-error (rc=$rc out=$out)"; fail=1; }
+done
+for c in "twice|int w = 1; int w = 2;|redefinition of w (at 'w')" "types|int v; long v;|conflicting types for v (at 'v')"; do
+  n=${c%%|*}; r=${c#*|}; src=${r%%|*}; want=${r#*|}
+  printf '%s int main(void) { return 0; }\n' "$src" > $T/te.c
+  out=$($T/c2forge $T/te.c $T/te.forge); rc=$?
+  [ $rc = 1 ] && [ "$out" = "c2forge: line 1: $want" ] && echo "PASS c2forge tentative-$n-error" || { echo "FAIL c2forge tentative-$n-error (rc=$rc out=$out)"; fail=1; }
 done
 printf 'int main(void) { char s[1] = "hi"; return 0; }\n' > $T/sl.c
 out=$($T/c2forge $T/sl.c $T/sl.forge); rc=$?

@@ -28,7 +28,8 @@
 # output spells it ptr[u8]. Globals (0.15.2): file-scope integer/float/array/struct variables, integer scalars with an
 # integer constant expression initializer (see below) wrapped as C converts it, 1-D integer arrays with a
 # brace list of such expressions (zero padded), the rest zero; T a[] = {...} (local or global) takes its size
-# from the list; pointer globals, non-constant or float
+# from the list; a global may be declared again with the same type (tentative definitions, extern), and the
+# one initializer, if any, is the definition; pointer globals, non-constant or float
 # initializers and a local named like a global are clean errors. String literals are interned as hidden i8[N]
 # globals (adjacent strings concatenate; char s[] = "..." and char s[N] = "..." copy the bytes, including a
 # NUL when it fits). ++/-- is supported in expressions
@@ -434,6 +435,7 @@ class Parser:
         self.funcs = {}
         self.vars = {}
         self.globals = {}
+        self.gdecl = {}
         self.cctx = "array size"
         self.c_uns = False
         self.c_negv = False
@@ -1907,13 +1909,32 @@ class Parser:
                 continue
             self.function(n, rt, ps)
 
+    def global_out(self, n, line, has_init, pn):
+    # emit a global's definition, or merge a tentative redeclaration (int x; ... int x = 5;) into the one
+    # already emitted: at most one of the declarations may have an initializer
+        if n in self.gdecl:
+            g = self.gdecl[n]
+            if has_init:
+                if g[1]:
+                    self.pos = pn
+                    self.err("redefinition of " + n)
+                self.out[g[0]] = line
+                g[1] = True
+            return
+        self.emit(0, "")
+        self.emit(0, line)
+        self.gdecl[n] = [len(self.out) - 1, has_init]
+
     def global_decl(self, bt):
     # file-scope variables -> Forge globals (zero-initialized unless given an integer constant):
-    # integer scalars may have an integer-literal initializer (optionally negated, wrapped to the type as
-    # C converts it); float scalars, arrays and structs are zero-initialized and may only be given 0 or
-    # nothing; pointer globals are rejected (Forge ptr[T] globals need a non-null initializer)
+    # integer scalars and 1-D integer arrays may have integer constant expression initializers (wrapped to
+    # the type as C converts it), char arrays a string; float scalars, other arrays and structs are
+    # zero-initialized and may only be given 0 or nothing; pointer globals are rejected (Forge ptr[T]
+    # globals need a non-null initializer). A name may be declared again with the same type (C tentative
+    # definitions, extern); the one initializer, if any, wins.
         while True:
             d = self.declarator(bt, False)
+            pn = self.pos - 1
             n = d[0]
             t = d[1]
             if n == "":
@@ -1936,13 +1957,15 @@ class Parser:
                 self.pos -= 1
             if is_incomplete(t):
                 self.err("array needs a positive size")
-            if n in self.globals or n in self.funcs:
+            if n in self.funcs:
                 self.pos -= 1
                 self.err("redefinition of " + n)
+            if n in self.globals and self.globals[n] != t:
+                self.pos = pn
+                self.err("conflicting types for " + n)
             if str_payload != None:
                 self.globals[n] = t
-                self.emit(0, "")
-                self.emit(0, fname(n) + ": " + t + " = " + self.forge_bytes(str_payload))
+                self.global_out(n, fname(n) + ": " + t + " = " + self.forge_bytes(str_payload), True, pn)
                 if self.is_op(","):
                     self.pos += 1
                     continue
@@ -1978,8 +2001,7 @@ class Parser:
                     self.pos = p0
                     self.err("global initializer must be an integer constant")
             self.globals[n] = t
-            self.emit(0, "")
-            self.emit(0, fname(n) + ": " + t + init)
+            self.global_out(n, fname(n) + ": " + t + init, init != "", pn)
             if self.is_op(","):
                 self.pos += 1
             else:
