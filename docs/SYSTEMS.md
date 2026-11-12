@@ -73,6 +73,13 @@ being reported as a bare `qemu rc=-9` (which was just the harness's own SIGKILL)
   is retried once only for information (`FLAKY os/NAME ... informational retry PASS`, `[retry PASS; a HANG
   always fails, dump kept ...]`), so a real hang can never be hidden by a lucky second boot.
   `FORGE_BOOT_NO_RETRY=1` skips the retry.
+  Before the first HMP command the dump also records QEMU's threads from the host side
+  (`tests/os/hostcap.sh`, appended as `---- host: QEMU pid ... ----`): per thread its name, state, CPU
+  ticks used over a 2 s window, the box CPU it last ran on, wchan, the syscall (`running` or the number, 202 = futex), its
+  kernel stack when `sudo -n` works, and gdb backtraces when gdb is installed. It is taken first because
+  the monitor needs QEMU's global lock and earlier stalled guests resumed right after the monitor dump.
+  It also records the box side over the same window (steal ticks per box CPU, since the box is itself a
+  VM; memory/cpu/io pressure; load; other QEMU processes; the top CPU users).
 The kills seen so far (g11 bios, g52 bios-smp1, g64 uefi) were all of this second kind: the serial log
 stops mid-boot at different points (after the blkd restart, after the Linux personality line, inside the
 module load/unload cycles) and nothing follows for minutes, while the same boot alone takes 65-85 s and

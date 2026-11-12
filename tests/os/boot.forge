@@ -9,6 +9,8 @@
 # Hang path (inv118b os/kernel-bios-smp1): drain QEMU stdio before any HMP command, and apply
 # FORGE_BOOT_STALL (default 60 s, not raised) every loop iteration rather than only at the timeout
 # deadline, so a full serial pipe cannot wedge serial_putc while the harness waits until 2x timeout.
+# Before the first HMP command a stalled boot also records QEMU's threads from the host side (tests/os/hostcap.sh:
+# per-thread CPU over 1 s, state, wchan, syscall, kernel stack with sudo -n, gdb backtraces if installed).
 import os
 import sys
 import time
@@ -275,6 +277,18 @@ def spawn(h, pin, pout):
         os._exit(127)
     return pid
 
+def host_capture(pid, out):
+# QEMU's threads as the host sees them, before any HMP command (tests/os/hostcap.sh); returns the text
+    c = os.fork()
+    if c == 0:
+        os.execv("/bin/sh", ["sh", "-c", f"sh tests/os/hostcap.sh {pid} > {out} 2>&1"])
+        os._exit(127)
+    os.waitpid(c, 0)
+    t = read_file(out)
+    if t is None:
+        return "(hostcap: no output)\n"
+    return concat(t, "\n")
+
 def boot(h, attempt):
     for sfx in [".in", ".out"]:
         if os.path.exists(concat(h.mon, sfx)):
@@ -327,8 +341,9 @@ def boot(h, attempt):
                 dump = f"{h.log}.hang{attempt}"
                 load = split__1(proc_text("/proc/loadavg"))[0]
                 hdr = f"hang: no serial output for {fix(now - tlast)}s (stopped at +{fix(tlast - t0)}s), load {load}\nlast line: {last_line(buf)}\n\n"
+                host = host_capture(pid, concat(dump, ".host"))
                 regs = monitor(h, "info registers -a", 2.0)
-                write_file(dump, concat(concat(hdr, monitor(h, "info cpus")), concat(concat("\n", regs), concat("\n", stack_dump(h, regs)))))
+                write_file(dump, concat(concat(concat(hdr, host), monitor(h, "info cpus")), concat(concat("\n", regs), concat("\n", stack_dump(h, regs)))))
                 break
         if now >= deadline:
             if now < t0 + 2 * h.tmo:
