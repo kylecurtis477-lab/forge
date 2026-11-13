@@ -173,9 +173,11 @@ def mb2_parse(info: u64):
                 bi.fb_width = u64(load32(p + 20))
                 bi.fb_height = u64(load32(p + 24))
                 bi.fb_bpp = 32
-                bi.fb_format = FB_RGBX
+                # red field position (byte 32): 16 means byte 0 is blue (BGRX, QEMU std VGA), 0 means byte 0
+                # is red (RGBX); the UEFI loader reports the same layouts from GOP
+                bi.fb_format = FB_BGRX
                 if load8(p + 32) == 0:
-                    bi.fb_format = FB_BGRX
+                    bi.fb_format = FB_RGBX
             elif fbt == 2:
                 vga_base = load64(p + 8)
         if typ == 12:
