@@ -15705,6 +15705,9 @@ fs_hasasm = 0  # the function being compiled has an asm() statement: --fs-opt le
 fsr_o = list(4096)
 fsr_c = list(4096)
 fsr_r = list(4096)
+fs_live = 0  # --fs-live (Phase 12.1 step 4b, opt-in, implies --fs-opt): slots whose live ranges are disjoint share a register
+fsr_lo = list(4096)  # step 4b: a promotable slot's live interval, in positions of the function's non-empty lines
+fsr_hi = list(4096)
 fsx_o = list(4096)  # step 4a: frame offset of every local of the function being compiled (scopes never reuse one)
 fsx_k = list(4096)  # 1: an 8-byte-or-narrower scalar local (the only kind a pinned-frame function may promote)
 nfsx = 0
@@ -20025,6 +20028,9 @@ def fs_ra_assign(s0, nsl, free):
     cs_ok = starts(pl, "    sub $") and ends(pl, ",%rsp\n") and str_eq(out[s0], "    push %rbp\n")
     nsv = 0
     r = 0
+    if fs_live and fs_lv_build(s0, nsl):
+        nsv = fs_lv_assign(nsl, free, cs_ok)
+        r = 11
     while r < 11:
         if free[r] and (r < 6 or cs_ok):
             bk = -1
@@ -20070,6 +20076,221 @@ def fs_ra_assign(s0, nsl, free):
         i += 1
     if nsv > 0:
         fs_ra_save(s0, nsl)
+
+# ---- --fs-live: liveness-based register sharing (Phase 12.1 step 4b) ----
+# Steps 1-2 give each promoted slot a register of its own for the whole function, so a function with more
+# promotable slots than free registers keeps the rest in memory. With --fs-live, fs_lv_build computes each slot's
+# live interval over a control-flow graph of the finished lines, and fs_lv_assign lets slots whose intervals do
+# not overlap share one register (linear scan, most-used slot first). The rewrite, the callee-saved saves and
+# every eligibility rule are those of steps 1-2; without the flag nothing changes.
+def fs_lv_lab(l):
+# n for a `.LFn:` line, else -1
+    if not starts(l, ".LF") or not ends(l, ":\n"):
+        return -1
+    return fs_lv_num(substr(l, 3, len(l) - 2))
+
+def fs_lv_num(t):
+# the decimal value of t, or -1 if t is empty or not all digits
+    if len(t) == 0:
+        return -1
+    i = 0
+    while i < len(t):
+        c = char_at(t, i)
+        if c < 48 or c > 57:
+            return -1
+        i += 1
+    return fs_parse_dec(t)
+
+def fs_lv_ref(l, nsl):
+# the promotable slot (fsr_o index k) that line l reads or writes, as 4 * k + kind (1 read, 2 write, 3 both),
+# or -1 when l names none of them
+    if not contains(l, "(%rbp)"):
+        return -1
+    sl = ""
+    kind = 0
+    if (starts(l, "    addq $") or starts(l, "    subq $") or starts(l, "    movq $")) and ends(l, "(%rbp)\n"):
+        ops = substr(l, 9, len(l) - 1)
+        sl = substr(ops, fs_ra_comma(ops) + 1, len(ops))
+        kind = 3
+        if starts(l, "    movq"):
+            kind = 2
+    elif starts(l, "    mov ") or starts(l, "    cmp "):
+        ops = substr(l, 8, len(l) - 1)
+        q = fs_ra_opnd(ops)
+        if q < 0:
+            return -1
+        kind = 1
+        if q == 0:
+            sl = substr(ops, 5, len(ops))
+            if starts(l, "    mov "):
+                kind = 2
+        else:
+            sl = substr(ops, 0, len(ops) - 5)
+    else:
+        return -1
+    k = 0
+    while k < nsl:
+        if fsr_c[k] > 0 and str_eq(sl, concat(str(fsr_o[k]), "(%rbp)")):
+            return 4 * k + kind
+        k += 1
+    return -1
+
+def fs_lv_build(s0, nsl):
+# Live interval [fsr_lo, fsr_hi] of every promotable slot of out[s0:nout]. Positions number the non-empty lines.
+# Successors: the next line, a jmp's target only, a jcc's target and the next line, none after ret. Liveness is
+# the usual backward fixpoint per slot (a read makes it live, a plain write kills it). The interval covers every
+# position where the slot is live on entry or written (dead writes too, which would clobber a sharing slot).
+# Returns 0, and step 1-2 allocation is used, if a jump leaves the function or names an unknown label.
+    n = 0
+    lmin = -1
+    lmax = -1
+    i = s0
+    while i < nout:
+        if len(out[i]) > 0:
+            v = fs_lv_lab(out[i])
+            if v >= 0:
+                if lmin < 0 or v < lmin:
+                    lmin = v
+                if v > lmax:
+                    lmax = v
+            n += 1
+        i += 1
+    if n == 0:
+        return 0
+    ln = list(n)
+    nl = 1
+    if lmin >= 0:
+        nl = lmax - lmin + 1
+    lpos = list(nl)
+    j = 0
+    while j < nl:
+        lpos[j] = -1
+        j += 1
+    p = 0
+    i = s0
+    while i < nout:
+        if len(out[i]) > 0:
+            ln[p] = i
+            v = fs_lv_lab(out[i])
+            if v >= 0:
+                lpos[v - lmin] = p
+            p += 1
+        i += 1
+    s1 = list(n)
+    s2 = list(n)
+    sr = list(n)
+    p = 0
+    while p < n:
+        l = out[ln[p]]
+        s1[p] = p + 1
+        if p + 1 >= n:
+            s1[p] = -1
+        s2[p] = -1
+        sr[p] = -1
+        if starts(l, "    "):
+            b = substr(l, 4, len(l) - 1)
+            sp = 0
+            while sp < len(b) and char_at(b, sp) != 32:
+                sp += 1
+            mn = substr(b, 0, sp)
+            if str_eq(mn, "ret"):
+                s1[p] = -1
+            elif starts(mn, "j"):
+                ops = substr(b, sp + 1, len(b))
+                if not starts(ops, ".LF") or lmin < 0:
+                    return 0
+                v = fs_lv_num(substr(ops, 3, len(ops)))
+                if v < lmin or v > lmax or lpos[v - lmin] < 0:
+                    return 0
+                if str_eq(mn, "jmp"):
+                    s1[p] = lpos[v - lmin]
+                else:
+                    s2[p] = lpos[v - lmin]
+            else:
+                sr[p] = fs_lv_ref(l, nsl)
+        p += 1
+    lv = list(n)
+    k = 0
+    while k < nsl:
+        fsr_lo[k] = -1
+        fsr_hi[k] = -1
+        if fsr_c[k] > 0:
+            p = 0
+            while p < n:
+                lv[p] = 0
+                p += 1
+            ch = 1
+            while ch:
+                ch = 0
+                p = n - 1
+                while p >= 0:
+                    x = 0
+                    if s1[p] >= 0 and lv[s1[p]]:
+                        x = 1
+                    if s2[p] >= 0 and lv[s2[p]]:
+                        x = 1
+                    if sr[p] >= 0 and sr[p] // 4 == k:
+                        if sr[p] % 4 == 2:
+                            x = 0
+                        else:
+                            x = 1
+                    if x != lv[p]:
+                        lv[p] = x
+                        ch = 1
+                    p -= 1
+            p = 0
+            while p < n:
+                if lv[p] or sr[p] >= 0 and sr[p] // 4 == k:
+                    if fsr_lo[k] < 0:
+                        fsr_lo[k] = p
+                    fsr_hi[k] = p
+                p += 1
+        k += 1
+    return 1
+
+def fs_lv_assign(nsl, free, cs_ok):
+# Linear scan over the slots, most-used first (ties: first seen): each takes the first free register (FS_RAR
+# order) none of whose slots' intervals overlaps its own. A callee-saved register costs a save and a restore,
+# so its first slot must be used at least 3 times and the frame setup must be extendable (cs_ok); later slots
+# share it for free. Returns the number of callee-saved registers used.
+    k = 0
+    while k < nsl:
+        fsr_r[k] = ""
+        k += 1
+    done = list(nsl)
+    k = 0
+    while k < nsl:
+        done[k] = 0
+        k += 1
+    used = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    nsv = 0
+    while 1:
+        bk = -1
+        k = 0
+        while k < nsl:
+            if not done[k] and fsr_c[k] > 0 and fsr_lo[k] >= 0 and (bk < 0 or fsr_c[k] > fsr_c[bk]):
+                bk = k
+            k += 1
+        if bk < 0:
+            return nsv
+        done[bk] = 1
+        r = 0
+        while r < 11:
+            if free[r] and (r < 6 or cs_ok) and (r < 6 or used[r] or fsr_c[bk] >= 3):
+                ok = 1
+                j = 0
+                while j < nsl and ok:
+                    if str_eq(fsr_r[j], FS_RAR[r]) and not (fsr_hi[j] < fsr_lo[bk] or fsr_hi[bk] < fsr_lo[j]):
+                        ok = 0
+                    j += 1
+                if ok:
+                    fsr_r[bk] = FS_RAR[r]
+                    if r >= 6 and not used[r]:
+                        nsv += 1
+                    used[r] = 1
+                    r = 11
+            r += 1
+    return nsv
 
 def fs_ra_comma(ops):
     k = 0
@@ -20214,7 +20435,7 @@ def fs_wrapper(f, nm, body):
     e("iretq")
 
 def fs_main(src):
-    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_prov, fs_ufix, fs_ubare, fs_safe, fs_sp, fs_g, fs_ra
+    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_prov, fs_ufix, fs_ubare, fs_safe, fs_sp, fs_g, fs_ra, fs_live
     if contains(src, concat("# forge: ", "checked-ints")):
         fs_chk = 1
     if contains(src, concat("# forge: ", "no-bounds-checks")):
@@ -20239,6 +20460,9 @@ def fs_main(src):
             fs_g = 1
         if str_eq(argv(ai), "--fs-opt"):
             fs_ra = 1
+        if str_eq(argv(ai), "--fs-live"):
+            fs_ra = 1
+            fs_live = 1
         ai += 1
     ft_init()
     fs_prescan()

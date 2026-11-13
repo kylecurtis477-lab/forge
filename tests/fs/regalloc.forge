@@ -135,6 +135,40 @@ def ra_mix(n: i64) -> i64:
         j += 1
     return acc + x
 
+def ra_seq(n: i64) -> i64:
+# step 4b (--fs-live): 14 locals, each live only in its own phase, plus n and s live throughout: 16 slots for
+# the 11 free registers, so --fs-opt keeps some in memory while --fs-live lets the phases share registers
+    s: i64 = n
+    a0: i64 = s % 97 + 1
+    s = (s * 3 + a0 * a0 + a0) % 1000003
+    a1: i64 = s % 97 + 2
+    s = (s * 3 + a1 * a1 + a1) % 1000003
+    a2: i64 = s % 97 + 3
+    s = (s * 3 + a2 * a2 + a2) % 1000003
+    a3: i64 = s % 97 + 4
+    s = (s * 3 + a3 * a3 + a3) % 1000003
+    a4: i64 = s % 97 + 5
+    s = (s * 3 + a4 * a4 + a4) % 1000003
+    a5: i64 = s % 97 + 6
+    s = (s * 3 + a5 * a5 + a5) % 1000003
+    a6: i64 = s % 97 + 7
+    s = (s * 3 + a6 * a6 + a6) % 1000003
+    a7: i64 = s % 97 + 8
+    s = (s * 3 + a7 * a7 + a7) % 1000003
+    a8: i64 = s % 97 + 9
+    s = (s * 3 + a8 * a8 + a8) % 1000003
+    a9: i64 = s % 97 + 10
+    s = (s * 3 + a9 * a9 + a9) % 1000003
+    a10: i64 = s % 97 + 11
+    s = (s * 3 + a10 * a10 + a10) % 1000003
+    a11: i64 = s % 97 + 12
+    s = (s * 3 + a11 * a11 + a11) % 1000003
+    a12: i64 = s % 97 + 13
+    s = (s * 3 + a12 * a12 + a12) % 1000003
+    a13: i64 = s % 97 + 14
+    s = (s * 3 + a13 * a13 + a13) % 1000003
+    return s + n
+
 def main() -> i64:
     put_i64(ra_leaf(1000, 7))
     nl()
@@ -162,5 +196,7 @@ def main() -> i64:
     put_i64(ra_cpy(wv, 9) + wv[0])
     nl()
     put_i64(ra_mix(4))
+    nl()
+    put_i64(ra_seq(5))
     nl()
     return 0

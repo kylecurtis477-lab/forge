@@ -7,7 +7,7 @@ step 4 work on the register allocator.
 
 ## What it checks
 
-It writes COUNT random programs to build/fsfuzz/pK.forge and builds each one four ways with build/forgec, build/fas
+It writes COUNT random programs to build/fsfuzz/pK.forge and builds each one six ways with build/forgec, build/fas
 and build/fld:
 
 | config | flags |
@@ -16,11 +16,13 @@ and build/fld:
 | 1 | `-O0` |
 | 2 | `--fs-opt` |
 | 3 | `-O0 --fs-opt` |
+| 4 | `--fs-live` (step 4b, liveness-based register sharing) |
+| 5 | `-O0 --fs-live` |
 
-Each binary runs under `/usr/bin/timeout 10`. The result is the exit status plus stdout. All four must be equal. Any
-difference (or a build failure) counts as a diff and prints the four results, truncated to 300 characters.
+Each binary runs under `/usr/bin/timeout 10`. The result is the exit status plus stdout. All six must be equal. Any
+difference (or a build failure) counts as a diff and prints the six results, truncated to 300 characters.
 
-It ends with `fsfuzz: seed N, COUNT programs (L lines), 4 builds each (...): A agree, D differ` and exits 1 when D > 0.
+It ends with `fsfuzz: seed N, COUNT programs (L lines), 6 builds each (...): A agree, D differ` and exits 1 when D > 0.
 Without `--keep` it deletes each program's .s, .o and binaries after the comparison.
 
 ## The programs
@@ -45,4 +47,4 @@ safe code, so step 4a's promotion next to frame aggregates applies.
 ## Tests
 
 run_tests.sh builds the tool and runs `build/fsfuzz-tool --seed 1 --n 20` (`PASS fs-opt-fuzz`) at both O2 and
-FORGEC_FLAGS=-O0. The tool itself is built with those flags, but every program is always built in all four configs.
+FORGEC_FLAGS=-O0. The tool itself is built with those flags, but every program is always built in all six configs.

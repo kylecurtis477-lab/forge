@@ -411,6 +411,22 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      `fs-opt-fuzz` (seed 1, 20 programs, about 10 s). Before landing: seeds 1-4, 305 programs (about 61,700
      lines), 0 diffs; in the `--fs-opt` builds frame accesses drop (seed 7, program 0: 738 to 619) and rbx/r12/r8
      are allocated, so promotion is exercised. See docs/tools-fsfuzz.md.
+   - *Step 4b done (2026-11-12): liveness-based register sharing, opt-in `--fs-live`.* Steps 1-2 give each
+     promoted slot its own register for the whole function, so functions with more promotable slots than free
+     registers kept the rest in memory. `--fs-live` (implies `--fs-opt`) builds a control-flow graph over the
+     finished lines (fall-through, `jmp`/`jcc` to `.LF` labels, `ret` ends a path), runs backward liveness per
+     slot, and gives each slot the interval of positions where it is live on entry or written (dead writes
+     included). A linear scan, most-used slot first, puts each slot in the first free register none of whose
+     slots' intervals overlaps its own; a callee-saved register's first slot still needs 3 uses, later ones share it
+     for free. A jump out of the function or to an unknown label falls back to step 1-2 allocation. Rewrite,
+     callee-saved saves and every eligibility rule are unchanged, and code built without the flag is
+     byte-identical (the kernel with and without `--fs-opt` compared against the previous compiler). Tests: every
+     tests/fs program again under `--fs-live` (`PASS fs-live ...`, 22 programs); tests/fs/regalloc.forge adds
+     ra_seq (14 phase-local scalars plus 2 long-lived ones, 16 slots for 11 registers): frame accesses 103 plain,
+     33 with `--fs-opt`, 0 with `--fs-live` (`fs-live-shape`); tools/fsfuzz.forge now builds six ways (adds
+     `--fs-live` and -O0 `--fs-live`): seeds 1-6, 480 programs (98,151 lines), 0 diffs. Kernel frame accesses with
+     the flag 11,975 to 11,125 (-7.1%), compile 0.77 s. Not yet used for any image; the kernel switch is its own
+     step after a QEMU gate. Next: SSA values for the stack-machine temporaries (push/pop and %rax/%rcx chains).
    - *Asm audit as a checked list (2026-11-12).* The step 3 audit table in docs/SYSTEMS.md ("Kernel asm and
      --fs-opt") is now a `- [x]` checklist covering the kernel and the user programs, and tests/asm-audit/run.sh
      keeps it complete: it lists every `@naked` function, every top-level `asm(...)` block (its `.globl` symbols,

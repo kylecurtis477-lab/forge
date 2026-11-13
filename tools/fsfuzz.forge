@@ -1,7 +1,8 @@
 # fsfuzz: differential fuzzer for the freestanding backend's --fs-opt (Phase 12.1).
 # usage: build/fsfuzz [--seed N] [--n COUNT] [--keep]
 # Generates COUNT random, well-typed, deterministic freestanding programs (build/fsfuzz/pK.forge) and builds
-# each four ways with build/forgec + build/fas + build/fld: default (O2), -O0, --fs-opt and -O0 --fs-opt.
+# each six ways with build/forgec + build/fas + build/fld: default (O2), -O0, --fs-opt, -O0 --fs-opt, and the
+# step 4b liveness-based allocation --fs-live and -O0 --fs-live.
 # Every build must print the same output and exit with the same code; any difference (or a compile or link
 # failure) is reported with the seed and program index and fails the run (exit 1).
 # The programs exercise what --fs-opt rewrites: many scalar locals (more than the free registers), up to 8
@@ -203,8 +204,8 @@ def gen_prog():
     src = src + "    put_i64(s)\n    nl()\n    return s & 63\n"
     return src
 
-CONFIGS = [[], ["-O0"], ["--fs-opt"], ["-O0", "--fs-opt"]]
-CNAMES = ["O2", "O0", "O2 --fs-opt", "O0 --fs-opt"]
+CONFIGS = [[], ["-O0"], ["--fs-opt"], ["-O0", "--fs-opt"], ["--fs-live"], ["-O0", "--fs-live"]]
+CNAMES = ["O2", "O0", "O2 --fs-opt", "O0 --fs-opt", "O2 --fs-live", "O0 --fs-live"]
 
 def build_run(d, name, cfg, tag):
 # [ok, "exit N | output"] for one configuration
@@ -280,7 +281,7 @@ def main():
                         os.remove(f)
                 c += 1
         i += 1
-    print("fsfuzz: seed " + str(s0) + ", " + str(n) + " programs (" + str(lines) + " lines), 4 builds each (O2, O0, --fs-opt, -O0 --fs-opt): " + str(n - bad) + " agree, " + str(bad) + " differ")
+    print("fsfuzz: seed " + str(s0) + ", " + str(n) + " programs (" + str(lines) + " lines), 6 builds each (O2, O0, --fs-opt, -O0 --fs-opt, --fs-live, -O0 --fs-live): " + str(n - bad) + " agree, " + str(bad) + " differ")
     if bad:
         sys.exit(1)
     sys.exit(0)
