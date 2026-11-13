@@ -18233,6 +18233,10 @@ def fs_postfix():
                 e(c3("imul $", str(ftsz[el]), ",%rcx,%rcx"))
             e("add %rcx,%rax")
             fs_expect("]")
+            if fsk[t] == 1 and ft_isaff(el) and not fs_isop(".") and not fs_isop("["):
+            # p[0] of a pointer to an owner/borrow reads or overwrites that owner with no move tracking
+            # (a = q[0]; b = q[0] gave two owners from one own[own[T]])
+                fs_unsafe_op("reading or writing an own/ref/mut through a pointer (p[i])")
             fs_mode = 1
             fs_ety = el
             base = ""

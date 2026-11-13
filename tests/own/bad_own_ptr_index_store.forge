@@ -1,0 +1,7 @@
+# expect: reading or writing an own/ref/mut through a pointer (p[i]) is unsafe
+# forge: no-runtime
+struct Node:
+    id: u64
+def f(q: mut[own[Node]], n: own[Node]) -> u64:
+    q[0] = n
+    return 0
