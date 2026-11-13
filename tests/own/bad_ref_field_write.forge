@@ -1,0 +1,8 @@
+# expect: cannot modify an owner field through ref[T]
+# forge: no-runtime
+struct Node:
+    id: u64
+struct Queue:
+    head: own[Node]
+def bad(p: ref[Queue]):
+    p.head.id = 3

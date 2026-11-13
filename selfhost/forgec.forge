@@ -18242,9 +18242,29 @@ def fs_postfix():
                 fs_die("field access needs a struct or pointer to struct")
             k = fs_field(t, fs_ident())
             if ft_isaff(fft[k]):
-                if len(base) == 0 or fs_local(base) < 0 or fsk[fsl_t[fs_local(base)]] != 2:
+                # Stage 3a (restricted): follow an owner field through a checked owning/borrowed
+                # pointer only as a place. Never expose its owner value or overwrite its slot.
+                # No lifetime escapes: borrowing the field itself still requires place tracking.
+                pl = fs_local(base)
+                if pl >= 0 and fsk[fsl_t[pl]] == 1:
+                    sg = ftsg[fsl_t[pl]]
+                    if sg < 2:
+                        fs_die("own field through a raw pointer requires explicit unsafe ownership handling")
+                    if not fs_isop(".") and not fs_isop("["):
+                        fs_die("cannot move owner through a pointer: use take/replace")
+                    if w and sg == 3:
+                        fs_die("cannot modify an owner field through ref[T]")
+                    # The field's address remains a place; the subsequent postfix may access
+                    # members of its pointee, but cannot copy the owner itself.
+                    base = ""
+                    if ffo[k] != 0:
+                        e(c3("add $", str(ffo[k]), ",%rax"))
+                    fs_mode = 1
+                    fs_ety = fft[k]
+                    continue
+                if pl < 0 or fsk[fsl_t[pl]] != 2:
                     fs_die("own field read through a pointer or nonlocal is not tracked")
-                z = fs_flocal(fs_local(base), k)
+                z = fs_flocal(pl, k)
                 if z < 0:
                     fs_die("nested owner field access is not supported")
                 if w == 2 and not fs_isop(".") and not fs_isop("["):

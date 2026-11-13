@@ -1,0 +1,22 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Queue:
+    head: own[Node]
+cell: Node
+@unsafe
+def make() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell)))
+def view(p: ref[Queue]) -> u64:
+    return p.head.id
+def update(p: mut[Queue]):
+    p.head.id = p.head.id + 1
+@unsafe
+def main() -> u64:
+    q: Queue
+    q.head = make()
+    q.head.id = 40
+    update(mut[Queue](ptr[Queue](addr(q.head))))
+    puts("pointer owner place ok\n")
+    return 0

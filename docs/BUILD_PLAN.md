@@ -166,6 +166,35 @@ count stays at or under 709.
      annotated `x: ref[T]` locals and globals and generic arguments (`list[mut[T]]`) were still silently ignored;
      the check is now in hosted `parse_type` and covers every type position (a hosted name `own`, `ref` or `mut`
      still works; tests/own/bad_hosted_own_{return,local,generic}.forge; 50 checks).
+   - *Status: Stage 3a done (2026-11-13; restricted patch designed by ChatGPT, reviewed and tested adversarially
+     here, /workspace/chatgpt/REVIEW-stage3a.md).* A direct `own[T]` field reached through a local `own[S]`,
+     `mut[S]` or `ref[S]` pointer can be used as a place: `p.head.id`, `p.head.arr[i]` and `p.head[0].id` read
+     (and, through `own`/`mut`, write) the owned node. The owner itself never leaves the slot: a bare `p.head`
+     (move, copy, compare, argument, `addr()`) is "cannot move owner through a pointer: use take/replace", any
+     write under `p.head` through a `ref[S]` is refused, and raw `ptr[S]`/`nptr[S]` bases are refused even in
+     unsafe code (no ownership facts for raw pointers). Why this is sound without per-pointer state: a `mut[S]`/
+     `ref[S]`/`own[S]` only comes from `borrow`/`borrow_mut` of an own local, a parameter, or an unsafe
+     conversion from a raw pointer; nothing safe can move an owner out through a pointer, so every own field
+     behind one stays initialised. The unsafe conversion carries the obligation (documented in SYSTEMS.md) that
+     every own field of the pointee is initialised and uniquely owned. Nested owner fields (`p.head.next.id`,
+     `w.q.head.id`) and borrowing `p.head` itself stay refused. Tests: ptr_field_place_ok, bad_ptr_field_move,
+     bad_ref_field_write; three Stage 2 tests take the raw-pointer message. Found while testing it and fixed in
+     separate commits: arrays/slices of owners outside struct fields and `addr()` through a `ref[T]` (Phase 4.4
+     item 4), plus the review fixes in the commit after this one.
+   - *Next Stage 3 steps (from ChatGPT's design note, in order; each its own gated commit):*
+     (3b) `nown[T]`, a nullable affine owner: the only owner type allowed in zero-initialised storage (globals,
+     arrays, kexec records), with a null check before use; arrays of owners return as arrays of `nown[T]`.
+     (3c) `take(place) -> nown[T]` (returns the old owner and zeroes the slot in one step), `replace(place, v)`
+     and `swap(a, b)` on `nown` and `own` places, with place provenance (root local/param, access path, pointer
+     kind) so a move through `mut[S]` is legal exactly when the slot never stays empty; through `ref[S]` never.
+     (3d) Borrowing `p.head` records the borrow on the pointer root `p` and releases it at the call or block end;
+     nested owner fields through pointers (`p.head.next`) follow from provenance. (3e) Run queue: one ownership
+     transfer point between the queue and `current[cpu]` (no owning queue entry while a thread runs), tail
+     links stay non-owning, and `rq_push(ptr[Thread])`/`rq_pop() -> u64` become `rq_push(own[Thread])`/
+     `rq_pop() -> nown[Thread]` in one coordinated API change. (3f) kexec/pstate handoff records: owner-bearing
+     typed records proved layout-compatible at every offset across the old and new kernel, adopted once by the
+     receiver and released by `kx_release`; no casting the raw region into several owning pointers. The kernel
+     unsafe count stays at or under 709 through all of it.
    - *Gate infrastructure (2026-11-13):* a box reset removed the QEMU/GRUB/xorriso/OVMF packages and failed a
      gate on setup, not code. tools/ostools.forge now checks the OS-test toolchain and reinstalls what is missing
      (signed Debian index and .debs fetched with curl, installed by apt offline); the gate harness runs it after

@@ -29,6 +29,11 @@ if $FC addr_paths_ok.forge $T/ap.s && ../../build/fas -o $T/ap.o $T/ap.s && ../.
 else
     echo "FAIL own-addr-paths-ok"; fail=1
 fi
+if $FC ptr_field_place_ok.forge $T/ptr.s && ../../build/fas -o $T/ptr.o $T/ptr.s && ../../build/fld -o $T/ptr $T/ptr.o && $T/ptr | diff -q - ptr_field_place_ok.expected >/dev/null; then
+    echo "PASS own-ptr-field-place"
+else
+    echo "FAIL own-ptr-field-place"; fail=1
+fi
 for f in bad_*.forge; do
     want=$(sed -n 's/^# expect: //p' $f)
     out=$($FC $f $T/x.s 2>&1)

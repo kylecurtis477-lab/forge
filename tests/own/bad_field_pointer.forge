@@ -1,4 +1,4 @@
-# expect: own field read through a pointer or nonlocal is not tracked
+# expect: own field through a raw pointer requires explicit unsafe ownership handling
 # forge: no-runtime
 include "../fs/linux.fsi"
 struct Node:

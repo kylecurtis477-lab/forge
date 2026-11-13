@@ -1,0 +1,8 @@
+# expect: cannot move owner through a pointer: use take/replace
+# forge: no-runtime
+struct Node:
+    id: u64
+struct Queue:
+    head: own[Node]
+def bad(p: mut[Queue]) -> own[Node]:
+    return p.head
