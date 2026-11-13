@@ -10,12 +10,16 @@
 #   +128 fds x16: (file index + 1) | rights << 32 (0 = closed)
 #   +256 args (128 bytes) +384 syscall frame (SF_SIZE = 128 bytes)
 #   +512 header word: PS_MAGIC << 32 | PS_VERSION (adopters refuse a record whose header fails ps_hdr_ok)
+#   +520 checksum (v2, v1 reservation 4): FNV-1a over the 64 words at +0..+504, word by word (kx_hash), then the
+#        header word; an adopter refuses a v2 record whose checksum does not match (ps_sum_ok). v1 records have no
+#        checksum and are still adopted.
 # Record page 1: FPU state (fxsave/xsave image, the container records its size).
 # User pages, the page index and the shared file table belong to the container (the kexec handoff
 # region, see kexec.fsi); the record refers to them by index.
 PS_MAGIC = 0x46505354  # "TSPF" little-endian: Forge Process STate
-PS_VERSION = 1  # written by this kernel
+PS_VERSION = 2  # written by this kernel (v2 adds the checksum at +520)
 PS_MIN_VERSION = 1  # oldest record this kernel adopts
+PS_SUM_VERSION = 2  # first version that carries a checksum
 PS_PID = 0
 PS_PPID = 8
 PS_STATE = 16
@@ -32,6 +36,9 @@ PS_FDS = 128
 PS_ARGS = 256
 PS_FRAME = 384
 PS_HDR = 512
+PS_SUM = 520
+FNV_PRIME = 0x100000001B3
+FNV_BASIS = 0xCBF29CE484222325
 PS_PAGES = 2
 
 def ps_hdr_word() -> u64:
@@ -46,16 +53,64 @@ def ps_hdr_ok(w: u64) -> u64:
         return 0
     return 1
 
+def ps_sum_fold(body: u64, hdr: u64) -> u64:
+# the record checksum: body is the FNV-1a word hash of the 64 words at +0..+504 (kx_hash(r, PS_HDR)), hdr the
+# header word, folded in last so a version change also changes the sum
+    return (body ^ hdr) * FNV_PRIME
+
+def ps_sum_ok(hdr: u64, stored: u64, body: u64) -> u64:
+# 1 if a record whose header word is hdr (already accepted by ps_hdr_ok) passes its checksum; v1 has none
+    if (hdr & 0xFFFFFFFF) < PS_SUM_VERSION:
+        return 1
+    if stored == ps_sum_fold(body, hdr):
+        return 1
+    return 0
+
 def ps_selftest():
-# boot check of the header rules: own word accepted; wrong magic, version 0 and a newer version refused
+# boot check of the header rules: own word accepted; wrong magic, version 0 and a newer version refused; and of
+# the checksum: an intact record accepted, any flipped bit in the body or header refused, a v1 record accepted
     if ps_hdr_ok(ps_hdr_word()) == 0 or ps_hdr_ok(ps_hdr_word() ^ (u64(1) << 40)) != 0:
         panic("process-state: header check")
     if ps_hdr_ok(PS_MAGIC << 32) != 0 or ps_hdr_ok(ps_hdr_word() + 1) != 0:
         panic("process-state: version check")
+    rec: u64[64]
+    i: u64 = 0
+    while i < 64:
+        rec[i] = i * 0x9E3779B97F4A7C15
+        i += 1
+    h = ps_hdr_word()
+    s = ps_sum_fold(ps_words_hash(rec[0:64]), h)
+    if ps_sum_ok(h, s, ps_words_hash(rec[0:64])) == 0:
+        panic("process-state: intact record refused")
+    bad: u64 = 0
+    i = 0
+    while i < 64:
+        rec[i] = rec[i] ^ (u64(1) << (i % 64))
+        if ps_sum_ok(h, s, ps_words_hash(rec[0:64])) == 0:
+            bad += 1
+        rec[i] = rec[i] ^ (u64(1) << (i % 64))
+        i += 1
+    # a flipped magic bit keeps version 2, so the sum must catch it; a flipped version bit (2 -> 0, 3 or 6) is
+    # refused by ps_hdr_ok before the sum is looked at
+    if bad != 64 or ps_sum_ok(h ^ (u64(1) << 40), s, ps_words_hash(rec[0:64])) != 0:
+        panic("process-state: checksum misses a flipped bit")
+    if ps_hdr_ok(h ^ 1) != 0 or ps_hdr_ok(h ^ 2) != 0 or ps_hdr_ok(h ^ 4) != 0:
+        panic("process-state: checksum misses a flipped bit")
+    if ps_sum_ok((PS_MAGIC << 32) | 1, 0, ps_words_hash(rec[0:64])) == 0:
+        panic("process-state: v1 record refused")
     puts("process-state: format v")
     put_u64(PS_VERSION)
     puts(" (adopts v")
     put_u64(PS_MIN_VERSION)
     puts("..v")
     put_u64(PS_VERSION)
-    puts("), header checks OK\n")
+    puts("), header and checksum checks OK (64 of 64 flipped bits caught)\n")
+
+def ps_words_hash(w: slice[u64]) -> u64:
+# the same FNV-1a word hash as kx_hash over 64 words, on a kernel array (the self-test's record)
+    h: u64 = FNV_BASIS
+    i: u64 = 0
+    while i < 64:
+        h = (h ^ w[i]) * FNV_PRIME
+        i += 1
+    return h

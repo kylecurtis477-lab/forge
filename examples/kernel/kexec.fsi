@@ -16,7 +16,7 @@
 #   +64 fpu size +72 data hash +80 metadata hash +88 proc page +96 file page +104 index page
 #   +112 data page +128 sender's kernel version (64 B) +384 RSDP copy (64 B)
 # process record (v5): one process-state record per process, the single versioned format defined in
-#   pstate.fsi (record page + FPU page; +512 header word PS_MAGIC << 32 | PS_VERSION, checked on adoption)
+#   pstate.fsi (record page + FPU page; +512 header word PS_MAGIC << 32 | PS_VERSION and +520 checksum, both checked on adoption)
 # file record: +0 type +8 first cluster +16 size +24 position +32 fds referring to it
 # driver state (no-restart gap 4; header page, past KXH_BYTES, so a receiver that ignores it still
 # adopts v4): +1016 hash of +1024..+2048 | +1024 magic KXD_MAGIC +1032 records (0 or 1)
@@ -391,7 +391,6 @@ def sys_kexec(frame: u64, which: u64) -> u64:
             while j < 8:
                 vstore64(r + PS_PID + j * 8, pw[j])
                 j += 1
-            vstore64(r + PS_HDR, ps_hdr_word())
             n = 0
             if q.state == P_ALIVE:
                 n = kx_walk(q.pml4, h + pidx * PAGE + pg * 16, h + (pdata + pg) * PAGE)
@@ -415,6 +414,11 @@ def sys_kexec(frame: u64, which: u64) -> u64:
             elif q.state == P_ALIVE:
                 memcpy(r + PS_FRAME, qt.kstack_top - SF_SIZE, SF_SIZE)
                 memcpy(r + PAGE, qt.fpu, fpu_size)
+            # header word and checksum last, once every word at +0..+504 is final (pstate.fsi, v2)
+            hs: u64[2]
+            hs[0] = ps_hdr_word()
+            hs[1] = ps_sum_fold(kx_hash(r, PS_HDR), hs[0])
+            memcpy(r + PS_HDR, u64(addr(hs[0])), 16)
             k += 1
         i += 1
     # open files (console, regular files, directories)
@@ -632,8 +636,12 @@ def kx_restore() -> nptr[Thread]:
         r = h + (pproc + PS_PAGES * i) * PAGE
         c = proc_new(0)
         c.pml4 = as_new()
-        if ps_hdr_ok(vload64(r + PS_HDR)) == 0:
+        hs: u64[2]
+        memcpy(u64(addr(hs[0])), r + PS_HDR, 16)
+        if ps_hdr_ok(hs[0]) == 0:
             panic("kexec: process record is not a supported process-state version")
+        if ps_sum_ok(hs[0], hs[1], kx_hash(r, PS_HDR)) == 0:
+            panic("kexec: process record checksum mismatch")
         n = vload64(r + PS_NPG)
         first = vload64(r + PS_FIRST_PG)
         j = 0

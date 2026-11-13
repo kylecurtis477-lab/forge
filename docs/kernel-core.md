@@ -171,7 +171,7 @@ Forge FS and the object store have their own result names (`os/drivers`, `os/for
 `os/objstore-*`, `os/objfs-*`, `os/nvme-service-swap-restart-boot1` / `boot2`).
 
 **Kexec and process-state.** `kexec handoff OK`, `kexec: handoff format v5`, `process-state: format
-v1 (adopts v1..v1), header checks OK`, `TLB IPI: 1 stale shootdown IPI(s) from the previous kernel
+v2 (adopts v1..v2), header and checksum checks OK (64 of 64 flipped bits caught)`, `TLB IPI: 1 stale shootdown IPI(s) from the previous kernel
 handled before SMP`, and `driver state carried across kexec OK`. `os/kexec-no-disk-write` requires
 the GPT image to be byte-identical after the loader boot. The bios suite repeats the handoff
 (`kexec: generation 3 kernel adopted`).

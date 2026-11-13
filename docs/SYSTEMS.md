@@ -343,7 +343,7 @@ Appendix A of that file is the verification scope (what the tests pin, the known
 
 ## Process-state format (plan v1.3 item 7)
 `examples/kernel/pstate.fsi` defines the single versioned record of one user process, **process-state
-v1**. The kexec handoff (format v5) writes one record per process and adopts nothing else; checkpointing,
+v2** (v2 added the checksum, v1 reservation 4). The kexec handoff (format v5) writes one record per process and adopts nothing else; checkpointing,
 migration or record/replay must reuse it and bump `PS_VERSION` instead of defining another format.
 - Two pages: the record page and the FPU page (fxsave/xsave image; the container records its size).
 - Record words: pid, ppid, state, exit code, brk_base, brk, mmap_next, flags (is-caller | caps << 8 |
@@ -352,11 +352,18 @@ migration or record/replay must reuse it and bump `PS_VERSION` instead of defini
 - Header word at +512: `PS_MAGIC << 32 | PS_VERSION` ("FPST", v1). `ps_hdr_ok` accepts
   `PS_MIN_VERSION..PS_VERSION`; kexec panics on a record that fails it rather than adopting a misread
   process (the container header itself is still versioned separately: `KXH_VERSION` 5).
+- Checksum at +520 (v2): the FNV-1a word hash of the 64 words at +0..+504 (`kx_hash(r, PS_HDR)`), with the
+  header word folded in last (`ps_sum_fold`), so the record verifies on its own, outside any container. kexec
+  writes the header and checksum last, once the record is final, and refuses (panics on) a v2 record whose sum
+  does not match (`ps_sum_ok`); v1 records carry no sum and are still adopted (`PS_MIN_VERSION` 1). The FPU page
+  stays covered by the container's metadata hash only.
 - User pages, the page index and the shared file table belong to the container (the handoff region) and
   are referenced by index.
-- Boot check: `ps_selftest` (run before the kexec session) prints `process-state: format v1 (adopts
-  v1..v1), header checks OK` after checking that its own header passes and wrong-magic, version-0 and
-  newer-version headers are refused.
+- Boot check: `ps_selftest` (run before the kexec session) prints `process-state: format v2 (adopts
+  v1..v2), header and checksum checks OK (64 of 64 flipped bits caught)` after checking that its own header
+  passes, wrong-magic, version-0 and newer-version headers are refused, an intact record's checksum passes, each
+  of 64 single-bit flips in the body (one per word) and a flip in the header is caught, and a v1 record (no
+  checksum) is still accepted.
 
 ## Nondeterminism hook (plan v1.3 item 6)
 `examples/kernel/nondet.fsi`. Every nondeterministic input the kernel takes goes through one function,

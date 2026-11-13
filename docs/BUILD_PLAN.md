@@ -181,6 +181,15 @@ one commit in five, in this order, each its own commit with a visual and docs:
      kernel mutated to accept ID 1 the boot fails at blkd ("blkd: address-space ID 1 not refused"). Per-process or
      per-device-group IOMMU domains can be added later without an ABI change. No new unsafe code.
 4. A checksum and version in the handoff/process-state record format.
+   - *Status: done (2026-11-13).* The record already had a version (header word +512, `PS_MAGIC << 32 |
+     PS_VERSION`, adopted range `PS_MIN_VERSION..PS_VERSION`) and the handoff container its own version (v5) and
+     region hashes. Process-state v2 adds a per-record checksum at +520: the FNV-1a word hash of the 64 words at
+     +0..+504 with the header word folded in last, so a record verifies on its own (checkpoint, migration and
+     record/replay can reuse it outside the kexec container). kexec writes header and checksum last and refuses a
+     v2 record that fails it; v1 records (no checksum) are still adopted. `ps_selftest` checks an intact record,
+     64 single-bit flips (one per word) and a header flip (all caught) and v1 acceptance. Boot marker:
+     `process-state: format v2 (adopts v1..v2), header and checksum checks OK (64 of 64 flipped bits caught)`.
+     No new unsafe code (the header store and load became one 16-byte copy each; kernel 170 / 708).
 5. CPython bindings on the stable ABI (abi3).
 6. The build.sh/run_tests.sh port to Forge, whenever it fits.
 
