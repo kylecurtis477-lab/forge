@@ -1,0 +1,25 @@
+# expect: use of moved value `q.slot`
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Holder:
+    n: u64
+    slot: nown[Node]
+cell: Node
+@unsafe
+def make() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell)))
+def consume(x: own[Node]) -> u64:
+    return x.id
+def peek(x: ref[Node]) -> u64:
+    return x.id
+def f(a: own[Node]) -> u64:
+    q: Holder
+    q.slot = a
+    t = q.slot
+    if q.slot == 0:
+        return 1
+    return consume_n(t)
+def consume_n(o: nown[Node]) -> u64:
+    return 0

@@ -1,0 +1,7 @@
+# expect: nown[T] is freestanding-only
+class Node:
+    def __init__(self):
+        self.v = 1
+def f(x: nown[Node]) -> int:
+    return 1
+print(f(Node()))

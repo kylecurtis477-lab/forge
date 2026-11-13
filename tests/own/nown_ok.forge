@@ -1,0 +1,88 @@
+# forge: no-runtime
+# Stage 3b-min: nown[T], an owner that may be none (0). Two owners are made once in unsafe code (the
+# raw-to-own conversion); everything after that is safe code. Each line printed is computed from the values.
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Holder:
+    n: u64
+    slot: nown[Node]
+cell1: Node
+cell2: Node
+hmem: u64[2]
+@unsafe
+def make1() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell1)))
+@unsafe
+def make2() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell2)))
+@unsafe
+def make_holder() -> own[Holder]:
+# zeroed memory is a valid Holder: n = 0, slot none
+    return own[Holder](ptr[Holder](addr(hmem)))
+def consume(n: own[Node]) -> u64:
+    return n.id
+def peek(r: ref[Node]) -> u64:
+    return r.id
+def bump(m: mut[Node]):
+    m.id = m.id + 1
+def id_or(o: nown[Node], d: u64) -> u64:
+    if o == 0:
+        return d
+    return consume(o)
+def keep(n: own[Node]) -> nown[Node]:
+# own[T] -> nown[T] is a move
+    return n
+def first(a: nown[Node], b: nown[Node]) -> nown[Node]:
+    if a != 0:
+        id_or(b, 0)
+        return a
+    id_or(a, 0)
+    return b
+def has_slot(h: ref[Holder]) -> u64:
+    if h.slot != 0:
+        return 1
+    return 0
+def run(n1: own[Node], n2: own[Node], h: own[Holder]) -> u64:
+    n1.id = 40
+    n2.id = 2
+    # a nown local starts as none; the test does not move it
+    o: nown[Node]
+    if o != 0:
+        puts("wrong: none is not none\n")
+    put_u64(id_or(o, 7))
+    puts(" none local\n")
+    # own -> nown, narrowed: inside the branch o is an own[Node] (borrow, field access, move)
+    o = n1
+    if o != 0:
+        bump(borrow_mut(o))
+        o.id = o.id + peek(borrow(o))
+    put_u64(id_or(o, 0))
+    puts(" narrowed local\n")
+    # params and returns: first(none, n2) gives n2
+    a: nown[Node] = 0
+    r = first(a, keep(n2))
+    total = 0
+    if r == 0:
+        return 1
+    total = r.id
+    # a Stage 2 local struct with a nown field: starts none, filled, moved out, refilled with none
+    q: Holder
+    if q.slot == 0:
+        total = total + 100
+    q.slot = r
+    t = q.slot
+    if t != 0:
+        total = total + t.id * 1000
+    q.slot = t
+    put_u64(total)
+    puts(" params, returns, local field\n")
+    # through own/mut/ref pointers a nown field can be tested for none, never moved or stored
+    s = has_slot(borrow(h))
+    h.n = h.n + 5
+    put_u64(s + h.n)
+    puts(" pointer field test\n")
+    return 0
+@unsafe
+def main() -> u64:
+    return run(make1(), make2(), make_holder())

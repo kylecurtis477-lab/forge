@@ -1,0 +1,24 @@
+# expect: is moved inside a loop
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Holder:
+    n: u64
+    slot: nown[Node]
+cell: Node
+@unsafe
+def make() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell)))
+def consume(x: own[Node]) -> u64:
+    return x.id
+def peek(x: ref[Node]) -> u64:
+    return x.id
+def g(o: nown[Node]) -> u64:
+    return 0
+def f(o: nown[Node], n: u64) -> u64:
+    i = 0
+    while i < n:
+        g(o)
+        i += 1
+    return 0

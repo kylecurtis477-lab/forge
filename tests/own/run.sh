@@ -34,6 +34,11 @@ if $FC ptr_field_place_ok.forge $T/ptr.s && ../../build/fas -o $T/ptr.o $T/ptr.s
 else
     echo "FAIL own-ptr-field-place"; fail=1
 fi
+if $FC nown_ok.forge $T/nown.s && ../../build/fas -o $T/nown.o $T/nown.s && ../../build/fld -o $T/nown $T/nown.o && $T/nown | diff -q - nown_ok.expected >/dev/null; then
+    echo "PASS own-nown-ok"
+else
+    echo "FAIL own-nown-ok"; fail=1
+fi
 for f in bad_*.forge; do
     want=$(sed -n 's/^# expect: //p' $f)
     out=$($FC $f $T/x.s 2>&1)

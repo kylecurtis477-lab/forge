@@ -850,6 +850,8 @@ def hosted_affchk(p):
 # own/ref/mut have move and borrow checks only in freestanding code; in hosted code they would be silently ignored
     if tk[p] == K_ID and (str_eq(tv[p], "own") or str_eq(tv[p], "ref") or str_eq(tv[p], "mut")) and tk[p + 1] == K_OP and str_eq(tv[p + 1], "["):
         die(tl[p], "own/ref/mut are freestanding-only (add the no-runtime header)")
+    if tk[p] == K_ID and str_eq(tv[p], "nown") and tk[p + 1] == K_OP and str_eq(tv[p + 1], "["):
+        die(tl[p], "nown[T] is freestanding-only, like own/ref/mut (add the no-runtime header)")
 
 def parse_type():
 # returns a type code; skips generic arguments like list[int]
@@ -15642,6 +15644,8 @@ fs_tbk = list(4096)
 fs_bpk = 0
 # Stage 2: field states are synthetic local slots, one per direct own[T] field.
 # fsl_mv == -1 means uninitialised, 0 live, positive source line moved.
+# Stage 3b: -2 means initialised and none (a nown[T] local or field holding 0): readable, and a store over it does
+# not leak. Only leak checks read -2; non-null proofs come from fsl_nn, never from fsl_mv.
 fs_fwriting = 0
 fs_fslot = -1
 # set by fs_postfix: the place just compiled was reached through a ref[T] (read by addr())
@@ -15700,6 +15704,8 @@ fsl_nn = list(4096)
 fs_lhs = 0
 fs_lhsl = -1
 fs_lastimm = 1
+# the right-hand side of the assignment being compiled is the literal 0 (a nown[T] target becomes none, -2)
+fs_vzero = 0
 fs_nnl = list(64)
 fs_nnc = 0
 fsb_v = list(256)
@@ -16001,10 +16007,11 @@ def ft_isnptr(t):
     return fsk[t] == 1 and ftsg[t] == 1
 
 def ft_isnn(t):
-    return fsk[t] == 1 and ftsg[t] != 1
+    return fsk[t] == 1 and ftsg[t] != 1 and ftsg[t] != 5
 
 def ft_bptr(t, sg):
-# own[T] (sg 2), ref[T] (3), mut[T] (4): non-null pointers with ownership rules
+# own[T] (sg 2), ref[T] (3), mut[T] (4): non-null pointers with ownership rules; nown[T] (5): an own[T] that
+# may be none (0), affine like own[T], usable as own[T] only where `if o != 0:` narrows it
     i = 0
     while i < nft:
         if fsk[i] == 1 and ftel[i] == t and ftsg[i] == sg:
@@ -16015,10 +16022,19 @@ def ft_bptr(t, sg):
         nm = "ref"
     elif sg == 4:
         nm = "mut"
+    elif sg == 5:
+        nm = "nown"
     return ft_add(1, t, 8, 8, sg, 0, nm)
 
 def ft_isaff(t):
     return fsk[t] == 1 and ftsg[t] >= 2
+
+def ft_isnown(t):
+    return fsk[t] == 1 and ftsg[t] == 5
+
+def ft_isowner(t):
+# own[T] or nown[T]: moved on whole-value use (ref/mut are borrows)
+    return fsk[t] == 1 and (ftsg[t] == 2 or ftsg[t] == 5)
 
 def ft_elem_aff(t):
 # an array or slice (at any depth) whose element is own/ref/mut: not affine itself, but indexing it yields owner
@@ -16030,7 +16046,7 @@ def ft_elem_aff(t):
     return 0
 
 def fs_isbname(nm):
-    return str_eq(nm, "own") or str_eq(nm, "ref") or str_eq(nm, "mut")
+    return str_eq(nm, "own") or str_eq(nm, "ref") or str_eq(nm, "mut") or str_eq(nm, "nown")
 
 def ft_arr(t, n):
     i = 0
@@ -16121,6 +16137,8 @@ def fs_type():
             sg = 3
         elif str_eq(nm, "mut"):
             sg = 4
+        elif str_eq(nm, "nown"):
+            sg = 5
         t = ft_bptr(el, sg)
     elif t < 0:
         t = ft_struct(nm)
@@ -16317,7 +16335,7 @@ def fs_ownerfield(t):
         return 0
     i = ftf0[t]
     while i < ftf0[t] + ftfn[t]:
-        if (ft_isaff(fft[i]) and ftsg[fft[i]] == 2) or fs_ownerfield(fft[i]):
+        if ft_isowner(fft[i]) or fs_ownerfield(fft[i]):
             return 1
         i += 1
     return 0
@@ -16374,7 +16392,7 @@ def fs_newlocal(nm, t):
     if fsk[t] == 2 and fs_ownerfield(t) and len(nm) > 0:
         j = ftf0[t]
         while j < ftf0[t] + ftfn[t]:
-            if ft_isaff(fft[j]) and ftsg[fft[j]] == 2:
+            if ft_isowner(fft[j]):
                 if nfsl >= FSLMAX:
                     fs_toomany()
                 z = nfsl
@@ -16383,6 +16401,9 @@ def fs_newlocal(nm, t):
                 fsl_t[z] = fft[j]
                 fsl_o[z] = fsl_o[root] + ffo[j]
                 fsl_mv[z] = -1
+                if ft_isnown(fft[j]):
+                # the struct local starts zeroed: a nown field is initialised and none (-2), not uninitialised
+                    fsl_mv[z] = -2
                 fsl_bf[z] = -1
                 fsl_bk[z] = 0
                 fsl_sh[z] = 0
@@ -16578,6 +16599,13 @@ def fs_bconv(to):
     if ftsg[s] < 2:
         fs_unsafe_op(c3("converting a raw pointer to ", ftname[to], "[T]"))
         return 0
+    if ftsg[s] == 2 and ftsg[to] == 5:
+    # own[T] -> nown[T]: the value moves (a local source was marked moved by fs_lchk)
+        return 0
+    if ftsg[s] == 5 and ftsg[to] == 2:
+        fs_die("nown[T] may be none: check it (if o != 0:) before using it as an own[T]")
+    if ftsg[s] == 5:
+        fs_die(c3("cannot use a nown[T] as a ", ftname[to], "[T]: check it (if o != 0:), then borrow(o) or borrow_mut(o)"))
     if ftsg[s] == 2:
         fs_die(c3("cannot use an own[T] as a ", ftname[to], "[T]: pass borrow(x) or borrow_mut(x)"))
     fs_die(c4("cannot convert ", ftname[s], "[T] to ", concat(ftname[to], "[T]")))
@@ -16609,7 +16637,7 @@ def fs_lchk(l, lh):
         return 0
     whole = not (tk[fp] == K_OP and (str_eq(tv[fp], ".") or str_eq(tv[fp], "[")))
     if lh and whole:
-        if ftsg[t] >= 3:
+        if ftsg[t] == 3 or ftsg[t] == 4:
             fs_die("a borrow local cannot be reassigned")
         if fsl_sh[l] > 0:
             fs_die(c3("cannot assign to ", fs_lname(l), c3(" while it is borrowed (at ", fs_where(fsl_bl[l]), ")")))
@@ -16617,17 +16645,34 @@ def fs_lchk(l, lh):
             fs_die(concat("assigning to ", concat(fs_lname(l), " would leak the own[T] it holds: move or free it first")))
         fsl_mv[l] = 0
         return 0
-    if fsl_mv[l]:
+    if fsl_mv[l] and fsl_mv[l] != -2:
         fs_die(c4("use of moved value ", fs_lname(l), " (moved at ", concat(fs_where(fsl_mv[l]), ")")))
     if not whole:
         return 0
-    if ftsg[t] == 2:
+    if ftsg[t] == 5 and fs_nowncmp(fp):
+    # `o == 0` / `o != 0` reads the word for a test; the owner stays in o
+        return 0
+    if ftsg[t] == 2 or ftsg[t] == 5:
         if fsl_sh[l] > 0:
             fs_die(c3("cannot move ", fs_lname(l), c3(" while it is borrowed (at ", fs_where(fsl_bl[l]), ")")))
         fsl_mv[l] = tl[fp - 1]
     elif ftsg[t] == 4 and fs_argd > 0:
     # passing a mut[T] reborrows it for the call: no other use of it in the same call
         fs_tb_push(l, 2)
+
+def fs_nowncmp(p):
+# tokens at p are `== 0` or `!= 0` ending the comparison (`:`, `)`, `,`, `]`, and/or, end of line): a null test of
+# the nown[T] value just named, which reads it without moving it
+    if tk[p] != K_OP or not (str_eq(tv[p], "==") or str_eq(tv[p], "!=")):
+        return 0
+    if tk[p + 1] != K_NUM or tv[p + 1] != 0:
+        return 0
+    q = p + 2
+    if tk[q] == K_NL or tk[q] == K_DED or tk[q] == K_EOF:
+        return 1
+    if tk[q] == K_OP and (str_eq(tv[q], ":") or str_eq(tv[q], ")") or str_eq(tv[q], ",") or str_eq(tv[q], "]")):
+        return 1
+    return tk[q] == K_ID and (str_eq(tv[q], "and") or str_eq(tv[q], "or"))
 
 def fs_tb_push(x, k):
     global nfstb
@@ -16675,7 +16720,10 @@ def fs_mvor(acc, sn):
     i = 0
     while i < n:
         r[i] = acc[i]
-        if r[i] == 0:
+        if r[i] == 0 and sn[i] != -2:
+            r[i] = sn[i]
+        elif r[i] == -2:
+        # none on one path: the other path decides (live, moved or none)
             r[i] = sn[i]
         i += 1
     r[n] = n
@@ -16695,7 +16743,7 @@ def fs_mvloop(e0):
     n = e0[len(e0) - 1]
     i = 0
     while i < n:
-        if fsl_mv[i] > 0 and e0[i] == 0:
+        if fsl_mv[i] > 0 and (e0[i] == 0 or e0[i] == -2):
             fs_die(c3(fs_lname(i), " is moved inside a loop (moved at ", concat(fs_where(fsl_mv[i]), "); it would be used again on the next iteration")))
         i += 1
 
@@ -16712,7 +16760,7 @@ def fs_bkill(n0):
 def fs_battach(l, vt):
 # a new local l of borrow type vt was just initialized
     global fs_bpend
-    if fsk[vt] != 1 or ftsg[vt] < 3:
+    if fsk[vt] != 1 or ftsg[vt] < 3 or ftsg[vt] == 5:
         if fs_bpend >= 0:
             fs_bpend = -1
         return 0
@@ -17596,14 +17644,16 @@ def fs_borrow(k):
             fs_die("field borrowing requires a direct own[T] field")
         x = fld
         fp += 2
-    if x < 0 or not fs_isop2(fp + 1, ")") or not (ftsg[fsl_t[x]] == 2 or (k == 1 and ftsg[fsl_t[x]] == 4)) or fsk[fsl_t[x]] != 1:
+    if x >= 0 and fs_isop2(fp + 1, ")") and ft_isnown(fsl_t[x]) and not fsl_nn[x]:
+        fs_die("nown[T] may be none: check it (if o != 0:) before borrowing it")
+    if x < 0 or not fs_isop2(fp + 1, ")") or not (ftsg[fsl_t[x]] == 2 or (ftsg[fsl_t[x]] == 5 and fsl_nn[x]) or (k == 1 and ftsg[fsl_t[x]] == 4)) or fsk[fsl_t[x]] != 1:
         fs_die("borrow()/borrow_mut() take a local own[T] variable or direct own[T] field")
     fp += 1
     if fsl_dead[x]:
         fs_die(concat(fs_lname(x), " is a borrow whose block has ended"))
     if fsl_mv[x] == -1:
         fs_die(concat("use of uninitialised field ", fs_lname(x)))
-    if fsl_mv[x]:
+    if fsl_mv[x] and fsl_mv[x] != -2:
         fs_die(c4("borrow of moved value ", fs_lname(x), " (moved at ", concat(fs_where(fsl_mv[x]), ")")))
     if fsl_mu[x] > 0:
         fs_die(c3("cannot borrow ", fs_lname(x), c3(": it is already mutably borrowed (at ", fs_where(fsl_bl[x]), ")")))
@@ -17995,7 +18045,9 @@ def fs_primary():
             fs_die(concat("unknown function ", nm))
         fs_fcall(f, nm)
         return 0
-    if (str_eq(nm, "ptr") or str_eq(nm, "nptr") or fs_isbname(nm)) and fs_isop("[") and fs_local(nm) < 0:
+    nowng = str_eq(nm, "nown") and fs_glob(nm) >= 0
+    # nown is newer than the other type names: a program's own global called nown keeps meaning that global
+    if (str_eq(nm, "ptr") or str_eq(nm, "nptr") or fs_isbname(nm)) and fs_isop("[") and fs_local(nm) < 0 and not nowng:
         fp -= 1
         t = fs_type()
         fs_expect("(")
@@ -18035,6 +18087,9 @@ def fs_primary():
             fs_lhsl = l
         elif ft_isnptr(fs_ety) and fsl_nn[l]:
             fs_ety = ft_ptr(ftel[fs_ety])
+        elif ft_isnown(fs_ety) and fsl_nn[l]:
+        # narrowed by `if o != 0:`: the value is an own[T]; fs_lchk already moved o for a whole-value use
+            fs_ety = ft_bptr(ftel[fs_ety], 2)
         return 0
     g = fs_glob(nm)
     if g >= 0:
@@ -18193,6 +18248,8 @@ def fs_postfix():
             elif fsk[t] == 1:
                 if ftsg[t] == 1:
                     fs_die("nptr[T] may be null: check it (if p != 0:) before indexing")
+                if ftsg[t] == 5:
+                    fs_die("nown[T] may be none: check it (if o != 0:) before indexing")
                 if ftsg[t] == 3:
                     vr = 1
                 if not (tk[fp + 1] == K_NUM and tv[fp + 1] == 0 and fs_isop2(fp + 2, "]")):
@@ -18248,6 +18305,8 @@ def fs_postfix():
             elif fsk[t] == 1 and fsk[ftel[t]] == 2:
                 if ftsg[t] == 1:
                     fs_die("nptr[T] may be null: check it (if p != 0:) before a field access")
+                if ftsg[t] == 5:
+                    fs_die("nown[T] may be none: check it (if o != 0:) before a field access")
                 if ftsg[t] == 3:
                     vr = 1
                 fs_rv()
@@ -18268,7 +18327,8 @@ def fs_postfix():
                     sg = ftsg[fsl_t[pl]]
                     if sg < 2:
                         fs_die("own field through a raw ptr[T]/nptr[T] is refused, even in unsafe code: convert the pointer to own/mut/ref[T] first")
-                    if not fs_isop(".") and not fs_isop("["):
+                    nt = ft_isnown(fft[k]) and not w and fs_nowncmp(fp)
+                    if not fs_isop(".") and not fs_isop("[") and not nt:
                         fs_die("cannot move owner through a pointer: use take/replace")
                     if w and sg == 3:
                         fs_die("cannot modify an owner field through ref[T]")
@@ -18718,6 +18778,9 @@ def fs_nnname(q):
         n = q + 2
         fs_nnend = q + 4
     l = fs_local(tv[n])
+    if l >= 0 and ft_isnown(fsl_t[l]) and n == q:
+    # a nown[T] local narrows only in the `o != 0` / `o == 0` forms (fs_nowncmp: the test does not move o)
+        return l
     if l < 0 or not ft_isnptr(fsl_t[l]):
         return -1
     return l
@@ -18728,7 +18791,7 @@ def fs_nnpat(q, e):
     if l < 0:
         return -1
     n = fs_nnend
-    if e == n and n == q + 1:
+    if e == n and n == q + 1 and not ft_isnown(fsl_t[l]):
         return l
     if e == n + 2 and fs_isop2(n, "!=") and tk[n + 1] == K_NUM and tv[n + 1] == 0:
         return l
@@ -19014,10 +19077,14 @@ def fs_lhs_store(vt):
     fs_store(t, m)
     if fs_fslot >= 0:
         fsl_mv[fs_fslot] = 0
+        if ft_isnown(t) and fs_vzero:
+            fsl_mv[fs_fslot] = -2
         fs_fslot = -1
     if bare and tl0 >= 0:
     # assigning a proven non-null value narrows an nptr local; anything else clears it
         fsl_nn[tl0] = ft_isnn(vt)
+        if ft_isnown(fsl_t[tl0]) and fs_vzero:
+            fsl_mv[tl0] = -2
 
 def fs_stmt():
     global fs_term, fs_bpend, fs_rsrc
@@ -19032,7 +19099,7 @@ def fs_stmt():
     fs_bpend = -1
 
 def fs_stmt1():
-    global fp, nfsloop, fs_ety, fs_mode, fs_dep, nfsb, fs_ublk, fs_uops, fs_unsafe, fs_term, fs_rsrc, nfsdf, fs_fwriting
+    global fp, nfsloop, fs_ety, fs_mode, fs_dep, nfsb, fs_ublk, fs_uops, fs_unsafe, fs_term, fs_rsrc, nfsdf, fs_fwriting, fs_vzero
     if tk[fp] == K_NL:
         fp += 1
         return 0
@@ -19289,12 +19356,19 @@ def fs_stmt1():
             fs_rsrc = fs_rsrcat(fp)
             fs_rexpr()
             vt = fs_ety
+            z0 = vt == FT_LIT and fs_lastimm == 0
             fs_conv(t)
             fs_store(t, concat(str(fsl_o[l]), "(%rbp)"))
             fsl_nn[l] = ft_isnn(vt)
             fs_battach(l, t)
+            if ft_isnown(t) and z0:
+                fsl_mv[l] = -2
         elif ft_isnn(t):
             fs_die("a ptr[T] local needs an initializer (it cannot be null; use nptr[T])")
+        elif ft_isnown(t):
+        # `o: nown[T]` starts as none
+            fsl_mv[l] = -2
+            e(c3("movq $0,", str(fsl_o[l]), "(%rbp)"))
         elif ft_agg(t):
             e(c3("lea ", str(fsl_o[l]), "(%rbp),%rdi"))
             e("xor %eax,%eax")
@@ -19313,9 +19387,11 @@ def fs_stmt1():
             fs_rsrc = fs_rsrcat(fp)
             fs_rexpr()
             vt = fs_ety
+            fs_vzero = vt == FT_LIT and fs_lastimm == 0
             en = fp
             fp = st
             fs_lhs_store(vt)
+            fs_vzero = 0
             if fp != a:
                 fs_die("bad assignment target")
             fp = en
@@ -19479,7 +19555,7 @@ def fs_struct_body(t, packed):
         ft = fs_type()
         # own-fields Stage 1: own[T] fields are recorded in the layout (8 bytes, 8-aligned) but unreadable (see
         # the field-access check); borrow fields need a lifetime tied to the containing value and stay illegal
-        if ft_isaff(ft) and ftsg[ft] != 2:
+        if ft_isaff(ft) and not ft_isowner(ft):
             fs_die("ref/mut struct fields need lifetime tracking")
         if fsk[ft] == 2 and fs_ownerfield(ft):
             fs_die("nested owner-bearing structs need recursive field tracking")
@@ -19561,7 +19637,7 @@ def fs_sig(ext):
             fsf_ret[f] = fs_type()
             if fs_ownerfield(fsf_ret[f]):
                 fs_die("by-value owner-bearing struct returns are not supported")
-            if fsk[fsf_ret[f]] == 1 and ftsg[fsf_ret[f]] >= 3:
+            if fsk[fsf_ret[f]] == 1 and (ftsg[fsf_ret[f]] == 3 or ftsg[fsf_ret[f]] == 4):
                 fs_die("a function cannot return a borrow (ref[T]/mut[T])")
             if fsk[fsf_ret[f]] == 6 and fs_bop(fs_datt, 22, 0):
                 fs_die("@efiapi / @interrupt functions cannot return a float")
@@ -19633,6 +19709,8 @@ def fs_prescan():
             nfsg += 1
             fsg_n[g] = nm
             fsg_t[g] = fs_type()
+            if ft_isnown(fsg_t[g]):
+                fs_die("nown[T] globals are not supported yet (Stage 3b-min: locals, parameters, returns and fields)")
             if ft_isaff(fsg_t[g]):
                 fs_die("globals cannot be own/ref/mut")
             if fs_ownerfield(fsg_t[g]):

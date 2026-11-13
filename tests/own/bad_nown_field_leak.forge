@@ -1,0 +1,21 @@
+# expect: would leak the own[T] it holds
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Holder:
+    n: u64
+    slot: nown[Node]
+cell: Node
+@unsafe
+def make() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell)))
+def consume(x: own[Node]) -> u64:
+    return x.id
+def peek(x: ref[Node]) -> u64:
+    return x.id
+def f(a: own[Node], b: own[Node]) -> u64:
+    q: Holder
+    q.slot = a
+    q.slot = b
+    return 0

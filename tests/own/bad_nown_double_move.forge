@@ -1,0 +1,22 @@
+# expect: use of moved value `o`
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Holder:
+    n: u64
+    slot: nown[Node]
+cell: Node
+@unsafe
+def make() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell)))
+def consume(x: own[Node]) -> u64:
+    return x.id
+def peek(x: ref[Node]) -> u64:
+    return x.id
+def g(o: nown[Node]) -> u64:
+    return 0
+def f(o: nown[Node]) -> u64:
+    a = o
+    b = o
+    return g(a) + g(b)
