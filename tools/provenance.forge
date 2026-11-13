@@ -1,0 +1,83 @@
+# tools/provenance.forge: AI-provenance commit trailers (docs/PROVENANCE.md). Every commit from the one that added
+# this tool on carries, in its last paragraph, a `Provenance:` trailer (human, ai-assisted or ai-generated), and an
+# AI-written one also names the tool in `AI-Tool:`.
+#   provenance log FILE   check a `git log --format='@@commit %H%n%B'` dump (what `forge provenance` passes)
+#   provenance msg FILE   check one commit message (a commit-msg hook can call this)
+# Prints one line per problem and a summary; exit 0 when every message is valid, 1 otherwise, 2 on bad usage.
+import sys
+
+KINDS = ["human", "ai-assisted", "ai-generated"]
+
+def is_key(k):
+    if len(k) == 0:
+        return False
+    for ch in k:
+        if not (ch.isalnum() or ch == "-"):
+            return False
+    return True
+
+def trailers(body):
+# [key, value] pairs of the message's last paragraph, or [] when any line in it is not `Key: value`
+    lines = body.strip().split("\n")
+    i = len(lines) - 1
+    out = []
+    while i >= 0 and lines[i].strip() != "":
+        l = lines[i]
+        c = l.find(": ")
+        if c <= 0 or not is_key(l[:c]):
+            return []
+        out.insert(0, [l[:c], l[c + 2:].strip()])
+        i -= 1
+    if i < 0:
+        return []  # the subject alone is not a trailer block
+    return out
+
+def problems(body):
+    t = trailers(body)
+    kinds = []
+    tools = []
+    for kv in t:
+        if kv[0] == "Provenance":
+            kinds.append(kv[1])
+        elif kv[0] == "AI-Tool":
+            tools.append(kv[1])
+    if len(kinds) == 0:
+        return ["no Provenance trailer in the last paragraph"]
+    if len(kinds) > 1:
+        return ["more than one Provenance trailer"]
+    if kinds[0] not in KINDS:
+        return ["Provenance '" + kinds[0] + "' is not one of human, ai-assisted, ai-generated"]
+    if kinds[0] != "human" and (len(tools) == 0 or tools[0] == ""):
+        return [kinds[0] + " commit without an AI-Tool trailer"]
+    return []
+
+def report(n, bad):
+    print("provenance: " + str(n) + " commit message(s) checked, " + str(bad) + " without valid trailers")
+    if bad > 0:
+        sys.exit(1)
+
+def main():
+    a = sys.argv[1:]
+    if len(a) == 2 and a[0] == "msg":
+        p = problems(read_file(a[1]))
+        for e in p:
+            print("provenance: " + a[1] + ": " + e)
+        report(1, len(p))
+    elif len(a) == 2 and a[0] == "log":
+        n = 0
+        bad = 0
+        for rec in read_file(a[1]).split("@@commit ")[1:]:
+            nl = rec.find("\n")
+            sha = rec[:nl][:12]
+            n += 1
+            p = problems(rec[nl + 1:])
+            for e in p:
+                print("provenance: " + sha + ": " + e)
+            if len(p) > 0:
+                bad += 1
+        report(n, bad)
+    else:
+        sys.stderr.write("usage: provenance log FILE | provenance msg FILE\n")
+        sys.exit(2)
+
+main()

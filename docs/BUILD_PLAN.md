@@ -60,6 +60,11 @@ count stays at or under 709.
 **v1 reservations**, cheap items that keep 1.0 formats and syntax open for Version 2. They are mixed in at about
 one commit in five, in this order, each its own commit with a visual and docs:
 1. AI-provenance commit trailers: a convention plus a check in tools, applied from then on.
+   - *Status: done (2026-11-12).* docs/PROVENANCE.md: the last paragraph of every commit message carries
+     `Provenance: human | ai-assisted | ai-generated`, plus `AI-Tool: NAME` for the two AI kinds. `forge provenance
+     [RANGE]` (tools/provenance.forge) checks every commit from the one that added the tool to HEAD;
+     tests/provenance/run.sh (in run_tests) checks 10 fixed messages, a mixed log dump, bad usage and the
+     repository's own history.
 2. `noalloc`, `noio` and `noreclaim` reserved in the effect grammar (syntax only, no enforcement).
 3. An address-space-ID field in the device-grant ABI, defaulting to 0.
 4. A checksum and version in the handoff/process-state record format.

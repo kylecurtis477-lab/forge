@@ -50,6 +50,20 @@ if [ "$1" = "reseed" ]; then
   [ "$D/build/reseed" -nt "$D/tools/reseed.forge" ] || "$0" "$D/tools/reseed.forge" -o "$D/build/reseed" >&2
   exec "$D/build/reseed"
 fi
+# forge provenance [RANGE] : AI-provenance trailers (tools/provenance.forge, docs/PROVENANCE.md) on every commit in
+# RANGE; default: from the commit that added tools/provenance.forge to HEAD
+if [ "$1" = "provenance" ]; then
+  [ "$D/build/provenance" -nt "$D/tools/provenance.forge" ] || "$0" "$D/tools/provenance.forge" -o "$D/build/provenance" >&2
+  cd "$D"
+  r="$2"
+  if [ -z "$r" ]; then
+    first=$(git log --format=%H --diff-filter=A -- tools/provenance.forge | tail -1)
+    [ -n "$first" ] || { echo "forge provenance: tools/provenance.forge is not committed yet" >&2; exit 2; }
+    r="$first^..HEAD"
+  fi
+  t=$(mktemp); git log --format='@@commit %H%n%B' "$r" > "$t" || { rm -f "$t"; exit 2; }
+  "$D/build/provenance" log "$t"; rc=$?; rm -f "$t"; exit $rc
+fi
 # forge lsp : Language Server Protocol server on stdio (tools/lsp.forge)
 if [ "$1" = "lsp" ]; then
   [ "$D/build/lsp" -nt "$D/tools/lsp.forge" ] || "$0" "$D/tools/lsp.forge" -o "$D/build/lsp" >&2

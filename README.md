@@ -160,6 +160,7 @@ Subsystem docs (design, formats, APIs, tests, limits):
 Benchmarks (best of 5): see bench/results.md.
 
 ## All-Forge tooling
+- `forge provenance [RANGE]` (tools/provenance.forge): every commit since the tool was added carries an AI-provenance trailer (`Provenance:` human, ai-assisted or ai-generated, and `AI-Tool:` for AI-written commits); see docs/PROVENANCE.md.
 
 Policy: every tool that can be written in Forge is written in Forge (one language to build, debug and troubleshoot). Python tools are ported one per commit and must reproduce the Python original byte-for-byte on representative inputs before any script switches over.
 

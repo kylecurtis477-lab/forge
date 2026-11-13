@@ -69,6 +69,8 @@ tests/oslib/run.sh || fail=1
 tests/reseed/run.sh || fail=1
 tests/pkg/run.sh || fail=1
 tests/lsp/run.sh || fail=1
+# tests/provenance: AI-provenance commit trailers (tools/provenance.forge, docs/PROVENANCE.md)
+tests/provenance/run.sh || fail=1
 tests/testblocks/run.sh || fail=1
 tests/bounds/run.sh || fail=1
 tests/nonnull/run.sh || fail=1
