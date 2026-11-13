@@ -443,6 +443,16 @@ All device register access goes through checked accessors in `mmio.fsi` that onl
 ## Framebuffer console (Phase 8)
 The loader sets a 1024x768 GOP mode when offered. The kernel keeps two cell grids (wanted and drawn) and draws only changed cells; scrolling never reads the framebuffer. The boot tests decode the screen and check the console's consistency line above KERNEL OK.
 
+
+## Desktop graphics (screen step 1)
+examples/kernel/gfx.fsi draws into a back buffer in ordinary memory (`gfx_buf`, u32 per pixel, at most 1024x768)
+and copies only the damaged bounding box to the screen (`gfx_present`). Every framebuffer store, from the console
+and from gfx, goes through `fb_px` in console.fsi, which drops any offset outside the mapped pitch x height bytes;
+gfx itself has no unsafe code. Colours are 0xRRGGBB; `gfx_px` converts them to the framebuffer's byte order
+(BGRX: byte 0 is blue, the same number; RGBX swaps red and blue). The byte order comes from the GOP pixel format
+(UEFI loader) or the multiboot2 red field position (16 = BGRX, 0 = RGBX). `forge.desktop` on the command line turns
+it on; console text then goes to serial only. tests/os/desktop.sh reads the desktop's text rows back from a QEMU
+screendump and checks the colour bars pixel by pixel.
 ## Security fix: user-copy validation (after 8.8)
 
 `copy_user` / `copy_str_user` (cpux.fsi) now enforce the user range themselves: every operand below

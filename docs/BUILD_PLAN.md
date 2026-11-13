@@ -53,6 +53,18 @@ count stays at or under 709.
    1. Framebuffer graphics in the kernel: pixel primitives (fill, rectangle, blit, glyph at any pixel) over the
       GOP / multiboot framebuffer that the text console already uses (bochs-display/std VGA in QEMU; virtio-gpu
       later), with a boot self-test that draws a test pattern and checks it from the screendump.
+      - *Status: done (2026-11-12).* examples/kernel/gfx.fsi: a back buffer `gfx_buf` (u32, at most 1024x768,
+        3 MiB of .bss, bounds-checked) with `gfx_fill` (clipped), `gfx_frame`, `gfx_get`, `gfx_char`/`gfx_text`/
+        `gfx_num` (the 8x16 font at any pixel, any fg/bg) and `gfx_present`, which copies the damaged bounding box
+        to the framebuffer. Colours are 0xRRGGBB and converted to the framebuffer's byte order on the way out.
+        Every framebuffer store, console and desktop, now goes through `fb_px` (console.fsi), one bounds-checked
+        store, so the kernel unsafe report fell from 170 functions / 709 ops to 169 / 708. `forge.desktop` on the
+        boot command line skips the shell and kexec sessions, runs `gfx_selftest` (fills, clipping, glyph pixels,
+        byte order), draws the desktop (background, 8 colour bars, two text rows, a framed area), presents it and
+        sends console text to serial only. tests/os/desktop.sh (GRUB BIOS, about 11 s) reads both rows back from
+        the QEMU screendump and checks the 8 bars pixel by pixel. It adds the result os/desktop, so
+        os/result-count goes from 38 to 39 results (approved by Kyle, 2026-11-12). The first screendump found the
+        multiboot2 byte-order bug (red and blue swapped on GRUB boots), fixed in its own commit.
    2. Text on screen at any position and colour through a proper font path (the 8x16 font in font.fsi), and a
       graphical text console that the terminal window reuses.
    3. Input events: PS/2 mouse plus the existing PS/2 and USB HID keyboards feeding one event queue

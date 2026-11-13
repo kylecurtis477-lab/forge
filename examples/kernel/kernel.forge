@@ -55,6 +55,7 @@ include "kexec.fsi"
 include "ed25519.fsi"
 include "seal.fsi"
 include "bootpol.fsi"
+include "gfx.fsi"
 include "linux.fsi"
 include "../../std/vec.fsi"
 include "../../std/map.fsi"
@@ -1904,6 +1905,8 @@ def after_overflow():
     stop_machine_stress()
     if bi.handoff != 0:
         kexec_resume()
+    elif desktop_wanted() != 0:
+        puts("shell and kexec sessions skipped: desktop mode (forge.desktop)\n")
     elif iommu_grant_allowed() != 0:
         shell_test()
         kexec_test()
@@ -1927,6 +1930,8 @@ def after_overflow():
         puts(" cells drawn (full redraws would be ")
         put_u64(full)
         puts("), back == front\n")
+    if desktop_wanted() != 0:
+        desktop_show()
     puts("KERNEL OK\n")
     # test harness: wait up to 5 s for 'q' on COM1 so it can take a screenshot first.
     # Do not hlt(): COM1 is polled (no RX interrupt), and after kexec the LAPIC timer may not

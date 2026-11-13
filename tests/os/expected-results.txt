@@ -38,3 +38,4 @@ os/forgefs-host-read
 dwarf/image-unchanged-by-g
 dwarf/line-table
 dwarf/gdb-schedule
+os/desktop

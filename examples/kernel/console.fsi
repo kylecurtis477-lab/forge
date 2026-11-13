@@ -1,4 +1,6 @@
 # Console: COM1 serial always; GOP/VBE linear framebuffer text (8x16 font) once mapped; VGA text as fallback.
+# Every framebuffer store goes through fb_px (bounds-checked); once the desktop owns the screen (gfx_on) text goes
+# to serial only.
 include "font.fsi"
 
 COM1 = 0x3F8
@@ -65,8 +67,17 @@ con_back: u8[32768]
 con_front: u8[32768]
 con_scrolls: u64
 con_redrawn: u64
+# 1 once the desktop (gfx.fsi) owns the screen: console text then goes to serial only
+gfx_on: u64
 
 @unsafe
+def fb_px(off: u64, v: u32):
+# the one store to the framebuffer (console and gfx.fsi): off is a byte offset into the mapped
+# pitch * height bytes; anything outside is dropped
+    if fb_base == 0 or off + 4 > fb_pitch * fb_h:
+        return
+    vstore32(fb_base + off, v)
+
 def fb_attach(virt: u64, w: u64, h: u64, pitch: u64):
     fb_base = virt
     fb_w = w
@@ -88,11 +99,10 @@ def fb_attach(virt: u64, w: u64, h: u64, pitch: u64):
     while y < h:
         x = 0
         while x < w:
-            vstore32(virt + y * pitch + x * 4, 0)
+            fb_px(y * pitch + x * 4, 0)
             x += 1
         y += 1
 
-@unsafe
 def fb_glyph(cx: u64, cy: u64, c: u8):
     g = 0
     if c >= 32 and c <= 126:
@@ -100,13 +110,13 @@ def fb_glyph(cx: u64, cy: u64, c: u8):
     row = 0
     while row < 16:
         bits = font8x16[g + row]
-        line = fb_base + (cy * 16 + row) * fb_pitch + cx * 32
+        line = (cy * 16 + row) * fb_pitch + cx * 32
         x = 0
         while x < 8:
             px: u32 = 0
             if (bits >> (7 - x)) & 1:
                 px = con_fg
-            vstore32(line + x * 4, px)
+            fb_px(line + x * 4, px)
             x += 1
         row += 1
 
@@ -174,6 +184,8 @@ def vga_putc(c: u8):
 
 def putc(c: u8):
     serial_putc(c)
+    if gfx_on != 0:
+        return
     if fb_base != 0:
         fb_putc(c)
     elif vga_base != 0:

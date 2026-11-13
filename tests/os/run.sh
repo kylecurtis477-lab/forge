@@ -77,6 +77,8 @@ bash tests/os/drivers.sh
 bash tests/os/bootpol.sh
 # Phase 8.9: writable Forge FS on an explicitly created Forge partition only
 bash tests/os/forgefs.sh
+# screen step 1: the desktop (gfx.fsi) drawn and presented, checked from the screendump
+bash tests/os/desktop.sh
 
 # Phase 7.3: -g kernel, DWARF line table, gdb breakpoint at schedule over the QEMU gdbstub
 bash tests/dwarf/run.sh
