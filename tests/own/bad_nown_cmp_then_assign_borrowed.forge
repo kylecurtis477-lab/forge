@@ -1,0 +1,35 @@
+# expect: cannot assign to `o` while it is borrowed
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Holder:
+    n: u64
+    slot: nown[Node]
+cell: Node
+cell2: Node
+hmem: u64[2]
+@unsafe
+def make() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell)))
+@unsafe
+def make2() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell2)))
+@unsafe
+def mkh() -> own[Holder]:
+    return own[Holder](ptr[Holder](addr(hmem)))
+def consume(x: own[Node]) -> u64:
+    return x.id
+def drop(x: nown[Node]) -> u64:
+    return 0
+def peek(x: ref[Node]) -> u64:
+    return x.id
+def pair(a: own[Node], b: own[Node]) -> u64:
+    return a.id + b.id
+def f(o: nown[Node]) -> u64:
+    if o != 0:
+        r: ref[Node] = borrow(o)
+        if o != 0:
+            o = 0
+        return peek(r)
+    return 0

@@ -1,0 +1,80 @@
+# forge: no-runtime
+# Stage 3b-min review probes that must stay accepted: null-test forms do not move, a test while
+# shared-borrowed is fine, a branch that stores then moves joins as moved, and a loop that moves a
+# nown local and puts none back keeps it reusable.
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Holder:
+    n: u64
+    slot: nown[Node]
+cell1: Node
+cell2: Node
+@unsafe
+def make1() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell1)))
+@unsafe
+def make2() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell2)))
+def consume(n: own[Node]) -> u64:
+    return n.id
+def peek(r: ref[Node]) -> u64:
+    return r.id
+def id_or(o: nown[Node], d: u64) -> u64:
+    if o == 0:
+        return d
+    return consume(o)
+def forms(o: nown[Node]) -> u64:
+    t = 0
+    if (o != 0):
+        t = t + 1
+    if (o == 0):
+        t = t + 100
+    if o != 0 and o != 0:
+        t = t + 10
+    b = (o != 0) == (1 == 1)
+    if b:
+        t = t + 1000
+    return t + id_or(o, 0)
+def shared(o: nown[Node]) -> u64:
+    if o != 0:
+        r: ref[Node] = borrow(o)
+        if o != 0:
+            return peek(r) + 1
+        return 0
+    return id_or(o, 0)
+def join(n: own[Node], flag: u64) -> u64:
+    h: Holder
+    t = 0
+    if flag != 0:
+        h.slot = n
+        x = h.slot
+        t = id_or(x, 0)
+    else:
+        t = consume(n)
+    h.slot = 0
+    return t
+def loop_none() -> u64:
+    o: nown[Node]
+    i: u64 = 0
+    while i < 3:
+        x = o
+        i = i + 1 + id_or(x, 0)
+        o = 0
+    return i + id_or(o, 9)
+def run(n1: own[Node], n2: own[Node]) -> u64:
+    n1.id = 3
+    n2.id = 4
+    put_u64(forms(n1))
+    puts(" null-test forms\n")
+    put_u64(shared(n2))
+    puts(" test while borrowed\n")
+    put_u64(loop_none())
+    puts(" loop reset to none\n")
+    return 0
+@unsafe
+def main() -> u64:
+    run(make1(), make2())
+    put_u64(join(make1(), 1) + join(make2(), 0))
+    puts(" branch store-then-move join\n")
+    return 0

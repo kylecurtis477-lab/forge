@@ -39,6 +39,11 @@ if $FC nown_ok.forge $T/nown.s && ../../build/fas -o $T/nown.o $T/nown.s && ../.
 else
     echo "FAIL own-nown-ok"; fail=1
 fi
+if $FC nown_forms_ok.forge $T/nf.s && ../../build/fas -o $T/nf.o $T/nf.s && ../../build/fld -o $T/nf $T/nf.o && $T/nf | diff -q - nown_forms_ok.expected >/dev/null; then
+    echo "PASS own-nown-forms-ok"
+else
+    echo "FAIL own-nown-forms-ok"; fail=1
+fi
 for f in bad_*.forge; do
     want=$(sed -n 's/^# expect: //p' $f)
     out=$($FC $f $T/x.s 2>&1)

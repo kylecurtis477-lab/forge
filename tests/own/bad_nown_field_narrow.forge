@@ -1,0 +1,34 @@
+# expect: nown[T] may be none: check it (if o != 0:) before a field access
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Holder:
+    n: u64
+    slot: nown[Node]
+cell: Node
+cell2: Node
+hmem: u64[2]
+@unsafe
+def make() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell)))
+@unsafe
+def make2() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell2)))
+@unsafe
+def mkh() -> own[Holder]:
+    return own[Holder](ptr[Holder](addr(hmem)))
+def consume(x: own[Node]) -> u64:
+    return x.id
+def drop(x: nown[Node]) -> u64:
+    return 0
+def peek(x: ref[Node]) -> u64:
+    return x.id
+def pair(a: own[Node], b: own[Node]) -> u64:
+    return a.id + b.id
+def inspect() -> u64:
+    h: Holder
+    h.slot = make()
+    if h.slot != 0:
+        return h.slot.id
+    return 0
