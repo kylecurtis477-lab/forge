@@ -113,7 +113,15 @@ for t in tests/fs/*.forge; do
   build/forgec "$t" build/t_fs.s $FORGEC_FLAGS --fs-live && build/fas -o build/t_fs.o build/t_fs.s && build/fld -o build/t_fs build/t_fs.o $c && build/t_fs | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS fs-live $t" || { echo "FAIL fs-live $t"; fail=1; }
 done
 build/forgec tests/fs/regalloc.forge build/t_ra.s $FORGEC_FLAGS --fs-opt && [ "$(awk '/^ra_seq:/,/ret$/' build/t_ra.s | grep -c '(%rbp)')" -gt 0 ] && build/forgec tests/fs/regalloc.forge build/t_ra.s $FORGEC_FLAGS --fs-live && [ "$(awk '/^ra_seq:/,/ret$/' build/t_ra.s | grep -c '(%rbp)')" = 0 ] && echo "PASS fs-live-shape" || { echo "FAIL fs-live-shape"; fail=1; }
-# --fs-opt differential fuzz: 20 random programs (fixed seed), each built O2 / -O0 / --fs-opt / -O0 --fs-opt / --fs-live / -O0 --fs-live; any output diff fails
+# --fs-temps (Phase 12.1 step 4c, opt-in, implies --fs-live): call arguments go straight to their registers and
+# constant loads skip the stack; every freestanding program must print the same, and ra_rec keeps (%rsp)
+# operands under --fs-live and none under --fs-temps
+for t in tests/fs/*.forge; do
+  c=""; [ -f "${t%.forge}.c" ] && gcc -O1 -ffreestanding -fno-pic -fno-stack-protector -c -o build/t_fsc.o "${t%.forge}.c" && c=build/t_fsc.o
+  build/forgec "$t" build/t_fs.s $FORGEC_FLAGS --fs-temps && build/fas -o build/t_fs.o build/t_fs.s && build/fld -o build/t_fs build/t_fs.o $c && build/t_fs | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS fs-temps $t" || { echo "FAIL fs-temps $t"; fail=1; }
+done
+build/forgec tests/fs/regalloc.forge build/t_ra.s $FORGEC_FLAGS --fs-live && [ "$(awk '/^ra_rec:/,/ret$/' build/t_ra.s | grep -c '(%rsp)')" -gt 0 ] && build/forgec tests/fs/regalloc.forge build/t_ra.s $FORGEC_FLAGS --fs-temps && [ "$(awk '/^ra_rec:/,/ret$/' build/t_ra.s | grep -c '(%rsp)')" = 0 ] && echo "PASS fs-temps-shape" || { echo "FAIL fs-temps-shape"; fail=1; }
+# --fs-opt differential fuzz: 20 random programs (fixed seed), each built O2 / -O0 / --fs-opt / -O0 --fs-opt / --fs-live / -O0 --fs-live / --fs-temps / -O0 --fs-temps; any output diff fails
 ./forge tools/fsfuzz.forge -o build/fsfuzz-tool >/dev/null 2>&1 && build/fsfuzz-tool --seed 1 --n 20 > build/t_fsfuzz.log 2>&1 && echo "PASS fs-opt-fuzz" || { echo "FAIL fs-opt-fuzz"; cat build/t_fsfuzz.log; fail=1; }
 # constant division: in c_i64_7 and c_u64_641 only the three divisions by a variable keep div/idiv
 build/forgec tests/fs/cdiv.forge build/t_cd.s $FORGEC_FLAGS --fs-opt && [ "$(awk '/^c_i64_7:/,/ret$/' build/t_cd.s | grep -c '    idiv ')" = 3 ] && [ "$(awk '/^c_u64_641:/,/ret$/' build/t_cd.s | grep -c '    div ')" = 3 ] && echo "PASS fs-opt-cdiv-shape" || { echo "FAIL fs-opt-cdiv-shape"; fail=1; }

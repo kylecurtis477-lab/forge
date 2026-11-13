@@ -432,6 +432,25 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      the registers and eligibility rules of steps 1-2, so the step 3 asm audit covers it unchanged. Kernel text
      596,784 to 595,024 bytes, frame accesses in kernel.s 11,975 to 11,125. The QEMU boot suite at O2 and O0 is
      the test. The loader, modules and user programs stay on `--fs-opt` for now.
+   - *Step 4c done (2026-11-12): stack temporaries into registers, opt-in `--fs-temps`.* The stack machine
+     pushes every call argument and every left operand, so after step 4b most of the remaining memory traffic
+     was `push %rax`/`pop` pairs and `(%rsp)` reloads. `--fs-temps` (implies `--fs-live`) runs two more text
+     passes after the step 2 peephole. `fs_tmp_peep` turns a constant loaded into %rcx through the stack
+     (`push %rax; xor %eax,%eax` or `movabs $N,%rax; mov %rax,%rcx; pop %rax`) into one `xor %ecx,%ecx` or
+     `movabs $N,%rcx`. `fs_tmp_args` finds each call whose 1-6 argument pushes are later reloaded into distinct
+     argument registers, and writes each argument straight to its register (`mov %rax,REG`), dropping the
+     pushes, the alignment pad, the reloads and the `add $T,%rsp`. It only fires when T is 8n plus pad and a
+     multiple of 16, the region between the pushes and the call holds only whitelisted instructions (20 mnemonics
+     that touch no memory through %rsp) or balanced push/pop pairs, has no label, jump, call or %rsp use, and
+     nothing after an argument's push names that argument's register; anything else keeps the stack form.
+     Code built without the flag is byte-identical (the kernel plain, with `--fs-opt` and with `--fs-live`,
+     compared against the previous compiler). Tests: every tests/fs program again under `--fs-temps` (`PASS
+     fs-temps ...`, 22 programs, O2 and -O0); tests/fs/regalloc.forge ra_rec has `(%rsp)` operands under
+     `--fs-live` and none under `--fs-temps` (`fs-temps-shape`); tools/fsfuzz.forge now builds eight ways (adds
+     `--fs-temps` and -O0 `--fs-temps`): seeds 1-6, 480 programs (98,151 lines), 0 diffs. On the kernel with
+     the flag: instructions 147,046 to 125,711 (-14.5%), `push %rax` 13,117 to 3,912, `(%rsp)` operands 8,204
+     to 899. The kernel is not switched yet (a separate commit, gated by the QEMU suite). Next: a real SSA value
+     numbering for the remaining %rax/%rcx chains.
    - *Asm audit as a checked list (2026-11-12).* The step 3 audit table in docs/SYSTEMS.md ("Kernel asm and
      --fs-opt") is now a `- [x]` checklist covering the kernel and the user programs, and tests/asm-audit/run.sh
      keeps it complete: it lists every `@naked` function, every top-level `asm(...)` block (its `.globl` symbols,
