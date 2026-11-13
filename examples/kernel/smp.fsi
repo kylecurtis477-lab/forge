@@ -58,6 +58,17 @@ def ap_off(i: u64) -> u64:
 
 ap_boot_cpu: u64
 ap_up: u64
+# AP start-up claim (fix after inv142 O0): 0 while the BSP waits, 1 once the AP has claimed its slot (first thing in
+# ap_main), 2 once the BSP gave up on it. Both sides atomic_swap their value in; whoever saw 0 decides. An AP that
+# sees 2 spins with interrupts off and the BSP sends it INIT, so a late AP can never run on into the trampoline page
+# (unmapped after bring-up) or into a cpu slot that the next AP is given.
+ap_claim: u64
+AP_WAIT_MS = 1000
+ap_parked: u64
+# forge.ap_delay=MS (test knob): the last AP waits MS ms at the top of ap_main before it claims
+# its slot, so a slow AP is made real: MS < AP_WAIT_MS comes up late, MS > AP_WAIT_MS is parked
+ap_delay_ms: u64
+ap_delay_cpu: u64
 ncpu_online: u64
 cpu_to_apic: u64[8]
 
@@ -89,6 +100,13 @@ def tramp_page() -> u64:
 @unsafe
 def ap_main():
     cpu = ap_boot_cpu
+    if ap_delay_ms != 0 and cpu == ap_delay_cpu:
+        tsc_delay_us(ap_delay_ms * 1000)
+    if atomic_swap(addr(ap_claim), 1, acq_rel) == 2:
+    # the BSP gave up on this AP and is sending INIT: touch nothing (no per-CPU state); interrupts are still
+    # off from the trampoline, so spin until INIT puts this CPU back into wait-for-SIPI
+        while 1:
+            cpu_relax()
     gdt_load(cpu)
     lidt(addr(idtr))
     cpu_features_cpu()
@@ -102,6 +120,26 @@ def ap_main():
     atomic_fetch_add(addr(ncpu_online), 1, acq_rel)
     atomic_store(addr(ap_up), 1, seq_cst)
     idle_loop(0)
+
+def smp_ap_delay() -> u64:
+# forge.ap_delay=MS on the command line (decimal, at most 5000), 0 when absent
+    v: u64 = 0
+    i: u64 = 0
+    while i < 255 and bi.cmdline[i] != 0:
+        while i < 255 and bi.cmdline[i] == 32:
+            i += 1
+        s = i
+        while i < 255 and bi.cmdline[i] != 0 and bi.cmdline[i] != 32:
+            i += 1
+        if i > s and cmd_tok_pre(s, i - s, "forge.ap_delay="):
+            v = 0
+            k = s + 15
+            while k < i and bi.cmdline[k] >= 48 and bi.cmdline[k] <= 57:
+                v = v * 10 + u64(bi.cmdline[k]) - 48
+                k += 1
+    if v > 5000:
+        v = 5000
+    return v
 
 @unsafe
 def smp_init():
@@ -123,6 +161,14 @@ def smp_init():
     puts("SMP: trampoline at ")
     put_hex(tp)
     putc(10)
+    ap_delay_ms = smp_ap_delay()
+    ap_delay_cpu = n - 1
+    if ap_delay_ms != 0:
+        puts("SMP: test knob forge.ap_delay: cpu ")
+        put_u64(ap_delay_cpu)
+        puts(" starts ")
+        put_u64(ap_delay_ms)
+        puts(" ms late\n")
     cpu: u64 = 1
     i = 0
     while i < n:
@@ -142,21 +188,43 @@ def smp_init():
         vstore64(p2v(tp) + ap_off(4), u64(ap_main))
         ap_boot_cpu = cpu
         ap_up = 0
+        ap_claim = 0
+        t0 = rdtsc()
         lapic_ipi(apic, 0x4500)
         tsc_delay_us(10000)
         lapic_ipi(apic, 0x4600 | u32(tp >> 12))
         tsc_delay_us(200)
         if atomic_load(addr(ap_up), acquire) == 0:
             lapic_ipi(apic, 0x4600 | u32(tp >> 12))
+        # wait up to AP_WAIT_MS (was 100 ms: inv142 O0, a kexec'd kernel's AP missed it and the machine reset)
         w = 0
-        while atomic_load(addr(ap_up), acquire) == 0 and w < 1000:
+        while atomic_load(addr(ap_up), acquire) == 0 and w < AP_WAIT_MS * 10:
+            tsc_delay_us(100)
+            w += 1
+        if atomic_load(addr(ap_up), acquire) == 0 and atomic_swap(addr(ap_claim), 2, acq_rel) == 0:
+        # it never claimed its slot: hold it in wait-for-SIPI before the trampoline page goes away
+            lapic_ipi(apic, 0x4500)
+            tsc_delay_us(10000)
+            ap_parked += 1
+            puts("SMP: AP apic ")
+            put_u64(apic)
+            puts(" did not start within ")
+            put_u64(AP_WAIT_MS)
+            puts(" ms: INIT sent, parked\n")
+            continue
+        # it claimed its slot (possibly right at the deadline): it is past the trampoline and comes up shortly
+        w = 0
+        while atomic_load(addr(ap_up), acquire) == 0 and w < AP_WAIT_MS * 10:
             tsc_delay_us(100)
             w += 1
         if atomic_load(addr(ap_up), acquire) == 0:
+            panic("SMP: an AP claimed its slot but never came up")
+        if tsc_per_ms != 0 and rdtsc() - t0 > tsc_per_ms * 100:
             puts("SMP: AP apic ")
             put_u64(apic)
-            puts(" did not start\n")
-            continue
+            puts(" came up late, after ")
+            put_u64((rdtsc() - t0) / tsc_per_ms)
+            puts(" ms\n")
         puts("SMP: cpu ")
         put_u64(cpu)
         puts(" (apic ")

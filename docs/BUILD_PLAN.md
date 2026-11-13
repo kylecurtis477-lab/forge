@@ -81,6 +81,13 @@ one commit in five, in this order, each its own commit with a visual and docs:
 ## Phase 1 — Interactive multi-process kernel (done)
 *Pillars: C, D, F. Closes SYSTEMS.md items 3–5.*
 
+*Fix (2026-11-12, after inv142 O0):* AP start-up waited only 100 ms. A kexec'd kernel's AP missed it ("did not
+start"), the BSP unmapped the trampoline, and the AP then enabled paging on a missing page and reset the machine
+(os/kernel-bios, rc 0). Now: up to 1 s per AP, a claim word decided by `atomic_swap`, and INIT for an AP that never
+claimed, before the trampoline goes away. Reproduced with a delay inside the trampoline's 32-bit stage: the old code
+reset exactly as in inv142; the fix brings a 300 ms AP up late and parks a 1500 ms AP (3/3 CPUs used, the next
+kexec'd kernel starts all 4). The committed knob `forge.ap_delay=MS` delays the last AP at the top of `ap_main`.
+
 | Deliverable | Test that proves it |
 |---|---|
 | FPU/SSE/AVX state saved with xsave/fxsave on every context switch **(done, b14b23e)** | User programs fill xmm0–15, yield 20 times across 4 CPUs, and verify every register |
