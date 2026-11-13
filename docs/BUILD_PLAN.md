@@ -47,15 +47,43 @@ The phase sections below stay the record of what each phase means and what is do
 is taken in now. Batches are 3-4 commits, one item per commit, each with a visual and docs; the kernel unsafe
 count stays at or under 709.
 
-1. **12.1 step 4: a real SSA IR for fs/kernel mode with liveness-based register allocation** (Phase 12 item 1),
-   closing the gap to Rust -O3 on the bench suite. Safe steps, each byte-identical for code built without the
-   new flag, each checked by the `--fs-opt` differential fuzzer before it lands.
-2. **The Forge language server in Forge**: extend `forge lsp` (tools/lsp.forge; Phase 11 item 3): incremental
+1. **A working screen first** (Kyle, 2026-11-12: "i want a working screen sooner rather than later"). The Phase 8
+   graphics and input items and the start of the Desktop and apps track are pulled forward; every step's visual
+   is a real QEMU screendump. Steps, one commit each:
+   1. Framebuffer graphics in the kernel: pixel primitives (fill, rectangle, blit, glyph at any pixel) over the
+      GOP / multiboot framebuffer that the text console already uses (bochs-display/std VGA in QEMU; virtio-gpu
+      later), with a boot self-test that draws a test pattern and checks it from the screendump.
+   2. Text on screen at any position and colour through a proper font path (the 8x16 font in font.fsi), and a
+      graphical text console that the terminal window reuses.
+   3. Input events: PS/2 mouse plus the existing PS/2 and USB HID keyboards feeding one event queue
+      (key down/up, mouse move/buttons), visible to user programs through a capability-checked syscall.
+   4. A minimal desktop shell: a windowed compositor (back buffer, window list, z-order, damage-based redraw)
+      that draws at least a terminal window, a mouse cursor, and focus that follows clicks.
+   5. A sandboxed Forge program with manifest capabilities that gets a window (a draw/event capability) and
+      draws into it; anything outside its manifest is refused.
+2. **Ownership-typed struct fields.** `own`/`ref`/`mut` as struct field types, borrow checks through field access,
+   and non-lexical borrow ends where the rule is simple. Applied first to kernel data structures: the run queue,
+   page tables and the handoff records.
+3. **Optimizer correctness gate.** Measure the compiler's test coverage, extend the differential fuzzer
+   (tools/fsfuzz.forge) to every combination of optimizer flags, and require it to pass before any new optimizer
+   pass lands.
+4. **SSA backend (12.1 step 4), gated by item 3**: a real SSA IR for fs/kernel mode with liveness-based register
+   allocation (Phase 12 item 1), in safe steps that are byte-identical for code built without the new flag.
+   Steps 4b (`--fs-live`) and 4c (`--fs-temps`) are done and the kernel is built with both.
+5. **The Forge language server in Forge**: extend `forge lsp` (tools/lsp.forge; Phase 11 item 3): incremental
    checks of changed files, diagnostics, go-to-definition.
-3. **The plugin/package manager**: grow `forge pkg` (tools/pkg.forge; Phase 7 item 4) into plugins and packages.
-4. Then the rest of the core roadmap: release patches, IOMMU strict-switch preparation, safety work, DWARF/DAP.
-5. **Phase 8 leftovers come last** ("work on phase 8 very last"): the parked virtio-net interrupt-driven RX with a
-   timed wait, the GOP console, xHCI mass storage and the other open Phase 8 items.
+6. **The package manager**: grow `forge pkg` (tools/pkg.forge; Phase 7 item 4) with dependency resolution,
+   signed packages and reproducible builds.
+7. **Sustained adversarial testing**: multi-hour soak runs, syscall and capability fuzzing, and fault injection,
+   with the results recorded.
+8. **Real-hardware boot**: a USB image plus a test checklist for Kyle's PC (needs Kyle's hardware).
+9. **Linux compatibility measured by real applications**: a list of real apps, each recorded as pass or fail.
+10. **Diverse double-compilation check of the bootstrap seed.**
+
+The v1 reservations below still mix in at about one commit in five, and **the other Phase 8 leftovers come
+last** (the parked virtio-net interrupt-driven RX with a timed wait, xHCI mass storage and the other open Phase 8
+items). Items 2-10 and the never-reboot tiers in Phase 2 follow an outside review (ChatGPT, 2026-11-12), approved
+by Kyle on 2026-11-12.
 
 **v1 reservations**, cheap items that keep 1.0 formats and syntax open for Version 2. They are mixed in at about
 one commit in five, in this order, each its own commit with a visual and docs:
@@ -102,6 +130,16 @@ kexec'd kernel starts all 4). The committed knob `forge.ap_delay=MS` delays the 
 
 ## Phase 2 — Never reboot: self-healing, live-updatable system (signature feature 1)
 *This phase needs Phase 1's processes, services, and wait queues. Each sub-step is finished and tested before the next one starts.*
+
+**The never-reboot promise has three tiers** (outside review, ChatGPT, 2026-11-12), each claimed only as far as
+its tests go:
+- *Tier 1, service restart*: a crashed or updated user-mode service (driver, input, storage) restarts without a
+  reboot, and its clients keep their state (done for blkd, kbdd, the NVMe service).
+- *Tier 2, live driver update*: a running driver is replaced by a new version in place, with its state handed
+  over (the kbdd v1/v2 swap, kernel modules with save_state/restore_state).
+- *Tier 3, live kernel replacement*: kexec handoff to a new kernel with the processes kept. It needs a written
+  state-transfer contract (the process-state record format), rollback to the old kernel when the new one fails
+  its checks, and tests with I/O in flight across the switch. Until those exist it is not claimed as finished.
 1. **Kernel module ABI.** Relocatable Forge modules (ELF ET_REL) are loaded and unloaded at runtime. They get a versioned symbol table and an explicit `init/exit/save_state/restore_state` contract. Test: load, call, and unload a module 1000 times with no leaks.
    - **Status: done.** `examples/kernel/module.fsi`; test modules in `examples/modules/` (forgec + `as` → `.ko`, shipped in `\EFI\Forge\mod\`). KABI 1.0: exports carry a since-minor; wrong major, newer minor, imports newer than the module's ABI, unresolved symbols and truncated images are rejected. Relocations R_X86_64_64/PC32/PLT32/32S with range checks; sections mapped W^X in 1 MiB slots at `0xFFFFFFFFD0000000`. Boot test: 1000 load/call/unload cycles, 0 frames and 0 heap bytes leaked, save/restore state across reload, 4 bad modules rejected.
 2. **Drivers as isolated services.** Each driver (virtio-blk, tty/keyboard, later the network) runs as a user-mode or isolated service process. It reaches its device only through granted MMIO/IRQ/DMA capabilities and talks to clients over IPC. Test: injecting a crash into the driver service leaves clients alive.
@@ -512,7 +550,7 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
 - Live process migration (serialise address space, fds, and capabilities, then resume on the other node).
 - Test: two QEMU nodes; a running program migrates mid-computation and finishes with the same result; storage stays readable when either node is offline.
 
-## Desktop and apps (track; lands once Phase 8 graphics/input exist, before Phase 15)
+## Desktop and apps (track; its first steps, a windowed compositor with a terminal and a sandboxed windowed program, are pulled forward with Phase 8 graphics/input: see "Current execution order")
 - Graphical desktop shell and apps run as sandboxed Forge programs with manifest capabilities.
 - **Default browser: a Forge browser.** Grok is built in as a core AI layer, not an add-on: page summaries, form filling, and carrying out tasks for the user (each action shown and approved, capability-checked, reversible like Phase 15 plans). It renders pages with a ported open-source engine (Servo preferred), running sandboxed with network and storage only through granted capabilities.
 - **Replaceable, not required.** The Forge/Grok browser is only the shipped default. A system default-app setting (per app type: browser, mail, editor, viewer, terminal, …, and per URL scheme / file type) lets users pick another default; other browsers install like any app; the Grok browser can be fully uninstalled (binaries, data, grants). No OS feature may hard-depend on it: links and intents resolve through the default-app setting, and the system works with no browser installed.
