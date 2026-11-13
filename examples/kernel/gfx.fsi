@@ -4,6 +4,8 @@
 # the framebuffer through fb_px (console.fsi), the one bounds-checked store to the screen. No new unsafe code.
 # Colours are 0xRRGGBB everywhere; gfx_px converts to the framebuffer's byte order once per stored pixel.
 # Text: gfx_char / gfx_text draw the 8x16 font (font.fsi) at any pixel position in any fg/bg colour.
+# Terminal (screen step 2): a cell grid at any pixel origin, drawn into the back buffer with its own colours,
+# scrolling by moving back-buffer rows; once the desktop is up, console text (putc) lands in it.
 # The desktop runs when the boot command line has `forge.desktop` (tests/os/desktop.sh).
 GFX_MAXW = 1024
 GFX_MAXH = 768
@@ -152,9 +154,141 @@ def gfx_present() -> u64:
     gfx_dy1 = 0
     return n
 
+def gfx_scroll(x: u64, y: u64, w: u64, h: u64, dy: u64, bg: u64):
+# move the rectangle's pixels up by dy rows and fill the freed rows at the bottom with bg
+    if x >= gfx_w or y >= gfx_h or dy >= h:
+        gfx_fill(x, y, w, h, bg)
+        return
+    if x + w > gfx_w:
+        w = gfx_w - x
+    if y + h > gfx_h:
+        h = gfx_h - y
+    yy = y
+    while yy + dy < y + h:
+        src = (yy + dy) * gfx_w + x
+        dst = yy * gfx_w + x
+        k: u64 = 0
+        while k < w:
+            gfx_buf[dst + k] = gfx_buf[src + k]
+            k += 1
+        yy += 1
+    gfx_fill(x, y + h - dy, w, dy, bg)
+    gfx_damage(x, y, x + w, y + h)
+
+# the terminal: TERM_MAX cells (enough for 128 x 48), origin in pixels, colours 0xRRGGBB
+TERM_MAX = 6144
+term_cell: u8[6144]
+term_on: u64
+term_x: u64
+term_y: u64
+term_cols: u64
+term_rows: u64
+term_col: u64
+term_row: u64
+term_fg: u64
+term_bg: u64
+term_lines: u64
+term_scrolls: u64
+
+def term_open(x: u64, y: u64, cols: u64, rows: u64, fg: u64, bg: u64):
+# a terminal at pixel (x, y), cols x rows cells (clipped to the screen and TERM_MAX), cleared to bg
+    if cols * 8 > gfx_w - x:
+        cols = (gfx_w - x) / 8
+    if rows * 16 > gfx_h - y:
+        rows = (gfx_h - y) / 16
+    while cols * rows > TERM_MAX:
+        rows -= 1
+    term_x = x
+    term_y = y
+    term_cols = cols
+    term_rows = rows
+    term_col = 0
+    term_row = 0
+    term_fg = fg
+    term_bg = bg
+    term_lines = 0
+    term_scrolls = 0
+    i: u64 = 0
+    while i < cols * rows:
+        term_cell[i] = 32
+        i += 1
+    gfx_fill(x, y, cols * 8, rows * 16, bg)
+    term_on = 1
+
+def term_newline():
+    term_col = 0
+    term_lines += 1
+    if term_row + 1 < term_rows:
+        term_row += 1
+        return
+    i: u64 = 0
+    while i < (term_rows - 1) * term_cols:
+        term_cell[i] = term_cell[i + term_cols]
+        i += 1
+    while i < term_rows * term_cols:
+        term_cell[i] = 32
+        i += 1
+    gfx_scroll(term_x, term_y, term_cols * 8, term_rows * 16, 16, term_bg)
+    term_scrolls += 1
+
+def term_putc(c: u64):
+# one character; a newline presents what changed, so the screen follows the text line by line
+    if term_on == 0:
+        return
+    if c == 10:
+        term_newline()
+        gfx_present()
+        return
+    if c == 13:
+        return
+    if c < 32 or c > 126:
+        c = 32
+    term_cell[term_row * term_cols + term_col] = u8(c)
+    gfx_char(term_x + term_col * 8, term_y + term_row * 16, c, term_fg, term_bg)
+    term_col += 1
+    if term_col >= term_cols:
+        term_newline()
+
+def term_replay():
+# start the terminal with the text console's last rows (con_back, the boot log as the console showed it),
+# without the trailing empty rows, so the desktop opens on the log rather than a blank terminal
+    if fb_cols == 0:
+        return
+    last: u64 = 0
+    r: u64 = 0
+    while r < fb_rows:
+        k: u64 = 0
+        while k < fb_cols:
+            if con_back[r * fb_cols + k] != 32:
+                last = r + 1
+            k += 1
+        r += 1
+    first: u64 = 0
+    if last + 1 > term_rows:
+        first = last + 1 - term_rows
+    r = first
+    while r < last:
+        n = fb_cols
+        while n > 0 and con_back[r * fb_cols + n - 1] == 32:
+            n -= 1
+        j: u64 = 0
+        while j < n:
+            term_putc(u64(con_back[r * fb_cols + j]))
+            j += 1
+        # a row that filled the terminal's width has already wrapped
+        if n < term_cols:
+            term_newline()
+        r += 1
+
+def gfx_putc(c: u8):
+# console text while the desktop owns the screen (console.fsi putc): into the terminal when one is open
+    term_putc(u64(c))
+
 # 0xRRGGBB colour bars of the test pattern: white, yellow, cyan, green, magenta, red, blue, grey
 gfx_bars: u64[8] = [0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00, 0xFF00FF, 0xFF0000, 0x0000FF, 0x808080]
 GFX_DESK = 0x1E2A3C
+GFX_TITLE = 0x2D5A8C
+GFX_TERM = 0x101820
 
 def gfx_selftest() -> u64:
 # back-buffer checks before anything reaches the screen: fills land where asked, clipping keeps
@@ -198,9 +332,9 @@ def desktop_wanted() -> u64:
     return 0
 
 def desktop_show():
-# screen step 1: the desktop background, the colour-bar test pattern, two labelled rows right under the bars
-# (white on the dark background, on the 8x16 grid from column 0, so the boot harness reads them back from a QEMU
-# screendump as whole rows) and a framed area below them
+# the desktop: background, the colour-bar test pattern, two labelled rows right under the bars (white on the dark
+# background, on the 8x16 grid from column 0, so the boot harness reads them back from a QEMU screendump as whole
+# rows), then a terminal (step 2) that opens on the boot log and receives console text from here on
     if gfx_init(bi.fb_format) == 0:
         puts("desktop: no linear framebuffer, staying on the text console\n")
         return
@@ -212,14 +346,19 @@ def desktop_show():
     while i < 8:
         gfx_fill(i * bw, 0, bw, 96, gfx_bars[i])
         i += 1
-    gfx_frame(32, 128, gfx_w - 64, gfx_h - 192, 2, 0x8899AA)
-    gfx_text(0, 96, "Forge desktop (screen step 1: framebuffer graphics)", 0xFFFFFF, GFX_DESK)
+    # the terminal: a title bar on row 8, then the cells from row 9 to the bottom, full width from column 0 so
+    # the harness reads its rows whole
+    gfx_fill(0, 128, gfx_w, 16, GFX_TITLE)
+    gfx_text(0, 128, "Terminal: kernel console", 0xFFFFFF, GFX_TITLE)
+    term_open(0, 144, gfx_w / 8, (gfx_h - 144) / 16, 0xE0E0E0, GFX_TERM)
+    term_replay()
+    gfx_text(0, 96, "Forge desktop (screen step 2: terminal text console)", 0xFFFFFF, GFX_DESK)
     x = gfx_text(0, 112, "gfx: ", 0xFFFFFF, GFX_DESK)
     x = gfx_num(x, 112, gfx_w, 0xFFFFFF, GFX_DESK)
     x = gfx_text(x, 112, "x", 0xFFFFFF, GFX_DESK)
     x = gfx_num(x, 112, gfx_h, 0xFFFFFF, GFX_DESK)
     gfx_text(x, 112, " back buffer, 8 colour bars, self-test OK", 0xFFFFFF, GFX_DESK)
-    n = gfx_present()
+    gfx_present()
     gfx_on = 1
     puts("desktop: gfx ")
     put_u64(gfx_w)
@@ -229,6 +368,10 @@ def desktop_show():
         puts(" BGRX")
     else:
         puts(" RGBX")
-    puts(", back-buffer self-test OK, ")
-    put_u64(n)
-    puts(" pixels presented, console text now serial only\n")
+    puts(", self-test OK, ")
+    put_u64(gfx_presented)
+    puts(" pixels presented, terminal ")
+    put_u64(term_cols)
+    puts("x")
+    put_u64(term_rows)
+    putc(10)

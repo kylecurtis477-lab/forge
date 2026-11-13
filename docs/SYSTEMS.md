@@ -452,7 +452,8 @@ gfx itself has no unsafe code. Colours are 0xRRGGBB; `gfx_px` converts them to t
 (BGRX: byte 0 is blue, the same number; RGBX swaps red and blue). The byte order comes from the GOP pixel format
 (UEFI loader) or the multiboot2 red field position (16 = BGRX, 0 = RGBX). `forge.desktop` on the command line turns
 it on; console text then goes to serial only. tests/os/desktop.sh reads the desktop's text rows back from a QEMU
-screendump and checks the colour bars pixel by pixel.
+screendump and checks the colour bars pixel by pixel. Step 2 adds a terminal in the back buffer (a cell grid at a pixel origin, scrolled
+by moving back-buffer rows); it opens on the text console's last rows and receives console text from then on.
 ## Security fix: user-copy validation (after 8.8)
 
 `copy_user` / `copy_str_user` (cpux.fsi) now enforce the user range themselves: every operand below

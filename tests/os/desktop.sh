@@ -1,9 +1,10 @@
 #!/bin/bash
-# tests/os/desktop.sh: screen step 1 (examples/kernel/gfx.fsi), one result, os/desktop.
+# tests/os/desktop.sh: screen steps 1-2 (examples/kernel/gfx.fsi), one result, os/desktop.
 # GRUB (BIOS) boot with `forge.desktop` on the multiboot2 command line: the kernel runs its self-tests (shell and
 # kexec sessions are skipped in desktop mode), checks the gfx back buffer, draws the desktop (background, 8 colour
-# bars, a framed area and two text rows) and presents it, then prints KERNEL OK on serial only. The boot harness
-# reads the two text rows back from the QEMU screendump (white 8x16 glyphs on the dark background), and the
+# bars, two text rows and a terminal that opens on the boot log) and presents it; from then on console text goes
+# to serial and the terminal. The boot harness reads the terminal's last two rows back from the QEMU screendump
+# (the desktop line, then KERNEL OK as a whole row, light 8x16 glyphs on the dark terminal), and the
 # colour bars are checked pixel by pixel in the same screendump (build/os/desktop.ppm), so a wrong framebuffer
 # byte order (red and blue swapped) fails. Approved addition: os/result-count went from 38 to 39 results.
 cd "$(dirname "$0")/../.."
@@ -19,7 +20,7 @@ grep -q 'forge.desktop' $T/iso/boot/grub/grub.cfg || { echo "FAIL os/desktop (gr
 env -u SOURCE_DATE_EPOCH grub-mkrescue -o $T/desktop.iso $T/iso >/dev/null 2>&1 || { echo "FAIL os/desktop (grub-mkrescue)"; exit 0; }
 VD="-drive file=$L/vdisk.img,format=raw,if=none,id=vd,readonly=on -device virtio-blk-pci,drive=vd"
 rm -f $L/desktop.ppm
-R=$($B desktop $L/desktop.log 200 "multiboot2 (BIOS)|shell and kexec sessions skipped: desktop mode (forge.desktop)|desktop: gfx |, back-buffer self-test OK, |pixels presented, console text now serial only|KERNEL OK" "Forge desktop (screen step 1^gfx: 1024x768 back buffer, 8 colour bars, self-test OK" -- $Q $VD -boot d -cdrom $T/desktop.iso)
+R=$($B desktop $L/desktop.log 200 "multiboot2 (BIOS)|shell and kexec sessions skipped: desktop mode (forge.desktop)|desktop: gfx 1024x768 BGRX, self-test OK, |pixels presented, terminal 128x39|KERNEL OK" "desktop: gfx 1024x768 BGRX^KERNEL OK" -- $Q $VD -boot d -cdrom $T/desktop.iso)
 case "$R" in PASS*) ;; *) echo "$R"; exit 0;; esac
 # the colour bars: centre of bar i (of 8, across the full width, 96 pixels tall) must be the 0xRRGGBB it was drawn in
 C=$(python3 - $L/desktop.ppm <<'P'

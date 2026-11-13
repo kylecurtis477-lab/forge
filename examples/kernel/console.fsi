@@ -1,6 +1,6 @@
 # Console: COM1 serial always; GOP/VBE linear framebuffer text (8x16 font) once mapped; VGA text as fallback.
 # Every framebuffer store goes through fb_px (bounds-checked); once the desktop owns the screen (gfx_on) text goes
-# to serial only.
+# to serial and the desktop terminal (gfx_putc).
 include "font.fsi"
 
 COM1 = 0x3F8
@@ -67,7 +67,7 @@ con_back: u8[32768]
 con_front: u8[32768]
 con_scrolls: u64
 con_redrawn: u64
-# 1 once the desktop (gfx.fsi) owns the screen: console text then goes to serial only
+# 1 once the desktop (gfx.fsi) owns the screen: console text then goes to serial and the desktop terminal
 gfx_on: u64
 
 @unsafe
@@ -185,6 +185,7 @@ def vga_putc(c: u8):
 def putc(c: u8):
     serial_putc(c)
     if gfx_on != 0:
+        gfx_putc(c)
         return
     if fb_base != 0:
         fb_putc(c)

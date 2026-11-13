@@ -67,6 +67,13 @@ count stays at or under 709.
         multiboot2 byte-order bug (red and blue swapped on GRUB boots), fixed in its own commit.
    2. Text on screen at any position and colour through a proper font path (the 8x16 font in font.fsi), and a
       graphical text console that the terminal window reuses.
+      - *Status: done (2026-11-12).* gfx.fsi adds a terminal: a cell grid at any pixel origin with its own
+        colours (`term_open`, `term_putc`, `term_newline`), scrolling by moving back-buffer rows (`gfx_scroll`)
+        and presenting the damage at each newline. `term_replay` opens it on the text console's last rows (the
+        boot log as the console showed it; rows that filled the width are not doubled). Once the desktop is up,
+        console.fsi `putc` sends text to serial and the terminal (`gfx_putc`). The desktop now has a title bar
+        ("Terminal: kernel console") and a 128x39 terminal; tests/os/desktop.sh reads its last two rows, the
+        desktop line and KERNEL OK as whole rows, from the screendump. Unsafe report unchanged (169 / 708).
    3. Input events: PS/2 mouse plus the existing PS/2 and USB HID keyboards feeding one event queue
       (key down/up, mouse move/buttons), visible to user programs through a capability-checked syscall.
    4. A minimal desktop shell: a windowed compositor (back buffer, window list, z-order, damage-based redraw)
