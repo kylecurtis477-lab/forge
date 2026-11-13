@@ -36,18 +36,31 @@ grep -q " 0 checked" $T/n.st && ok bounds-off-flag || no bounds-off-flag
 sed '1a # forge: no-bounds-checks' tests/bounds/oob_array.forge > tests/bounds/.p.forge
 build/forgec tests/bounds/.p.forge $T/p.s --bounds-stats 2> $T/p.st; rm -f tests/bounds/.p.forge
 grep -q " 0 checked" $T/p.st && ok bounds-off-pragma || no bounds-off-pragma
-# overhead: checked vs --no-bounds, best of 21 each, runs interleaved (the order alternates every round so drift
-# and warm-up favour neither) so load drift hits both; must be <= 5% slower. Best-of-7 failed once under box load
-# (inv138 O2: 6.7%) with byte-identical code, and three re-runs gave 5.7%, -3.3% and 4.3%.
+# overhead: checked vs --no-bounds, must be <= 5% slower. 21 pairs; a pair is 3 interleaved checked/unchecked
+# rounds (the order alternates every round so drift and warm-up favour neither) and its ratio is best checked /
+# best unchecked of those 3, in basis points; the test takes the median of the 21 pair ratios. Comparing the best
+# checked run with the best unchecked run of the whole series failed twice under gate load with byte-identical
+# code: inv138 O2 (best of 7, 6.7%; three re-runs gave 5.7%, -3.3% and 4.3%) and inv156 O2 (best of 21, 6.95%:
+# one lucky fast unchecked run, 286 ms against 287-334 ms in the ten gates before). Single-run pairs were too
+# noisy on the box (pair ratios 0.63-2.66, medians of 21 from 0.997 to 1.067 with identical code); best of 3 per
+# pair keeps the pair ratios near 0.9-1.17 and the median of 21 at 1.009-1.023 (measured 2026-11-13).
 ./forge tests/bounds/bench.forge -o $T/bc && FORGEC_FLAGS=--no-bounds ./forge tests/bounds/bench.forge -o $T/bn
 [ "$($T/bc)" = "$($T/bn)" ] && ok bounds-bench-same || no bounds-bench-same
 tm() { s=$(date +%s%N); $1 >/dev/null; echo $(( ($(date +%s%N)-s)/1000 )); }
-c=999999; n=999999
+: > $T/ratios
 for k in $(seq 1 21); do
-  if [ $((k % 2)) = 1 ]; then d=$(tm $T/bc); [ $d -lt $c ] && c=$d; d=$(tm $T/bn); [ $d -lt $n ] && n=$d
-  else d=$(tm $T/bn); [ $d -lt $n ] && n=$d; d=$(tm $T/bc); [ $d -lt $c ] && c=$d; fi
+  c=999999999; n=999999999
+  for j in 1 2 3; do
+    if [ $(((k + j) % 2)) = 1 ]; then d=$(tm $T/bc); [ $d -lt $c ] && c=$d; d=$(tm $T/bn); [ $d -lt $n ] && n=$d
+    else d=$(tm $T/bn); [ $d -lt $n ] && n=$d; d=$(tm $T/bc); [ $d -lt $c ] && c=$d; fi
+  done
+  [ $n -gt 0 ] || n=1
+  echo $((c * 10000 / n)) >> $T/ratios
 done
+med=$(sort -n $T/ratios | sed -n 11p); lo=$(sort -n $T/ratios | head -1); hi=$(sort -n $T/ratios | tail -1)
 build/forgec tests/bounds/bench.forge $T/b.s --bounds-stats 2> $T/b.st
-echo "bounds bench: checked ${c}us, unchecked ${n}us, $(cat $T/b.st)"
-[ $((c * 100)) -le $((n * 105)) ] && ok bounds-bench-overhead || no bounds-bench-overhead
+r4() { echo "$(($1 / 10000)).$(printf %04d $(($1 % 10000)))"; }
+echo "bounds bench: median checked/unchecked $(r4 $med) over 21 pairs of best-of-3 (min $(r4 $lo), max $(r4 $hi)," \
+  "limit 1.0500), last pair checked ${c}us unchecked ${n}us, $(cat $T/b.st)"
+[ $med -le 10500 ] && ok bounds-bench-overhead || no bounds-bench-overhead
 rm -rf $T; exit $fail

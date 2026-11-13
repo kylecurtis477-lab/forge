@@ -121,7 +121,7 @@ bench/baseline.tsv (fails above +25%) and reports the Phase 12.4 targets. See do
 
 ### Optimizing backend (default; `-O0` turns it off)
 (In freestanding mode `-O0` turns off bounds-check elision, the one fs optimization that is on by default; the
-opt-in `--fs-opt`/`--fs-live`/`--fs-temps` passes still run when named. See docs/SYSTEMS.md, "Optimization levels". Reproducibility tests that compare two builds pin the same FORGEC_FLAGS for both.)
+opt-in `--fs-opt`/`--fs-live`/`--fs-temps` passes still run when named. See docs/SYSTEMS.md, "Optimization levels". Reproducibility tests that compare two builds pin the same FORGEC_FLAGS for both. The bounds-check overhead test, tests/bounds/run.sh, times 21 pairs of 3 interleaved checked/`--no-bounds` rounds and requires the median of the 21 per-pair ratios (best checked / best unchecked within the pair) to be at most 1.05; comparing the two best runs failed under gate load with identical code in inv138 and inv156.)
 Eligible functions are plain int functions with int params. They are lowered to a three-address IR with virtual registers and basic blocks. The passes are const/copy propagation with folding, unreachable-block and jump cleanup, local CSE, liveness-based DCE, and elimination of tag and bounds checks for typed non-escaping `list[int]` locals. Registers are assigned by linear scan over rsi/rdi/r8-r10 and rbx/r12-r15, with spilling. Division by a constant uses magic numbers. Any function that is not eligible uses the direct code generator.
 
 ## Systems programming (freestanding mode)
