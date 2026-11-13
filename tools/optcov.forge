@@ -1,0 +1,211 @@
+# optcov: block coverage of the freestanding backend's optimizer passes (build-plan item 3, optimizer gate).
+# usage: build/optcov [--quick] [--out FILE]
+# 1. Instruments selfhost/forgec.forge: every block of the optimizer functions (the function body and the body of
+#    every if / elif / else / while / for) gets a counter increment; the counters are added into build/optcov/
+#    counts.txt when a freestanding compile finishes (fs_main returned, so a compile error adds nothing).
+# 2. Builds that compiler (build/optcov/forgec-cov) with build/forgec, build/fas and build/fld.
+# 3. Compiles a corpus with it under each optimizer configuration (default, --fs-opt, --fs-live, --fs-temps,
+#    --no-bounds): every freestanding program in tests/ and examples/ that is expected to compile (no bad_*,
+#    invalid/ or diag/ cases), plus the fsfuzz programs build/fsfuzz/p*.forge if present.
+# 4. Writes the report (FILE, default build/optcov/report.txt): per pass group and per function, blocks hit of
+#    blocks total, then every block never hit with its compiler.forge line and text.
+# --quick: two corpus programs and two configurations (the run_tests.sh check: the instrumented compiler builds,
+#    counts are written and at least one block of every pass group is hit).
+# Lines of selfhost/forgec.forge are the lines of selfhost/compiler.forge (build/embed appends the prelude and
+# runtime after them), so the report's line numbers point into compiler.forge.
+import os
+import sys
+
+# pass groups: name, function-name prefixes (a function belongs to the first group whose prefix it starts with)
+GROUPS = [["fs-opt allocator (fs_regalloc, fs_ra_*)", ["fs_regalloc", "fs_ra_", "fs_ranext"]], ["fs-opt peepholes (fs_rapeep)", ["fs_rapeep"]], ["fs-live liveness (fs_lv_*)", ["fs_lv_"]], ["fs-temps (fs_tmp_*)", ["fs_tmp_"]], ["constant division (fs_cdiv_try)", ["fs_cdiv_try"]], ["bounds-check elision (fs_bsafe)", ["fs_bsafe"]]]
+CONFIGS = [[], ["--fs-opt"], ["--fs-live"], ["--fs-temps"], ["--no-bounds"]]
+HEADS = ["if ", "elif ", "else:", "while ", "for "]
+
+def group_of(fn):
+    g = 0
+    while g < len(GROUPS):
+        for p in GROUPS[g][1]:
+            if fn.startswith(p):
+                return g
+        g += 1
+    return -1
+
+def indent_of(s):
+    n = 0
+    while n < len(s) and s[n] == " ":
+        n += 1
+    return n
+
+def body_indent(lines, i):
+# the indentation of the first code line after line i (comment lines at column 0 under a def are skipped)
+    j = i + 1
+    while j < len(lines):
+        t = lines[j].strip()
+        if t != "" and not t.startswith("#"):
+            return indent_of(lines[j])
+        j += 1
+    return 0
+
+def is_head(t):
+    if not t.endswith(":"):
+        return False
+    for h in HEADS:
+        if t.startswith(h):
+            return True
+    return False
+
+def instrument(src):
+# [instrumented source, blocks]; a block is [function, group, compiler line (1-based), header text]
+    lines = src.split("\n")
+    out = []
+    blocks = []
+    fn = ""
+    g = -1
+    i = 0
+    while i < len(lines):
+        s = lines[i]
+        out.append(s)
+        t = s.strip()
+        if s.startswith("def "):
+            fn = s[4:s.index("(")]
+            g = group_of(fn)
+            if g >= 0:
+                blocks.append([fn, g, i + 1, t])
+                out.append(" " * body_indent(lines, i) + "__cov[" + str(len(blocks) - 1) + "] = __cov[" + str(len(blocks) - 1) + "] + 1")
+        elif s != "" and indent_of(s) == 0 and not s.startswith("#"):
+            fn = ""
+            g = -1
+        elif g >= 0 and is_head(t):
+            blocks.append([fn, g, i + 1, t])
+            out.append(" " * body_indent(lines, i) + "__cov[" + str(len(blocks) - 1) + "] = __cov[" + str(len(blocks) - 1) + "] + 1")
+        i += 1
+    nb = len(blocks)
+    pre = "__cov = list(" + str(nb) + ")\n__cov_i = 0\nwhile __cov_i < " + str(nb) + ":\n    __cov[__cov_i] = 0\n    __cov_i += 1\n"
+    dump = "def __cov_dump():\n    f = \"build/optcov/counts.txt\"\n    old = read_file(f)\n    acc = []\n    if old is not None and old.strip() != \"\":\n        acc = old.strip().split(\" \")\n    r = []\n    k = 0\n    while k < " + str(nb) + ":\n        v = __cov[k]\n        if k < len(acc):\n            v = v + int(acc[k])\n        r.append(str(v))\n        k += 1\n    write_file(f, \" \".join(r) + \"\\n\")\n\n"
+    body = "\n".join(out)
+    a = body.index("        fs_main(src)\n")
+    body = body[:a] + "        fs_main(src)\n        __cov_dump()\n" + body[a + len("        fs_main(src)\n"):]
+    z = body.rindex("\nforge_main()")
+    body = body[:z] + "\n" + dump + body[z:]
+    return [pre + body, blocks]
+
+def run(cmd):
+    r = os.run(cmd)
+    return r[0]
+
+def corpus(quick):
+# freestanding programs expected to compile
+    if quick:
+        return ["tests/own/ok.forge", "examples/user/hello.forge"]
+    mark = "# forge: " + "no-runtime"
+    r = os.run(["sh", "-c", "grep -rl '" + mark + "' tests examples | grep '\\.forge$' | grep -v '/bad_\\|/invalid/\\|/diag/\\|/errors/' | sort"])
+    xs = []
+    for l in r[1].split("\n"):
+        if l.strip() != "":
+            xs.append(l.strip())
+    r = os.run(["sh", "-c", "ls build/fsfuzz/p*.forge 2>/dev/null | grep -v '\\.[0-9]' | sort -V"])
+    for l in r[1].split("\n"):
+        if l.strip() != "":
+            xs.append(l.strip())
+    return xs
+
+def opt(name, dflt):
+    i = 1
+    while i < len(sys.argv) - 1:
+        if sys.argv[i] == name:
+            return sys.argv[i + 1]
+        i += 1
+    return dflt
+
+def main():
+    quick = "--quick" in sys.argv
+    outf = opt("--out", "build/optcov/report.txt")
+    d = "build/optcov"
+    if not os.path.isdir(d):
+        os.mkdir(d)
+    ins = instrument(read_file("selfhost/forgec.forge"))
+    blocks = ins[1]
+    write_file(d + "/forgec-cov.forge", ins[0])
+    if os.path.exists(d + "/counts.txt"):
+        os.remove(d + "/counts.txt")
+    if run(["build/forgec", d + "/forgec-cov.forge", d + "/forgec-cov.s"]) != 0 or run(["build/fas", "-o", d + "/forgec-cov.o", d + "/forgec-cov.s"]) != 0 or run(["build/fld", "--base", "0x100000000000", "-o", d + "/forgec-cov", d + "/forgec-cov.o"]) != 0:
+        print("optcov: building the instrumented compiler failed")
+        sys.exit(1)
+    progs = corpus(quick)
+    cfgs = CONFIGS
+    if quick:
+        cfgs = [["--fs-temps"], []]
+    ok = 0
+    bad = 0
+    for p in progs:
+        for c in cfgs:
+            if run([d + "/forgec-cov", p, d + "/x.s"] + c) == 0:
+                ok += 1
+            else:
+                bad += 1
+    cnt = read_file(d + "/counts.txt")
+    if cnt is None:
+        print("optcov: no counts written")
+        sys.exit(1)
+    cs = cnt.strip().split(" ")
+    rep = []
+    rep.append("optcov: " + str(len(progs)) + " programs x " + str(len(cfgs)) + " configurations (" + str(ok) + " compiles counted, " + str(bad) + " refused), " + str(len(blocks)) + " optimizer blocks")
+    gh = []
+    gt = []
+    g = 0
+    while g < len(GROUPS):
+        gh.append(0)
+        gt.append(0)
+        g += 1
+    k = 0
+    while k < len(blocks):
+        gt[blocks[k][1]] += 1
+        if int(cs[k]) > 0:
+            gh[blocks[k][1]] += 1
+        k += 1
+    th = 0
+    g = 0
+    while g < len(GROUPS):
+        pct = 0
+        if gt[g] > 0:
+            pct = gh[g] * 1000 // gt[g]
+        rep.append("  " + GROUPS[g][0] + ": " + str(gh[g]) + " / " + str(gt[g]) + " blocks (" + str(pct // 10) + "." + str(pct % 10) + "%)")
+        th += gh[g]
+        g += 1
+    pct = th * 1000 // len(blocks)
+    rep.append("  total: " + str(th) + " / " + str(len(blocks)) + " blocks (" + str(pct // 10) + "." + str(pct % 10) + "%)")
+    rep.append("")
+    rep.append("per function (hit / blocks):")
+    k = 0
+    while k < len(blocks):
+        f = blocks[k][0]
+        n = 0
+        h = 0
+        while k < len(blocks) and blocks[k][0] == f:
+            n += 1
+            if int(cs[k]) > 0:
+                h += 1
+            k += 1
+        rep.append("  " + f + ": " + str(h) + " / " + str(n))
+    rep.append("")
+    rep.append("blocks never hit (compiler.forge line: header):")
+    k = 0
+    while k < len(blocks):
+        if int(cs[k]) == 0:
+            rep.append("  " + str(blocks[k][2]) + " " + blocks[k][0] + ": " + blocks[k][3][:100])
+        k += 1
+    write_file(outf, "\n".join(rep) + "\n")
+    i = 0
+    while i < 8 and i < len(rep):
+        print(rep[i])
+        i += 1
+    if quick:
+        g = 0
+        while g < len(GROUPS):
+            if gh[g] == 0 and GROUPS[g][1][0] != "fs_bsafe":
+                print("optcov: no block of " + GROUPS[g][0] + " hit")
+                sys.exit(1)
+            g += 1
+    sys.exit(0)
+
+main()

@@ -141,6 +141,15 @@ count stays at or under 709.
 3. **Optimizer correctness gate.** Measure the compiler's test coverage, extend the differential fuzzer
    (tools/fsfuzz.forge) to every combination of optimizer flags, and require it to pass before any new optimizer
    pass lands.
+   - *Status (a), coverage: done (2026-11-13).* tools/optcov.forge instruments the fs optimizer functions of
+     selfhost/forgec.forge (one counter per block: function body and every if/elif/else/while/for body), builds
+     that compiler (its assembly is byte-identical to build/forgec's), compiles the corpus (78 freestanding programs
+     from tests/ and examples/ plus 20 fsfuzz programs) under default, --fs-opt, --fs-live, --fs-temps and
+     --no-bounds, and reports per pass group: allocator 107/125 blocks, peepholes 8/8, liveness 63/68, temps 49/57,
+     constant division 19/20, bounds-check elision 6/6; 252/284 (88.7%) overall, with every block never hit listed
+     (docs/tools-optcov.md, mostly defensive bail-outs). Finding: `-O0` changes nothing in freestanding mode (the fs
+     backend ignores opt_on), so half of fsfuzz's eight builds were duplicates and the O0 test pass does not run a
+     different code generator for kernel and user code. run_tests.sh `optimizer-coverage` runs the quick form.
 4. **SSA backend (12.1 step 4), gated by item 3**: a real SSA IR for fs/kernel mode with liveness-based register
    allocation (Phase 12 item 1), in safe steps that are byte-identical for code built without the new flag.
    Steps 4b (`--fs-live`) and 4c (`--fs-temps`) are done and the kernel is built with both.
