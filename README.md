@@ -133,7 +133,7 @@ The kernel unsafe ceiling in `tests/unsafe/baseline.txt` is 170 functions, 0 blo
 
 Subsystem docs (design, formats, APIs, tests, limits):
 
-- CHANGELOG.md: release notes from 0.17.1 on (0.17.2, 0.17.3 security/VT-d, 0.17.4 fixes, 0.18.0, unreleased 0.18.1), each entry naming its commit; no tags
+- CHANGELOG.md: release notes from 0.17.1 on (0.17.2, 0.17.3 security/VT-d, 0.17.4 fixes, 0.18.0, 0.18.1 cut, open 0.19.0 and 0.20.0), each entry naming its commit; no tags. The package index will record a signed publish time and a yank flag per version from its first format (BUILD_PLAN item 6)
 - docs/process.md: processes, the ELF loader, fork/exec/brk/mmap
 - docs/bootstrap.md: the seed compiler, the self-hosting fixpoint and reseeding
 - docs/objstore.md: the living object store (Phase 9): versions, blobs, the write-ahead log, persistence, indexes, system rewind and the /obj files-as-objects VFS view

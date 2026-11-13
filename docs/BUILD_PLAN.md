@@ -270,6 +270,11 @@ count stays at or under 709.
    checks of changed files, diagnostics, go-to-definition.
 6. **The package manager**: grow `forge pkg` (tools/pkg.forge; Phase 7 item 4) with dependency resolution,
    signed packages and reproducible builds.
+   - *Index format rule (2026-11-13, from the Forge Strategist roadmap review):* from the very first index
+     format, every published version records a publish time covered by the package signature and a yank flag.
+     Dependency cooldowns (do not resolve a version younger than N days) and quarantine (yanked versions stay
+     downloadable for existing lock files but are never newly selected) then need no format change later;
+     Cargo has just stabilised both.
 7. **Sustained adversarial testing**: multi-hour soak runs, syscall and capability fuzzing, and fault injection,
    with the results recorded.
 8. **Real-hardware boot**: a USB image plus a test checklist for Kyle's PC (needs Kyle's hardware).
