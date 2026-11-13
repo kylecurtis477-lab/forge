@@ -118,7 +118,7 @@ test) checks that a 2000 ms jump is skipped and 5 ms counted.
 
 - `slice[T]` (freestanding backend) is a 16-byte (ptr, len) header. Make one with `slice(p, n)` or `x[a:b]` (bounds optional) on an array or slice; `len(x)` reads it (arrays give their constant length). Slice params take two argument registers (ptr, len); slices copy on assignment. Array and struct params are passed by address and copied into the callee's frame on entry, so they are values: a callee's writes never reach the caller, and a parameter can be passed on to another function (tests/fs/aggparam.forge).
 - Array and slice indexing is bounds-checked: `cmp len,%rcx; jb ok`, else `forge_bounds_fail(line, idx, len, file)` if the program defines it, then `ud2`. The line and file are the original source position, even through `include`. Constant out-of-range array indices are compile errors. `ptr[T]` indexing is unchecked.
-- Checks are elided for `x[v]` inside `for v in range(len(x))`, `range(C, len(x))` or `range(K)` with K ≤ the array length, when the body never assigns v or x or takes their `addr()`. `forgec … --bounds-stats` prints the counts on stderr; `--no-bounds` or `# forge: no-bounds-checks` disables checks.
+- Checks are elided for `x[v]` inside `for v in range(len(x))`, `range(C, len(x))` or `range(K)` with K ≤ the array length, when the body never assigns v or x or takes their `addr()`. `forgec … --bounds-stats` prints the counts on stderr; `--no-bounds` or `# forge: no-bounds-checks` disables checks. Elision (these loop facts and in-range constant array indices) is the default; `-O0` keeps every check (see "Optimization levels" below).
 
 ### No null (Phase 4.2)
 
@@ -259,6 +259,21 @@ The full phased plan is in docs/BUILD_PLAN.md; the items below are the kernel su
 8. **ARM64 target:** an AArch64 backend for fs mode, UEFI on ARM (AAVMF in QEMU `virt`), PL011 serial, GIC, and the generic timer.
 9. **Secure Boot:** sign `forgex64.efi` (sbsign/MOK) or chain through shim so it coexists with distro and Windows Secure Boot setups.
 10. **Never reboot (BUILD_PLAN Phase 2):** 1 module ABI, 2 isolated driver services, 3 supervisor restart, 4 tty hot-swap, 5 live patching, 6 kexec handoff — done.
+
+## Optimization levels (freestanding mode)
+
+| Flags | What runs |
+|---|---|
+| (default) | bounds-check elision (constant indices, `range` loop facts) |
+| `-O0` | nothing: every bounds check is kept (the out-of-range constant-index compile error stays) |
+| `--fs-opt` / `--fs-live` / `--fs-temps` | the default plus the opt-in passes: register allocation, its peepholes, magic-number constant division; liveness; register temporaries |
+| `-O0 --fs-…` | the named opt-in passes, with every bounds check kept |
+| `--no-bounds` | no bounds checks at all (nothing to elide) |
+
+The `--fs-*` passes are opt-in, so naming one wins over `-O0`; the kernel build names `--fs-temps`, and the O0 gate
+pass (`FORGEC_FLAGS=-O0 ./run_tests.sh`) builds it with every bounds check kept (2080 of 2080 sites checked vs
+1496 by default). Until 2026-11-13 `-O0` was ignored in freestanding mode. New optimizer passes follow the landing
+rule in docs/tools-optcov.md.
 
 ## Kernel asm and --fs-opt (Phase 12.1 step 3)
 

@@ -26,6 +26,10 @@ build/forgec $T/bare.forge $T/bare.s && grep -q ud2 $T/bare.s && ok bounds-bare-
 build/forgec tests/bounds/elide.forge $T/e.s --bounds-stats 2> $T/e.st
 grep -qx "bounds: 8 sites, 5 checked, 3 elided" $T/e.st && ok bounds-elide-count || { no bounds-elide-count; cat $T/e.st; }
 ./forge tests/bounds/elide.forge -o $T/e && [ "$($T/e)" = 197 ] && ok bounds-elide-run || no bounds-elide-run
+# -O0 turns elision off: every site keeps its check (also for in-range constant indices), same output
+build/forgec tests/bounds/elide.forge $T/e0.s -O0 --bounds-stats 2> $T/e0.st
+grep -qx "bounds: 8 sites, 8 checked, 0 elided" $T/e0.st && ok bounds-elide-off-O0 || { no bounds-elide-off-O0; cat $T/e0.st; }
+build/fas -o $T/e0.o $T/e0.s && build/fld -o $T/e0 $T/e0.o && [ "$($T/e0)" = 197 ] && ok bounds-elide-off-O0-run || no bounds-elide-off-O0-run
 # --no-bounds and the pragma drop every check
 build/forgec tests/bounds/oob_sub.forge $T/n.s --no-bounds --bounds-stats 2> $T/n.st
 grep -q " 0 checked" $T/n.st && ok bounds-off-flag || no bounds-off-flag

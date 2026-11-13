@@ -50,13 +50,14 @@ set and its result and fails the run. The summary is
     fsfuzz --combos: seed S, N programs x 2 sources (plain, stack-protector) x 56 flag sets = B builds, D distinct assemblies run: A agree, F differ
 
 Results on 2026-11-13, 25 programs per seed (2800 builds each): seed 1 ran 744 distinct assemblies, seed 2 760 and
-seed 3 748 (about 15 per source); all agreed. `-O0` never produced a distinct
-assembly (see docs/tools-optcov.md), and neither did the redundant spellings. A deliberately broken compiler
+seed 3 748 (about 15 per source); all agreed. At that point `-O0` never produced a distinct
+assembly (see docs/tools-optcov.md), and neither did the redundant spellings. Since the -O0 fix (2026-11-13) a
+`-O0` build keeps every bounds check, so it is a distinct assembly whenever a program has an elided check. A deliberately broken compiler
 (a wrapper that turns the first `imul` into `add` when `--fs-live` and `-g` are both given) is caught on the first
 program, with the three affected flag sets listed.
 
 run_tests.sh runs a bounded form, `build/fsfuzz-tool --combos --seed 7 --n 3` (`PASS fs-opt-combos`, 336 builds,
-84 distinct assemblies, about 30 s; 2 programs until build-plan item 3 part d). Together with `optcov --check` it is
+126 distinct assemblies since the -O0 fix (84 before it), about 30 s; 2 programs until build-plan item 3 part d). Together with `optcov --check` it is
 the landing gate for optimizer passes (docs/tools-optcov.md, "Landing rule").
 
 ## The programs

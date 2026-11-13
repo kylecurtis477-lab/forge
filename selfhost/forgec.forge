@@ -15609,6 +15609,7 @@ fs_dsec = ""
 fs_dexp = 0
 fs_datt = 0
 fs_bchk = 1
+fs_elide = 1  # bounds-check elision (constant indices, fs_bsafe loop facts); -O0 sets 0: every check is kept
 fs_bstats = 0
 # Phase 4.3 unsafe: fs_unsafe > 0 inside `with unsafe:` / @unsafe / @naked; --unsafe-report lists regions,
 # --unsafe-fix lists functions that need @unsafe instead of failing
@@ -18180,9 +18181,11 @@ def fs_postfix():
             if chk and fsk[t] == 3 and tk[fp + 1] == K_NUM and fs_isop2(fp + 2, "]"):
                 if tv[fp + 1] >= ftn[t] or tv[fp + 1] < 0:
                     fs_die(c4("index ", str(tv[fp + 1]), " is out of bounds for an array of length ", str(ftn[t])))
-                chk = 0
-                fs_nbe += 1
-            elif chk and fs_bsafe(base, t):
+                if fs_elide:
+                # -O0 keeps the runtime check of an in-range constant index (the out-of-range error above stays)
+                    chk = 0
+                    fs_nbe += 1
+            elif chk and fs_elide and fs_bsafe(base, t):
                 chk = 0
                 fs_nbe += 1
             fp += 1
@@ -20767,7 +20770,7 @@ def fs_wrapper(f, nm, body):
     e("iretq")
 
 def fs_main(src):
-    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_prov, fs_ufix, fs_ubare, fs_safe, fs_sp, fs_g, fs_ra, fs_live, fs_temps
+    global fp, fs_chk, fs_bchk, fs_bstats, fs_urep, fs_prov, fs_ufix, fs_ubare, fs_safe, fs_sp, fs_g, fs_ra, fs_live, fs_temps, fs_elide
     if contains(src, concat("# forge: ", "checked-ints")):
         fs_chk = 1
     if contains(src, concat("# forge: ", "no-bounds-checks")):
@@ -20780,6 +20783,10 @@ def fs_main(src):
     while ai < argc():
         if str_eq(argv(ai), "--no-bounds"):
             fs_bchk = 0
+        if str_eq(argv(ai), "-O0"):
+        # -O0 turns off what freestanding code gets by default (bounds-check elision). The --fs-* passes are opt-in
+        # and stay on when named explicitly, so `-O0 --fs-temps` is --fs-temps with every bounds check kept.
+            fs_elide = 0
         if str_eq(argv(ai), "--bounds-stats"):
             fs_bstats = 1
         if str_eq(argv(ai), "--unsafe-report"):

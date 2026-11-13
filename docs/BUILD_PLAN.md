@@ -203,6 +203,14 @@ count stays at or under 709.
      in optcov's configurations and in tools/fsfuzz.forge, and every fs_* function called under a pass switch
      (fs_ra, fs_live, fs_temps) is in an optcov pass group. run_tests.sh `fs-opt-combos` now runs 3 programs
      (336 builds). Item 4 (SSA backend) is gated by this rule.
+   - *-O0 in freestanding mode: done (2026-11-13).* `-O0` now turns off bounds-check elision (constant indices and
+     fs_bsafe loop facts; the compile-time error for an out-of-range constant index stays), the only fs
+     optimization on by default, so the O0 gate pass builds kernel, EFI loader, modules and user programs with
+     every bounds check kept (kernel: 2080 sites, 2080 checked at -O0 vs 1496 at the default; 160,037 vs 153,896
+     asm lines). The opt-in `--fs-*` passes stay on when named (the kernel build names `--fs-temps`), so -O0 does
+     not turn the regalloc shape checks into failures. Default-level output is byte-identical (kernel checked).
+     The -O0 kernel was boot-checked with `FORGEC_FLAGS=-O0 tests/os/run.sh` outside the gate. optcov GATES gained
+     `fs_elide`.
 4. **SSA backend (12.1 step 4), gated by item 3**: a real SSA IR for fs/kernel mode with liveness-based register
    allocation (Phase 12 item 1), in safe steps that are byte-identical for code built without the new flag.
    Steps 4b (`--fs-live`) and 4c (`--fs-temps`) are done and the kernel is built with both.

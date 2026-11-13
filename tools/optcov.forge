@@ -31,7 +31,7 @@ GROUPS = [["fs-opt allocator (fs_regalloc, fs_ra_*)", ["fs_regalloc", "fs_ra_", 
 CONFIGS = [[], ["--fs-opt"], ["--fs-live"], ["--fs-temps"], ["--no-bounds"]]
 HEADS = ["if ", "elif ", "else:", "while ", "for "]
 # variables that switch an fs optimizer pass on (the registry check, part d)
-GATES = ["fs_ra", "fs_live", "fs_temps"]
+GATES = ["fs_ra", "fs_live", "fs_temps", "fs_elide"]
 
 def group_of(fn):
     g = 0

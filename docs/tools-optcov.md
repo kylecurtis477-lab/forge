@@ -58,7 +58,8 @@ selfhost/compiler.forge without compiling anything and fails when
 
 - the compiler parses a `--fs-*` option that is not one of optcov's configurations, or that tools/fsfuzz.forge
   does not mention (so the combination fuzzer would never build with it);
-- a line that tests a pass switch (`if`/`elif`/`while` naming `fs_ra`, `fs_live` or `fs_temps`) calls, or its
+- a line that tests a pass switch (`if`/`elif`/`while` naming `fs_ra`, `fs_live`, `fs_temps` or, since the -O0
+  commit, `fs_elide`) calls, or its
   block calls, an `fs_*` function that is in no optcov pass group (so its blocks would never be counted).
 
 `--src FILE` points it at another compiler source; a copy with a planted `fs_newpass(s0)` under `if fs_temps:`
@@ -182,10 +183,12 @@ blocks never hit (compiler.forge line: header):
   new targeted programs are how they get covered. Part (c) settled every one of them (above).
 - The only `fs_cdiv_try` block never hit is its "not a division" early return: callers already filter for `/`,
   `//` and `%`.
-- Finding: `-O0` changes nothing in freestanding mode. The fs backend ignores `opt_on` (it only drives the hosted
-  optimizer), so `forgec x.forge out.s -O0` gives byte-identical assembly to the default build for every
+- Finding (fixed 2026-11-13, "fix(fs): -O0 turns off bounds-check elision"): `-O0` changed nothing in freestanding
+  mode. The fs backend ignored `opt_on` (it only drives the hosted optimizer), so `forgec x.forge out.s -O0` gives byte-identical assembly to the default build for every
   freestanding program (checked on the kernel). Half of the eight fsfuzz builds per program were therefore
   duplicates, and run_tests.sh's `FORGEC_FLAGS=-O0` pass does not exercise a different code generator for the
-  kernel or user programs. The combination fuzzer counts distinct assemblies instead of builds.
+  kernel or user programs. The combination fuzzer counts distinct assemblies instead of builds. Now `-O0` turns off
+  the only default-on fs optimization, bounds-check elision (constant indices and `fs_bsafe` loop facts), so every
+  check is kept; the opt-in `--fs-*` passes still run when named (see docs/SYSTEMS.md, "Optimization levels").
 - Not covered by this tool yet: the hosted optimizer (constant folding, inlining, tail calls, typed ints), which
   the fs passes do not share.
