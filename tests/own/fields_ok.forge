@@ -1,0 +1,41 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Queue:
+    count: u64
+    head: own[Node]
+    tail: own[Node]
+cell1: Node
+cell2: Node
+@unsafe
+def node1() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell1)))
+@unsafe
+def node2() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell2)))
+def peek(r: ref[Node]) -> u64:
+    return r.id
+def bump(r: mut[Node]):
+    r.id = r.id + 1
+def main() -> u64:
+    q: Queue
+    q.count = 1
+    q.head = node1()
+    q.tail = node2()
+    q.head.id = 5
+    q.tail.id = 7
+    bump(borrow_mut(q.head))
+    bump(borrow_mut(q.tail))
+    if peek(borrow(q.head)) == 6 and peek(borrow(q.tail)) == 8:
+        puts("borrow fields ok\n")
+    if 1 == 1:
+        a: mut[Node] = borrow_mut(q.head)
+        b: mut[Node] = borrow_mut(q.tail)
+        bump(a)
+        bump(b)
+    first = q.head
+    q.head = first
+    if q.count == 1:
+        puts("own fields ok\n")
+    return 0

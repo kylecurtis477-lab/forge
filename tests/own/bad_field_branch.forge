@@ -1,0 +1,24 @@
+# expect: use of moved value `q.head`
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Queue:
+    head: own[Node]
+    tail: own[Node]
+cell: Node
+@unsafe
+def make() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell)))
+def use(x: own[Node]) -> u64:
+    return x.id
+def peek(x: ref[Node]) -> u64:
+    return x.id
+def bump(x: mut[Node]):
+    x.id = x.id + 1
+def main() -> u64:
+    q: Queue
+    q.head = make()
+    if 1 == 1:
+        a = use(q.head)
+    return use(q.head)

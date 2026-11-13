@@ -1,4 +1,4 @@
-# expect: own/ref/mut field access requires field borrow and move tracking
+# expect: own field read through a pointer or nonlocal is not tracked
 # forge: no-runtime
 struct Node:
     value: u64

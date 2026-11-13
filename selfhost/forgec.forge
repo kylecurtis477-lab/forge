@@ -5367,6 +5367,8 @@ def reg_func(p, c):
         t = 0
         if is_op(":"):
             pos += 1
+            if tok_is_id(pos, "own") or tok_is_id(pos, "ref") or tok_is_id(pos, "mut"):
+                die(tl[pos], "own/ref/mut are freestanding-only (add the no-runtime header)")
             t = parse_type()
         pdef[npall] = -1
         if is_op("="):
@@ -15631,6 +15633,10 @@ fsl_dead = list(4096)
 fs_tb = list(4096)
 fs_tbk = list(4096)
 fs_bpk = 0
+# Stage 2: field states are synthetic local slots, one per direct own[T] field.
+# fsl_mv == -1 means uninitialised, 0 live, positive source line moved.
+fs_fwriting = 0
+fs_fslot = -1
 nfstb = 0
 fs_argd = 0
 # SysV argument layout of the current call/prologue: fs_wd[w] is the destination of argument word w
@@ -16290,8 +16296,32 @@ def fs_local(nm):
         i -= 1
     return -1
 
+def fs_ownerfield(t):
+# Detect direct and transitive owner fields; arrays/slices containing such structs are refused.
+    if fsk[t] == 3 or fsk[t] == 5:
+        return fs_ownerfield(ftel[t])
+    if fsk[t] != 2:
+        return 0
+    i = ftf0[t]
+    while i < ftf0[t] + ftfn[t]:
+        if (ft_isaff(fft[i]) and ftsg[fft[i]] == 2) or fs_ownerfield(fft[i]):
+            return 1
+        i += 1
+    return 0
+
+def fs_flocal(l, k):
+    nm = c3(fsl_n[l], ".", ffn[k])
+    i = l + 1
+    while i < nfsl:
+        if str_eq(fsl_n[i], nm):
+            return i
+        i += 1
+    return -1
+
 def fs_newlocal(nm, t):
     global nfsl, fs_frame, nfsx
+    if (fsk[t] == 3 or fsk[t] == 5) and fs_ownerfield(t):
+        fs_die("arrays/slices containing own fields need per-element initialisation")
     a = ftal[t]
     if a < 8:
         a = 8
@@ -16318,8 +16348,27 @@ def fs_newlocal(nm, t):
         if ftsz[t] <= 8 and fsk[t] != 2 and fsk[t] != 3 and fsk[t] != 5:
             fsx_k[nfsx] = 1
         nfsx += 1
+    root = nfsl
     nfsl += 1
-    return nfsl - 1
+    # Only direct owner fields are supported. Synthetic slots never shadow source identifiers.
+    if fsk[t] == 2 and fs_ownerfield(t) and len(nm) > 0:
+        j = ftf0[t]
+        while j < ftf0[t] + ftfn[t]:
+            if ft_isaff(fft[j]) and ftsg[fft[j]] == 2:
+                z = nfsl
+                nfsl += 1
+                fsl_n[z] = c3(nm, ".", ffn[j])
+                fsl_t[z] = fft[j]
+                fsl_o[z] = fsl_o[root] + ffo[j]
+                fsl_mv[z] = -1
+                fsl_bf[z] = -1
+                fsl_bk[z] = 0
+                fsl_sh[z] = 0
+                fsl_mu[z] = 0
+                fsl_bl[z] = 0
+                fsl_dead[z] = 0
+            j += 1
+    return root
 
 def fs_func(nm):
     i = 0
@@ -16624,7 +16673,7 @@ def fs_mvloop(e0):
     n = e0[len(e0) - 1]
     i = 0
     while i < n:
-        if fsl_mv[i] and not e0[i]:
+        if fsl_mv[i] > 0 and e0[i] == 0:
             fs_die(c3(fs_lname(i), " is moved inside a loop (moved at ", concat(fs_where(fsl_mv[i]), "); it would be used again on the next iteration")))
         i += 1
 
@@ -16712,6 +16761,8 @@ def fs_args(maxn, ptys):
         if ptys >= 0 and pi < fsf_np[ptys] and fsf_ext[ptys] and fsk[fs_ety] == 1 and fsk[fsp_t[fsf_p0[ptys] + pi]] == 0:
             fs_die("a pointer passed to C keeps its provenance: declare the extern parameter ptr[T] or nptr[T], not an integer")
         if ptys >= 0 and pi < fsf_np[ptys]:
+            if fs_ownerfield(fsp_t[fsf_p0[ptys] + pi]):
+                fs_die("by-value owner-bearing struct arguments are not supported")
             fs_conv(fsp_t[fsf_p0[ptys] + pi])
             sl = fsk[fsp_t[fsf_p0[ptys] + pi]] == 5
         st = ptys >= 0 and pi < fsf_np[ptys] and fsk[fsp_t[fsf_p0[ptys] + pi]] == 2
@@ -17513,11 +17564,23 @@ def fs_borrow(k):
     x = -1
     if tk[fp] == K_ID:
         x = fs_local(tv[fp])
+    fld = -1
+    if x >= 0 and fs_isop2(fp + 1, ".") and tk[fp + 2] == K_ID and fs_isop2(fp + 3, ")"):
+        if fsk[fsl_t[x]] != 2:
+            fs_die("field borrowing requires a local struct")
+        j = fs_field(fsl_t[x], tv[fp + 2])
+        fld = fs_flocal(x, j)
+        if fld < 0:
+            fs_die("field borrowing requires a direct own[T] field")
+        x = fld
+        fp += 2
     if x < 0 or not fs_isop2(fp + 1, ")") or not (ftsg[fsl_t[x]] == 2 or (k == 1 and ftsg[fsl_t[x]] == 4)) or fsk[fsl_t[x]] != 1:
-        fs_die("borrow()/borrow_mut() take a local own[T] variable (borrow() also takes a mut[T])")
+        fs_die("borrow()/borrow_mut() take a local own[T] variable or direct own[T] field")
     fp += 1
     if fsl_dead[x]:
         fs_die(concat(fs_lname(x), " is a borrow whose block has ended"))
+    if fsl_mv[x] == -1:
+        fs_die(concat("use of uninitialised field ", fs_lname(x)))
     if fsl_mv[x]:
         fs_die(c4("borrow of moved value ", fs_lname(x), " (moved at ", concat(fs_where(fsl_mv[x]), ")")))
     if fsl_mu[x] > 0:
@@ -17932,6 +17995,8 @@ def fs_primary():
         return 0
     l = fs_local(nm)
     if l >= 0:
+        if fs_ownerfield(fsl_t[l]) and not fs_isop("."):
+            fs_die("by-value owner-bearing struct use is not supported")
         fs_lchk(l, lh)
         fs_mode = 2
         fs_moff = fsl_o[l]
@@ -18078,7 +18143,7 @@ def fs_asgop(o):
     return str_eq(o, "=") or str_eq(o, "+=") or str_eq(o, "-=") or str_eq(o, "*=") or str_eq(o, "//=") or str_eq(o, "%=") or str_eq(o, "|=") or str_eq(o, "^=") or str_eq(o, "<<=") or str_eq(o, ">>=") or str_eq(o, "/=") or str_eq(o, ":") or str_eq(o, "&=")
 
 def fs_postfix():
-    global fp, fs_ety, fs_mode, fs_nbe, fs_lastnm
+    global fp, fs_ety, fs_mode, fs_nbe, fs_lastnm, fs_fslot
     base = ""
     if tk[fp] == K_ID:
         base = tv[fp]
@@ -18145,10 +18210,30 @@ def fs_postfix():
             else:
                 fs_die("field access needs a struct or pointer to struct")
             k = fs_field(t, fs_ident())
-            # own-fields Stage 1: an owned field is not a plain pointer value; until per-field move and lifetime
-            # state exists it is never loaded, stored or borrowed (so no copy through a larger expression or call)
             if ft_isaff(fft[k]):
-                fs_die("own/ref/mut field access requires field borrow and move tracking")
+                if len(base) == 0 or fs_local(base) < 0 or fsk[fsl_t[fs_local(base)]] != 2:
+                    fs_die("own field read through a pointer or nonlocal is not tracked")
+                z = fs_flocal(fs_local(base), k)
+                if z < 0:
+                    fs_die("nested owner field access is not supported")
+                if fs_fwriting and not fs_isop("."):
+                    if fsl_mu[z] > 0 or fsl_sh[z] > 0:
+                        fs_die(concat("cannot assign to borrowed field ", fs_lname(z)))
+                    if fsl_mv[z] == 0:
+                        msg = " would leak the own[T] it holds: move or free it first"
+                        fs_die(c3("assigning to ", fs_lname(z), msg))
+                    fs_fslot = z
+                else:
+                    if fsl_mv[z] == -1:
+                        fs_die(concat("use of uninitialised field ", fs_lname(z)))
+                    if fsl_mv[z] > 0:
+                        fs_die(c4("use of moved value ", fs_lname(z), " (moved at ", concat(fs_where(fsl_mv[z]), ")")))
+                    if fs_isop("."):
+                        if fsl_mu[z] > 0 or (fs_fwriting and fsl_sh[z] > 0):
+                            fs_die(concat("field is borrowed ", fs_lname(z)))
+                    else:
+                        fs_lchk(z, 0)
+            base = ""
             if ffo[k] != 0:
                 e(c3("add $", str(ffo[k]), ",%rax"))
             fs_mode = 1
@@ -18811,7 +18896,7 @@ def fs_assign_at():
 
 def fs_lhs_store(vt):
 # value in rax (type vt); compile target at fp (before '=') and store
-    global fp, fs_ety, fs_lhs, fs_lhsl
+    global fp, fs_ety, fs_lhs, fs_lhsl, fs_fwriting, fs_fslot
     if tk[fp] == K_ID and tk[fp + 1] == K_OP and str_eq(tv[fp + 1], "=") and fs_local(tv[fp]) < 0 and fs_glob(tv[fp]) < 0:
         if fs_const(tv[fp]) >= 0:
             fs_die("cannot assign to a constant")
@@ -18832,7 +18917,10 @@ def fs_lhs_store(vt):
     fs_lhs = tk[fp] == K_ID and fs_isop2(fp + 1, "=")
     fs_lhsl = -1
     p0 = fp
+    fs_fwriting = 1
+    fs_fslot = -1
     fs_postfix()
+    fs_fwriting = 0
     fs_lhs = 0
     bare = fp == p0 + 1
     fs_wstore(p0, bare)
@@ -18849,6 +18937,9 @@ def fs_lhs_store(vt):
     fs_ety = vt
     fs_conv(t)
     fs_store(t, m)
+    if fs_fslot >= 0:
+        fsl_mv[fs_fslot] = 0
+        fs_fslot = -1
     if bare and tl0 >= 0:
     # assigning a proven non-null value narrows an nptr local; anything else clears it
         fsl_nn[tl0] = ft_isnn(vt)
@@ -18882,6 +18973,8 @@ def fs_stmt1():
             fs_rexpr()
             fs_conv(fs_rty)
             if fsk[fs_rty] == 2:
+                if fs_ownerfield(fs_rty):
+                    fs_die("by-value owner-bearing struct returns are not supported")
             # struct result: copy into the return slot (rax:rdx) or the caller's hidden-pointer buffer
                 e("mov %rax,%rsi")
                 if fs_smem(fs_rty):
@@ -19314,6 +19407,8 @@ def fs_struct_body(t, packed):
             fs_die("ref/mut struct fields need lifetime tracking")
         if ft_elem_aff(ft):
             fs_die("arrays/slices of own/ref/mut struct fields need per-element move tracking")
+        if fsk[ft] == 2 and fs_ownerfield(ft):
+            fs_die("nested owner-bearing structs need recursive field tracking")
         fa = ftal[ft]
         if packed:
             fa = 1
@@ -19371,6 +19466,8 @@ def fs_sig(ext):
     i = 0
     while i < n:
         nr += fs_pwords(fsp_t[fsf_p0[f] + i])
+        if fs_ownerfield(fsp_t[fsf_p0[f] + i]):
+            fs_die("by-value owner-bearing struct parameters are not supported")
         if fsk[fsp_t[fsf_p0[f] + i]] == 6 and fs_bop(fs_datt, 22, 0):
             fs_die("float parameters are not supported with @efiapi / @interrupt")
         if fsk[fsp_t[fsf_p0[f] + i]] == 2 and fs_bop(fs_datt, 22, 0):
@@ -19388,6 +19485,8 @@ def fs_sig(ext):
             fp += 1
         else:
             fsf_ret[f] = fs_type()
+            if fs_ownerfield(fsf_ret[f]):
+                fs_die("by-value owner-bearing struct returns are not supported")
             if fsk[fsf_ret[f]] == 1 and ftsg[fsf_ret[f]] >= 3:
                 fs_die("a function cannot return a borrow (ref[T]/mut[T])")
             if fsk[fsf_ret[f]] == 6 and fs_bop(fs_datt, 22, 0):
@@ -19462,6 +19561,8 @@ def fs_prescan():
             fsg_t[g] = fs_type()
             if ft_isaff(fsg_t[g]):
                 fs_die("globals cannot be own/ref/mut")
+            if fs_ownerfield(fsg_t[g]):
+                fs_die("globals/arrays containing own fields need definite initialisation")
             if ft_isnn(fsg_t[g]) and (not fs_isop("=") or (tk[fp + 1] == K_NUM and tv[fp + 1] == 0)):
                 fs_die("a ptr[T] global needs a non-null initializer (use nptr[T])")
             fsg_al[g] = fs_dal
@@ -19704,6 +19805,8 @@ def fs_function2(f):
     i = 0
     w = 0
     while i < fsf_np[f]:
+        if fs_ownerfield(fsp_t[fsf_p0[f] + i]):
+            fs_die("by-value owner-bearing struct parameters are not supported")
         l = fs_newlocal(fsp_n[fsf_p0[f] + i], fsp_t[fsf_p0[f] + i])
         i += 1
     if fsk[fs_rty] == 2:
