@@ -1,0 +1,6 @@
+# expect: arrays/slices of own/ref/mut struct fields need per-element move tracking
+# forge: no-runtime
+struct Node:
+    value: u64
+struct Queue:
+    slots: slice[own[Node]]

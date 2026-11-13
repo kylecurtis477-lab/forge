@@ -16005,6 +16005,15 @@ def ft_bptr(t, sg):
 def ft_isaff(t):
     return fsk[t] == 1 and ftsg[t] >= 2
 
+def ft_elem_aff(t):
+# an array or slice (at any depth) whose element is own/ref/mut: not affine itself, but indexing it yields owner
+# values that nothing tracks, so it is refused as a struct field (q.a[i] would copy an owner out)
+    while fsk[t] == 3 or fsk[t] == 5:
+        t = ftel[t]
+        if ft_isaff(t):
+            return 1
+    return 0
+
 def fs_isbname(nm):
     return str_eq(nm, "own") or str_eq(nm, "ref") or str_eq(nm, "mut")
 
@@ -19297,6 +19306,8 @@ def fs_struct_body(t, packed):
         ft = fs_type()
         if ft_isaff(ft):
             fs_die("struct fields cannot be own/ref/mut yet")
+        if ft_elem_aff(ft):
+            fs_die("arrays/slices of own/ref/mut struct fields need per-element move tracking")
         fa = ftal[ft]
         if packed:
             fa = 1
