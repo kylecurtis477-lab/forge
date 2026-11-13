@@ -1,5 +1,13 @@
 # fsfuzz: differential fuzzer for the freestanding backend's --fs-opt (Phase 12.1).
-# usage: build/fsfuzz [--seed N] [--n COUNT] [--keep]
+# usage: build/fsfuzz [--seed N] [--n COUNT] [--keep] [--combos]
+# --combos (build-plan item 3, optimizer correctness gate): instead of the eight fixed builds, build every
+# program under every combination of the optimizer and code-generation switches: none / --fs-opt / --fs-live /
+# --fs-temps and the redundant spellings --fs-opt --fs-live, --fs-live --fs-temps, --fs-opt --fs-live --fs-temps
+# (7), times -O0 or not, --no-bounds or not, -g or not (56 flag sets), times two sources: the program as
+# generated and the same program with `# forge: stack-protector` (canary in every frame with an array): 112
+# builds. Builds whose assembly is byte-identical to an earlier build of the same source are not run again;
+# every distinct assembly is linked and run and must print the same output and exit code as the plain default
+# build. The summary counts distinct code generations per program.
 # Generates COUNT random, well-typed, deterministic freestanding programs (build/fsfuzz/pK.forge) and builds
 # each eight ways with build/forgec + build/fas + build/fld: default (O2), -O0, --fs-opt, -O0 --fs-opt, the
 # step 4b liveness-based allocation --fs-live and -O0 --fs-live, and step 4c --fs-temps and -O0 --fs-temps.
@@ -234,8 +242,110 @@ def opt(name, dflt):
         i += 1
     return dflt
 
+COPT = [[], ["--fs-opt"], ["--fs-live"], ["--fs-temps"], ["--fs-opt", "--fs-live"], ["--fs-live", "--fs-temps"], ["--fs-opt", "--fs-live", "--fs-temps"]]
+
+def combo_flags():
+# the 56 flag sets of --combos: COPT x {O2, -O0} x {bounds, --no-bounds} x {no debug info, -g}
+    res = []
+    for o in COPT:
+        for lvl in [[], ["-O0"]]:
+            for nb in [[], ["--no-bounds"]]:
+                for g in [[], ["-g"]]:
+                    res.append(lvl + o + nb + g)
+    return res
+
+def sp_variant(src):
+# the same program with the stack protector on: the pragma, the canary word and the handler it calls
+    s = src.replace("no-runtime\n", "no-runtime\n# forge" + ": stack-protector\n")
+    h = "\nstack_canary: u64 = 6148914691236517120\n\ndef stack_smashed():\n    puts(\"stack smashed\")\n    nl()\n    sys3(60, 99, 0, 0)\n"
+    return s.replace("include \"linux.fsi\"\n", "include \"linux.fsi\"\n" + h)
+
+def combo_one(d, name, flags, keep):
+# build program name under every flag set; [bad, distinct, report lines]
+    seen = {}
+    ref = ""
+    distinct = 0
+    bad = 0
+    rep = []
+    k = 0
+    while k < len(flags):
+        cfg = flags[k]
+        tag = "c" + str(k)
+        s = d + "/" + name + "." + tag + ".s"
+        r = os.run(["build/forgec", d + "/" + name + ".forge", s] + cfg)
+        if r[0] != 0:
+            bad += 1
+            rep.append("  [" + " ".join(cfg) + "]: compile failed: " + r[1].strip()[:200])
+            k += 1
+            continue
+        asm = read_file(s)
+        if asm in seen:
+            os.remove(s)
+            k += 1
+            continue
+        seen[asm] = k
+        distinct += 1
+        o = d + "/" + name + "." + tag + ".o"
+        b = d + "/" + name + "." + tag
+        res = ""
+        if os.run(["build/fas", "-o", o, s])[0] != 0:
+            res = "fas failed"
+        elif os.run(["build/fld", "-o", b, o])[0] != 0:
+            res = "fld failed"
+        else:
+            r = os.run(["/usr/bin/timeout", "10", b])
+            if r[0] == 124:
+                res = "timed out after 10 s"
+            else:
+                res = "exit " + str(r[0]) + " | " + r[1].replace("\n", " ")
+        if k == 0:
+            ref = res
+        if res != ref or not res.startswith("exit "):
+            bad += 1
+            rep.append("  [" + " ".join(cfg) + "]: " + res[:300])
+        elif not keep:
+            for f in [s, o, b]:
+                if os.path.exists(f):
+                    os.remove(f)
+        k += 1
+    if bad:
+        rep.insert(0, "  reference [default]: " + ref[:300])
+    return [bad, distinct, rep]
+
+def combos_main(s0, n, keep):
+    seed[0] = s0
+    d = "build/fsfuzz"
+    if not os.path.isdir(d):
+        os.mkdir(d)
+    write_file(d + "/linux.fsi", read_file("tests/fs/linux.fsi"))
+    flags = combo_flags()
+    bad = 0
+    builds = 0
+    distinct = 0
+    i = 0
+    while i < n:
+        src = gen_prog()
+        for v in [["p", src], ["sp", sp_variant(src)]]:
+            name = v[0] + str(i)
+            write_file(d + "/" + name + ".forge", v[1])
+            r = combo_one(d, name, flags, keep)
+            builds += len(flags)
+            distinct += r[1]
+            if r[0]:
+                bad += 1
+                print("FAIL fsfuzz --combos seed " + str(s0) + " program " + str(i) + " (" + d + "/" + name + ".forge): " + str(r[0]) + " of " + str(len(flags)) + " builds differ or fail")
+                for l in r[2]:
+                    print(l)
+        i += 1
+    print("fsfuzz --combos: seed " + str(s0) + ", " + str(n) + " programs x 2 sources (plain, stack-protector) x " + str(len(flags)) + " flag sets = " + str(builds) + " builds, " + str(distinct) + " distinct assemblies run: " + str(2 * n - bad) + " agree, " + str(bad) + " differ")
+    if bad:
+        sys.exit(1)
+    sys.exit(0)
+
 def main():
     s0 = int(opt("--seed", "1"))
+    if "--combos" in sys.argv:
+        combos_main(s0, int(opt("--n", "50")), "--keep" in sys.argv)
     n = int(opt("--n", "50"))
     keep = "--keep" in sys.argv
     seed[0] = s0

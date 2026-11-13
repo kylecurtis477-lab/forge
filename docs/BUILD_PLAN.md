@@ -150,6 +150,12 @@ count stays at or under 709.
      (docs/tools-optcov.md, mostly defensive bail-outs). Finding: `-O0` changes nothing in freestanding mode (the fs
      backend ignores opt_on), so half of fsfuzz's eight builds were duplicates and the O0 test pass does not run a
      different code generator for kernel and user code. run_tests.sh `optimizer-coverage` runs the quick form.
+   - *Status (b), every flag combination: done (2026-11-13).* `fsfuzz --combos` builds each random program under
+     all 56 combinations of the optimizer level (7 spellings, redundant ones included), -O0, --no-bounds and -g,
+     from the plain source and a stack-protector variant (112 builds), runs every distinct assembly and requires
+     identical output. Seeds 1-3 x 25 programs: no miscompile found. A planted miscompile is caught. run_tests.sh
+     `fs-opt-combos` runs 2 programs (224 builds). Next for item 3: targeted programs for the never-hit blocks
+     listed by optcov, then the rule that a new optimizer pass lands only with both checks green.
 4. **SSA backend (12.1 step 4), gated by item 3**: a real SSA IR for fs/kernel mode with liveness-based register
    allocation (Phase 12 item 1), in safe steps that are byte-identical for code built without the new flag.
    Steps 4b (`--fs-live`) and 4c (`--fs-temps`) are done and the kernel is built with both.

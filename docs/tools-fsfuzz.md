@@ -3,7 +3,7 @@
 Differential fuzzer for the freestanding backend's `--fs-opt` pass (Phase 12.1). It is the gate before any further
 step 4 work on the register allocator.
 
-    fsfuzz [--seed N] [--n COUNT] [--keep]       (defaults: seed 1, 20 programs)
+    fsfuzz [--seed N] [--n COUNT] [--keep] [--combos]       (defaults: seed 1, 20 programs; 50 with --combos)
 
 ## What it checks
 
@@ -26,6 +26,37 @@ difference (or a build failure) counts as a diff and prints the eight results, t
 
 It ends with `fsfuzz: seed N, COUNT programs (L lines), 8 builds each (...): A agree, D differ` and exits 1 when D > 0.
 Without `--keep` it deletes each program's .s, .o and binaries after the comparison.
+
+## --combos: every optimizer flag combination (build-plan item 3, part b)
+
+With `--combos` each program is built under every combination of the switches that change freestanding code
+generation, instead of the eight fixed builds:
+
+- optimizer level, 7 spellings: none, `--fs-opt`, `--fs-live`, `--fs-temps`, and the redundant `--fs-opt --fs-live`,
+  `--fs-live --fs-temps`, `--fs-opt --fs-live --fs-temps` (each flag implies the ones before it, so the redundant
+  spellings must give the same code);
+- `-O0` or not;
+- `--no-bounds` or not (bounds checks removed, so `fs_bsafe` elision and the check code both change);
+- `-g` or not (debug line info; `.loc` lines sit between the instructions the peepholes and the allocator match).
+
+That is 56 flag sets. Each program is also built from a second source, the same program with
+`# forge: stack-protector` plus a `stack_canary` word and a `stack_smashed` handler, so every frame that holds an
+array gets a canary store in the prologue and a check before `leave` (code the allocator must work around):
+112 builds per program. A build whose assembly is byte-identical to an earlier build of the same source is not
+assembled or run again; every distinct assembly is linked, run under `timeout 10`, and must print the same output
+and exit code as the plain default build of that source. Any difference, or a build that fails, prints the flag
+set and its result and fails the run. The summary is
+
+    fsfuzz --combos: seed S, N programs x 2 sources (plain, stack-protector) x 56 flag sets = B builds, D distinct assemblies run: A agree, F differ
+
+Results on 2026-11-13, 25 programs per seed (2800 builds each): seed 1 ran 744 distinct assemblies, seed 2 760 and
+seed 3 748 (about 15 per source); all agreed. `-O0` never produced a distinct
+assembly (see docs/tools-optcov.md), and neither did the redundant spellings. A deliberately broken compiler
+(a wrapper that turns the first `imul` into `add` when `--fs-live` and `-g` are both given) is caught on the first
+program, with the three affected flag sets listed.
+
+run_tests.sh runs a bounded form, `build/fsfuzz-tool --combos --seed 7 --n 2` (`PASS fs-opt-combos`, 224 builds,
+about 20 s).
 
 ## The programs
 
