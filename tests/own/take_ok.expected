@@ -1,0 +1,5 @@
+15234 take/swap/replace on locals
+1567 swap/take/replace on local struct fields
+76 replace/take through mut[T]
+3 replace own field through own[T]
+289 nown fields through own[T]: replace, field swap, pointer/local swap

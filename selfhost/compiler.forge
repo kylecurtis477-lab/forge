@@ -15650,6 +15650,15 @@ fs_fwriting = 0
 fs_fslot = -1
 # set by fs_postfix: the place just compiled was reached through a ref[T] (read by addr())
 fs_viaref = 0
+# Stage 3c: the take/replace/swap operand fs_place resolved: kind 1 a frame slot (an own/nown local or a Stage 2
+# field slot; fs_pll is its state local), kind 2 an owner field through the local pointer fs_plr (fs_ploff bytes
+# into its pointee); fs_plo is the frame offset of the slot or of the pointer, fs_plt the owner type
+fs_plk = 0
+fs_plr = -1
+fs_pll = -1
+fs_plo = 0
+fs_ploff = 0
+fs_plt = 0
 nfstb = 0
 fs_argd = 0
 # SysV argument layout of the current call/prologue: fs_wd[w] is the destination of argument word w
@@ -16646,7 +16655,10 @@ def fs_lchk(l, lh):
         fsl_mv[l] = 0
         return 0
     if fsl_mv[l] and fsl_mv[l] != -2:
-        fs_die(c4("use of moved value ", fs_lname(l), " (moved at ", concat(fs_where(fsl_mv[l]), ")")))
+        hint = ""
+        if ftsg[t] == 5:
+            hint = c3("; take(", fsl_n[l], ") moves a nown[T] out and leaves it none")
+        fs_die(c4("use of moved value ", fs_lname(l), " (moved at ", c3(fs_where(fsl_mv[l]), ")", hint)))
     if not whole:
         return 0
     if ftsg[t] == 5 and fs_nowncmp(fp):
@@ -17670,6 +17682,205 @@ def fs_borrow(k):
         fs_bpk = k
     return 1
 
+def fs_plmsg():
+    return "take()/replace()/swap() need a named place: an own/nown local, a direct own/nown field of a local struct, or an own/nown field through a local own[T]/mut[T] pointer"
+
+def fs_place(p, nm):
+# Stage 3c: resolve the take/replace/swap operand at token p as a place (no code, no state change): a name or
+# `name.field`, ending at `,` or `)`. Anything else (a call, an index, an operator, parentheses, a global) is a
+# value, not a place. Returns the token after the place; sets fs_plk/fs_plr/fs_pll/fs_plo/fs_ploff/fs_plt.
+    global fs_plk, fs_plr, fs_pll, fs_plo, fs_ploff, fs_plt
+    q = p + 1
+    while fs_isop2(q, ".") and tk[q + 1] == K_ID:
+        q += 2
+    if tk[p] != K_ID or not (fs_isop2(q, ",") or fs_isop2(q, ")")):
+        fs_die(fs_plmsg())
+    r = fs_local(tv[p])
+    if r < 0:
+        fs_die(fs_plmsg())
+    t = fsl_t[r]
+    fs_plr = r
+    fs_ploff = 0
+    if q == p + 1:
+        if not ft_isowner(t):
+            fs_die(c4(nm, "() needs an own[T] or nown[T] place, not ", fs_lname(r), ""))
+        fs_plk = 1
+        fs_pll = r
+        fs_plo = fsl_o[r]
+        fs_plt = t
+        return q
+    if fsk[t] == 2:
+    # a local struct: only its direct owner fields have Stage 2 state slots
+        k = fs_field(t, tv[p + 2])
+        if q != p + 3 or not ft_isowner(fft[k]):
+            fs_die(c3(nm, "() on a local struct needs one of its direct own[T]/nown[T] fields (", c3(fsl_n[r], ".", concat(tv[p + 2], ")"))))
+        z = fs_flocal(r, k)
+        if z < 0:
+            fs_die(fs_plmsg())
+        fs_plk = 1
+        fs_pll = z
+        fs_plo = fsl_o[z]
+        fs_plt = fft[k]
+        return q
+    if fsk[t] != 1:
+        fs_die(fs_plmsg())
+    sg = ftsg[t]
+    if sg == 3:
+        fs_die(c4("cannot ", nm, "() through ", concat(fs_lname(r), ": a ref[T] is a shared borrow (use borrow_mut / mut[T])")))
+    if sg < 2:
+        fs_die(c3("cannot ", nm, "() through a raw ptr[T]/nptr[T], even in unsafe code: convert the pointer to own/mut[T] first"))
+    if sg == 5 and not fsl_nn[r]:
+        fs_die("nown[T] may be none: check it (if o != 0:) before a field access")
+    # owner-bearing structs never nest (fs_type refuses them), so the place is one field of the pointee
+    st = ftel[t]
+    if q != p + 3 or fsk[st] != 2:
+        fs_die(fs_plmsg())
+    k = fs_field(st, tv[p + 2])
+    fs_ploff = ffo[k]
+    st = fft[k]
+    if not ft_isowner(st):
+        fs_die(c4(nm, "() needs an own[T] or nown[T] place, not the field ", c3(fsl_n[r], ".", tv[p + 2]), ""))
+    fs_plk = 2
+    fs_pll = -1
+    fs_plo = fsl_o[r]
+    fs_plt = st
+    return q
+
+def fs_plchk(nm):
+# the place fs_place resolved may be used now: its root is not dead, moved or borrowed, and a frame slot holds a
+# live owner (own) or a live/none one (nown)
+    r = fs_plr
+    if fsl_dead[r]:
+        fs_die(concat(fs_lname(r), " is a borrow whose block has ended"))
+    if fsl_mu[r] > 0:
+        fs_die(c3(fs_lname(r), " is mutably borrowed (at ", concat(fs_where(fsl_bl[r]), "): use the borrow until its block ends")))
+    if fs_plk == 2:
+        if fsl_sh[r] > 0:
+            fs_die(c4("cannot ", nm, "() through ", c3(fs_lname(r), " while it is borrowed (at ", concat(fs_where(fsl_bl[r]), ")"))))
+        if fsl_mv[r] > 0:
+            fs_die(c4("use of moved value ", fs_lname(r), " (moved at ", concat(fs_where(fsl_mv[r]), ")")))
+        return 0
+    x = fs_pll
+    if fsl_mu[x] > 0 or fsl_sh[x] > 0:
+        fs_die(c4("cannot ", nm, "() ", c3(fs_lname(x), " while it is borrowed (at ", concat(fs_where(fsl_bl[x]), ")"))))
+    if fsl_mv[x] == -1:
+        fs_die(c4(nm, "() needs a live owner in ", fs_lname(x), ": it is uninitialised (assign it with = instead)"))
+    if fsl_mv[x] > 0:
+        fs_die(c4("use of moved value ", fs_lname(x), " (moved at ", c3(fs_where(fsl_mv[x]), "): ", concat(nm, "() needs an initialised place"))))
+    return 0
+
+def fs_plld(r):
+# load the resolved place into register r (a pointer place uses %rcx for its base)
+    if fs_plk == 1:
+        e(c4("mov ", str(fs_plo), "(%rbp),", r))
+        return 0
+    e(c3("mov ", str(fs_plo), "(%rbp),%rcx"))
+    if fs_ploff == 0:
+        e(concat("mov (%rcx),", r))
+    else:
+        e(c4("mov ", str(fs_ploff), "(%rcx),", r))
+
+def fs_plst(r):
+# store register r (not %rcx) into the resolved place
+    if fs_plk == 1:
+        e(c4("mov ", r, ",", concat(str(fs_plo), "(%rbp)")))
+        return 0
+    e(c3("mov ", str(fs_plo), "(%rbp),%rcx"))
+    if fs_ploff == 0:
+        e(c3("mov ", r, ",(%rcx)"))
+    else:
+        e(c4("mov ", r, ",", concat(str(fs_ploff), "(%rcx)")))
+
+def fs_xfer(nm):
+# Stage 3c intrinsics on places (fs_place), never on values, so no owner is copied: take(place) -> nown[T] leaves
+# the place none; replace(place, v) stores v and returns the old owner (type of the place); swap(a, b) exchanges
+# two distinct places of one owner type. Frame-slot states follow (take: none; replace: live; swap: exchanged).
+    global fp, fs_ety, fs_mode
+    fp += 1
+    p0 = fp
+    if str_eq(nm, "take"):
+        fp = fs_place(p0, nm)
+        fs_expect(")")
+        if not ft_isnown(fs_plt):
+            fs_die("take() needs a nown[T] place: an own[T] is never empty (use replace(place, v))")
+        fs_plchk(nm)
+        fs_plld("%rax")
+        e("xor %edx,%edx")
+        fs_plst("%rdx")
+        if fs_pll >= 0:
+            fsl_mv[fs_pll] = -2
+            fsl_nn[fs_pll] = 0
+        fs_ety = fs_plt
+        fs_mode = 0
+        return 1
+    if str_eq(nm, "replace"):
+        q = fs_place(p0, nm)
+        if not fs_isop2(q, ","):
+            fs_die("replace(place, v) takes a place and a value")
+        t = fs_plt
+        fp = q + 1
+        fs_rexpr()
+        z0 = fs_ety == FT_LIT and fs_lastimm == 0
+        fs_conv(t)
+        fs_expect(")")
+        e("mov %rax,%rdx")
+        # resolve again: evaluating v may have moved or borrowed the place or its root (replace(o, o))
+        fs_place(p0, nm)
+        fs_plchk(nm)
+        fs_plld("%rax")
+        fs_plst("%rdx")
+        if fs_pll >= 0:
+        # replace(o, 0) leaves the place none, like take(o)
+            fsl_mv[fs_pll] = 0
+            if z0:
+                fsl_mv[fs_pll] = -2
+            fsl_nn[fs_pll] = 0
+        fs_ety = t
+        fs_mode = 0
+        return 1
+    qa = fs_place(p0, nm)
+    if not fs_isop2(qa, ","):
+        fs_die("swap(a, b) takes two places")
+    ka = fs_plk
+    ra = fs_plr
+    la = fs_pll
+    oa = fs_ploff
+    ta = fs_plt
+    fp = fs_place(qa + 1, nm)
+    fs_expect(")")
+    if fs_plt != ta:
+        fs_die("swap(a, b) needs two places of the same owner type")
+    # distinct places: different root locals never alias (an own[T] is unique, a mut[T] excludes every other use
+    # of what it borrows, ref roots are refused); under one root, different fields are different words
+    if ka == fs_plk and ra == fs_plr and la == fs_pll and oa == fs_ploff:
+        fs_die("swap(a, b) needs two different places: both name the same one")
+    lb = fs_pll
+    fs_plchk(nm)
+    fs_plld("%rdx")
+    fs_place(p0, nm)
+    fs_plchk(nm)
+    fs_plld("%rax")
+    fs_plst("%rdx")
+    fs_place(qa + 1, nm)
+    fs_plst("%rax")
+    # a pointer field's owner is live (own) or unknown (nown): its frame-slot partner becomes live
+    sa = 0
+    sb = 0
+    if la >= 0:
+        sa = fsl_mv[la]
+        fsl_nn[la] = 0
+    if lb >= 0:
+        sb = fsl_mv[lb]
+        fsl_nn[lb] = 0
+    if la >= 0:
+        fsl_mv[la] = sb
+    if lb >= 0:
+        fsl_mv[lb] = sa
+    e("xor %eax,%eax")
+    fs_ety = FT_VOID
+    fs_mode = 0
+    return 1
+
 def fs_intrin(nm):
 # returns 1 if nm( ... ) was compiled as an intrinsic
     global fp, fs_ety, fs_mode, fs_moff, fs_lab, fs_hasasm
@@ -17679,6 +17890,8 @@ def fs_intrin(nm):
         if str_eq(nm, "borrow_mut"):
             return fs_borrow(2)
         return fs_borrow(1)
+    if (str_eq(nm, "take") or str_eq(nm, "replace") or str_eq(nm, "swap")) and fs_func(nm) < 0:
+        return fs_xfer(nm)
     one = ["cli", "sti", "hlt", "pause", "int3", "mfence", "lfence", "sfence", "wbinvd", "ud2", "cpu_relax"]
     k = find(one, 11, nm)
     if k >= 0:
@@ -18221,8 +18434,23 @@ def fs_bodyok(vn, x):
                 return 0
             if fs_isop2(p - 1, "(") and tk[p - 2] == K_ID and str_eq(tv[p - 2], "addr"):
                 return 0
+            if fs_isop2(p - 1, "(") and fs_xname(p - 2):
+                return 0
+            if fs_isop2(p - 1, ","):
+            # swap(a, vn): back over the first place (a name and .field steps) to the call
+                b = p - 2
+                while b >= 2 and fs_isop2(b - 1, ".") and tk[b - 2] == K_ID:
+                    b -= 2
+                if tk[b] == K_ID and fs_isop2(b - 1, "(") and fs_xname(b - 2) and str_eq(tv[b - 2], "swap"):
+                    return 0
         p += 1
     return 1
+
+def fs_xname(p):
+# the token at p names the Stage 3c intrinsic take/replace/swap (no user function by that name)
+    if tk[p] != K_ID or not (str_eq(tv[p], "take") or str_eq(tv[p], "replace") or str_eq(tv[p], "swap")):
+        return 0
+    return fs_func(tv[p]) < 0
 
 def fs_asgop(o):
     return str_eq(o, "=") or str_eq(o, "+=") or str_eq(o, "-=") or str_eq(o, "*=") or str_eq(o, "//=") or str_eq(o, "%=") or str_eq(o, "|=") or str_eq(o, "^=") or str_eq(o, "<<=") or str_eq(o, ">>=") or str_eq(o, "/=") or str_eq(o, ":") or str_eq(o, "&=")
@@ -18358,7 +18586,10 @@ def fs_postfix():
                     if fsl_mv[z] == -1:
                         fs_die(concat("use of uninitialised field ", fs_lname(z)))
                     if fsl_mv[z] > 0:
-                        fs_die(c4("use of moved value ", fs_lname(z), " (moved at ", concat(fs_where(fsl_mv[z]), ")")))
+                        hint = ""
+                        if ft_isnown(fft[k]):
+                            hint = c3("; take(", fsl_n[z], ") moves a nown[T] out and leaves it none")
+                        fs_die(c4("use of moved value ", fs_lname(z), " (moved at ", c3(fs_where(fsl_mv[z]), ")", hint)))
                     if fs_isop(".") or fs_isop("["):
                         if fsl_mu[z] > 0 or (w and fsl_sh[z] > 0):
                             fs_die(concat("field is borrowed ", fs_lname(z)))
@@ -18807,10 +19038,20 @@ def fs_nnzero(q, e):
         return l
     return -1
 
+def fs_hasxfer(p):
+# the logical line from p calls take/replace/swap (it can empty a nown local after a conjunct tested it)
+    while tk[p] != K_NL and tk[p] != K_EOF:
+        if fs_xname(p) and fs_isop2(p + 1, "("):
+            return 1
+        p += 1
+    return 0
+
 def fs_nnscan(p):
 # conjuncts of the condition at p (up to the depth-0 ':') that prove an nptr local non-null -> fs_nnl[0..fs_nnc)
     global fs_nnc
     fs_nnc = 0
+    if fs_hasxfer(p):
+        return 0
     q = p
     d = 0
     while tk[p] != K_NL and tk[p] != K_EOF:
@@ -18834,7 +19075,7 @@ def fs_nnscan(p):
 
 def fs_nulltest(p):
 # condition at p starts with `x == 0` or is `not x` (x an nptr local) -> x's index, else -1
-    if tk[p] != K_ID:
+    if tk[p] != K_ID or fs_hasxfer(p):
         return -1
     if str_eq(tv[p], "not") and fs_isop2(p + 2, ":"):
         return fs_nnpat(p + 1, p + 2)

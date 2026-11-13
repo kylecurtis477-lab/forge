@@ -1,0 +1,41 @@
+# expect: take() needs a nown[T] place: an own[T] is never empty (use replace(place, v))
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Holder:
+    n: u64
+    slot: nown[Node]
+    head: own[Node]
+struct Pair:
+    a: nown[Node]
+    b: nown[Node]
+struct Local:
+    head: own[Node]
+    slot: nown[Node]
+cell: Node
+cell2: Node
+cell3: Node
+hmem: u64[3]
+pmem: u64[2]
+@unsafe
+def make() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell)))
+@unsafe
+def make2() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell2)))
+@unsafe
+def mkh() -> own[Holder]:
+    hmem[2] = u64(addr(cell3))
+    return own[Holder](ptr[Holder](addr(hmem)))
+@unsafe
+def mkp() -> own[Pair]:
+    return own[Pair](ptr[Pair](addr(pmem)))
+def consume(x: own[Node]) -> u64:
+    return x.id
+def drop(x: nown[Node]) -> u64:
+    return 0
+def peek(x: ref[Node]) -> u64:
+    return x.id
+def f(x: own[Node]) -> u64:
+    return drop(take(x))

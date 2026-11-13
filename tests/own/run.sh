@@ -44,6 +44,16 @@ if $FC nown_forms_ok.forge $T/nf.s && ../../build/fas -o $T/nf.o $T/nf.s && ../.
 else
     echo "FAIL own-nown-forms-ok"; fail=1
 fi
+if $FC take_ok.forge $T/tk.s && ../../build/fas -o $T/tk.o $T/tk.s && ../../build/fld -o $T/tk $T/tk.o && $T/tk | diff -q - take_ok.expected >/dev/null; then
+    echo "PASS own-take-ok"
+else
+    echo "FAIL own-take-ok"; fail=1
+fi
+if $FC take_shadow_ok.forge $T/tks.s && ../../build/fas -o $T/tks.o $T/tks.s && ../../build/fld -o $T/tks $T/tks.o && $T/tks | diff -q - take_shadow_ok.expected >/dev/null; then
+    echo "PASS own-take-shadow-ok"
+else
+    echo "FAIL own-take-shadow-ok"; fail=1
+fi
 for f in bad_*.forge; do
     want=$(sed -n 's/^# expect: //p' $f)
     out=$($FC $f $T/x.s 2>&1)

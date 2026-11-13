@@ -1,0 +1,89 @@
+# forge: no-runtime
+# Stage 3c: take(place), replace(place, v) and swap(a, b) on named places. Owners are made once in unsafe code
+# (the raw-to-own conversion); everything after that is safe code. Each line printed is computed from the values.
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Holder:
+    n: u64
+    slot: nown[Node]
+    head: own[Node]
+struct Pair:
+    a: nown[Node]
+    b: nown[Node]
+struct Local:
+    head: own[Node]
+    slot: nown[Node]
+cells: Node[8]
+hmem: u64[3]
+omem: u64[3]
+@unsafe
+def mk(i: u64) -> own[Node]:
+    cells[i].id = i
+    return own[Node](ptr[Node](addr(cells[i])))
+@unsafe
+def make_holder(head: own[Node]) -> own[Holder]:
+# zeroed memory with head filled is a valid Holder: n = 0, slot none, head live
+    hmem[2] = u64(ptr[Node](head))
+    return own[Holder](ptr[Holder](addr(hmem)))
+@unsafe
+def make_outer() -> own[Pair]:
+# zeroed memory is a valid Pair: both nown fields none
+    return own[Pair](ptr[Pair](addr(omem)))
+def consume(n: own[Node]) -> u64:
+    return n.id
+def id_or(o: nown[Node], d: u64) -> u64:
+    if o == 0:
+        return d
+    return consume(o)
+def locals(n1: own[Node], n2: own[Node], n3: own[Node], n4: own[Node]) -> u64:
+    o: nown[Node] = n1
+    a = id_or(take(o), 0)
+    # o is none again after take: a plain store does not leak
+    o = n2
+    p: nown[Node]
+    swap(o, p)
+    b = id_or(take(o), 5)
+    # replace on an own local returns the old owner and keeps the local live
+    x: own[Node] = n3
+    old = replace(x, n4)
+    return a * 10000 + b * 1000 + id_or(p, 0) * 100 + consume(old) * 10 + consume(x)
+def fields(n4: own[Node], n5: own[Node], n6: own[Node]) -> u64:
+    q: Pair
+    q.a = n4
+    swap(q.a, q.b)
+    x = id_or(take(q.a), 1)
+    y = id_or(take(q.b), 0)
+    # both none again: plain stores are fine
+    q.a = 0
+    l: Local
+    l.head = n5
+    # replace on a live own field keeps it live; the old owner fills the (none) nown field
+    l.slot = replace(l.head, n6)
+    return x * 1000 + y * 100 + id_or(take(l.slot), 0) * 10 + consume(l.head)
+def fill(m: mut[Holder], n: own[Node]) -> u64:
+# a nown field through mut[T]: replace stores, the old (none) owner comes back
+    return id_or(replace(m.slot, n), 7)
+def drain(m: mut[Holder]) -> u64:
+    return id_or(take(m.slot), 9)
+def run(h: own[Holder], o: own[Pair]) -> u64:
+    put_u64(fill(borrow_mut(h), mk(6)) * 10 + drain(borrow_mut(h)))
+    puts(" replace/take through mut[T]\n")
+    # an own field through own[T]: replace keeps it live and returns the old owner
+    old = replace(h.head, mk(3))
+    put_u64(consume(old) * 10 + h.head.id)
+    puts(" replace own field through own[T]\n")
+    t = replace(o.a, mk(2))
+    l: nown[Node]
+    swap(o.a, o.b)
+    swap(l, o.b)
+    put_u64(id_or(l, 0) * 100 + id_or(t, 8) * 10 + id_or(take(o.a), 9))
+    puts(" nown fields through own[T]: replace, field swap, pointer/local swap\n")
+    return 0
+@unsafe
+def main() -> u64:
+    put_u64(locals(mk(1), mk(2), mk(3), mk(4)))
+    puts(" take/swap/replace on locals\n")
+    put_u64(fields(mk(5), mk(6), mk(7)))
+    puts(" swap/take/replace on local struct fields\n")
+    return run(make_holder(mk(0)), make_outer())

@@ -220,6 +220,39 @@ count stays at or under 709.
      the two fixes before this commit (Phase 4.4 item 4: pointer arithmetic on own/ref/mut and `p[i]` of an
      owner through a pointer are unsafe operations). Adversarial set: 54 programs (39 must-reject, 15
      must-accept), all as expected.
+   - *Status: Stage 3c done (2026-11-13; designed by ChatGPT in its 3b/3c note, which declined to write the patch;
+     implemented and tested adversarially here, /workspace/chatgpt/stage3c).* `take(place) -> nown[T]` returns the
+     owner and leaves the place none; `replace(place, v)` stores `v` (moved in, converted to the place's type) and
+     returns the old owner with the place's type; `swap(a, b)` exchanges two places of one owner type. They are
+     built-ins only when the program has no function (or generic function) of that name, so user
+     `take`/`replace`/`swap` keep working. The operands are places, parsed by token shape and never through the value
+     path, so nothing is copied: an own/nown local (`take(o)`), a direct own/nown field of a local struct (a Stage 2
+     slot, `q.slot`), or an own/nown field through a local `own[S]`/`mut[S]` (or narrowed `nown[S]`) pointer
+     (`p.slot`, `m.head`). Everything else is refused: a call result, parentheses, an expression, a global, an index
+     (`p[0].slot`), a nested path, any path through `ref[S]` (shared borrow), and raw `ptr`/`nptr` bases even in
+     unsafe code (like 3a). `take` needs a `nown` place (an `own` place is never empty: use `replace`). The root and
+     the slot must not be dead, moved or borrowed (a shared or mutable borrow of the slot, of an own root or of a mut
+     root, including a borrow held for the call the intrinsic is an argument of), and a frame slot must be
+     initialised (`replace`/`swap` on an uninitialised or moved own field is refused: assign it instead). `replace`
+     evaluates `v` first and resolves the place after it, so `replace(o, o)` or `replace(p.slot, f(p))` is a use
+     after move. `swap` proves its places distinct syntactically: different root locals never alias (an `own` is
+     unique, a `mut` excludes every other use of what it borrows, `ref` roots are refused), and under one root
+     different fields are different words; `swap(x, x)` and `swap(p.f, p.f)` are refused. Frame-slot states follow:
+     after `take` (or `replace(o, 0)`) the slot is none (-2), after `replace` live, `swap` exchanges them (a pointer
+     field's partner becomes live). Non-null proofs end: the intrinsics clear `fsl_nn` of a local they change, the
+     loop-entry scan treats `take(o`/`replace(o`/`swap(.., o` as an assignment, and a condition that calls one of
+     them narrows nothing (`if o != 0 and drop(take(o)) == 0:` would otherwise prove a none `o` non-null; found by
+     the adversarial set before commit). Through `own`/`mut` pointers this closes the 3b-min gap: owners are moved
+     out of and stored into pointer fields only by these operations, so an own field behind a pointer is never left
+     empty and a nown field holds none or a unique owner (the 3a/3b invariant). Plain `x = p.slot` / `p.slot = v`
+     stay refused. Decision on plain reads of a local struct's `nown` field: they stay a tracked move like `own`
+     fields and `nown` locals (one rule for every owner), and the use-after-move error for a `nown` local or field
+     now names `take(...)`, which leaves it none instead of moved. No runtime checks, no unsafe operations; kernel
+     and user assembly byte-identical, unsafe report 708. Not in 3c: `nown` globals and arrays (and so the `rq[i]`
+     element places), nested places, borrowing through pointers (3d). Tests: take_ok (locals, Stage 2 fields, through
+     `mut` and `own`, field and pointer/local swaps), take_shadow_ok (user functions win) and 33 compile-fail cases
+     (bad_take_*, bad_replace_*, bad_swap_*, bad_nown_field_moved_hint); tests/own 151 checks. Adversarial set: 78
+     programs (56 must-reject, 22 must-accept), all as expected.
    - *Next Stage 3 steps (from ChatGPT's design note, in order; each its own gated commit):*
      (3b) `nown[T]`, a nullable affine owner: the only owner type allowed in zero-initialised storage (globals,
      arrays, kexec records), with a null check before use; arrays of owners return as arrays of `nown[T]`.
@@ -228,6 +261,7 @@ count stays at or under 709.
      (3c) `take(place) -> nown[T]` (returns the old owner and zeroes the slot in one step), `replace(place, v)`
      and `swap(a, b)` on `nown` and `own` places, with place provenance (root local/param, access path, pointer
      kind) so a move through `mut[S]` is legal exactly when the slot never stays empty; through `ref[S]` never.
+     *3c is done (above) for named places; element places of `nown` arrays come with `nown` globals/arrays.*
      (3d) Borrowing `p.head` records the borrow on the pointer root `p` and releases it at the call or block end;
      nested owner fields through pointers (`p.head.next`) follow from provenance. (3e) Run queue: one ownership
      transfer point between the queue and `current[cpu]` (no owning queue entry while a thread runs), tail
