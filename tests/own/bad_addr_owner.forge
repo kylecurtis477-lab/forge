@@ -1,0 +1,17 @@
+# expect: addr() of an own/ref/mut value is unsafe
+# forge: no-runtime
+include "../fs/linux.fsi"
+cell: u64
+
+@unsafe
+def mk() -> own[u64]:
+    return own[u64](ptr[u64](addr(cell)))
+
+def drop(b: own[u64]) -> u64:
+    return b[0]
+
+def main() -> u64:
+    b = mk()
+    # a raw pointer to the owner slot would hand out a second owner: p[0] twice
+    p: ptr[own[u64]] = addr(b)
+    return drop(p[0]) + drop(p[0])

@@ -17944,6 +17944,9 @@ def fs_primary():
             fs_postfix()
             if fs_mode == 0:
                 fs_die("addr() needs an lvalue")
+            if ft_isaff(fs_ety):
+            # a raw pointer to an owner/borrow slot copies the owner past the move checks (p[0] twice)
+                fs_unsafe_op("addr() of an own/ref/mut value")
             fs_mat()
             fs_ety = ft_ptr(fs_ety)
             fs_mode = 0
