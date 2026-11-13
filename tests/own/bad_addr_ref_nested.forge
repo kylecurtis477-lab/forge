@@ -1,0 +1,10 @@
+# expect: addr() of a place reached through a ref[T] is unsafe
+# forge: no-runtime
+struct Inner:
+    v: u64[4]
+struct Node:
+    id: u64
+    inner: Inner
+def f(p: ref[Node]):
+    a = addr(p.inner.v[2])
+    a[0] = 5

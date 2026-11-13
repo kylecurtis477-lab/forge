@@ -1,0 +1,8 @@
+# expect: addr() of a place reached through a ref[T] is unsafe
+# forge: no-runtime
+# a raw pointer into a shared borrow's pointee was writable in safe code (a[0] = 5 wrote through ref[Node])
+struct Node:
+    id: u64
+def f(p: ref[Node]):
+    a = addr(p.id)
+    a[0] = 5

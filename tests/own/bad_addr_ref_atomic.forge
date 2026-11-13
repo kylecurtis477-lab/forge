@@ -1,0 +1,6 @@
+# expect: addr() of a place reached through a ref[T] is unsafe
+# forge: no-runtime
+struct Node:
+    id: u64
+def f(p: ref[Node]):
+    atomic_store(addr(p.id), 5, relaxed)

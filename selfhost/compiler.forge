@@ -15643,6 +15643,8 @@ fs_bpk = 0
 # fsl_mv == -1 means uninitialised, 0 live, positive source line moved.
 fs_fwriting = 0
 fs_fslot = -1
+# set by fs_postfix: the place just compiled was reached through a ref[T] (read by addr())
+fs_viaref = 0
 nfstb = 0
 fs_argd = 0
 # SysV argument layout of the current call/prologue: fs_wd[w] is the destination of argument word w
@@ -17959,6 +17961,9 @@ def fs_primary():
             if ft_isaff(fs_ety):
             # a raw pointer to an owner/borrow slot copies the owner past the move checks (p[0] twice)
                 fs_unsafe_op("addr() of an own/ref/mut value")
+            elif fs_viaref:
+            # a raw pointer into a shared borrow's pointee is writable (a[0] = v) and outlives the borrow
+                fs_unsafe_op("addr() of a place reached through a ref[T]")
             fs_mat()
             fs_ety = ft_ptr(fs_ety)
             fs_mode = 0
@@ -18158,11 +18163,12 @@ def fs_asgop(o):
     return str_eq(o, "=") or str_eq(o, "+=") or str_eq(o, "-=") or str_eq(o, "*=") or str_eq(o, "//=") or str_eq(o, "%=") or str_eq(o, "|=") or str_eq(o, "^=") or str_eq(o, "<<=") or str_eq(o, ">>=") or str_eq(o, "/=") or str_eq(o, ":") or str_eq(o, "&=")
 
 def fs_postfix():
-    global fp, fs_ety, fs_mode, fs_nbe, fs_lastnm, fs_fslot, fs_fwriting
+    global fp, fs_ety, fs_mode, fs_nbe, fs_lastnm, fs_fslot, fs_fwriting, fs_viaref
     # only the outermost postfix of an assignment target is the target: an index or call argument inside it
     # (a[f(q.head)] = v) is an ordinary read, so it must not take the field-store path
     w = fs_fwriting
     fs_fwriting = 0
+    vr = 0
     base = ""
     if tk[fp] == K_ID:
         base = tv[fp]
@@ -18177,6 +18183,8 @@ def fs_postfix():
             elif fsk[t] == 1:
                 if ftsg[t] == 1:
                     fs_die("nptr[T] may be null: check it (if p != 0:) before indexing")
+                if ftsg[t] == 3:
+                    vr = 1
                 if not (tk[fp + 1] == K_NUM and tv[fp + 1] == 0 and fs_isop2(fp + 2, "]")):
                     fs_unsafe_op("indexing a ptr[T] (unchecked; use a slice)")
                 fs_rv()
@@ -18226,6 +18234,8 @@ def fs_postfix():
             elif fsk[t] == 1 and fsk[ftel[t]] == 2:
                 if ftsg[t] == 1:
                     fs_die("nptr[T] may be null: check it (if p != 0:) before a field access")
+                if ftsg[t] == 3:
+                    vr = 1
                 fs_rv()
                 t = ftel[t]
             else:
@@ -18263,6 +18273,7 @@ def fs_postfix():
             fs_ety = fft[k]
             base = ""
         else:
+            fs_viaref = vr
             return 0
 
 def fs_subsl():

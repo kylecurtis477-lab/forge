@@ -1,0 +1,21 @@
+# forge: no-runtime
+# addr() through a mut[T] stays safe (the borrow is exclusive and writable); through a ref[T] it needs unsafe
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+cell: Node
+def bump(p: mut[Node]):
+    a = addr(p.id)
+    a[0] = a[0] + 1
+@unsafe
+def peek(p: ref[Node]) -> u64:
+    a = addr(p.id)
+    return a[0]
+@unsafe
+def main() -> u64:
+    o = own[Node](ptr[Node](addr(cell)))
+    o.id = 41
+    bump(borrow_mut(o))
+    if peek(borrow(o)) == 42:
+        puts("addr paths ok\n")
+    return 0
