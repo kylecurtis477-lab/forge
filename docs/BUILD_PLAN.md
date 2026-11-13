@@ -76,6 +76,20 @@ count stays at or under 709.
         desktop line and KERNEL OK as whole rows, from the screendump. Unsafe report unchanged (169 / 708).
    3. Input events: PS/2 mouse plus the existing PS/2 and USB HID keyboards feeding one event queue
       (key down/up, mouse move/buttons), visible to user programs through a capability-checked syscall.
+      - *Status: kernel side done (2026-11-12); the user-program syscall comes with step 5.* examples/kernel/
+        input.fsi: one event queue (256 u64 events: kind, scan code or button mask, signed dx/dy) under its own
+        lock, filled from the PS/2 handler; the PS/2 mouse is enabled in desktop mode (`mouse_init`: aux port,
+        IRQ 12 on the shared `on_kbd`, defaults + data reporting, ACKs checked), and `on_kbd` sorts controller
+        bytes by the status register's aux bit (mouse bytes to `mouse_byte`, which builds 3-byte packets into
+        EV_MOVE / EV_BUTTON; scan codes keep their tty/kbdd path and are also queued as EV_KEY). All PS/2 port
+        access goes through `ps2_io` (ports 0x60/0x64 only). The desktop draws an arrow cursor over the back
+        buffer (saved and restored pixels; lifted while terminal text is drawn) and, in its input window, moves it
+        and echoes buttons and keys in the terminal. tests/os/boot.forge: `FORGE_BOOT_INPUT="MARKER|cmd;..."`
+        sends QEMU monitor commands once MARKER appears; tests/os/desktop.sh sends `mouse_move 40 30`,
+        `mouse_move 24 10`, `mouse_button 1`, `mouse_button 0`, `sendkey a` and checks the cursor at 576,424 for both
+        button changes, scan code 1e, 0 dropped, and the terminal's last rows in the screendump (13 s). Kernel unsafe
+        report 169 / 708 -> 170 / 708 (ps2_io is the one new @unsafe function; on_kbd's two port reads moved
+        into it).
    4. A minimal desktop shell: a windowed compositor (back buffer, window list, z-order, damage-based redraw)
       that draws at least a terminal window, a mouse cursor, and focus that follows clicks.
    5. A sandboxed Forge program with manifest capabilities that gets a window (a draw/event capability) and

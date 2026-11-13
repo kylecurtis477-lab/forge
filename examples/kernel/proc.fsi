@@ -613,6 +613,7 @@ kbd_shift: u64
 kbd_e0: u64
 VEC_KBD = 0x42
 VEC_COM1 = 0x43
+VEC_MOUSE = 0x44
 
 def kbd_decode_l(sc: u64):
 # in-kernel scan-code decoder (rq_lock held); the input service (kbd.fsi) runs the same in ring 3
@@ -633,12 +634,75 @@ def kbd_decode_l(sc: u64):
         if c != 0:
             tty_push_l(c)
 
+@unsafe
+def ps2_io(port: u64, v: u64, wr: u64) -> u64:
+# the PS/2 controller's two ports only (0x60 data, 0x64 status/command): one write or one read
+    if port != 0x60 and port != 0x64:
+        return 0
+    if wr != 0:
+        outb(u16(port), u8(v))
+        return 0
+    return u64(inb(u16(port)))
+
+def ps2_wait_out():
+# input buffer empty (status bit 1 clear) before a command or data byte, bounded
+    g = 0
+    while (ps2_io(0x64, 0, 0) & 2) != 0 and g < 100000:
+        g += 1
+
+def ps2_read_wait() -> u64:
+# the next output byte (status bit 0), bounded; 0x100 when none came
+    g = 0
+    while (ps2_io(0x64, 0, 0) & 1) == 0 and g < 100000:
+        g += 1
+    if g >= 100000:
+        return 0x100
+    return ps2_io(0x60, 0, 0)
+
+def ps2_mouse_cmd(c: u64) -> u64:
+# a command to the aux device (0xD4 prefix); returns its reply byte (0xFA = ACK)
+    ps2_wait_out()
+    ps2_io(0x64, 0xD4, 1)
+    ps2_wait_out()
+    ps2_io(0x60, c, 1)
+    return ps2_read_wait()
+
+ms_ready: u64
+
+def mouse_init():
+# screen step 3, desktop mode only: enable the aux port and its interrupt (config bit 1, clock bit 5 clear),
+# set defaults and turn on data reporting; IRQ 12 shares on_kbd, which sorts bytes by the aux bit
+    ps2_wait_out()
+    ps2_io(0x64, 0xA8, 1)
+    ps2_wait_out()
+    ps2_io(0x64, 0x20, 1)
+    cfg = ps2_read_wait() & 0xFF
+    ps2_wait_out()
+    ps2_io(0x64, 0x60, 1)
+    ps2_wait_out()
+    ps2_io(0x60, (cfg | 0x43) & 0xCF, 1)
+    a = ps2_mouse_cmd(0xF6)
+    b = ps2_mouse_cmd(0xF4)
+    ms_ready = 0
+    if a == 0xFA and b == 0xFA:
+        ms_ready = 1
+    idt_set(VEC_MOUSE, u64(on_kbd), 0)
+    ioapic_route(12, VEC_MOUSE)
+
 @interrupt
 @unsafe
 def on_kbd(frame: ptr[u64]):
+# IRQ 1 and (desktop mode) IRQ 12: status bit 5 marks a byte from the aux (mouse) port
     atomic_fetch_add(addr(kbd_irqs), 1, acq_rel)
-    while inb(0x64) & 1:
-        sc = u64(inb(0x60))
+    while 1:
+        st = ps2_io(0x64, 0, 0)
+        if (st & 1) == 0:
+            break
+        sc = ps2_io(0x60, 0, 0)
+        if (st & 0x20) != 0:
+            mouse_byte(sc)
+            continue
+        kbd_key_event(sc)
         if kb_svc:
             kbd_event(0, sc)
         else:

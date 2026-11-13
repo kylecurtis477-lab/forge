@@ -20,7 +20,7 @@ grep -q 'forge.desktop' $T/iso/boot/grub/grub.cfg || { echo "FAIL os/desktop (gr
 env -u SOURCE_DATE_EPOCH grub-mkrescue -o $T/desktop.iso $T/iso >/dev/null 2>&1 || { echo "FAIL os/desktop (grub-mkrescue)"; exit 0; }
 VD="-drive file=$L/vdisk.img,format=raw,if=none,id=vd,readonly=on -device virtio-blk-pci,drive=vd"
 rm -f $L/desktop.ppm
-R=$($B desktop $L/desktop.log 200 "multiboot2 (BIOS)|shell and kexec sessions skipped: desktop mode (forge.desktop)|desktop: gfx 1024x768 BGRX, self-test OK, |pixels presented, terminal 128x39|KERNEL OK" "desktop: gfx 1024x768 BGRX^KERNEL OK" -- $Q $VD -boot d -cdrom $T/desktop.iso)
+R=$(FORGE_BOOT_INPUT="desktop: input ready|mouse_move 40 30;mouse_move 24 10;mouse_button 1;mouse_button 0;sendkey a" $B desktop $L/desktop.log 200 "multiboot2 (BIOS)|shell and kexec sessions skipped: desktop mode (forge.desktop)|desktop: gfx 1024x768 BGRX, self-test OK, |pixels presented, terminal 128x39|desktop: input ready, mouse on|mouse: buttons 1 at 576,424|mouse: buttons 0 at 576,424|key: scan code 1e|desktop: input events: |cursor at 576,424, dropped 0|KERNEL OK" "desktop: input events: ^KERNEL OK" -- $Q $VD -boot d -cdrom $T/desktop.iso)
 case "$R" in PASS*) ;; *) echo "$R"; exit 0;; esac
 # the colour bars: centre of bar i (of 8, across the full width, 96 pixels tall) must be the 0xRRGGBB it was drawn in
 C=$(python3 - $L/desktop.ppm <<'P'

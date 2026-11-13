@@ -317,6 +317,16 @@ def boot(h, attempt):
     eof = False
     tprev = t0
     frozen = 0.0
+    # FORGE_BOOT_INPUT="MARKER|cmd;cmd;...": once MARKER is on serial, send each HMP command once, in order
+    # (tests/os/desktop.sh: mouse_move / mouse_button / sendkey for the desktop's input window)
+    inp = os.getenv("FORGE_BOOT_INPUT", "")
+    inp_mark = ""
+    inp_cmds = []
+    if inp != "":
+        ip = split(inp, "|")
+        inp_mark = ip[0]
+        inp_cmds = split(ip[1], ";")
+    inp_sent = False
     while rc is None:
     # The box running this harness is itself a VM that is at times suspended whole (90-145 s seen; its kernel
     # logs "crng reseeded due to virtual machine fork"). QEMU stops with it, so wall time jumps with no serial
@@ -367,6 +377,11 @@ def boot(h, attempt):
                 kind = "slow"
             else:
                 break
+        if inp_mark != "" and not inp_sent and inp_mark in buf:
+            inp_sent = True
+            for ic in inp_cmds:
+                monitor(h, ic, 0.3)
+            tprev = time.time()
         if nocount(buf, "sh$ ") > sent and sent < len(sc) and (len(sc[sent]) < 3 or sc[sent][2] in buf):
             how = sc[sent][0]
             line = sc[sent][1]

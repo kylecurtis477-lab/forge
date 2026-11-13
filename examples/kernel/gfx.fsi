@@ -281,8 +281,16 @@ def term_replay():
         r += 1
 
 def gfx_putc(c: u8):
-# console text while the desktop owns the screen (console.fsi putc): into the terminal when one is open
+# console text while the desktop owns the screen (console.fsi putc): into the terminal when one is open; the
+# cursor (input.fsi) is lifted while a character is drawn so its saved pixels stay right
+    h = cur_shown
+    if h != 0:
+        cur_hide()
     term_putc(u64(c))
+    if h != 0:
+        cur_show()
+        if c == 10:
+            gfx_present()
 
 # 0xRRGGBB colour bars of the test pattern: white, yellow, cyan, green, magenta, red, blue, grey
 gfx_bars: u64[8] = [0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00, 0xFF00FF, 0xFF0000, 0x0000FF, 0x808080]
@@ -352,7 +360,7 @@ def desktop_show():
     gfx_text(0, 128, "Terminal: kernel console", 0xFFFFFF, GFX_TITLE)
     term_open(0, 144, gfx_w / 8, (gfx_h - 144) / 16, 0xE0E0E0, GFX_TERM)
     term_replay()
-    gfx_text(0, 96, "Forge desktop (screen step 2: terminal text console)", 0xFFFFFF, GFX_DESK)
+    gfx_text(0, 96, "Forge desktop (screen step 3: mouse and keyboard events)", 0xFFFFFF, GFX_DESK)
     x = gfx_text(0, 112, "gfx: ", 0xFFFFFF, GFX_DESK)
     x = gfx_num(x, 112, gfx_w, 0xFFFFFF, GFX_DESK)
     x = gfx_text(x, 112, "x", 0xFFFFFF, GFX_DESK)
@@ -375,3 +383,4 @@ def desktop_show():
     puts("x")
     put_u64(term_rows)
     putc(10)
+    desktop_input()
