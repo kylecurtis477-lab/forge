@@ -1,0 +1,9 @@
+# expect: own/ref/mut field access requires field borrow and move tracking
+# forge: no-runtime
+struct Node:
+    value: u64
+struct Queue:
+    head: own[Node]
+
+def bad(q: ptr[Queue]) -> own[Node]:
+    return q.head

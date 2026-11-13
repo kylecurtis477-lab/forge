@@ -18145,6 +18145,10 @@ def fs_postfix():
             else:
                 fs_die("field access needs a struct or pointer to struct")
             k = fs_field(t, fs_ident())
+            # own-fields Stage 1: an owned field is not a plain pointer value; until per-field move and lifetime
+            # state exists it is never loaded, stored or borrowed (so no copy through a larger expression or call)
+            if ft_isaff(fft[k]):
+                fs_die("own/ref/mut field access requires field borrow and move tracking")
             if ffo[k] != 0:
                 e(c3("add $", str(ffo[k]), ",%rax"))
             fs_mode = 1
@@ -19304,8 +19308,10 @@ def fs_struct_body(t, packed):
         fnm = fs_ident()
         fs_expect(":")
         ft = fs_type()
-        if ft_isaff(ft):
-            fs_die("struct fields cannot be own/ref/mut yet")
+        # own-fields Stage 1: own[T] fields are recorded in the layout (8 bytes, 8-aligned) but unreadable (see
+        # the field-access check); borrow fields need a lifetime tied to the containing value and stay illegal
+        if ft_isaff(ft) and ftsg[ft] != 2:
+            fs_die("ref/mut struct fields need lifetime tracking")
         if ft_elem_aff(ft):
             fs_die("arrays/slices of own/ref/mut struct fields need per-element move tracking")
         fa = ftal[ft]

@@ -1,0 +1,18 @@
+# forge: no-runtime
+# own-fields Stage 1: an own[T] field takes its place in the layout (8 bytes, 8-aligned) and the other fields
+# stay usable; the owner itself is unreadable until Stage 2 (bad_field_*.forge)
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Queue:
+    count: u64
+    head: own[Node]
+    tail: u64
+
+def main() -> u64:
+    q: Queue
+    q.count = 3
+    q.tail = 7
+    if q.count == 3 and q.tail == 7 and offsetof(Queue, tail) == 16 and sizeof(Queue) == 24:
+        puts("own field layout ok\n")
+    return 0
