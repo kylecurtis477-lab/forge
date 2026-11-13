@@ -1,0 +1,7 @@
+# expect: pointer arithmetic on an own/ref/mut[T] is unsafe
+# forge: no-runtime
+struct Node:
+    id: u64
+def f(q: own[Node]) -> u64:
+    r = q + 8
+    return r.id

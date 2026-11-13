@@ -18434,6 +18434,9 @@ def fs_binop(o, lt, rt):
         return 0
     if fsk[lt] == 1 and (str_eq(o, "+") or str_eq(o, "-")):
         sz = ftsz[ftel[lt]]
+        if fsk[rt] != 1 and ftsg[lt] >= 2:
+        # own/ref/mut + n would be a new owner/borrow of memory next to the pointee (q + 8 gave an own[T])
+            fs_unsafe_op("pointer arithmetic on an own/ref/mut[T]")
         if fsk[rt] == 1:
             e("sub %rcx,%rax")
             if sz > 1:
