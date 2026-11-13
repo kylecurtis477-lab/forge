@@ -17,14 +17,14 @@ klink() {
 # tests/modules-build checks they produce identical artifacts)
 ../../forge ../modules/build.forge -o ../../build/modules-build
 ../../build/modules-build
-../../build/forgec kernel.forge $B/kernel.s --fs-live $FORGEC_FLAGS
+../../build/forgec kernel.forge $B/kernel.s --fs-temps $FORGEC_FLAGS
 ../../build/fas -I ../../build/user -o $B/kernel.o $B/kernel.s
 klink $B/kernel
 grub-file --is-x86-multiboot2 $B/kernel.elf
 # a genuinely different build for the kexec test (\EFI\Forge\kernel-next.elf): another version string
 sed 's/"forge-kernel 0.2.6"/"forge-kernel 0.2.6-next"/' kernel.forge > .kernel_next.forge
 grep -q '"forge-kernel 0.2.6-next"' .kernel_next.forge
-../../build/forgec .kernel_next.forge $B/kernel-next.s --fs-live $FORGEC_FLAGS; rm -f .kernel_next.forge
+../../build/forgec .kernel_next.forge $B/kernel-next.s --fs-temps $FORGEC_FLAGS; rm -f .kernel_next.forge
 ../../build/fas -I ../../build/user -o $B/kernel-next.o $B/kernel-next.s
 klink $B/kernel-next
 cmp -s $B/kernel.elf $B/kernel-next.elf && { echo "kernel-next.elf is identical to kernel.elf"; exit 1; }

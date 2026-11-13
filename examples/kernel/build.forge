@@ -50,7 +50,9 @@ def main():
     # 12.1 step 3: the kernel (and kernel-next) are built with --fs-opt (register allocation and constant
     # division); every hand-written asm routine was audited for SysV register discipline (docs/SYSTEMS.md).
     # Step 4b: --fs-live (implies --fs-opt) adds liveness-based register sharing; same registers, same rules
-    flags = ["--fs-live"]
+    # Step 4c: --fs-temps (implies --fs-live) passes call arguments in registers and loads constants without
+    # the stack; it only rewrites compiler-generated pushes, so the asm audit still covers it
+    flags = ["--fs-temps"]
     for f in os.getenv("FORGEC_FLAGS", "").split():
         flags.append(f)
     # the user programs and BusyBox (examples/user/build.forge, tools/busybox/build.forge)

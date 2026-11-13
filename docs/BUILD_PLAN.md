@@ -451,6 +451,13 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      the flag: instructions 147,046 to 125,711 (-14.5%), `push %rax` 13,117 to 3,912, `(%rsp)` operands 8,204
      to 899. The kernel is not switched yet (a separate commit, gated by the QEMU suite). Next: a real SSA value
      numbering for the remaining %rax/%rcx chains.
+   - *Step 4c kernel switch (2026-11-12).* The kernel and kernel-next are built with `--fs-temps`
+     (examples/kernel/build.forge and build.sh; tests/dwarf/run.sh builds its `-g` kernel the same way). It only
+     rewrites compiler-generated pushes of call arguments and constants, never a hand-written asm line (asm
+     mnemonics outside the 20-entry whitelist end the region), so the step 3 asm audit covers it unchanged.
+     Kernel .text 529,365 to 465,056 bytes (-12.1%), `(%rsp)` operands in kernel.s 8,204 to 899, `push %rax`
+     13,117 to 3,912. The QEMU boot suite at O2 and O0 is the test. The loader, modules and user programs stay
+     on `--fs-opt` for now.
    - *Asm audit as a checked list (2026-11-12).* The step 3 audit table in docs/SYSTEMS.md ("Kernel asm and
      --fs-opt") is now a `- [x]` checklist covering the kernel and the user programs, and tests/asm-audit/run.sh
      keeps it complete: it lists every `@naked` function, every top-level `asm(...)` block (its `.globl` symbols,
