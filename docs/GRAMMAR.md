@@ -1,4 +1,4 @@
-# Forge grammar (frozen, version 1; additive v1.1 test blocks, v1.2 reserved effects)
+# Forge grammar (frozen, version 1; additive v1.1 test blocks, v1.2 reserved effects, v1.3 reserved allocation effects)
 
 This is the normative grammar of Forge source. It is the grammar accepted by the strict
 AST parser (`forgec F out --emit=ast-json`, the `a_*` functions in selfhost/compiler.forge);
@@ -158,3 +158,13 @@ name; absent when there is no clause, so existing trees and child indices are un
 it (hosted and freestanding) with E0106 `effect annotations are reserved ... not supported yet`.
 `uses` remains an ordinary name everywhere else. Tests: tests/grammar/valid/effects.forge,
 tests/grammar/invalid/effect_*.forge, tests/diag/effects_reserved*.forge.
+
+### Allocation effects (v1.3)
+
+v1.3 adds three names to EFFECT: `noalloc` (the function and its callees do not allocate), `noio` (no
+device or file I/O) and `noreclaim` (it never waits for memory reclaim, so it is safe on the reclaim and
+interrupt paths). `def f(...) uses noalloc, noreclaim:` parses into the same `Effects` node and is
+rejected by the checker with the same E0106 as every other effect. Only the names are reserved now so
+code written against v1 keeps parsing when enforcement lands (a Version 2 item in docs/BUILD_PLAN.md).
+They can be mixed with the capability names in one clause. Tests: tests/grammar/valid/effects_alloc.forge,
+tests/grammar/invalid/effect_alloc_typo.forge, tests/diag/effects_reserved_alloc.forge.

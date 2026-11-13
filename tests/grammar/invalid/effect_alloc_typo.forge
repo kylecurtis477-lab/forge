@@ -1,0 +1,3 @@
+# allocation effects are spelled noalloc / noio / noreclaim; anything else is not an effect name
+def f() uses no_alloc:
+    pass

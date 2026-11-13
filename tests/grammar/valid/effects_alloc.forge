@@ -1,0 +1,20 @@
+# allocation effects: noalloc, noio, noreclaim parse (grammar v1.3, v1 reservation 2; rejected by the checker)
+def a() uses noalloc:
+    pass
+
+def b(x: int) -> int uses noio, noreclaim:
+    return x
+
+# mixed with Phase 6 capability names in one clause
+def c(x: int) -> int uses noalloc, fs, noreclaim, ipc:
+    return x
+
+class C:
+    @staticmethod
+    def d() uses noreclaim:
+        pass
+
+# the names stay ordinary identifiers everywhere else
+noalloc = 1
+def e(noio: int) -> int:
+    return noio + noalloc

@@ -66,6 +66,11 @@ one commit in five, in this order, each its own commit with a visual and docs:
      tests/provenance/run.sh (in run_tests) checks 10 fixed messages, a mixed log dump, bad usage and the
      repository's own history.
 2. `noalloc`, `noio` and `noreclaim` reserved in the effect grammar (syntax only, no enforcement).
+   - *Status: done (2026-11-12).* Grammar v1.3 (docs/GRAMMAR.md, "Allocation effects"): the three names join
+     the Phase 6 capability names in EFFECT, so `def f(...) uses noalloc, noreclaim:` parses into the existing
+     `Effects` node, round-trips through `--emit=pretty`, and is rejected by the checker with E0106 like any
+     effect; outside a `uses` clause they stay ordinary names. Tests: tests/grammar/valid/effects_alloc.forge,
+     tests/grammar/invalid/effect_alloc_typo.forge, tests/diag/effects_reserved_alloc.forge.
 3. An address-space-ID field in the device-grant ABI, defaulting to 0.
 4. A checksum and version in the handoff/process-state record format.
 5. CPython bindings on the stable ABI (abi3).

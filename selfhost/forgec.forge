@@ -14327,7 +14327,9 @@ def a_def(decos, ext):
     a_push(ef)
     return a_mk("Def", nm, line, 5)
 
-EFFECT_NAMES = ["fs", "spawn", "ipc", "drv", "ktest", "kexec", "probe"]
+# Phase 6 capability names (v1.2) plus the allocation effects noalloc, noio, noreclaim (v1.3, v1 reservation 2;
+# syntax only, enforcement is a Version 2 item)
+EFFECT_NAMES = ["fs", "spawn", "ipc", "drv", "ktest", "kexec", "probe", "noalloc", "noio", "noreclaim"]
 
 def is_effect_name(v):
     i = 0
@@ -14339,7 +14341,7 @@ def is_effect_name(v):
 
 def a_effects():
 # grammar v1.2 (reserved): effects = 'uses' EFFECT (',' EFFECT)*, soft keyword after the header's
-# ')' / return annotation; EFFECT is one of the Phase 6 capability names. Returns an Effects node
+# ')' / return annotation; EFFECT is one of the Phase 6 capability names or (v1.3) noalloc/noio/noreclaim. Returns an Effects node
 # (children: Effect leaves, v = the name) or -1 when absent. The checker rejects it for now.
     global ap
     if not (a_kw("uses") and tk[ap + 1] == K_ID):
@@ -14349,7 +14351,7 @@ def a_effects():
     n = 0
     while 1:
         if tk[ap] != K_ID or not is_effect_name(tv[ap]):
-            a_fail("an effect name (fs, spawn, ipc, drv, ktest, kexec, probe)")
+            a_fail("an effect name (fs, spawn, ipc, drv, ktest, kexec, probe, noalloc, noio, noreclaim)")
         a_push(a_leaf("Effect", tv[ap], tl[ap]))
         ap += 1
         n += 1

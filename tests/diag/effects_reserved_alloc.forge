@@ -1,0 +1,5 @@
+# grammar v1.3 reserves the allocation effects (noalloc, noio, noreclaim): the checker rejects them like any effect
+def fill(n: int) -> int uses noalloc, noreclaim:
+    return n
+
+print(fill(3))
