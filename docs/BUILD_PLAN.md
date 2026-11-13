@@ -105,6 +105,15 @@ count stays at or under 709.
         at (384,252) and terminal where About was (13 s). No new unsafe code (kernel unsafe report 170 / 708).
    5. A sandboxed Forge program with manifest capabilities that gets a window (a draw/event capability) and
       draws into it; anything outside its manifest is refused.
+      **Done (screen step 5):** a new capability `gfx` (CAPB_GFX = 256; CAPB_ALL 255 -> 511; both forgeseals) gates
+        sys 431 win_open / 432 win_fill / 433 win_text (examples/kernel/appwin.fsi, wrappers in ulib.fsi). One
+        window per program, at most 320 x 160, pixels in a kernel canvas, every call clipped, only the opener may
+        draw. examples/user/gfxapp.forge (caps(gfx) only) opens a 300 x 120 window, draws text and 8 colour bars,
+        and records in the window that its file open was refused; gfxdeny.forge (caps(fs)) is refused the window.
+        The compositor shows the canvas as window 4. tests/os/desktop.sh checks the serial lines (both denials,
+        12 draws, foreign handle refused) and two pixels of the canvas in the screendump. tests/user-build counts
+        118 artifacts (was 110). No new unsafe code (kernel 170 / 708). Event delivery to apps, more windows per app and a user-space compositor
+        are later Desktop-track items.
 2. **Ownership-typed struct fields.** `own`/`ref`/`mut` as struct field types, borrow checks through field access,
    and non-lexical borrow ends where the rule is simple. Applied first to kernel data structures: the run queue,
    page tables and the handoff records.

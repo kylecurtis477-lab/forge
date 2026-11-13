@@ -235,3 +235,19 @@ def mem_get64(a: u64) -> u64:
 @unsafe
 def mem_set64(a: u64, v: u64):
     ptr[u64](a)[0] = v
+
+# screen step 5 (needs the gfx capability): one window per program, drawn by the kernel's compositor
+SYS_WIN_OPEN = 431
+SYS_WIN_FILL = 432
+SYS_WIN_TEXT = 433
+
+def win_open(w: u64, h: u64, title: ptr[u8]) -> u64:
+    return syscall3(SYS_WIN_OPEN, w, h, u64(title))
+
+def win_fill(win: u64, x: u64, y: u64, w: u64, h: u64, c: u64) -> u64:
+# x, y, w, h are packed 16 bits each; c is 0xRRGGBB
+    return syscall3(SYS_WIN_FILL, win, (x & 0xFFFF) | ((y & 0xFFFF) << 16) | ((w & 0xFFFF) << 32) | ((h & 0xFFFF) << 48), c)
+
+def win_text(win: u64, x: u64, y: u64, s: ptr[u8], c: u64) -> u64:
+# x, y packed 16 bits each, colour in bits 32..55
+    return syscall3(SYS_WIN_TEXT, win, (x & 0xFFFF) | ((y & 0xFFFF) << 16) | ((c & 0xFFFFFF) << 32), u64(s))

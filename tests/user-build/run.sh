@@ -14,7 +14,7 @@ cp -a build/user $T/orig
 ./forge examples/user/build.forge -o build/user-build >/dev/null || { echo "FAIL user-build build"; exit 1; }
 ./forge tools/busybox/build.forge -o build/busybox-build >/dev/null || { echo "FAIL user-build busybox-build"; exit 1; }
 man() { (cd $1 && stat -c '%a %n' * && sha256sum *); }
-# chk name flags bbsrc nfiles
+# chk name flags bbsrc nfiles (118 since screen step 5 added gfxapp and gfxdeny: .s .o .elf .raw each)
 chk() {
   BB_SRC="$3" FORGEC_FLAGS="$2" sh examples/user/build.sh >$T/s.out 2>$T/s.err; rs=$?
   rm -rf $T/sh $T/fg; cp -a build/user $T/sh; mkdir $T/fg; cp -p build/user/seal.key build/user/seal2.key $T/fg/
@@ -25,10 +25,10 @@ chk() {
      && [ "$(ls $T/fg | wc -l)" = $4 ]; then echo "PASS user-build/$1"; else echo "FAIL user-build/$1 (rc $rs/$rf)"; diff $T/m1 $T/m2 | head -5; fail=1; fi
 }
 rm -rf build/user/busybox.elf
-chk default "" /nonexist 110
-chk O0 "-O0" /nonexist 110
+chk default "" /nonexist 118
+chk O0 "-O0" /nonexist 118
 mkdir $T/bb; echo fake > $T/bb/busybox-1.38.0.tar.bz2
-chk bb-branch "" $T/bb 110
+chk bb-branch "" $T/bb 118
 # fresh keys: generated, 32 bytes, and the same names and modes as the shell build
 rm -rf $T/fk; (cd / && BB_SRC=/nonexist "$OLDPWD/build/user-build" $T/fk >/dev/null 2>&1); rf=$?
 if [ $rf = 0 ] && [ "$(stat -c %s $T/fk/seal.key $T/fk/seal2.key)" = "32

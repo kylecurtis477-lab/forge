@@ -1,0 +1,66 @@
+# forge: safe
+# forge: no-runtime
+# forge: caps(gfx)
+# Screen step 5: a sandboxed Forge program that gets a window and draws into it. Its manifest declares only gfx:
+# sys 431 opens its window (one per program, at most 320 x 160), 432 fills a rectangle and 433 draws text in it,
+# both clipped to the window by the kernel. Opening a file needs fs, which it does not declare, so the kernel
+# refuses it; a handle that is not its window is refused too. It writes both results into the window.
+include "ulib.fsi"
+
+def bar_col(i: u64) -> u64:
+    if i == 0:
+        return 0xE04040
+    if i == 1:
+        return 0xE09040
+    if i == 2:
+        return 0xE0E040
+    if i == 3:
+        return 0x40C040
+    if i == 4:
+        return 0x40C0C0
+    if i == 5:
+        return 0x4060E0
+    if i == 6:
+        return 0x9050E0
+    return 0xE050B0
+
+@export
+def _start():
+    win = win_open(300, 120, "Forge app (sandboxed, caps: gfx)")
+    if win >= 0x8000000000000000:
+        out("gfxapp: no window\n")
+        flush()
+        sys_exit(1)
+    win_fill(win, 0, 0, 300, 120, 0x203040)
+    win_text(win, 8, 8, "Hello from a sandboxed Forge", 0xFFFFFF)
+    win_text(win, 8, 24, "program in its own window.", 0xFFFFFF)
+    i: u64 = 0
+    while i < 8:
+        win_fill(win, 16 + i * 34, 56, 30, 24, bar_col(i))
+        i += 1
+    fd = sys_open("/efi/forge/docs/big.bin")
+    fs_denied = fd >= 0x8000000000000000
+    if fs_denied:
+        win_text(win, 8, 88, "open file: denied (no fs cap)", 0xFFC080)
+    else:
+        sys_close(fd)
+        win_text(win, 8, 88, "open file: ALLOWED (bug)", 0xFF4040)
+    bad = win_fill(win + 1, 0, 0, 10, 10, 0xFF0000)
+    bad_denied = bad >= 0x8000000000000000
+    out("gfxapp: window ")
+    out_u64(win)
+    out(", 12 draws, open file ")
+    if fs_denied:
+        out("denied")
+    else:
+        out("allowed")
+    out(", other handle ")
+    if bad_denied:
+        out("refused")
+    else:
+        out("accepted")
+    out("\n")
+    flush()
+    if fs_denied and bad_denied:
+        sys_exit(0)
+    sys_exit(1)

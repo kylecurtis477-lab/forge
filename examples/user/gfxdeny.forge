@@ -1,0 +1,17 @@
+# forge: safe
+# forge: no-runtime
+# forge: caps(fs)
+# Screen step 5: declares fs but not gfx, so asking for a window (sys 431) must be refused at the syscall boundary.
+include "ulib.fsi"
+
+@export
+def _start():
+    win = win_open(100, 50, "should not open")
+    out("gfxdeny: window ")
+    if win >= 0x8000000000000000:
+        out("denied\n")
+        flush()
+        sys_exit(0)
+    out("granted\n")
+    flush()
+    sys_exit(1)

@@ -58,6 +58,7 @@ include "bootpol.fsi"
 include "gfx.fsi"
 include "input.fsi"
 include "wm.fsi"
+include "appwin.fsi"
 include "linux.fsi"
 include "../../std/vec.fsi"
 include "../../std/map.fsi"
@@ -1909,6 +1910,7 @@ def after_overflow():
         kexec_resume()
     elif desktop_wanted() != 0:
         puts("shell and kexec sessions skipped: desktop mode (forge.desktop)\n")
+        desktop_app()
     elif iommu_grant_allowed() != 0:
         shell_test()
         kexec_test()

@@ -382,7 +382,7 @@ four kinds, the ring may only hold known kinds, and nothing is recorded after re
 Every user ELF is sealed at build time by `tools/forgeseal.py`, which is the verifier gate: it compiles the program with `--unsafe-report` and refuses to seal unless the program has no unsafe code or its counts are within the audited `tests/unsafe/baseline.txt` entry. It appends a 128-byte trailer: `FORGEPRF`, version 1, safety level (0 none, 1 audited, 2 audited ulib only), unsafe ops, declared caps (`# forge: caps(fs, spawn, ipc, drv, kexec, probe, ktest)`), ELF length, own-file unsafe ops, SHA-256 of the ELF and HMAC-SHA256(key, trailer[0:96]). The key is 32 random bytes per build tree (`build/user/seal.key`, never committed) and is `.incbin`'d into the kernel. The kernel (`seal.fsi`, safe SHA-256/HMAC; 3 new casts offset by moving `elf_load` onto `Ehdr`/`Phdr` struct views) refuses any image that fails, in `sys_exec` (ENOEXEC, logged `verify: PATH refused: REASON`) and `proc_spawn_args`. The W^X self-test loads its crafted images with `elf_try` directly. Limits: MAC not signature; modules unsealed.
 
 ## Capability grants (Phase 6.2)
-A process holds exactly the capability bits its sealed manifest declares (fs=1, spawn=2, ipc=4, drv=8, kexec=16, probe=32, ktest=64, grant=128 for the 10.2 grant syscalls 428/429 and the 10.3 audit syscall 430); exec can only narrow them (declared ∩ held), fork copies them, kexec hands them over (handoff v3). Base syscalls (read/write/close/mmap/munmap/brk/yield/getpid/exit/ticks/cpu/getppid/getargs/dup/rights/restrict/kx_gen) need none. The check sits at the top of `syscall_dispatch`, before the handle-rights and sandbox checks, which still apply.
+A process holds exactly the capability bits its sealed manifest declares (fs=1, spawn=2, ipc=4, drv=8, kexec=16, probe=32, ktest=64, grant=128 for the 10.2 grant syscalls 428/429 and the 10.3 audit syscall 430, gfx=256 for the screen step 5 window syscalls 431-433); exec can only narrow them (declared ∩ held), fork copies them, kexec hands them over (handoff v3). Base syscalls (read/write/close/mmap/munmap/brk/yield/getpid/exit/ticks/cpu/getppid/getargs/dup/rights/restrict/kx_gen) need none. The check sits at the top of `syscall_dispatch`, before the handle-rights and sandbox checks, which still apply.
 
 ## Refusal paths and the Linux ABI gate (Phase 6.3, 6.4)
 - Reason codes from `image_verify`: 1 no manifest, 2 bad version, 3 length mismatch, 4 bad signature, 5 hash mismatch, 6 Linux ABI image outside the compat sandbox.
@@ -462,7 +462,12 @@ honoured by `gfx_fill` and `gfx_char`): desktop background, each intersecting wi
 edge, content; the terminal's content is drawn from its cells, so text under another window stays hidden), then
 the cursor. A left click raises and focuses the topmost window under the cursor; pressing on a floating window's
 title bar drags it. In compositor mode the terminal repaints through `wm_paint` instead of drawing or scrolling
-pixels itself.
+pixels itself. Step 5 adds appwin.fsi: a program whose sealed manifest declares `gfx` may open one window (sys 431,
+at most 320 x 160) and fill rectangles (432) and draw text (433) in it; the kernel keeps the pixels in its own canvas,
+clips every call to it, and only the opening process may draw (any other handle or process: EBADF). The compositor
+shows the canvas as one more window, which outlives the program. Without `gfx` the call never gets past the
+syscall boundary (EACCES, logged by cap_sys_deny). Desktop mode runs gfxdeny (caps(fs)) and gfxapp (caps(gfx))
+before the desktop starts.
 ## Security fix: user-copy validation (after 8.8)
 
 `copy_user` / `copy_str_user` (cpux.fsi) now enforce the user range themselves: every operand below

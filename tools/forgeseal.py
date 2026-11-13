@@ -47,7 +47,7 @@ def v3(head, digest, keys, alg=1, proof=False):
 def sealed(elf):
     return elf[-160:-152] == MAGIC or elf[-SEAL3:-SEAL3 + 8] == MAGIC
 
-CAPS = {'fs': 1, 'spawn': 2, 'ipc': 4, 'drv': 8, 'kexec': 16, 'probe': 32, 'ktest': 64, 'grant': 128}
+CAPS = {'fs': 1, 'spawn': 2, 'ipc': 4, 'drv': 8, 'kexec': 16, 'probe': 32, 'ktest': 64, 'grant': 128, 'gfx': 256}
 MAGIC = b'FORGEPRF'
 
 def foreign(img, keyf):

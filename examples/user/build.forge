@@ -92,7 +92,7 @@ def main():
         exit(r[0])
     bl = "../../tests/unsafe/baseline.txt"
     for p in ["hello", "fault", "sh", "cat", "forktest", "blkd", "crash", "sum", "bg", "captest", "chantest",
-              "sbtest", "grtest", "wxtest", "capdeny", "badptr", "kbdd", "kbdd2", "nvmed", "nvmed2"]:
+              "sbtest", "grtest", "wxtest", "capdeny", "badptr", "kbdd", "kbdd2", "nvmed", "nvmed2", "gfxapp", "gfxdeny"]:
         b = out + "/" + p
         step(["../../build/forgec", p + ".forge", b + ".s"] + flags)
         step(["../../build/fas", "-o", b + ".o", b + ".s"])

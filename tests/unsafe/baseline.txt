@@ -29,6 +29,8 @@ examples/user kbdd.forge 10 0 13 0
 examples/user kbdd2.forge 10 0 13 0
 examples/user nvmed.forge 10 0 13 0
 examples/user nvmed2.forge 10 0 13 0
+examples/user gfxapp.forge 10 0 13 0
+examples/user gfxdeny.forge 10 0 13 0
 # 11.1: Linux-ABI test program (no ulib): peek/poke/peek8 plus the naked syscall, register and _start stubs
 examples/user lxtest.forge 7 0 7 0
 examples/user lxthreads.forge 12 0 12 0

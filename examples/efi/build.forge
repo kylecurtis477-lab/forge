@@ -59,7 +59,7 @@ def main():
               "userimg"]:
         step(["mcopy", "-i", e, "../../build/modules/" + m + ".ko", "::/EFI/Forge/mod/" + m + ".ko"])
     for p in ["sh", "hello", "cat", "forktest", "fault", "blkd", "crash", "sum", "bg", "captest", "chantest", "sbtest",
-              "grtest", "wxtest", "capdeny", "badptr", "kbdd", "kbdd2", "nvmed", "nvmed2", "unsealed", "tampered",
+              "grtest", "wxtest", "capdeny", "badptr", "kbdd", "kbdd2", "nvmed", "nvmed2", "gfxapp", "gfxdeny", "unsealed", "tampered",
               "forged", "hellov2", "algbad", "proofset", "linuxabi", "lxtest", "lxthreads", "lxfs", "lxexec", "lxsig"]:
         step(["mcopy", "-i", e, "../../build/user/" + p + ".elf", "::/EFI/Forge/bin/" + p])
     # the script's `[ -f busybox.elf ] && mcopy ...`: a failing mcopy there does not stop sh -e

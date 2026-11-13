@@ -389,7 +389,8 @@ CAPB_KEXEC = 16
 CAPB_PROBE = 32
 CAPB_KTEST = 64
 CAPB_GRANT = 128  # 10.2: revoke and list grants (sys 428/429)
-CAPB_ALL = 255
+CAPB_GFX = 256  # screen step 5: one window drawn by the program (sys 431-433, appwin.fsi)
+CAPB_ALL = 511
 cap_sys_denials: u64
 
 def sys_need(nr: u64) -> u64:
@@ -410,6 +411,8 @@ def sys_need(nr: u64) -> u64:
         return CAPB_PROBE
     if nr == 428 or nr == 429 or nr == 430:
         return CAPB_GRANT
+    if nr >= 431 and nr <= 433:
+        return CAPB_GFX
     return 0
 
 def cap_name(c: u64) -> ptr[u8]:
@@ -427,6 +430,8 @@ def cap_name(c: u64) -> ptr[u8]:
         return "probe"
     if c == CAPB_GRANT:
         return "grant"
+    if c == CAPB_GFX:
+        return "gfx"
     return "ktest"
 
 def cap_sys_deny(p: ptr[Proc], nr: u64, need: u64) -> u64:

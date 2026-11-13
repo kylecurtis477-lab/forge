@@ -3,13 +3,14 @@
 # wm_paint repaints it from the models: the desktop background, then every window that intersects it, bottom to
 # top (frame, title bar, content), then the mouse cursor, all clipped to the rectangle (gfx_clip). The terminal
 # (gfx.fsi) becomes window 0's content: its cells are drawn from term_cell, so text under another window stays
-# hidden. A left click raises and focuses the topmost window under the cursor; pressing on a floating window's
+# hidden. A sandboxed program's canvas (appwin.fsi, step 5) is one more window. A left click raises and focuses the topmost window under the cursor; pressing on a floating window's
 # title bar and moving drags it.
 WM_N = 6
 WM_TB = 16
 WM_TERM = 1
 WM_ABOUT = 2
 WM_HELP = 3
+WM_APP = 4  # screen step 5: the canvas a sandboxed program drew (appwin.fsi)
 WM_FOCUS = 0x3B6EA8
 WM_BLUR = 0x3A4250
 WM_EDGE = 0x8899AA
@@ -50,6 +51,8 @@ def wm_title(w: u64, x: u64, y: u64, fg: u64, bg: u64) -> u64:
         return gfx_text(x, y, "Terminal: kernel console", fg, bg)
     if k == WM_ABOUT:
         return gfx_text(x, y, "About Forge", fg, bg)
+    if k == WM_APP:
+        return gfx_text(x, y, addr(app_title[0]), fg, bg)
     return gfx_text(x, y, "Help", fg, bg)
 
 def wm_name(w: u64):
@@ -58,6 +61,8 @@ def wm_name(w: u64):
         puts("Terminal")
     elif k == WM_ABOUT:
         puts("About Forge")
+    elif k == WM_APP:
+        puts(addr(app_title[0]))
     else:
         puts("Help")
 
@@ -95,6 +100,9 @@ def wm_draw(w: u64):
         return
     gfx_fill(x, y + WM_TB, ww, hh - WM_TB, WM_BODY)
     gfx_frame(x, y, ww, hh, 1, WM_EDGE)
+    if wm_kind[w] == WM_APP:
+        app_blit(x + 1, y + WM_TB)
+        return
     cx = x + 16
     cy = y + WM_TB + 16
     if wm_kind[w] == WM_ABOUT:
@@ -243,6 +251,8 @@ def wm_start():
     wm_add(WM_TERM, 0, 128, gfx_w, gfx_h - 128)
     wm_add(WM_ABOUT, 100, 170, 420, 160)
     wm_add(WM_HELP, 380, 250, 380, 140)
+    if app_pid != 0:
+        wm_add(WM_APP, 600, 420, app_w + 2, app_h + WM_TB + 1)
     wm_on = 1
     term_wm = 1
     wm_paint(0, 0, gfx_w, gfx_h)

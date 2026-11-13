@@ -18,7 +18,7 @@ mcopy -i $B/esp.fat ../../build/kernel/kernel-next.elf ::/EFI/Forge/kernel-next.
 mcopy -i $B/esp.fat ../../build/user/hello.elf ::/EFI/Forge/init.elf
 mmd -i $B/esp.fat ::/EFI/Forge/bin ::/EFI/Forge/docs ::/EFI/Forge/mod
 for m in hello badabi unresolved newer tty1 tty2 getpid2 unsealed tty1u tampered userimg; do mcopy -i $B/esp.fat ../../build/modules/$m.ko ::/EFI/Forge/mod/$m.ko; done
-for p in sh hello cat forktest fault blkd crash sum bg captest chantest sbtest grtest wxtest capdeny badptr kbdd kbdd2 nvmed nvmed2 unsealed tampered forged hellov2 algbad proofset linuxabi lxtest lxthreads lxfs lxexec lxsig; do mcopy -i $B/esp.fat ../../build/user/$p.elf ::/EFI/Forge/bin/$p; done
+for p in sh hello cat forktest fault blkd crash sum bg captest chantest sbtest grtest wxtest capdeny badptr kbdd kbdd2 nvmed nvmed2 gfxapp gfxdeny unsealed tampered forged hellov2 algbad proofset linuxabi lxtest lxthreads lxfs lxexec lxsig; do mcopy -i $B/esp.fat ../../build/user/$p.elf ::/EFI/Forge/bin/$p; done
 [ -f ../../build/user/busybox.elf ] && mcopy -i $B/esp.fat ../../build/user/busybox.elf ::/EFI/Forge/bin/busybox
 printf 'Forge long file name test: this file lives at \\EFI\\Forge\\docs\\Long File Name Notes.txt\nIt spans more than one 13-character LFN entry and is read with open/read/stat/close.\n' > $B/notes.txt
 mcopy -i $B/esp.fat $B/notes.txt "::/EFI/Forge/docs/Long File Name Notes.txt"

@@ -1656,6 +1656,12 @@ def syscall_do(nr: u64, a: u64, b: u64, c: u64, d: u64, frame: u64) -> u64:
         return sys_grant_list()
     if nr == 430:
         return sys_audit_dump()
+    if nr == 431:
+        return sys_win_open(a, b, c)
+    if nr == 432:
+        return sys_win_fill(a, b, c)
+    if nr == 433:
+        return sys_win_text(a, b, c)
     if nr == 423:
         return sys_chan_create(a)
     if nr == 424:

@@ -412,7 +412,7 @@ def desk_bg(x0: u64, y0: u64, x1: u64, y1: u64):
             gfx_fill(i * bw, 0, bw, 96, gfx_bars[i])
             i += 1
     if y0 < 128 and y1 > 96:
-        gfx_text(0, 96, "Forge desktop (screen step 4: windowed compositor)", 0xFFFFFF, GFX_DESK)
+        gfx_text(0, 96, "Forge desktop (screen step 5: a sandboxed app window)", 0xFFFFFF, GFX_DESK)
         x = gfx_text(0, 112, "gfx: ", 0xFFFFFF, GFX_DESK)
         x = gfx_num(x, 112, gfx_w, 0xFFFFFF, GFX_DESK)
         x = gfx_text(x, 112, "x", 0xFFFFFF, GFX_DESK)
