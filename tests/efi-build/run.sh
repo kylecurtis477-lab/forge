@@ -25,10 +25,12 @@ chk() {
      && [ "$(ls $T/fg | wc -l)" = $3 ]; then echo "PASS efi-build/$1"; else echo "FAIL efi-build/$1 (rc $rs/$rf)"; diff $T/m1 $T/m2 | head -5; diff $T/s.err $T/f.err | head -5; fail=1; fi
 }
 chk default "" 10
-# two clean script builds (the default chk already ran one); require byte-identical ESP and GPT disk
+# two clean script builds (the default chk already ran one, with FORGEC_FLAGS=""); require byte-identical ESP and GPT
+# disk. The second build pins the same (empty) FORGEC_FLAGS: under the O0 gate pass the inherited -O0 would build
+# a different kernel.elf (every bounds check kept since -O0 is real in freestanding code) and change the ESP.
 if [ -f $T/sh/esp.fat ] && [ -f $T/sh/disk.img ]; then
   rm -rf build/efi
-  sh examples/efi/build.sh >$T/s2.out 2>$T/s2.err
+  FORGEC_FLAGS="" sh examples/efi/build.sh >$T/s2.out 2>$T/s2.err
   rs2=$?
   if [ $rs2 = 0 ] && cmp -s $T/sh/esp.fat build/efi/esp.fat && cmp -s $T/sh/disk.img build/efi/disk.img; then
     hs=$(sha256sum < build/efi/esp.fat | awk '{print $1}')
