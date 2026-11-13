@@ -1,6 +1,6 @@
 # Forge build plan
 
-Release notes per version (0.17.2 on) are in CHANGELOG.md; versions are commit groupings, not tags. This is the plan to execute, in phase order. It merges the open items from docs/SYSTEMS.md (roadmap items 1–9), the compiler performance list, and six pillars:
+Release notes per version (0.17.2 on) are in CHANGELOG.md, every commit named (each batch's lines land in the batch after it); versions are commit groupings, not tags. This is the plan to execute, in phase order. It merges the open items from docs/SYSTEMS.md (roadmap items 1–9), the compiler performance list, and six pillars:
 
 - **A. Provable safety.** Forge is memory-safe by default:
   - ownership/borrow or region checking;

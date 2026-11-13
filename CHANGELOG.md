@@ -20,6 +20,15 @@
   seven regression tests).
 - `6e19afc` fix: the Stage 3a comment block in `fs_postfix` reformatted with `build/fmt` (gate inv152
   failed fmt-repo-clean on it).
+- `f0cd802` fix: pointer arithmetic on `own`/`ref`/`mut` (`q + 8`) is an unsafe operation; in safe code it
+  made a second owner (or borrow) of the neighbouring memory.
+- `dc44810` fix: a whole-element `p[i]` of a pointer to owners (`ptr[own[T]]`, `own[own[T]]`) is an unsafe
+  operation; `a = q[0]; b = q[0]` copied one owner into two.
+- `77f5e7c` Stage 3b-min (designed by ChatGPT, implemented here): `nown[T]`, an affine owner that may be
+  none, for locals, parameters/returns and struct fields; use as `own[T]` needs an `if o != 0:` proof. No
+  globals, arrays or `take`/`replace`/`swap` yet.
+- `101c34c` tests: ChatGPT's 3b-min review probes (44 run, none wrongly accepted) pinned as 15 refusals and
+  a runtime test; the loop false rejection is documented in SYSTEMS.md.
 
 ### Optimizer: Phase 12.1 steps 4a-4c
 - `be09366` step 4a, `--fs-opt` promotes scalar locals in safe functions that also take frame addresses;
