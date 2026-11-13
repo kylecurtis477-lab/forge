@@ -425,8 +425,13 @@ get vectorized, `parallel for` spreads work over all cores, and every speed clai
      ra_seq (14 phase-local scalars plus 2 long-lived ones, 16 slots for 11 registers): frame accesses 103 plain,
      33 with `--fs-opt`, 0 with `--fs-live` (`fs-live-shape`); tools/fsfuzz.forge now builds six ways (adds
      `--fs-live` and -O0 `--fs-live`): seeds 1-6, 480 programs (98,151 lines), 0 diffs. Kernel frame accesses with
-     the flag 11,975 to 11,125 (-7.1%), compile 0.77 s. Not yet used for any image; the kernel switch is its own
-     step after a QEMU gate. Next: SSA values for the stack-machine temporaries (push/pop and %rax/%rcx chains).
+     the flag 11,975 to 11,125 (-7.1%), compile 0.77 s. Next: SSA values for the stack-machine temporaries
+     (push/pop and %rax/%rcx chains).
+   - *Step 4b kernel switch (2026-11-12).* The kernel and kernel-next are built with `--fs-live`
+     (examples/kernel/build.forge and build.sh; tests/dwarf/run.sh builds its `-g` kernel the same way). It uses
+     the registers and eligibility rules of steps 1-2, so the step 3 asm audit covers it unchanged. Kernel text
+     596,784 to 595,024 bytes, frame accesses in kernel.s 11,975 to 11,125. The QEMU boot suite at O2 and O0 is
+     the test. The loader, modules and user programs stay on `--fs-opt` for now.
    - *Asm audit as a checked list (2026-11-12).* The step 3 audit table in docs/SYSTEMS.md ("Kernel asm and
      --fs-opt") is now a `- [x]` checklist covering the kernel and the user programs, and tests/asm-audit/run.sh
      keeps it complete: it lists every `@naked` function, every top-level `asm(...)` block (its `.globl` symbols,

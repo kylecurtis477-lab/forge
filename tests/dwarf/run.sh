@@ -10,7 +10,7 @@ GDB=${GDB:-$(command -v gdb || echo $HOME/gdbd/bin/gdb)}
 if [ ! -x "$GDB" ]; then echo "SKIP dwarf/gdb-schedule (no gdb)"; exit 0; fi
 D=build/dwarf; mkdir -p $D/iso/boot/grub
 fail() { echo "FAIL dwarf/$1"; pkill -f "qemu-system.*$D/forge-g.iso" 2>/dev/null; exit 0; }
-(cd examples/kernel && ../../build/forgec kernel.forge ../../$D/kernel.s --fs-opt -g) || fail "build (forgec -g)"
+(cd examples/kernel && ../../build/forgec kernel.forge ../../$D/kernel.s --fs-live -g) || fail "build (forgec -g)"
 build/fas -I build/user -o $D/kernel.o $D/kernel.s || fail "build (fas)"
 build/fld --format kernel -o $D/kernel.elf $D/kernel.o || fail "build (fld)"
 # -g changes only the debug sections: the loaded image equals the normal build's
