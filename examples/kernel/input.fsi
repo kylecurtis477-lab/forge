@@ -168,7 +168,11 @@ def desktop_input():
     mouse_init()
     cur_x = gfx_w / 2
     cur_y = gfx_h / 2
-    cur_show()
+    if wm_on != 0:
+        wm_cur = 1
+        wm_paint(cur_x, cur_y, cur_x + CUR_W, cur_y + CUR_H)
+    else:
+        cur_show()
     gfx_present()
     ev_on = 1
     puts("desktop: input ready, mouse ")
@@ -189,7 +193,10 @@ def desktop_input():
         kind = e & 0xFF
         a = (e >> 8) & 0xFFFFFF
         if kind == EV_MOVE:
-            cur_move(ev_s16(e >> 32), ev_s16(e >> 48))
+            if wm_on != 0:
+                wm_cursor(ev_s16(e >> 32), ev_s16(e >> 48))
+            else:
+                cur_move(ev_s16(e >> 32), ev_s16(e >> 48))
             gfx_present()
         elif kind == EV_BUTTON:
             puts("mouse: buttons ")
@@ -199,6 +206,9 @@ def desktop_input():
             puts(",")
             put_u64(cur_y)
             putc(10)
+            if wm_on != 0:
+                wm_button(a)
+                gfx_present()
             if (a & 1) != 0:
                 pressed = 1
             elif pressed != 0:
@@ -224,3 +234,11 @@ def desktop_input():
     puts(", dropped ")
     put_u64(ev_dropped)
     putc(10)
+    if wm_on != 0:
+        puts("wm: ")
+        put_u64(wm_raises)
+        puts(" raises, ")
+        put_u64(wm_moves)
+        puts(" drag steps, ")
+        put_u64(wm_paints)
+        puts(" damage repaints\n")

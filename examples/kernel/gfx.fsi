@@ -19,6 +19,22 @@ gfx_dy0: u64
 gfx_dx1: u64
 gfx_dy1: u64
 gfx_presented: u64
+# the clip rectangle [gfx_cx0, gfx_cx1) x [gfx_cy0, gfx_cy1): gfx_fill and gfx_char draw only inside it (the
+# compositor, wm.fsi, narrows it to the rectangle it repaints); gfx_clip(0, 0, gfx_w, gfx_h) is the whole screen
+gfx_cx0: u64
+gfx_cy0: u64
+gfx_cx1: u64
+gfx_cy1: u64
+
+def gfx_clip(x0: u64, y0: u64, x1: u64, y1: u64):
+    if x1 > gfx_w:
+        x1 = gfx_w
+    if y1 > gfx_h:
+        y1 = gfx_h
+    gfx_cx0 = x0
+    gfx_cy0 = y0
+    gfx_cx1 = x1
+    gfx_cy1 = y1
 
 def gfx_init(fmt: u64) -> u64:
 # 1 when there is a 32-bit linear framebuffer to draw on; the back buffer starts black, damage empty
@@ -61,7 +77,7 @@ def gfx_damage(x0: u64, y0: u64, x1: u64, y1: u64):
         gfx_dy1 = y1
 
 def gfx_fill(x: u64, y: u64, w: u64, h: u64, c: u64) -> u64:
-# fill a rectangle clipped to the screen; returns the number of pixels written
+# fill a rectangle clipped to the screen and the clip rectangle; returns the number of pixels written
     if x >= gfx_w or y >= gfx_h or w == 0 or h == 0:
         return 0
     x1 = x + w
@@ -70,6 +86,16 @@ def gfx_fill(x: u64, y: u64, w: u64, h: u64, c: u64) -> u64:
     y1 = y + h
     if y1 > gfx_h or y1 < y:
         y1 = gfx_h
+    if x < gfx_cx0:
+        x = gfx_cx0
+    if y < gfx_cy0:
+        y = gfx_cy0
+    if x1 > gfx_cx1:
+        x1 = gfx_cx1
+    if y1 > gfx_cy1:
+        y1 = gfx_cy1
+    if x >= x1 or y >= y1:
+        return 0
     yy = y
     while yy < y1:
         row = yy * gfx_w
@@ -94,7 +120,9 @@ def gfx_get(x: u64, y: u64) -> u64:
     return u64(gfx_buf[y * gfx_w + x])
 
 def gfx_char(x: u64, y: u64, ch: u64, fg: u64, bg: u64):
-# one 8x16 glyph at pixel (x, y); characters outside 32..126 draw as a space
+# one 8x16 glyph at pixel (x, y), clipped; characters outside 32..126 draw as a space
+    if x >= gfx_cx1 or y >= gfx_cy1 or x + 8 <= gfx_cx0 or y + 16 <= gfx_cy0:
+        return
     g: u64 = 0
     if ch >= 32 and ch <= 126:
         g = (ch - 32) * 16
@@ -106,7 +134,7 @@ def gfx_char(x: u64, y: u64, ch: u64, fg: u64, bg: u64):
             c = bg
             if (bits >> (7 - k)) & 1:
                 c = fg
-            if x + k < gfx_w and y + r < gfx_h:
+            if x + k >= gfx_cx0 and x + k < gfx_cx1 and y + r >= gfx_cy0 and y + r < gfx_cy1:
                 gfx_buf[(y + r) * gfx_w + x + k] = u32(c)
             k += 1
         r += 1
@@ -189,6 +217,7 @@ term_fg: u64
 term_bg: u64
 term_lines: u64
 term_scrolls: u64
+term_wm: u64  # 1 once the terminal is a compositor window: changes repaint through wm_paint
 
 def term_open(x: u64, y: u64, cols: u64, rows: u64, fg: u64, bg: u64):
 # a terminal at pixel (x, y), cols x rows cells (clipped to the screen and TERM_MAX), cleared to bg
@@ -228,7 +257,10 @@ def term_newline():
     while i < term_rows * term_cols:
         term_cell[i] = 32
         i += 1
-    gfx_scroll(term_x, term_y, term_cols * 8, term_rows * 16, 16, term_bg)
+    if term_wm != 0:
+        wm_paint(term_x, term_y, term_x + term_cols * 8, term_y + term_rows * 16)
+    else:
+        gfx_scroll(term_x, term_y, term_cols * 8, term_rows * 16, 16, term_bg)
     term_scrolls += 1
 
 def term_putc(c: u64):
@@ -244,10 +276,39 @@ def term_putc(c: u64):
     if c < 32 or c > 126:
         c = 32
     term_cell[term_row * term_cols + term_col] = u8(c)
-    gfx_char(term_x + term_col * 8, term_y + term_row * 16, c, term_fg, term_bg)
+    cx = term_x + term_col * 8
+    cy = term_y + term_row * 16
+    if term_wm != 0:
+        wm_paint(cx, cy, cx + 8, cy + 16)
+    else:
+        gfx_char(cx, cy, c, term_fg, term_bg)
     term_col += 1
     if term_col >= term_cols:
         term_newline()
+
+def term_draw(x0: u64, y0: u64, x1: u64, y1: u64):
+# the cells that meet the rectangle (the compositor's repaint of the terminal window's content)
+    if x1 <= term_x or y1 <= term_y or term_on == 0:
+        return
+    c0: u64 = 0
+    if x0 > term_x:
+        c0 = (x0 - term_x) / 8
+    r0: u64 = 0
+    if y0 > term_y:
+        r0 = (y0 - term_y) / 16
+    c1 = (x1 - term_x + 7) / 8
+    if c1 > term_cols:
+        c1 = term_cols
+    r1 = (y1 - term_y + 15) / 16
+    if r1 > term_rows:
+        r1 = term_rows
+    r = r0
+    while r < r1:
+        k = c0
+        while k < c1:
+            gfx_char(term_x + k * 8, term_y + r * 16, u64(term_cell[r * term_cols + k]), term_fg, term_bg)
+            k += 1
+        r += 1
 
 def term_replay():
 # start the terminal with the text console's last rows (con_back, the boot log as the console showed it),
@@ -339,33 +400,38 @@ def desktop_wanted() -> u64:
             return 1
     return 0
 
+def desk_bg(x0: u64, y0: u64, x1: u64, y1: u64):
+# the desktop under the windows, inside the current clip: background, the colour-bar test pattern, and two
+# labelled rows right under the bars (white on the dark background, on the 8x16 grid from column 0, so the boot
+# harness reads them back from a QEMU screendump as whole rows); parts outside [y0, y1) are skipped
+    gfx_fill(x0, y0, x1 - x0, y1 - y0, GFX_DESK)
+    if y0 < 96:
+        bw = gfx_w / 8
+        i: u64 = 0
+        while i < 8:
+            gfx_fill(i * bw, 0, bw, 96, gfx_bars[i])
+            i += 1
+    if y0 < 128 and y1 > 96:
+        gfx_text(0, 96, "Forge desktop (screen step 4: windowed compositor)", 0xFFFFFF, GFX_DESK)
+        x = gfx_text(0, 112, "gfx: ", 0xFFFFFF, GFX_DESK)
+        x = gfx_num(x, 112, gfx_w, 0xFFFFFF, GFX_DESK)
+        x = gfx_text(x, 112, "x", 0xFFFFFF, GFX_DESK)
+        x = gfx_num(x, 112, gfx_h, 0xFFFFFF, GFX_DESK)
+        gfx_text(x, 112, " back buffer, 8 colour bars, self-test OK", 0xFFFFFF, GFX_DESK)
+
 def desktop_show():
-# the desktop: background, the colour-bar test pattern, two labelled rows right under the bars (white on the dark
-# background, on the 8x16 grid from column 0, so the boot harness reads them back from a QEMU screendump as whole
-# rows), then a terminal (step 2) that opens on the boot log and receives console text from here on
+# the desktop: the terminal (step 2) opens on the boot log and receives console text from here on, then the
+# compositor (step 4, wm.fsi) takes over the screen: desktop background (desk_bg), the terminal as window 0 and two
+# floating windows, repainted by damage rectangles; then the input window (step 3)
     if gfx_init(bi.fb_format) == 0:
         puts("desktop: no linear framebuffer, staying on the text console\n")
         return
+    gfx_clip(0, 0, gfx_w, gfx_h)
     if gfx_selftest() == 0:
         panic("gfx: back-buffer self-test failed")
-    gfx_fill(0, 0, gfx_w, gfx_h, GFX_DESK)
-    bw = gfx_w / 8
-    i: u64 = 0
-    while i < 8:
-        gfx_fill(i * bw, 0, bw, 96, gfx_bars[i])
-        i += 1
-    # the terminal: a title bar on row 8, then the cells from row 9 to the bottom, full width from column 0 so
-    # the harness reads its rows whole
-    gfx_fill(0, 128, gfx_w, 16, GFX_TITLE)
-    gfx_text(0, 128, "Terminal: kernel console", 0xFFFFFF, GFX_TITLE)
     term_open(0, 144, gfx_w / 8, (gfx_h - 144) / 16, 0xE0E0E0, GFX_TERM)
     term_replay()
-    gfx_text(0, 96, "Forge desktop (screen step 3: mouse and keyboard events)", 0xFFFFFF, GFX_DESK)
-    x = gfx_text(0, 112, "gfx: ", 0xFFFFFF, GFX_DESK)
-    x = gfx_num(x, 112, gfx_w, 0xFFFFFF, GFX_DESK)
-    x = gfx_text(x, 112, "x", 0xFFFFFF, GFX_DESK)
-    x = gfx_num(x, 112, gfx_h, 0xFFFFFF, GFX_DESK)
-    gfx_text(x, 112, " back buffer, 8 colour bars, self-test OK", 0xFFFFFF, GFX_DESK)
+    wm_start()
     gfx_present()
     gfx_on = 1
     puts("desktop: gfx ")
@@ -382,5 +448,7 @@ def desktop_show():
     put_u64(term_cols)
     puts("x")
     put_u64(term_rows)
-    putc(10)
+    puts(", ")
+    put_u64(wm_n)
+    puts(" windows\n")
     desktop_input()

@@ -92,6 +92,17 @@ count stays at or under 709.
         into it).
    4. A minimal desktop shell: a windowed compositor (back buffer, window list, z-order, damage-based redraw)
       that draws at least a terminal window, a mouse cursor, and focus that follows clicks.
+      **Done (screen step 4):** examples/kernel/wm.fsi. Windows are a list with a z-order; any change marks a
+        rectangle and `wm_paint` repaints it from the models under a clip rectangle (new `gfx_clip`, honoured by
+        `gfx_fill`/`gfx_char`): desktop background (`desk_bg`), every intersecting window bottom to top, then the
+        cursor. The terminal is window 0 (full width, so the harness still reads its rows whole) and repaints
+        through `wm_paint` (cells drawn by `term_draw`; scrolls repaint instead of moving pixels, so floating
+        windows are never smeared); About and Help float over it. Left press raises and focuses the topmost
+        window under the cursor; a press on a floating title bar drags it (clamped to the screen). tests/os/
+        desktop.sh: the monitor moves the cursor to About's title bar (under Help), presses, moves 3 x 100 right
+        and releases, then sends a key; serial must show `wm: focus About Forge` and `wm: About Forge moved to
+        400,170`, and the screendump must show About's focused title bar at (410,175), Help's unfocused title bar
+        at (384,252) and terminal where About was (13 s). No new unsafe code (kernel unsafe report 170 / 708).
    5. A sandboxed Forge program with manifest capabilities that gets a window (a draw/event capability) and
       draws into it; anything outside its manifest is refused.
 2. **Ownership-typed struct fields.** `own`/`ref`/`mut` as struct field types, borrow checks through field access,

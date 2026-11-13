@@ -455,7 +455,14 @@ it on; console text then goes to serial only. tests/os/desktop.sh reads the desk
 screendump and checks the colour bars pixel by pixel. Step 2 adds a terminal in the back buffer (a cell grid at a pixel origin, scrolled
 by moving back-buffer rows); it opens on the text console's last rows and receives console text from then on. Step 3 adds input.fsi: PS/2 mouse packets and keyboard scan codes go into one event queue (the
 shared PS/2 handler sorts bytes by the controller's aux bit; port access only through `ps2_io`), and the desktop moves
-an arrow cursor drawn over the back buffer.
+an arrow cursor drawn over the back buffer. Step 4 adds wm.fsi, the compositor: a window list with a z-order (the
+terminal is window 0, full width under the labels; About and Help float over it), and nothing draws into a window
+directly. A change marks a rectangle and `wm_paint` rebuilds it from the models inside a clip rectangle (`gfx_clip`,
+honoured by `gfx_fill` and `gfx_char`): desktop background, each intersecting window bottom to top (title bar,
+edge, content; the terminal's content is drawn from its cells, so text under another window stays hidden), then
+the cursor. A left click raises and focuses the topmost window under the cursor; pressing on a floating window's
+title bar drags it. In compositor mode the terminal repaints through `wm_paint` instead of drawing or scrolling
+pixels itself.
 ## Security fix: user-copy validation (after 8.8)
 
 `copy_user` / `copy_str_user` (cpux.fsi) now enforce the user range themselves: every operand below
