@@ -80,6 +80,11 @@ def _start():
     used = (16 * qsz + 6 + 2 * qsz + 4095) & ~u64(4095)
     total = used + ((6 + 8 * qsz + 4095) & ~u64(4095))
     np = total / 4096 + 1
+    # v1 reservation 3: the grant's address-space ID; only 0 exists, and ID 1 must be refused without allocating
+    if syscall3(407, 6, 0, 0) != 1 or syscall3(402, np, 1, 0) != 0xFFFFFFFFFFFFFFEA:
+        out("blkd: address-space ID 1 not refused\n")
+        flush()
+        sys_exit(1)
     q = syscall3(402, np, 0, 0)
     if is_err(q):
         out("blkd: no DMA region\n")

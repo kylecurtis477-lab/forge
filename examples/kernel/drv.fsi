@@ -12,6 +12,11 @@
 # replay when a supervisor will restart the driver).
 DRV_BLK = 1
 DRV_IO_LEN = 0x40
+# v1 reservation 3: a device grant names an address-space ID (drv 402's second argument). Only ID 0, the one
+# IOMMU domain a device has today, exists; any other ID is refused (EINVAL) before the policy check or any
+# allocation, so per-process or per-device-group IOMMU domains can be added later without changing the ABI.
+# drv 407 with a = 6 reports how many IDs exist (DRV_ASIDS).
+DRV_ASIDS = 1
 EIO = 0xFFFFFFFFFFFFFFFB
 EPERM = 0xFFFFFFFFFFFFFFFF
 RQ_IDLE = 0
@@ -160,7 +165,9 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
             pio_wr((a), 4, c & 0xFFFFFFFF)
         return 0
     if nr == 402:
-    # dma_alloc(npages): one contiguous region per driver, mapped user RW NX
+    # dma_alloc(npages, asid): one contiguous region per driver, mapped user RW NX, in address space asid
+        if b >= DRV_ASIDS:
+            return EINVAL
         if drv_dma_check() != 0:
             return EPERM
         if p.dma_n != 0 or a == 0 or a > 16:
@@ -247,6 +254,8 @@ def sys_drv(nr: u64, a: u64, b: u64, c: u64) -> u64:
             return vb_msix
         if a == 5:
             return vb_modern
+        if a == 6:
+            return DRV_ASIDS
         if vb_modern:
             if a == 0:
                 return vb_cfg_off

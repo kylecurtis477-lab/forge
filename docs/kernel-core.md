@@ -66,7 +66,7 @@ Two independent layers; a call must pass both.
   process-state record (flags word).
 - Check: `sys_need(nr)` at the top of `syscall_dispatch`, before anything else the syscall does.
   Missing bit -> `EPERM` and a `cap:` log line. Classes: fs = open, stat, getdents, openat;
-  spawn = fork, exec, wait, exec_sandboxed; ipc = chan, send, recv; drv = 400-407, 411-418;
+  spawn = fork, exec, wait, exec_sandboxed; ipc = chan, send, recv; drv = 400-407 (402 dma_alloc(npages, asid): address-space ID, only 0 exists, others EINVAL; 407 a=6 reports the count), 411-418;
   ktest = 408; kexec = 409; probe = 200; grant = 428-430. All other native syscalls need none.
 - Linux-personality processes never reach this table (they see only the Linux syscall table).
 

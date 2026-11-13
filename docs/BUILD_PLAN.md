@@ -174,6 +174,12 @@ one commit in five, in this order, each its own commit with a visual and docs:
      effect; outside a `uses` clause they stay ordinary names. Tests: tests/grammar/valid/effects_alloc.forge,
      tests/grammar/invalid/effect_alloc_typo.forge, tests/diag/effects_reserved_alloc.forge.
 3. An address-space-ID field in the device-grant ABI, defaulting to 0.
+   - *Status: done (2026-11-13).* The device grant (drv 402, `dma_alloc(npages, asid)`) takes an address-space ID as
+     its second argument. Only ID 0 exists (the device's one IOMMU domain), so any other ID gets EINVAL before the
+     DMA policy check or any allocation; drv 407 with a = 6 reports the number of IDs (`DRV_ASIDS` = 1). blkd checks
+     both at start-up and passes 0, so every boot that uses the user-mode driver exercises the refusal; with the
+     kernel mutated to accept ID 1 the boot fails at blkd ("blkd: address-space ID 1 not refused"). Per-process or
+     per-device-group IOMMU domains can be added later without an ABI change. No new unsafe code.
 4. A checksum and version in the handoff/process-state record format.
 5. CPython bindings on the stable ABI (abi3).
 6. The build.sh/run_tests.sh port to Forge, whenever it fits.
