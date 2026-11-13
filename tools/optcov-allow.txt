@@ -1,0 +1,37 @@
+# optcov allow-list: optimizer blocks that no Forge program can reach (build-plan item 3 part c).
+# `build/optcov --check` fails on a never-hit block that is not listed here, and on an entry here that the corpus
+# now hits or that names no block (a stale entry). Format, one block per line:
+#   function | block header (as written in selfhost/compiler.forge, stripped) | why no program reaches it
+# Entries are keyed by function and header text, not line numbers, so they survive compiler edits. A new entry
+# needs a reason that holds for every program the code generator can emit; a reachable hole gets a
+# tests/optgate program instead (docs/tools-optcov.md).
+fs_cdiv_try | if not (str_eq(o, "/") or str_eq(o, "//") or str_eq(o, "%")): | defensive: the only caller (fs_binop, level 5, operator not "*") passes /, // or %
+fs_ra_slot | if not ends(o, "(%rbp)"): | defensive: callers pass only operands they matched as N(%rbp) (fs_ra_opnd, fs_ra_immq)
+fs_ra_slot | if len(t) == 0: | defensive: the code generator writes every frame operand with its offset (never a bare "(%rbp)")
+fs_ra_slot | if i >= len(t): | defensive: an offset of "-" alone is never emitted
+fs_ra_slot | if c < 48 or c > 57: | defensive: frame offsets are decimal integers (str of an int)
+fs_ra_use | if v == 2: | defensive: fs_regalloc calls fs_ra_use only after fs_ra_opnd / fs_ra_immq accepted the operand
+fs_ra_use | if nsl >= 4096: | capacity: a function has at most 4096 locals (fsl_* tables), so at most 4096 distinct promotable slots; more locals stop the compiler earlier (see BUILD_PLAN item 3 note)
+fs_regalloc | if not ends(l, ":\n") or contains(l, " "): | defensive: fs labels are ".LFn:" / "name:" lines; functions with asm() text are excluded before fs_regalloc runs
+fs_regalloc | else: #2 | defensive: the code generator emits `rep` only as `rep movsb` / `rep stosb`
+fs_regalloc | if starts(mn, "j") and not starts(ops, ".L"): | defensive: every fs jump targets an fs_newlab ".LFn" label or fs_ret (also .LF)
+fs_regalloc | if nsl < 0: | follows fs_ra_use's two unreachable -1 returns (malformed operand, 4097th slot)
+fs_regalloc | if nret != nlv: | defensive: every fs function body ends each exit with `leave` / `ret` (one epilogue per return)
+fs_regalloc | while r < 11: | body of `if nret != nlv` (unreachable, above)
+fs_ra_opnd | if len(ops) < 6: | defensive: fs_regalloc calls it only for mov/cmp lines naming %rbp, whose operands are longer
+fs_ra_rsparg | if (c < 48 or c > 57) and c != 45: | defensive: the text before "(%rsp)" is always a decimal offset
+fs_lv_num | if len(t) == 0: | defensive: callers pass the digits after ".LF" of a generated label, never empty
+fs_lv_num | if c < 48 or c > 57: | defensive: generated labels are ".LF" + str(n)
+fs_lv_build | if n == 0: | defensive: a function body always has its prologue lines when liveness runs
+fs_lv_build | if not starts(ops, ".LF") or lmin < 0: | defensive: every fs jump target is an fs_newlab ".LFn" label inside the function
+fs_lv_build | if v < lmin or v > lmax or lpos[v - lmin] < 0: | defensive: jumps target labels of the same function (break/continue/return/if/while labels)
+fs_ra_immq | if k >= len(ops): | defensive: the operand starts with "$" and has a destination, so a comma is always present
+fs_ra_1line | if char_at(l, j) == 10: | defensive: the code generator emits one instruction per out[] entry
+fs_tmp_load | if k < 0: | defensive: pushed-argument reloads are written "8*k(%rsp)" with a decimal k
+fs_tmp_load | if r < 0: | defensive: pushed-argument reloads before a call target argument registers only
+fs_tmp_call | if n >= 6: | defensive: at most 6 arguments are reloaded into registers; further ones stay on the stack
+fs_tmp_call | if pad < 0: | defensive: the alignment pad is written "sub $N,%rsp" with a decimal N
+fs_tmp_call | if d < 0 or d % 8 != 0 or d // 8 >= n or tr[d // 8] >= 0: | defensive: argument reloads read distinct consecutive words above the pad
+fs_tmp_call | if lr[x] == lr[q]: | defensive: each argument is reloaded into a different argument register
+fs_tmp_call | if dep == 0: | defensive: argument evaluation pushes and pops %rcx in balanced pairs
+fs_tmp_call | if found < n: | defensive: every reloaded argument has its `push %rax` inside the same function

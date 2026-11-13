@@ -125,8 +125,15 @@ build/forgec tests/fs/regalloc.forge build/t_ra.s $FORGEC_FLAGS --fs-live && [ "
 ./forge tools/fsfuzz.forge -o build/fsfuzz-tool >/dev/null 2>&1 && build/fsfuzz-tool --seed 1 --n 20 > build/t_fsfuzz.log 2>&1 && echo "PASS fs-opt-fuzz" || { echo "FAIL fs-opt-fuzz"; cat build/t_fsfuzz.log; fail=1; }
 # build-plan item 3 (b): every optimizer flag combination (56 flag sets x plain/stack-protector), bounded
 build/fsfuzz-tool --combos --seed 7 --n 2 > build/t_fscombos.log 2>&1 && echo "PASS fs-opt-combos" || { echo "FAIL fs-opt-combos"; cat build/t_fscombos.log; fail=1; }
-# build-plan item 3 (a): block coverage of the fs optimizer passes, quick form (docs/tools-optcov.md)
-./forge tools/optcov.forge -o build/optcov-tool >/dev/null 2>&1 && build/optcov-tool --quick --out build/optcov/quick.txt > build/t_optcov.log 2>&1 && echo "PASS optimizer-coverage" || { echo "FAIL optimizer-coverage"; cat build/t_optcov.log; fail=1; }
+# build-plan item 3 (c): optimizer-gate programs (tests/optgate) give the same output under every fs optimizer level
+for t in tests/optgate/*.forge; do
+  for f in "" --fs-opt --fs-live --fs-temps; do
+    build/forgec "$t" build/t_og.s $FORGEC_FLAGS $f && build/fas -o build/t_og.o build/t_og.s && build/fld -o build/t_og build/t_og.o && build/t_og | diff -q - "${t%.forge}.expected" >/dev/null && echo "PASS optgate$f $t" || { echo "FAIL optgate$f $t"; fail=1; }
+  done
+done
+# build-plan item 3 (a, c): block coverage of the fs optimizer passes; --check fails on any never-hit block not in
+# tools/optcov-allow.txt and on any stale allow-list entry (docs/tools-optcov.md, ~45 s)
+./forge tools/optcov.forge -o build/optcov-tool >/dev/null 2>&1 && build/optcov-tool --check > build/t_optcov.log 2>&1 && echo "PASS optimizer-coverage" || { echo "FAIL optimizer-coverage"; cat build/t_optcov.log; fail=1; }
 # constant division: in c_i64_7 and c_u64_641 only the three divisions by a variable keep div/idiv
 build/forgec tests/fs/cdiv.forge build/t_cd.s $FORGEC_FLAGS --fs-opt && [ "$(awk '/^c_i64_7:/,/ret$/' build/t_cd.s | grep -c '    idiv ')" = 3 ] && [ "$(awk '/^c_u64_641:/,/ret$/' build/t_cd.s | grep -c '    div ')" = 3 ] && echo "PASS fs-opt-cdiv-shape" || { echo "FAIL fs-opt-cdiv-shape"; fail=1; }
 # float globals take float or integer literals only (tests/fs/fglobals.forge checks the bits)

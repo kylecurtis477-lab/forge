@@ -187,8 +187,15 @@ count stays at or under 709.
      all 56 combinations of the optimizer level (7 spellings, redundant ones included), -O0, --no-bounds and -g,
      from the plain source and a stack-protector variant (112 builds), runs every distinct assembly and requires
      identical output. Seeds 1-3 x 25 programs: no miscompile found. A planted miscompile is caught. run_tests.sh
-     `fs-opt-combos` runs 2 programs (224 builds). Next for item 3: targeted programs for the never-hit blocks
-     listed by optcov, then the rule that a new optimizer pass lands only with both checks green.
+     `fs-opt-combos` runs 2 programs (224 builds). Next for item 3: the rule that a new optimizer pass lands only
+     with both checks green.
+   - *Status (c), never-hit blocks: done (2026-11-13).* Of optcov's 32 never-hit blocks, the 2 reachable ones (the
+     4096-entry pin table of the --fs-opt allocator) are covered by tests/optgate/pins.forge, which run_tests.sh
+     also runs under every level (`optgate*`). The other 30 are listed with reasons in tools/optcov-allow.txt (29
+     defensive re-checks of code-generator output, 1 capacity limit). `optcov --check` fails on any never-hit block
+     not on the list and on any stale entry; run_tests.sh `optimizer-coverage` now runs it (254/284 blocks hit, the
+     rest allowed). Finding: more than 4096 locals in one freestanding function crash the compiler instead of
+     giving a diagnostic (fsl_* tables); fix queued for the next batch.
 4. **SSA backend (12.1 step 4), gated by item 3**: a real SSA IR for fs/kernel mode with liveness-based register
    allocation (Phase 12 item 1), in safe steps that are byte-identical for code built without the new flag.
    Steps 4b (`--fs-live`) and 4c (`--fs-temps`) are done and the kernel is built with both.

@@ -1,5 +1,5 @@
 # optcov: block coverage of the freestanding backend's optimizer passes (build-plan item 3, optimizer gate).
-# usage: build/optcov [--quick] [--out FILE]
+# usage: build/optcov [--quick | --check] [--out FILE] [--allow FILE]
 # 1. Instruments selfhost/forgec.forge: every block of the optimizer functions (the function body and the body of
 #    every if / elif / else / while / for) gets a counter increment; the counters are added into build/optcov/
 #    counts.txt when a freestanding compile finishes (fs_main returned, so a compile error adds nothing).
@@ -11,6 +11,11 @@
 #    blocks total, then every block never hit with its compiler.forge line and text.
 # --quick: two corpus programs and two configurations (the run_tests.sh check: the instrumented compiler builds,
 #    counts are written and at least one block of every pass group is hit).
+# --check: the full corpus without the fsfuzz programs (so the result does not depend on build/ leftovers), then
+#    every never-hit block must be listed in the allow-list (FILE, default tools/optcov-allow.txt: function |
+#    header | reason; a header that occurs more than once in the function ends with " #N", N counting from 1
+#    in source order) and every allow-list entry must name a block that is still never hit; anything else prints
+#    a CHECK line and exits 1 (the run_tests.sh optimizer-coverage check, build-plan item 3 part c).
 # Lines of selfhost/forgec.forge are the lines of selfhost/compiler.forge (build/embed appends the prelude and
 # runtime after them), so the report's line numbers point into compiler.forge.
 import os
@@ -93,8 +98,8 @@ def run(cmd):
     r = os.run(cmd)
     return r[0]
 
-def corpus(quick):
-# freestanding programs expected to compile
+def corpus(quick, fuzz):
+# freestanding programs expected to compile (fuzz: also build/fsfuzz/p*.forge)
     if quick:
         return ["tests/own/ok.forge", "examples/user/hello.forge"]
     mark = "# forge: " + "no-runtime"
@@ -103,6 +108,8 @@ def corpus(quick):
     for l in r[1].split("\n"):
         if l.strip() != "":
             xs.append(l.strip())
+    if not fuzz:
+        return xs
     r = os.run(["sh", "-c", "ls build/fsfuzz/p*.forge 2>/dev/null | grep -v '\\.[0-9]' | sort -V"])
     for l in r[1].split("\n"):
         if l.strip() != "":
@@ -117,8 +124,82 @@ def opt(name, dflt):
         i += 1
     return dflt
 
+def allow_list(f):
+# [[function, header, reason], ...] from the allow-list file (comments and blank lines skipped)
+    src = read_file(f)
+    xs = []
+    if src is None:
+        return xs
+    for l in src.split("\n"):
+        t = l.strip()
+        if t != "" and not t.startswith("#"):
+            ps = t.split(" | ")
+            if len(ps) >= 3:
+                xs.append([ps[0].strip(), ps[1].strip(), ps[2].strip()])
+            else:
+                xs.append([t, "", ""])
+    return xs
+
+def block_key(blocks, k):
+# "header", or "header #N" when the function has more than one block with that header (N counts from 1)
+    n = 0
+    m = 0
+    j = 0
+    while j < len(blocks):
+        if blocks[j][0] == blocks[k][0] and blocks[j][3] == blocks[k][3]:
+            n += 1
+            if j <= k:
+                m += 1
+        j += 1
+    if n > 1:
+        return blocks[k][3] + " #" + str(m)
+    return blocks[k][3]
+
+def check(blocks, cs, allow):
+# the --check comparison; returns the number of problems (each printed as a CHECK line)
+    bad = 0
+    keys = []
+    k = 0
+    while k < len(blocks):
+        keys.append(block_key(blocks, k))
+        k += 1
+    for a in allow:
+        if a[1] == "" or a[2] == "":
+            print("optcov: CHECK malformed allow-list line (want function | header | reason): " + a[0])
+            bad += 1
+    k = 0
+    while k < len(blocks):
+        if int(cs[k]) == 0:
+            hit = False
+            for a in allow:
+                if a[0] == blocks[k][0] and a[1] == keys[k]:
+                    hit = True
+            if not hit:
+                print("optcov: CHECK never hit and not allowed: compiler.forge:" + str(blocks[k][2]) + " " + blocks[k][0] + " | " + keys[k])
+                bad += 1
+        k += 1
+    for a in allow:
+        if a[1] != "":
+            seen = 0
+            live = 0
+            k = 0
+            while k < len(blocks):
+                if a[0] == blocks[k][0] and a[1] == keys[k]:
+                    seen += 1
+                    if int(cs[k]) > 0:
+                        live += 1
+                k += 1
+            if seen == 0:
+                print("optcov: CHECK stale allow-list entry (no such block): " + a[0] + " | " + a[1])
+                bad += 1
+            elif live > 0:
+                print("optcov: CHECK stale allow-list entry (now covered, remove it): " + a[0] + " | " + a[1])
+                bad += 1
+    return bad
+
 def main():
     quick = "--quick" in sys.argv
+    chk = "--check" in sys.argv
     outf = opt("--out", "build/optcov/report.txt")
     d = "build/optcov"
     if not os.path.isdir(d):
@@ -131,7 +212,7 @@ def main():
     if run(["build/forgec", d + "/forgec-cov.forge", d + "/forgec-cov.s"]) != 0 or run(["build/fas", "-o", d + "/forgec-cov.o", d + "/forgec-cov.s"]) != 0 or run(["build/fld", "--base", "0x100000000000", "-o", d + "/forgec-cov", d + "/forgec-cov.o"]) != 0:
         print("optcov: building the instrumented compiler failed")
         sys.exit(1)
-    progs = corpus(quick)
+    progs = corpus(quick, not chk)
     cfgs = CONFIGS
     if quick:
         cfgs = [["--fs-temps"], []]
@@ -199,6 +280,13 @@ def main():
     while i < 8 and i < len(rep):
         print(rep[i])
         i += 1
+    if chk:
+        allow = allow_list(opt("--allow", "tools/optcov-allow.txt"))
+        nbad = check(blocks, cs, allow)
+        if nbad > 0:
+            print("optcov: CHECK FAIL, " + str(nbad) + " problem(s)")
+            sys.exit(1)
+        print("optcov: CHECK OK, " + str(len(allow)) + " allowed never-hit blocks, every other block hit")
     if quick:
         g = 0
         while g < len(GROUPS):

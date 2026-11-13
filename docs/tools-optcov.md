@@ -1,9 +1,11 @@
 # optcov (tools/optcov.forge)
 
 Block coverage of the freestanding backend's optimizer passes: build-plan item 3 (optimizer correctness gate),
-part (a). It answers "which code paths of each optimizer pass does our test corpus actually reach?".
+parts (a) and (c). It answers "which code paths of each optimizer pass does our test corpus actually reach?",
+and with `--check` it turns the answer into a gate: every block is either reached or listed, with a reason, as
+unreachable.
 
-    optcov [--quick] [--out FILE]        (default report: build/optcov/report.txt)
+    optcov [--quick | --check] [--out FILE] [--allow FILE]   (default report: build/optcov/report.txt)
 
 ## How it works
 
@@ -26,10 +28,47 @@ Pass groups: the `--fs-opt` allocator (`fs_regalloc`, `fs_ra_*`), its peepholes 
 liveness (`fs_lv_*`), `--fs-temps` (`fs_tmp_*`), constant division by magic numbers (`fs_cdiv_try`, used under
 any of the three flags) and bounds-check elision (`fs_bsafe`, always on unless `--no-bounds`).
 
-`--quick` (run_tests.sh `optimizer-coverage`): two programs, two configurations; it fails if the instrumented
-compiler does not build, writes no counts, or hits no block of a pass group other than bounds-check elision.
+`--quick`: two programs, two configurations; it fails if the instrumented compiler does not build, writes no
+counts, or hits no block of a pass group other than bounds-check elision (a smoke test of the tool itself).
 
-## Report (2026-11-13, at commit "tools: optcov", after `fsfuzz --seed 1 --n 20 --keep`)
+## The gate: `--check` (part c)
+
+`--check` (run_tests.sh `optimizer-coverage`, about 45 s) runs the full corpus without the fsfuzz programs, so
+the result depends only on the tree, then compares the blocks never hit with the allow-list
+`tools/optcov-allow.txt`:
+
+- a never-hit block that is not on the list fails (`CHECK never hit and not allowed`): a new optimizer path landed
+  without a program that reaches it;
+- an entry that names no block fails (`CHECK stale ... no such block`), and so does an entry the corpus now hits
+  (`CHECK stale ... now covered, remove it`): the list cannot hide a path that is reachable.
+
+Allow-list lines are `function | block header | reason`. The header is the block's `if`/`elif`/`else`/`while`/
+`for` line as written in selfhost/compiler.forge, stripped; when a function has several blocks with the same header
+the entry ends with ` #N` (N-th in source order, from 1; `--check` prints the key it wants). Entries are keyed by
+text, not line numbers, so compiler edits elsewhere do not touch the list.
+
+A reachable hole gets a program in `tests/optgate/` instead (with a `.expected` output); optcov picks it up as part
+of the corpus, and run_tests.sh builds and runs every tests/optgate program under default, `--fs-opt`,
+`--fs-live` and `--fs-temps` (checks `optgate*`), so the program also proves the path computes the right answer.
+
+### Part (c) result (2026-11-13)
+
+Of the 32 blocks never hit in the part (a) report, 2 were reachable and 30 are not:
+
+- Reachable: the pin table limit. A function with no unsafe operation that names more than 4096 frame offsets in
+  `lea`/other %rbp forms fills `fsp_pin`; `fs_ra_pin` returns -1 and `fs_regalloc` gives up on the function.
+  `tests/optgate/pins.forge` reads a frame array 4224 times in one function and covers both blocks (`fs_ra_pin:
+  if npin >= 4096` and `fs_regalloc: if npin < 0`); its output is the same under every level.
+- Unreachable, 29 defensive bail-outs and 1 capacity limit, each listed with its reason in tools/optcov-allow.txt.
+  The defensive ones re-check the shape of text the fs code generator itself emits (every jump targets an
+  fs_newlab `.LFn` label, `rep` is only `movsb`/`stosb`, frame offsets are decimal, at most six arguments are
+  reloaded into registers, each function exit has one `leave`). The capacity one (`fs_ra_use: if nsl >= 4096`)
+  needs more than 4096 distinct slots in one function, and the compiler stops before that: see the finding below.
+- Finding (not fixed in this batch): a freestanding function with more than 4096 locals stops the compiler with an
+  internal error (`list assignment index 4096 out of range for length 4096`, from the `fsl_*` tables) instead of a
+  diagnostic. Found while probing the slot limit; queued as a fix commit for the next batch.
+
+## Report (2026-11-13, at commit "tools: optcov", after `fsfuzz --seed 1 --n 20 --keep`; part (a) baseline)
 
 ```
 optcov: 98 programs x 5 configurations (481 compiles counted, 9 refused), 284 optimizer blocks
@@ -117,7 +156,7 @@ blocks never hit (compiler.forge line: header):
   not an rbp slot, a label that is not a plain label, table-size limits (4096 slots or pins), a call with more than
   six register arguments in `fs_tmp_call`, or a jump to a non-local label. They decide when a pass gives up, so a
   bug there would show up as a miscompile only on unusual code; the combination fuzzer (`fsfuzz --combos`) and
-  new targeted programs are how they get covered.
+  new targeted programs are how they get covered. Part (c) settled every one of them (above).
 - The only `fs_cdiv_try` block never hit is its "not a division" early return: callers already filter for `/`,
   `//` and `%`.
 - Finding: `-O0` changes nothing in freestanding mode. The fs backend ignores `opt_on` (it only drives the hosted
