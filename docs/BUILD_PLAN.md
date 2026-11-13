@@ -41,6 +41,31 @@ Release notes per version (0.17.2 on) are in CHANGELOG.md; versions are commit g
 
 A phase is done when every listed test passes in CI (`run_tests.sh`) on both -O2 and -O0.
 
+## Current execution order (2026-11-12, set by Kyle)
+
+The phase sections below stay the record of what each phase means and what is done; this list is the order work
+is taken in now. Batches are 3-4 commits, one item per commit, each with a visual and docs; the kernel unsafe
+count stays at or under 709.
+
+1. **12.1 step 4: a real SSA IR for fs/kernel mode with liveness-based register allocation** (Phase 12 item 1),
+   closing the gap to Rust -O3 on the bench suite. Safe steps, each byte-identical for code built without the
+   new flag, each checked by the `--fs-opt` differential fuzzer before it lands.
+2. **The Forge language server in Forge**: extend `forge lsp` (tools/lsp.forge; Phase 11 item 3): incremental
+   checks of changed files, diagnostics, go-to-definition.
+3. **The plugin/package manager**: grow `forge pkg` (tools/pkg.forge; Phase 7 item 4) into plugins and packages.
+4. Then the rest of the core roadmap: release patches, IOMMU strict-switch preparation, safety work, DWARF/DAP.
+5. **Phase 8 leftovers come last** ("work on phase 8 very last"): the parked virtio-net interrupt-driven RX with a
+   timed wait, the GOP console, xHCI mass storage and the other open Phase 8 items.
+
+**v1 reservations**, cheap items that keep 1.0 formats and syntax open for Version 2. They are mixed in at about
+one commit in five, in this order, each its own commit with a visual and docs:
+1. AI-provenance commit trailers: a convention plus a check in tools, applied from then on.
+2. `noalloc`, `noio` and `noreclaim` reserved in the effect grammar (syntax only, no enforcement).
+3. An address-space-ID field in the device-grant ABI, defaulting to 0.
+4. A checksum and version in the handoff/process-state record format.
+5. CPython bindings on the stable ABI (abi3).
+6. The build.sh/run_tests.sh port to Forge, whenever it fits.
+
 ---
 
 ## Phase 1 — Interactive multi-process kernel (done)
@@ -508,3 +533,12 @@ Directive: everything that can be Forge is Forge. One tool per commit, verified 
 - FIXED (was KNOWN OPEN ISSUE): livepatch stop_machine/tlb_poll rendezvous deadlock — *Status: fixed.* Under host load the stop-machine initiator waited forever on `tlb_acks` while every other CPU sat parked in `tlb_poll` (IF=0). Root cause: `spin_lock` calls `tlb_poll` with interrupts on, so a timer tick inside the poll could reschedule the thread to another CPU (dumps show the timer firing inside `lapic_cpu()` in `tlb_poll`, then the TLB IPI nested inside that). The migrated thread answered and parked for the first CPU's request, and the stray answer was counted by the single shared ack counter against a later round, which finished early. Fix (examples/kernel/cpux.fsi): `tlb_poll` runs with interrupts held off and a per-CPU `tlb_in_poll` flag, so a nested entry leaves the request to the outer poll. The shared counter is replaced by per-round generations: the initiator bumps `tlb_gen` and posts it to `tlb_req_gen[c]`, each CPU answers by storing the round it served in `tlb_ack_gen[c]`, and the initiator waits until every `tlb_ack_gen[c] == tlb_gen`. The park loop keeps answering newly posted requests while it waits. The lapic timer handler was checked: it EOIs, then takes `rq_lock` and calls `schedule_l`, but a parked CPU has IF=0, so the handler never runs while parked. Regression: kernel self-test `stop_machine_stress` (kernel.forge), in which 3 threads hammer a contended spinlock with interrupts on while the test thread runs 3000 stop-machine rounds; marker `stop_machine stress OK: 3000 rounds` in tests/os/run.sh. Before the fix, 3 of 3 loaded boots hung in this test; after it, 5 of 5 pass. Dumps: /workspace/hang-dumps/kxfix6 and /workspace/hang-dumps/smx.
 - Test-count gap between O2 and O0 runs — *Status: fixed.* In inv83, O2 reported 638 passes and O0 624, both with 0 FAIL. Fourteen os/ and dwarf/ result lines were missing from the O0 log in an alternating pattern, and one line was cut off mid-write (`full redraPASS`): output from `tests/os/run.sh` was lost inside the `r=$(...)` pipe capture, not skipped. A watcher during the next run saw O_NONBLOCK only on QEMU's own serial pipes, so the exact writer that dropped bytes was not identified. Fix (run_tests.sh): (1) capture `tests/os/run.sh` through a regular file (`build/os-results.txt`) instead of a pipe; (2) new check `os/result-count` FAILs if any name listed in `tests/os/expected-results.txt` (32 results) is missing, so lost output can never look like a passing run; (3) a second, smaller gap: the fas artifact round-trip globbed `build/os/*.s`, which existed only after an earlier OS run (boot.s), so run_tests now compiles the boot harness to `build/os/boot.s` first and both runs check the same set.
 - Exact `__powfits` (float literals 1e16..1e22, typed `**`) — *Status: done.* Found while probing c2forge step 5: `e: f64 = 1e17` made forgec fail with `line 0: integer overflow`. The compiler folds a float literal with `float(text)`; `__fparse`'s Clinger fast path (<= 15 digits, |e10| <= 22) scales by `__ipow(10, k)`, and `__powfits` approximated the overflow test as bits(|a|) * b <= 62, so 10**16..10**18 (which fit) were rejected, and so was every typed-int `a ** b` past that bound. It now multiplies step by step against 2**62 - 1, the small-int limit (at most 62 steps for |a| >= 2); a first draft bounded by 2**63 - 1 let 2**62 .. 2**63 - 1 take the small-int path, which tests/bigints.forge (O2 and ast-pretty-semantic) caught: `2 ** 62` printed garbage and sums of it lost their bigint promotion. Regression tests/pow_fits.forge (typed powers up to 10**18, 3**39, 2**61, 7**22, and `2 ** 62` .. `2 ** 63` staying exact as bigints; literals and `float()` of 1e16..4e22). Two-pass reseed (prelude change), pinned in seed/seed.sha256 and reproduced byte-for-byte by build.sh (SEED OK, SEED TOOLS OK).
+
+## Version 2 (after 1.0)
+
+Ideas that are not part of 1.0 go here, not into the phases above. The v1 reservations keep room for them.
+- **Allocation-effect enforcement**: check the reserved `noalloc`, `noio` and `noreclaim` effects.
+- **Crash-takeover standby kernel**: a second kernel kept loaded that takes over the machine when the running one panics.
+- **Multi-tenant GPU isolation**: GPU contexts isolated per app, with their own address spaces (the reserved
+  address-space ID in device grants).
+- **Free-threaded Python beyond the ABI switch**: running CPython without the GIL, beyond moving the bindings to abi3.
