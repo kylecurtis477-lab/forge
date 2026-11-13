@@ -155,6 +155,13 @@ count stays at or under 709.
      access, hosted). Three issues found in review are fixed in the separate commits that follow this one. Next:
      owner fields through `ptr`/`mut` to a struct (Stage 3), which the kernel run queue and page tables need before
      they convert.
+     *Fix 1 (2026-11-13):* the assignment-target flag reached the target's own index and call arguments, so
+     `a[sink(q.head)] = v` passed a moved owner on and then marked `q.head` live again (use after move, then a
+     second move); `q.buf[0] = v` was refused as a leak when live and accepted when moved; compound assignment
+     never checked borrows (`q.head.id += 1` under `borrow(q.head)`). Now only the outermost target postfix sees
+     the flag, `q.f[i]` is a place access like `q.f.x`, and `op=` checks borrows and refuses an own field as its
+     direct target (tests/own: bad_field_lhs_index, bad_field_index_moved, bad_field_compound_borrowed,
+     bad_field_compound_owner, fields_place_ok; 45 checks).
 3. **Optimizer correctness gate.** Measure the compiler's test coverage, extend the differential fuzzer
    (tools/fsfuzz.forge) to every combination of optimizer flags, and require it to pass before any new optimizer
    pass lands.

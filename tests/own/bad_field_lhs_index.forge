@@ -1,0 +1,31 @@
+# expect: use of moved value `q.head`
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Queue:
+    count: u64
+    head: own[Node]
+    buf: own[u64]
+cell1: Node
+cellw: u64
+@unsafe
+def node1() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell1)))
+@unsafe
+def word1() -> own[u64]:
+    return own[u64](ptr[u64](addr(cellw)))
+def sink(n: own[Node]) -> u64:
+    return n.id
+def sinkw(n: own[u64]) -> u64:
+    return n[0]
+def peek(r: ref[Node]) -> u64:
+    return r.id
+def main() -> u64:
+    q: Queue
+    q.head = node1()
+    x = q.head
+    a: u64[4]
+    # q.head inside the target's index is a read, not the assignment target: it is moved here
+    a[sink(q.head) & 3] = 1
+    return sink(x)

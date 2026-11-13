@@ -18143,7 +18143,11 @@ def fs_asgop(o):
     return str_eq(o, "=") or str_eq(o, "+=") or str_eq(o, "-=") or str_eq(o, "*=") or str_eq(o, "//=") or str_eq(o, "%=") or str_eq(o, "|=") or str_eq(o, "^=") or str_eq(o, "<<=") or str_eq(o, ">>=") or str_eq(o, "/=") or str_eq(o, ":") or str_eq(o, "&=")
 
 def fs_postfix():
-    global fp, fs_ety, fs_mode, fs_nbe, fs_lastnm, fs_fslot
+    global fp, fs_ety, fs_mode, fs_nbe, fs_lastnm, fs_fslot, fs_fwriting
+    # only the outermost postfix of an assignment target is the target: an index or call argument inside it
+    # (a[f(q.head)] = v) is an ordinary read, so it must not take the field-store path
+    w = fs_fwriting
+    fs_fwriting = 0
     base = ""
     if tk[fp] == K_ID:
         base = tv[fp]
@@ -18216,7 +18220,9 @@ def fs_postfix():
                 z = fs_flocal(fs_local(base), k)
                 if z < 0:
                     fs_die("nested owner field access is not supported")
-                if fs_fwriting and not fs_isop("."):
+                if w == 2 and not fs_isop(".") and not fs_isop("["):
+                    fs_die(concat("compound assignment to the own[T] field ", fs_lname(z)))
+                if w and not fs_isop(".") and not fs_isop("["):
                     if fsl_mu[z] > 0 or fsl_sh[z] > 0:
                         fs_die(concat("cannot assign to borrowed field ", fs_lname(z)))
                     if fsl_mv[z] == 0:
@@ -18228,8 +18234,8 @@ def fs_postfix():
                         fs_die(concat("use of uninitialised field ", fs_lname(z)))
                     if fsl_mv[z] > 0:
                         fs_die(c4("use of moved value ", fs_lname(z), " (moved at ", concat(fs_where(fsl_mv[z]), ")")))
-                    if fs_isop("."):
-                        if fsl_mu[z] > 0 or (fs_fwriting and fsl_sh[z] > 0):
+                    if fs_isop(".") or fs_isop("["):
+                        if fsl_mu[z] > 0 or (w and fsl_sh[z] > 0):
                             fs_die(concat("field is borrowed ", fs_lname(z)))
                     else:
                         fs_lchk(z, 0)
@@ -18957,7 +18963,7 @@ def fs_stmt():
     fs_bpend = -1
 
 def fs_stmt1():
-    global fp, nfsloop, fs_ety, fs_mode, fs_dep, nfsb, fs_ublk, fs_uops, fs_unsafe, fs_term, fs_rsrc, nfsdf
+    global fp, nfsloop, fs_ety, fs_mode, fs_dep, nfsb, fs_ublk, fs_uops, fs_unsafe, fs_term, fs_rsrc, nfsdf, fs_fwriting
     if tk[fp] == K_NL:
         fp += 1
         return 0
@@ -19248,6 +19254,7 @@ def fs_stmt1():
             return 0
         # augmented assignment: target address, current value, rhs, op, store
         fs_wstore(fp, a == fp + 1)
+        fs_fwriting = 2
         fs_postfix()
         t = fs_ety
         if fs_mode == 0:

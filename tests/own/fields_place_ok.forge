@@ -1,0 +1,36 @@
+# forge: no-runtime
+include "../fs/linux.fsi"
+struct Node:
+    id: u64
+struct Queue:
+    count: u64
+    head: own[Node]
+    buf: own[u64]
+cell1: Node
+cellw: u64
+@unsafe
+def node1() -> own[Node]:
+    return own[Node](ptr[Node](addr(cell1)))
+@unsafe
+def word1() -> own[u64]:
+    return own[u64](ptr[u64](addr(cellw)))
+def sink(n: own[Node]) -> u64:
+    return n.id
+def sinkw(n: own[u64]) -> u64:
+    return n[0]
+def peek(r: ref[Node]) -> u64:
+    return r.id
+def main() -> u64:
+    q: Queue
+    q.head = node1()
+    q.buf = word1()
+    q.head.id = 3
+    q.head.id += 4
+    q.buf[0] = 10
+    q.buf[0] += 1
+    a: u64[8]
+    a[q.head.id] = q.buf[0]
+    a[peek(borrow(q.head))] += 1
+    if a[7] == 12 and sinkw(q.buf) == 11:
+        puts("field places ok\n")
+    return sink(q.head) & 0
