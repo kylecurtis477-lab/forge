@@ -16019,7 +16019,7 @@ def ft_isaff(t):
 
 def ft_elem_aff(t):
 # an array or slice (at any depth) whose element is own/ref/mut: not affine itself, but indexing it yields owner
-# values that nothing tracks, so it is refused as a struct field (q.a[i] would copy an owner out)
+# values that nothing tracks, so fs_type refuses it in every position (a[i] or q.a[i] would copy an owner out)
     while fsk[t] == 3 or fsk[t] == 5:
         t = ftel[t]
         if ft_isaff(t):
@@ -16128,6 +16128,10 @@ def fs_type():
         n = fs_ceval()
         fs_expect("]")
         t = ft_arr(t, n)
+    if ft_elem_aff(t):
+    # any array or slice of owners/borrows, not only a struct field: x = a[0]; y = a[0] would give two owners of one
+    # object (nothing tracks per-element moves), and a global array of owners starts out as null owners
+        fs_die("arrays/slices of own/ref/mut need per-element move tracking")
     return t
 
 def fs_istype(p):
@@ -17650,6 +17654,8 @@ def fs_intrin(nm):
         fs_rexpr()
         if fsk[fs_ety] != 1:
             fs_die("slice(p, n) needs a ptr[T] first argument")
+        if ft_isaff(ftel[fs_ety]):
+            fs_die("arrays/slices of own/ref/mut need per-element move tracking")
         st = ft_slice(ftel[fs_ety])
         fs_push()
         fs_expect(",")
@@ -19423,8 +19429,6 @@ def fs_struct_body(t, packed):
         # the field-access check); borrow fields need a lifetime tied to the containing value and stay illegal
         if ft_isaff(ft) and ftsg[ft] != 2:
             fs_die("ref/mut struct fields need lifetime tracking")
-        if ft_elem_aff(ft):
-            fs_die("arrays/slices of own/ref/mut struct fields need per-element move tracking")
         if fsk[ft] == 2 and fs_ownerfield(ft):
             fs_die("nested owner-bearing structs need recursive field tracking")
         fa = ftal[ft]

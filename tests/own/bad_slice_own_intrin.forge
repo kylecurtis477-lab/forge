@@ -1,0 +1,8 @@
+# expect: arrays/slices of own/ref/mut need per-element move tracking
+# forge: no-runtime
+struct Node:
+    id: u64
+@unsafe
+def f(p: ptr[own[Node]]) -> u64:
+    s = slice(p, 2)
+    return 0

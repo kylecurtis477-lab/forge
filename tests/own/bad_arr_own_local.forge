@@ -1,0 +1,12 @@
+# expect: arrays/slices of own/ref/mut need per-element move tracking
+# forge: no-runtime
+struct Node:
+    id: u64
+def sink(x: own[Node]) -> u64:
+    return x.id
+def f(x: own[Node]) -> u64:
+    loc: own[Node][2]
+    loc[0] = x
+    a = loc[0]
+    b = loc[0]
+    return sink(a) + sink(b)

@@ -1,0 +1,12 @@
+# expect: arrays/slices of own/ref/mut need per-element move tracking
+# forge: no-runtime
+# a global array of owners: ns[0] copied twice gave two owners of one (null) object
+struct Node:
+    id: u64
+ns: own[Node][2]
+def sink(x: own[Node]) -> u64:
+    return x.id
+def f() -> u64:
+    a = ns[0]
+    b = ns[0]
+    return sink(a) + sink(b)

@@ -1,0 +1,6 @@
+# expect: arrays/slices of own/ref/mut need per-element move tracking
+# forge: no-runtime
+struct Node:
+    id: u64
+def f(rs: ref[Node][2]) -> u64:
+    return rs[0].id
