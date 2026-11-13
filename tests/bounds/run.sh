@@ -32,12 +32,17 @@ grep -q " 0 checked" $T/n.st && ok bounds-off-flag || no bounds-off-flag
 sed '1a # forge: no-bounds-checks' tests/bounds/oob_array.forge > tests/bounds/.p.forge
 build/forgec tests/bounds/.p.forge $T/p.s --bounds-stats 2> $T/p.st; rm -f tests/bounds/.p.forge
 grep -q " 0 checked" $T/p.st && ok bounds-off-pragma || no bounds-off-pragma
-# overhead: checked vs --no-bounds, best of 7 each, runs interleaved so load drift hits both; must be <= 5% slower
+# overhead: checked vs --no-bounds, best of 21 each, runs interleaved (the order alternates every round so drift
+# and warm-up favour neither) so load drift hits both; must be <= 5% slower. Best-of-7 failed once under box load
+# (inv138 O2: 6.7%) with byte-identical code, and three re-runs gave 5.7%, -3.3% and 4.3%.
 ./forge tests/bounds/bench.forge -o $T/bc && FORGEC_FLAGS=--no-bounds ./forge tests/bounds/bench.forge -o $T/bn
 [ "$($T/bc)" = "$($T/bn)" ] && ok bounds-bench-same || no bounds-bench-same
 tm() { s=$(date +%s%N); $1 >/dev/null; echo $(( ($(date +%s%N)-s)/1000 )); }
 c=999999; n=999999
-for k in 1 2 3 4 5 6 7; do d=$(tm $T/bc); [ $d -lt $c ] && c=$d; d=$(tm $T/bn); [ $d -lt $n ] && n=$d; done
+for k in $(seq 1 21); do
+  if [ $((k % 2)) = 1 ]; then d=$(tm $T/bc); [ $d -lt $c ] && c=$d; d=$(tm $T/bn); [ $d -lt $n ] && n=$d
+  else d=$(tm $T/bn); [ $d -lt $n ] && n=$d; d=$(tm $T/bc); [ $d -lt $c ] && c=$d; fi
+done
 build/forgec tests/bounds/bench.forge $T/b.s --bounds-stats 2> $T/b.st
 echo "bounds bench: checked ${c}us, unchecked ${n}us, $(cat $T/b.st)"
 [ $((c * 100)) -le $((n * 105)) ] && ok bounds-bench-overhead || no bounds-bench-overhead
