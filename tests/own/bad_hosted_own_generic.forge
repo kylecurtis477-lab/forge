@@ -1,0 +1,7 @@
+# expect: own/ref/mut are freestanding-only
+class Node:
+    def __init__(self):
+        self.v = 1
+def total(xs: list[mut[Node]]) -> int:
+    return len(xs)
+print(total([Node()]))

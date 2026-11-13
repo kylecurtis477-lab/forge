@@ -846,12 +846,18 @@ def type_of_name(t):
         return 11 + c
     return 0
 
+def hosted_affchk(p):
+# own/ref/mut have move and borrow checks only in freestanding code; in hosted code they would be silently ignored
+    if tk[p] == K_ID and (str_eq(tv[p], "own") or str_eq(tv[p], "ref") or str_eq(tv[p], "mut")) and tk[p + 1] == K_OP and str_eq(tv[p + 1], "["):
+        die(tl[p], "own/ref/mut are freestanding-only (add the no-runtime header)")
+
 def parse_type():
 # returns a type code; skips generic arguments like list[int]
     global pos
     if tk[pos] == K_STR:
         pos += 1
         return 0
+    hosted_affchk(pos)
     t = type_of_name(ident())
     while is_op("."):
         pos += 1
@@ -859,6 +865,7 @@ def parse_type():
     if is_op("["):
         d = 0
         while 1:
+            hosted_affchk(pos)
             if is_op("["):
                 d += 1
             elif is_op("]"):
@@ -5367,8 +5374,6 @@ def reg_func(p, c):
         t = 0
         if is_op(":"):
             pos += 1
-            if tok_is_id(pos, "own") or tok_is_id(pos, "ref") or tok_is_id(pos, "mut"):
-                die(tl[pos], "own/ref/mut are freestanding-only (add the no-runtime header)")
             t = parse_type()
         pdef[npall] = -1
         if is_op("="):

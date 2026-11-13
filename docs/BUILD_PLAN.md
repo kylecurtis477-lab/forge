@@ -162,6 +162,10 @@ count stays at or under 709.
      the flag, `q.f[i]` is a place access like `q.f.x`, and `op=` checks borrows and refuses an own field as its
      direct target (tests/own: bad_field_lhs_index, bad_field_index_moved, bad_field_compound_borrowed,
      bad_field_compound_owner, fields_place_ok; 45 checks).
+     *Fix 2 (2026-11-13; the `addr()` fix is under Phase 4.4 item 4):* the hosted refusal sat in `reg_func`'s parameter loop only, so `-> own[T]` returns,
+     annotated `x: ref[T]` locals and globals and generic arguments (`list[mut[T]]`) were still silently ignored;
+     the check is now in hosted `parse_type` and covers every type position (a hosted name `own`, `ref` or `mut`
+     still works; tests/own/bad_hosted_own_{return,local,generic}.forge; 50 checks).
 3. **Optimizer correctness gate.** Measure the compiler's test coverage, extend the differential fuzzer
    (tools/fsfuzz.forge) to every combination of optimizer flags, and require it to pass before any new optimizer
    pass lands.

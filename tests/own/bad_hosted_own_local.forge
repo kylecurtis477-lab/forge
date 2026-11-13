@@ -1,0 +1,6 @@
+# expect: own/ref/mut are freestanding-only
+class Node:
+    def __init__(self):
+        self.v = 1
+x: ref[Node] = Node()
+print(x.v)
