@@ -1,5 +1,5 @@
 # optcov: block coverage of the freestanding backend's optimizer passes (build-plan item 3, optimizer gate).
-# usage: build/optcov [--quick | --check] [--out FILE] [--allow FILE]
+# usage: build/optcov [--quick | --check | --registry] [--out FILE] [--allow FILE] [--src FILE]
 # 1. Instruments selfhost/forgec.forge: every block of the optimizer functions (the function body and the body of
 #    every if / elif / else / while / for) gets a counter increment; the counters are added into build/optcov/
 #    counts.txt when a freestanding compile finishes (fs_main returned, so a compile error adds nothing).
@@ -16,6 +16,11 @@
 #    header | reason; a header that occurs more than once in the function ends with " #N", N counting from 1
 #    in source order) and every allow-list entry must name a block that is still never hit; anything else prints
 #    a CHECK line and exits 1 (the run_tests.sh optimizer-coverage check, build-plan item 3 part c).
+#    --check runs the registry check first.
+# --registry: only the registry check (no compiles; part d): every "--fs-*" option the compiler parses is one of
+#    optcov's CONFIGS and appears in tools/fsfuzz.forge, and every fs_* function called on a line that tests a
+#    GATES variable (if/elif/while), or in that block's body, belongs to a pass group. So a new optimizer pass
+#    cannot land outside both checks. --src FILE reads another compiler source (for testing the check).
 # Lines of selfhost/forgec.forge are the lines of selfhost/compiler.forge (build/embed appends the prelude and
 # runtime after them), so the report's line numbers point into compiler.forge.
 import os
@@ -25,6 +30,8 @@ import sys
 GROUPS = [["fs-opt allocator (fs_regalloc, fs_ra_*)", ["fs_regalloc", "fs_ra_", "fs_ranext"]], ["fs-opt peepholes (fs_rapeep)", ["fs_rapeep"]], ["fs-live liveness (fs_lv_*)", ["fs_lv_"]], ["fs-temps (fs_tmp_*)", ["fs_tmp_"]], ["constant division (fs_cdiv_try)", ["fs_cdiv_try"]], ["bounds-check elision (fs_bsafe)", ["fs_bsafe"]]]
 CONFIGS = [[], ["--fs-opt"], ["--fs-live"], ["--fs-temps"], ["--no-bounds"]]
 HEADS = ["if ", "elif ", "else:", "while ", "for "]
+# variables that switch an fs optimizer pass on (the registry check, part d)
+GATES = ["fs_ra", "fs_live", "fs_temps"]
 
 def group_of(fn):
     g = 0
@@ -124,6 +131,86 @@ def opt(name, dflt):
         i += 1
     return dflt
 
+def idents(t):
+# [[name, called], ...] for the identifiers in t (called: the next character is "("); string literals skipped
+    r = []
+    i = 0
+    n = len(t)
+    while i < n:
+        c = t[i]
+        if c == "\"":
+            i += 1
+            while i < n and t[i] != "\"":
+                if t[i] == "\\":
+                    i += 1
+                i += 1
+            i += 1
+        elif c.isalpha() or c == "_":
+            j = i
+            while j < n and (t[j].isalnum() or t[j] == "_"):
+                j += 1
+            r.append([t[i:j], j < n and t[j] == "("])
+            i = j
+        else:
+            i += 1
+    return r
+
+def registry(src):
+# the part (d) registry check; returns the number of problems (each printed as a CHECK line)
+    bad = 0
+    lines = src.split("\n")
+    flat = []
+    for c in CONFIGS:
+        for f in c:
+            flat.append(f)
+    fz = read_file("tools/fsfuzz.forge")
+    if fz is None:
+        fz = ""
+    opts = []
+    for l in lines:
+        k = l.find("\"--fs-")
+        if k >= 0:
+            e = l.find("\"", k + 1)
+            o = l[k + 1:e]
+            if o not in opts:
+                opts.append(o)
+    for o in opts:
+        if o not in flat:
+            print("optcov: CHECK registry: compiler option " + o + " is not one of optcov's CONFIGS")
+            bad += 1
+        if fz.find("\"" + o + "\"") < 0:
+            print("optcov: CHECK registry: compiler option " + o + " is not in tools/fsfuzz.forge")
+            bad += 1
+    ngate = 0
+    i = 0
+    while i < len(lines):
+        t = lines[i].strip()
+        if (t.startswith("if ") or t.startswith("elif ") or t.startswith("while ")) and t.endswith(":"):
+            ids = idents(t)
+            gated = False
+            for x in ids:
+                if not x[1] and x[0] in GATES:
+                    gated = True
+            if gated:
+                ngate += 1
+                ind = indent_of(lines[i])
+                j = i + 1
+                while j < len(lines) and (lines[j].strip() == "" or lines[j].strip().startswith("#") or indent_of(lines[j]) > ind):
+                    for x in idents(lines[j].strip()):
+                        ids.append(x)
+                    j += 1
+                for x in ids:
+                    if x[1] and x[0].startswith("fs_") and group_of(x[0]) < 0:
+                        print("optcov: CHECK registry: compiler.forge:" + str(i + 1) + " gated call " + x[0] + " is in no optcov pass group")
+                        bad += 1
+        i += 1
+    if ngate == 0:
+        print("optcov: CHECK registry: no line tests a GATES variable (did the flags get renamed?)")
+        bad += 1
+    if bad == 0:
+        print("optcov: registry OK, " + str(len(opts)) + " fs options, " + str(ngate) + " gated lines, every gated call in a pass group")
+    return bad
+
 def allow_list(f):
 # [[function, header, reason], ...] from the allow-list file (comments and blank lines skipped)
     src = read_file(f)
@@ -200,6 +287,12 @@ def check(blocks, cs, allow):
 def main():
     quick = "--quick" in sys.argv
     chk = "--check" in sys.argv
+    if chk or "--registry" in sys.argv:
+        if registry(read_file(opt("--src", "selfhost/compiler.forge"))) > 0:
+            print("optcov: CHECK FAIL (registry)")
+            sys.exit(1)
+        if not chk:
+            sys.exit(0)
     outf = opt("--out", "build/optcov/report.txt")
     d = "build/optcov"
     if not os.path.isdir(d):

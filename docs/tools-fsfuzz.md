@@ -55,8 +55,9 @@ assembly (see docs/tools-optcov.md), and neither did the redundant spellings. A 
 (a wrapper that turns the first `imul` into `add` when `--fs-live` and `-g` are both given) is caught on the first
 program, with the three affected flag sets listed.
 
-run_tests.sh runs a bounded form, `build/fsfuzz-tool --combos --seed 7 --n 2` (`PASS fs-opt-combos`, 224 builds,
-about 20 s).
+run_tests.sh runs a bounded form, `build/fsfuzz-tool --combos --seed 7 --n 3` (`PASS fs-opt-combos`, 336 builds,
+84 distinct assemblies, about 30 s; 2 programs until build-plan item 3 part d). Together with `optcov --check` it is
+the landing gate for optimizer passes (docs/tools-optcov.md, "Landing rule").
 
 ## The programs
 

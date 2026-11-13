@@ -123,8 +123,8 @@ done
 build/forgec tests/fs/regalloc.forge build/t_ra.s $FORGEC_FLAGS --fs-live && [ "$(awk '/^ra_rec:/,/ret$/' build/t_ra.s | grep -c '(%rsp)')" -gt 0 ] && build/forgec tests/fs/regalloc.forge build/t_ra.s $FORGEC_FLAGS --fs-temps && [ "$(awk '/^ra_rec:/,/ret$/' build/t_ra.s | grep -c '(%rsp)')" = 0 ] && echo "PASS fs-temps-shape" || { echo "FAIL fs-temps-shape"; fail=1; }
 # --fs-opt differential fuzz: 20 random programs (fixed seed), each built O2 / -O0 / --fs-opt / -O0 --fs-opt / --fs-live / -O0 --fs-live / --fs-temps / -O0 --fs-temps; any output diff fails
 ./forge tools/fsfuzz.forge -o build/fsfuzz-tool >/dev/null 2>&1 && build/fsfuzz-tool --seed 1 --n 20 > build/t_fsfuzz.log 2>&1 && echo "PASS fs-opt-fuzz" || { echo "FAIL fs-opt-fuzz"; cat build/t_fsfuzz.log; fail=1; }
-# build-plan item 3 (b): every optimizer flag combination (56 flag sets x plain/stack-protector), bounded
-build/fsfuzz-tool --combos --seed 7 --n 2 > build/t_fscombos.log 2>&1 && echo "PASS fs-opt-combos" || { echo "FAIL fs-opt-combos"; cat build/t_fscombos.log; fail=1; }
+# build-plan item 3 (b, d): every optimizer flag combination (56 flag sets x plain/stack-protector), 3 programs
+build/fsfuzz-tool --combos --seed 7 --n 3 > build/t_fscombos.log 2>&1 && echo "PASS fs-opt-combos" || { echo "FAIL fs-opt-combos"; cat build/t_fscombos.log; fail=1; }
 # build-plan item 3 (c): optimizer-gate programs (tests/optgate) give the same output under every fs optimizer level
 for t in tests/optgate/*.forge; do
   for f in "" --fs-opt --fs-live --fs-temps; do

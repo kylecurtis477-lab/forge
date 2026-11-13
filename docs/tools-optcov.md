@@ -51,6 +51,29 @@ A reachable hole gets a program in `tests/optgate/` instead (with a `.expected` 
 of the corpus, and run_tests.sh builds and runs every tests/optgate program under default, `--fs-opt`,
 `--fs-live` and `--fs-temps` (checks `optgate*`), so the program also proves the path computes the right answer.
 
+## Registry and landing rule (part d)
+
+`--registry` (also run first by `--check`, so run_tests.sh `optimizer-coverage` covers it) reads
+selfhost/compiler.forge without compiling anything and fails when
+
+- the compiler parses a `--fs-*` option that is not one of optcov's configurations, or that tools/fsfuzz.forge
+  does not mention (so the combination fuzzer would never build with it);
+- a line that tests a pass switch (`if`/`elif`/`while` naming `fs_ra`, `fs_live` or `fs_temps`) calls, or its
+  block calls, an `fs_*` function that is in no optcov pass group (so its blocks would never be counted).
+
+`--src FILE` points it at another compiler source; a copy with a planted `fs_newpass(s0)` under `if fs_temps:`
+and a `"--fs-newpass"` option gives three CHECK lines and exit 1.
+
+**Landing rule** (BUILD_PLAN item 3, from 2026-11-13): a new fs optimizer pass, or a change to an existing one,
+lands only when, in the same gated batch,
+
+1. `optcov --check` passes: the pass is in a GROUPS entry (and its switch in GATES if it has a new one), every
+   block it adds is hit by the corpus or a new tests/optgate program, or is on tools/optcov-allow.txt with a reason
+   that holds for every program the code generator can emit;
+2. `fs-opt-combos` passes with the new flag in fsfuzz's flag sets (run_tests.sh runs `--combos --seed 7 --n 3`),
+   and a longer `fsfuzz --combos` run (at least 25 programs) is recorded in the commit's docs;
+3. the pass does not raise the kernel's `--unsafe-report` count and the O2 and O0 gate runs are clean.
+
 ### Part (c) result (2026-11-13)
 
 Of the 32 blocks never hit in the part (a) report, 2 were reachable and 30 are not:

@@ -196,6 +196,13 @@ count stays at or under 709.
      not on the list and on any stale entry; run_tests.sh `optimizer-coverage` now runs it (254/284 blocks hit, the
      rest allowed). Finding: more than 4096 locals in one freestanding function crash the compiler instead of
      giving a diagnostic (fsl_* tables); fix queued for the next batch.
+   - *Status (d), landing rule: done (2026-11-13); item 3 done.* A new or changed fs optimizer pass lands only with
+     `optcov --check` and `fs-opt-combos` green in the same gated batch, its new flag in fsfuzz's flag sets and a
+     recorded `fsfuzz --combos` run of at least 25 programs (docs/tools-optcov.md, "Landing rule"). `optcov
+     --registry` (run by `--check`) enforces the parts a script can: every `--fs-*` option the compiler parses is
+     in optcov's configurations and in tools/fsfuzz.forge, and every fs_* function called under a pass switch
+     (fs_ra, fs_live, fs_temps) is in an optcov pass group. run_tests.sh `fs-opt-combos` now runs 3 programs
+     (336 builds). Item 4 (SSA backend) is gated by this rule.
 4. **SSA backend (12.1 step 4), gated by item 3**: a real SSA IR for fs/kernel mode with liveness-based register
    allocation (Phase 12 item 1), in safe steps that are byte-identical for code built without the new flag.
    Steps 4b (`--fs-live`) and 4c (`--fs-temps`) are done and the kernel is built with both.
