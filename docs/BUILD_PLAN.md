@@ -255,6 +255,14 @@ count stays at or under 709.
      The -O0 kernel was boot-checked with `FORGEC_FLAGS=-O0 tests/os/run.sh` outside the gate. optcov GATES gained
      `fs_elide`. Its first gate (inv149) failed one O0 check, efi-build/esp-reproducible: the test compared a
      `FORGEC_FLAGS=""` build with one that inherited -O0 (fixed in the next commit, the test pins the flags).
+   - *Fix (2026-11-13, found while filling the pin table for part c):* more than 4096 locals in one fs function
+     (every name of every block, frame temporaries and own-field slots count; none is reused) crashed the compiler
+     with its own internal error, "error: line 16339: list assignment index 4096 out of range" (a compiler source
+     line, not the user's). `fs_newlocal` now stops at FSLMAX = 4096 with "too many locals in one function (limit
+     4096, ...): split the function" at the offending line, also for own-field slots. The fsx table (step 4a) was
+     already capped safely: a local missing from it is simply not promoted. tests/limits/run.sh (in run_tests.sh)
+     generates the cases: 4096 locals build and run, the 4097th and an own-field slot past the limit get the
+     diagnostic (on 1d4e26e both crashed).
 4. **SSA backend (12.1 step 4), gated by item 3**: a real SSA IR for fs/kernel mode with liveness-based register
    allocation (Phase 12 item 1), in safe steps that are byte-identical for code built without the new flag.
    Steps 4b (`--fs-live`) and 4c (`--fs-temps`) are done and the kernel is built with both.

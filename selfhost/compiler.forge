@@ -15583,7 +15583,8 @@ fsg_p = list(8192)
 fsg_al = list(8192)
 fsg_sec = list(8192)
 nfsg = 0
-fsl_n = list(4096)
+FSLMAX = 4096
+fsl_n = list(FSLMAX)
 fsl_t = list(4096)
 fsl_o = list(4096)
 nfsl = 0
@@ -16330,10 +16331,17 @@ def fs_flocal(l, k):
         i += 1
     return -1
 
+def fs_toomany():
+# the per-function local tables (fsl_*) hold FSLMAX entries; every local, block-scoped name, frame temporary and
+# own-field slot of the function takes one (they are never reused), so stop with a diagnostic, not an index error
+    fs_die(c3("too many locals in one function (limit ", str(FSLMAX), ", counting every block's names and compiler temporaries): split the function"))
+
 def fs_newlocal(nm, t):
     global nfsl, fs_frame, nfsx
     if (fsk[t] == 3 or fsk[t] == 5) and fs_ownerfield(t):
         fs_die("arrays/slices containing own fields need per-element initialisation")
+    if nfsl >= FSLMAX:
+        fs_toomany()
     a = ftal[t]
     if a < 8:
         a = 8
@@ -16367,6 +16375,8 @@ def fs_newlocal(nm, t):
         j = ftf0[t]
         while j < ftf0[t] + ftfn[t]:
             if ft_isaff(fft[j]) and ftsg[fft[j]] == 2:
+                if nfsl >= FSLMAX:
+                    fs_toomany()
                 z = nfsl
                 nfsl += 1
                 fsl_n[z] = c3(nm, ".", ffn[j])

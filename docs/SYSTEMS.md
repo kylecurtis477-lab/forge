@@ -276,6 +276,10 @@ pass (`FORGEC_FLAGS=-O0 ./run_tests.sh`) builds it with every bounds check kept 
 1496 by default). Until 2026-11-13 `-O0` was ignored in freestanding mode. New optimizer passes follow the landing
 rule in docs/tools-optcov.md.
 
+Limits: one fs function holds at most 4096 locals (FSLMAX; every block's names, compiler temporaries and own-field
+slots count, nothing is reused); past that the compiler stops with "too many locals in one function" at the
+offending line (tests/limits).
+
 ## Kernel asm and --fs-opt (Phase 12.1 step 3)
 
 `--fs-opt` keeps Forge locals in caller-saved registers (r8–r11, rsi, rdi) in leaf functions and in

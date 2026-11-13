@@ -76,6 +76,8 @@ tests/bounds/run.sh || fail=1
 tests/nonnull/run.sh || fail=1
 tests/unsafe/run.sh || fail=1
 tests/own/run.sh || fail=1
+# tests/limits: compiler table limits end in a diagnostic (4096 locals per fs function)
+tests/limits/run.sh || fail=1
 tests/defer/run.sh || fail=1
 tests/generic/run.sh || fail=1
 tests/ed25519/run.sh || fail=1
