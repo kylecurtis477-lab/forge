@@ -1,0 +1,84 @@
+# ostools: preflight for the OS-test toolchain (QEMU, GRUB, xorriso, mtools, OVMF), run before every gate.
+# usage: build/ostools [--check] [--force]
+#   (no flag)  if anything is missing, reinstall it, then check again; exit 1 ("PREFLIGHT FAIL") if still missing
+#   --check    only report what is missing (exit 1 if anything is)
+#   --force    reinstall even when everything is present (exercises the restore path)
+# A box reset (2026-11-13 ~04:20 CST) removed these packages and the next gate failed os-artifacts-build on a
+# missing grub-file. apt's own fetch fails through the box egress while curl works, so the restore fetches the
+# signed Debian index and the .debs with curl and lets apt verify the index and install offline.
+import os
+import sys
+
+PKGS = ["qemu-system-x86", "grub-pc-bin", "grub-efi-amd64-bin", "grub-common", "mtools", "xorriso", "ovmf"]
+CMDS = ["qemu-system-x86_64", "grub-file", "grub-mkrescue", "xorriso", "mformat"]
+PATHS = ["/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/lib/grub/i386-pc", "/usr/lib/grub/x86_64-efi"]
+DIST = "https://deb.debian.org/debian/dists/trixie"
+LISTS = "/var/lib/apt/lists/deb.debian.org_debian_dists_trixie_"
+TMP = "/tmp/forge-ostools"
+
+def missing():
+    res = []
+    for c in CMDS:
+        if os.run(["/bin/sh", "-c", "command -v " + c])[0] != 0:
+            res.append(c)
+    for p in PATHS:
+        if not os.path.exists(p):
+            res.append(p)
+    return res
+
+def step(args):
+    r = os.run(args)
+    if r[0] != 0:
+        print("ostools: failed (" + str(r[0]) + "): " + " ".join(args))
+        print(r[1] + r[2])
+        sys.exit(1)
+    return r
+
+def restore():
+    if not os.path.isdir(TMP):
+        os.mkdir(TMP)
+    if not os.path.isdir(TMP + "/debs"):
+        os.mkdir(TMP + "/debs")
+    step(["sudo", "sed", "-i", "s#http://deb.debian.org#https://deb.debian.org#g", "/etc/apt/sources.list.d/debian.sources"])
+    step(["curl", "-sf", "-o", TMP + "/InRelease", DIST + "/InRelease"])
+    step(["curl", "-sf", "-o", TMP + "/Packages.xz", DIST + "/main/binary-amd64/Packages.xz"])
+    step(["xz", "-dkf", TMP + "/Packages.xz"])
+    step(["sudo", "cp", TMP + "/InRelease", LISTS + "InRelease"])
+    step(["sudo", "cp", TMP + "/Packages", LISTS + "main_binary-amd64_Packages"])
+    # the URIs apt would fetch: lines like 'https://.../x.deb' x.deb SIZE SHA256:...
+    r = step(["apt-get", "install", "-y", "--print-uris"] + PKGS)
+    debs = []
+    for l in r[1].split("\n"):
+        if l.startswith("'"):
+            parts = l.split(" ")
+            u = parts[0].replace("'", "")
+            f = TMP + "/debs/" + parts[1]
+            step(["curl", "-sf", "--retry", "3", "-o", f, u])
+            debs.append(f)
+    print("ostools: fetched " + str(len(debs)) + " packages")
+    if len(debs) > 0:
+        step(["sudo", "cp"] + debs + ["/var/cache/apt/archives/"])
+    step(["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "-qq", "--no-download"] + PKGS)
+
+def main():
+    m = missing()
+    if "--check" in sys.argv:
+        if len(m) == 0:
+            print("ostools: all present")
+            sys.exit(0)
+        print("ostools: missing " + " ".join(m))
+        sys.exit(1)
+    if len(m) == 0 and not ("--force" in sys.argv):
+        print("ostools: all present")
+        sys.exit(0)
+    if len(m) > 0:
+        print("ostools: missing " + " ".join(m) + "; restoring")
+    restore()
+    m = missing()
+    if len(m) > 0:
+        print("PREFLIGHT FAIL: still missing " + " ".join(m))
+        sys.exit(1)
+    print("ostools: restored, all present")
+    sys.exit(0)
+
+main()

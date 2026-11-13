@@ -166,6 +166,11 @@ count stays at or under 709.
      annotated `x: ref[T]` locals and globals and generic arguments (`list[mut[T]]`) were still silently ignored;
      the check is now in hosted `parse_type` and covers every type position (a hosted name `own`, `ref` or `mut`
      still works; tests/own/bad_hosted_own_{return,local,generic}.forge; 50 checks).
+   - *Gate infrastructure (2026-11-13):* a box reset removed the QEMU/GRUB/xorriso/OVMF packages and failed a
+     gate on setup, not code. tools/ostools.forge now checks the OS-test toolchain and reinstalls what is missing
+     (signed Debian index and .debs fetched with curl, installed by apt offline); the gate harness runs it after
+     the build and stops with PREFLIGHT FAIL instead of running the tests without their tools
+     (docs/tools-ostools.md).
 3. **Optimizer correctness gate.** Measure the compiler's test coverage, extend the differential fuzzer
    (tools/fsfuzz.forge) to every combination of optimizer flags, and require it to pass before any new optimizer
    pass lands.
