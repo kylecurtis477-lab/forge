@@ -18242,11 +18242,11 @@ def fs_postfix():
                 fs_die("field access needs a struct or pointer to struct")
             k = fs_field(t, fs_ident())
             if ft_isaff(fft[k]):
-                # Stage 3a (restricted): follow an owner field through a checked owning/borrowed
-                # pointer only as a place. Never expose its owner value or overwrite its slot.
-                # No lifetime escapes: borrowing the field itself still requires place tracking.
-                # base is "" after any postfix or a non-name primary: fs_local("") would find an unnamed frame
-                # temporary (call result or return slot), so only a named local counts
+            # Stage 3a (restricted): follow an owner field through a checked owning/borrowed
+            # pointer only as a place. Never expose its owner value or overwrite its slot.
+            # No lifetime escapes: borrowing the field itself still requires place tracking.
+            # base is "" after any postfix or a non-name primary: fs_local("") would find an unnamed frame
+            # temporary (call result or return slot), so only a named local counts
                 pl = -1
                 if len(base) > 0:
                     pl = fs_local(base)

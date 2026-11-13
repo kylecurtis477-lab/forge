@@ -191,6 +191,10 @@ count stays at or under 709.
      values add up. The raw-pointer message said "requires explicit unsafe ownership handling" although unsafe
      code is refused too; it now says so. Seven adversarial cases became tests (bad_ptr_field_{ref_index,
      ref_compound,raw_unsafe,nested,shared_write,arg,index1}); tests/own 70 checks.
+     *Fix (2026-11-13, found by gate inv152's fmt-repo-clean):* the patch's comment block in `fs_postfix` sat at
+     the body's indentation directly under `if ft_isaff(fft[k]):`; `build/fmt` puts a comment directly under a block
+     opener at the opener's indentation (66 other places in the compiler do so), so `fmt --check` failed on
+     compiler.forge. Reformatted with `build/fmt`; comments only, the kernel assembly is unchanged.
    - *Next Stage 3 steps (from ChatGPT's design note, in order; each its own gated commit):*
      (3b) `nown[T]`, a nullable affine owner: the only owner type allowed in zero-initialised storage (globals,
      arrays, kexec records), with a null check before use; arrays of owners return as arrays of `nown[T]`.
