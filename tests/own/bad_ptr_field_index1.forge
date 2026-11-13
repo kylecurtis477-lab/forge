@@ -1,0 +1,11 @@
+# expect: indexing a ptr[T] (unchecked; use a slice) is unsafe
+# forge: no-runtime
+struct Node:
+    id: u64
+    arr: u64[4]
+    next: own[Node]
+struct Queue:
+    n: u64
+    head: own[Node]
+def f(p: mut[Queue]) -> u64:
+    return p.head[1].id

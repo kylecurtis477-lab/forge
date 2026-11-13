@@ -181,6 +181,16 @@ count stays at or under 709.
      bad_ref_field_write; three Stage 2 tests take the raw-pointer message. Found while testing it and fixed in
      separate commits: arrays/slices of owners outside struct fields and `addr()` through a `ref[T]` (Phase 4.4
      item 4), plus the review fixes in the commit after this one.
+     *Review fixes (2026-11-13):* the patch dropped the `len(base) > 0` guard, so after any postfix (base "")
+     `fs_local("")` resolved to the newest unnamed frame temporary (a struct call result or return slot); no
+     program reached a wrong path through it (those temporaries are structs, and the name lookup that follows
+     fails), but correctness hung on that accident, so the guard is back. The runtime test built a `mut[Queue]`
+     by casting the address of the `head` field (correct only because head sat at offset 0) and printed a fixed
+     string; it now makes one `own[Queue]` in unsafe code and does the rest in safe code (borrow_mut, borrow,
+     own parameter, `p.head.id`, `p.head.arr[2]`, `p.head[0].arr[3]` at offset 8) and prints only when the
+     values add up. The raw-pointer message said "requires explicit unsafe ownership handling" although unsafe
+     code is refused too; it now says so. Seven adversarial cases became tests (bad_ptr_field_{ref_index,
+     ref_compound,raw_unsafe,nested,shared_write,arg,index1}); tests/own 70 checks.
    - *Next Stage 3 steps (from ChatGPT's design note, in order; each its own gated commit):*
      (3b) `nown[T]`, a nullable affine owner: the only owner type allowed in zero-initialised storage (globals,
      arrays, kexec records), with a null check before use; arrays of owners return as arrays of `nown[T]`.

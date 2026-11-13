@@ -1,4 +1,4 @@
-# expect: own field through a raw pointer requires explicit unsafe ownership handling
+# expect: own field through a raw ptr[T]/nptr[T] is refused
 # forge: no-runtime
 struct Node:
     value: u64

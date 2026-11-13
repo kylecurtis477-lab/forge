@@ -1,0 +1,13 @@
+# expect: while it is borrowed
+# forge: no-runtime
+struct Node:
+    id: u64
+    arr: u64[4]
+    next: own[Node]
+struct Queue:
+    n: u64
+    head: own[Node]
+def f(p: own[Queue]) -> u64:
+    r = borrow(p)
+    p.head.id = 2
+    return r.n

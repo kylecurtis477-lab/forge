@@ -1,0 +1,11 @@
+# expect: own field read through a pointer or nonlocal is not tracked
+# forge: no-runtime
+struct Node:
+    id: u64
+    arr: u64[4]
+    next: own[Node]
+struct Queue:
+    n: u64
+    head: own[Node]
+def f(p: mut[Queue]) -> u64:
+    return p.head.next.id

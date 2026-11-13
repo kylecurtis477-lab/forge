@@ -1,0 +1,12 @@
+# expect: own field through a raw ptr[T]/nptr[T] is refused
+# forge: no-runtime
+struct Node:
+    id: u64
+    arr: u64[4]
+    next: own[Node]
+struct Queue:
+    n: u64
+    head: own[Node]
+@unsafe
+def f(p: ptr[Queue]) -> u64:
+    return p.head.id

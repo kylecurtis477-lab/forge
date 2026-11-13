@@ -18245,11 +18245,15 @@ def fs_postfix():
                 # Stage 3a (restricted): follow an owner field through a checked owning/borrowed
                 # pointer only as a place. Never expose its owner value or overwrite its slot.
                 # No lifetime escapes: borrowing the field itself still requires place tracking.
-                pl = fs_local(base)
+                # base is "" after any postfix or a non-name primary: fs_local("") would find an unnamed frame
+                # temporary (call result or return slot), so only a named local counts
+                pl = -1
+                if len(base) > 0:
+                    pl = fs_local(base)
                 if pl >= 0 and fsk[fsl_t[pl]] == 1:
                     sg = ftsg[fsl_t[pl]]
                     if sg < 2:
-                        fs_die("own field through a raw pointer requires explicit unsafe ownership handling")
+                        fs_die("own field through a raw ptr[T]/nptr[T] is refused, even in unsafe code: convert the pointer to own/mut/ref[T] first")
                     if not fs_isop(".") and not fs_isop("["):
                         fs_die("cannot move owner through a pointer: use take/replace")
                     if w and sg == 3:
