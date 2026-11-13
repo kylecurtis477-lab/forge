@@ -4,7 +4,7 @@
 # top (frame, title bar, content), then the mouse cursor, all clipped to the rectangle (gfx_clip). The terminal
 # (gfx.fsi) becomes window 0's content: its cells are drawn from term_cell, so text under another window stays
 # hidden. A sandboxed program's canvas (appwin.fsi, step 5) is one more window. A left click raises and focuses the topmost window under the cursor; pressing on a floating window's
-# title bar and moving drags it.
+# title bar and moving drags it. The desktop shell (panel.fsi, step 6) draws a taskbar and launcher above the windows.
 WM_N = 6
 WM_TB = 16
 WM_TERM = 1
@@ -32,6 +32,7 @@ wm_paints: u64
 wm_raises: u64
 wm_moves: u64
 wm_cur: u64  # 1 once the input window has placed the cursor
+wm_hid: u64[6]  # screen step 6: 1 while minimized from the taskbar (panel.fsi): not drawn, not hit
 
 def wm_add(kind: u64, x: u64, y: u64, w: u64, h: u64) -> u64:
     i = wm_n
@@ -40,6 +41,7 @@ def wm_add(kind: u64, x: u64, y: u64, w: u64, h: u64) -> u64:
     wm_w[i] = w
     wm_h[i] = h
     wm_kind[i] = kind
+    wm_hid[i] = 0
     wm_z[i] = i
     wm_n += 1
     wm_focus = i
@@ -67,11 +69,15 @@ def wm_name(w: u64):
         puts("Help")
 
 def wm_hits(w: u64, x: u64, y: u64) -> u64:
+    if wm_hid[w] != 0:
+        return 0
     if x >= wm_x[w] and x < wm_x[w] + wm_w[w] and y >= wm_y[w] and y < wm_y[w] + wm_h[w]:
         return 1
     return 0
 
 def wm_meets(w: u64, x0: u64, y0: u64, x1: u64, y1: u64) -> u64:
+    if wm_hid[w] != 0:
+        return 0
     if wm_x[w] < x1 and wm_x[w] + wm_w[w] > x0 and wm_y[w] < y1 and wm_y[w] + wm_h[w] > y0:
         return 1
     return 0
@@ -108,8 +114,8 @@ def wm_draw(w: u64):
     if wm_kind[w] == WM_ABOUT:
         gfx_text(cx, cy, "Forge OS: kernel, language and tools", 0xFFFFFF, WM_BODY)
         gfx_text(cx, cy + 16, "written in Forge.", 0xFFFFFF, WM_BODY)
-        gfx_text(cx, cy + 48, "Screen step 4: windowed compositor", 0xC8D0E0, WM_BODY)
-        gfx_text(cx, cy + 64, "(z-order, damage repaint, focus)", 0xC8D0E0, WM_BODY)
+        gfx_text(cx, cy + 48, "Screen step 6: desktop shell", 0xC8D0E0, WM_BODY)
+        gfx_text(cx, cy + 64, "(taskbar, launcher, minimize)", 0xC8D0E0, WM_BODY)
     else:
         gfx_text(cx, cy, "Click a window to focus it.", 0xFFFFFF, WM_BODY)
         gfx_text(cx, cy + 16, "Drag a title bar to move it.", 0xFFFFFF, WM_BODY)
@@ -145,6 +151,8 @@ def wm_paint(x0: u64, y0: u64, x1: u64, y1: u64):
         if wm_meets(w, x0, y0, x1, y1) != 0:
             wm_draw(w)
         i += 1
+    if pn_meets(x0, y0, x1, y1) != 0:
+        pn_draw()
     if wm_cur != 0 and cur_x < x1 and cur_x + CUR_W > x0 and cur_y < y1 and cur_y + CUR_H > y0:
         wm_cur_draw()
     gfx_clip(0, 0, gfx_w, gfx_h)
@@ -174,9 +182,10 @@ def wm_raise(w: u64):
     wm_z[wm_n - 1] = w
     wm_focus = w
     wm_raises += 1
-    if old != w:
+    if old != w and old < WM_N:
         wm_paint_win(old)
     wm_paint_win(w)
+    pn_paint_bar()  # the focused window's taskbar button changes too
 
 def wm_cursor(dx: u64, dy: u64):
 # move the cursor (two's complement deltas, clamped to the screen); a dragged window follows it
@@ -208,8 +217,8 @@ def wm_cursor(dx: u64, dy: u64):
             wy = cur_y - wm_oy
         if wx + wm_w[w] > gfx_w:
             wx = gfx_w - wm_w[w]
-        if wy + wm_h[w] > gfx_h:
-            wy = gfx_h - wm_h[w]
+        if wy + wm_h[w] > gfx_h - PN_H:
+            wy = gfx_h - PN_H - wm_h[w]
         wm_x[w] = wx
         wm_y[w] = wy
         wm_moves += 1
@@ -221,7 +230,7 @@ def wm_cursor(dx: u64, dy: u64):
 def wm_button(b: u64):
 # left press: raise and focus the window under the cursor; on a floating window's title bar, start a drag.
 # left release: end the drag and report where the window went
-    if (b & 1) != 0 and (wm_btn & 1) == 0:
+    if (b & 1) != 0 and (wm_btn & 1) == 0 and pn_press(cur_x, cur_y) == 0:
         w = wm_top_at(cur_x, cur_y)
         if w < WM_N:
             wm_raise(w)
@@ -246,9 +255,10 @@ def wm_button(b: u64):
 
 def wm_start():
 # the desktop's windows: the terminal (window 0, full width under the labels, so the boot harness reads its rows
-# whole) and two floating windows that overlap, Help on top
+# whole, ending above the taskbar) and two floating windows that overlap, Help on top
     wm_n = 0
-    wm_add(WM_TERM, 0, 128, gfx_w, gfx_h - 128)
+    pn_menu = 0
+    wm_add(WM_TERM, 0, 128, gfx_w, gfx_h - 128 - PN_H)
     wm_add(WM_ABOUT, 100, 170, 420, 160)
     wm_add(WM_HELP, 380, 250, 380, 140)
     if app_pid != 0:

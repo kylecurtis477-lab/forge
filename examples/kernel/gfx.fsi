@@ -412,7 +412,7 @@ def desk_bg(x0: u64, y0: u64, x1: u64, y1: u64):
             gfx_fill(i * bw, 0, bw, 96, gfx_bars[i])
             i += 1
     if y0 < 128 and y1 > 96:
-        gfx_text(0, 96, "Forge desktop (screen step 5: a sandboxed app window)", 0xFFFFFF, GFX_DESK)
+        gfx_text(0, 96, "Forge desktop (screen step 6: a desktop shell)", 0xFFFFFF, GFX_DESK)
         x = gfx_text(0, 112, "gfx: ", 0xFFFFFF, GFX_DESK)
         x = gfx_num(x, 112, gfx_w, 0xFFFFFF, GFX_DESK)
         x = gfx_text(x, 112, "x", 0xFFFFFF, GFX_DESK)
@@ -429,7 +429,7 @@ def desktop_show():
     gfx_clip(0, 0, gfx_w, gfx_h)
     if gfx_selftest() == 0:
         panic("gfx: back-buffer self-test failed")
-    term_open(0, 144, gfx_w / 8, (gfx_h - 144) / 16, 0xE0E0E0, GFX_TERM)
+    term_open(0, 144, gfx_w / 8, (gfx_h - 144 - PN_H) / 16, 0xE0E0E0, GFX_TERM)
     term_replay()
     wm_start()
     gfx_present()

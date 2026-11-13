@@ -114,6 +114,18 @@ count stays at or under 709.
         12 draws, foreign handle refused) and two pixels of the canvas in the screendump. tests/user-build counts
         118 artifacts (was 110). No new unsafe code (kernel 170 / 708). Event delivery to apps, more windows per app and a user-space compositor
         are later Desktop-track items.
+   6. A desktop shell around the compositor: a taskbar and a launcher, so every window can be found, brought
+      forward and minimized with the mouse. This completes build-plan item 1, the working screen.
+      **Done (screen step 6, 2026-11-13):** examples/kernel/panel.fsi. A 32-pixel taskbar (Forge button, one button
+        per window, the focused one highlighted) and a launcher menu above it, both drawn by `wm_paint` after the
+        windows. A press on a window's button raises it, or minimizes it when it is already focused (`wm_hid`);
+        a launcher entry restores and raises its window. The terminal shrinks to 128x37 to sit above the bar.
+        tests/os/desktop.sh, after the step 4 drag: About's button (About minimized), the Forge button (launcher
+        open, 4 entries), the About Forge entry (restored, raised, menu closed), Help's button (Help raised);
+        serial must show each step and `shell: 1 launches, 1 minimized, 1 restored`, and the screendump must show
+        Help's title over About, About's title unfocused, the taskbar, the Forge button, Help's button focused,
+        About's not, and no launcher (21 s). Found while making the visual: a click-raise left the taskbar
+        showing the old focus, so `wm_raise` now repaints it. No new unsafe code (kernel 170 / 708).
 2. **Ownership-typed struct fields.** `own`/`ref`/`mut` as struct field types, borrow checks through field access,
    and non-lexical borrow ends where the rule is simple. Applied first to kernel data structures: the run queue,
    page tables and the handoff records.

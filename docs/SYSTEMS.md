@@ -467,7 +467,14 @@ at most 320 x 160) and fill rectangles (432) and draw text (433) in it; the kern
 clips every call to it, and only the opening process may draw (any other handle or process: EBADF). The compositor
 shows the canvas as one more window, which outlives the program. Without `gfx` the call never gets past the
 syscall boundary (EACCES, logged by cap_sys_deny). Desktop mode runs gfxdeny (caps(fs)) and gfxapp (caps(gfx))
-before the desktop starts.
+before the desktop starts. Step 6 adds the desktop shell, panel.fsi: a 32-pixel taskbar along the bottom (the
+terminal ends above it, 128x37 cells) with a Forge button that opens a launcher listing every window, and one button
+per window, the focused one highlighted. `wm_paint` draws the taskbar and an open launcher after the windows, so they
+are always on top, and windows are dragged only above it. A press on a window's button raises and focuses it; on the
+focused window's button it minimizes it (`wm_hid`: not drawn, not hit; focus moves to the topmost visible window).
+Choosing a launcher entry restores and raises that window and closes the menu; a press anywhere else closes the menu.
+Every focus change repaints the taskbar. The shell is kernel code for now; a user-space shell and event delivery to
+apps are later Desktop-track items.
 ## Security fix: user-copy validation (after 8.8)
 
 `copy_user` / `copy_str_user` (cpux.fsi) now enforce the user range themselves: every operand below
