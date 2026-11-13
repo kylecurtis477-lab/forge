@@ -53,6 +53,8 @@
 - `ce37b64` CHANGELOG.md for 0.17.2 through 0.18.0 and the start of 0.18.1.
 - `e21ccf8` current execution order, the six v1 reservations and a Version 2 section.
 - `e287417` working screen first, then the reviewed core order and three never-reboot tiers.
+- docs for the gate's whole-repo `build/fmt --check` preflight (the commit after 9c31307; the harness lives
+  outside the repo).
 
 ## 0.19.0 (unreleased)
 

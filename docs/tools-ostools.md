@@ -35,6 +35,10 @@ and runs it before any test. It logs to `forge-logs/preflightN.log` and prints `
 preflight stops the gate with `PREFLIGHT FAIL` instead of producing a wall of OS-test failures. Trees older than
 this tool fall back to the harness's `restore-tools.sh`.
 
+Right after it the harness runs `build/fmt --check $(build/fmt --list)` (log `forge-logs/fmtpreN.log`, line
+`FMT PREFLIGHT EXIT=N`); a tree that is not fmt-clean stops with `FMT PREFLIGHT FAIL` before any test, instead of
+failing fmt-repo-clean an hour later (gate inv152, 2026-11-13).
+
 ## Tested
 
 The tool was checked on the box in four ways:

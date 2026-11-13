@@ -214,6 +214,10 @@ count stays at or under 709.
      (signed Debian index and .debs fetched with curl, installed by apt offline); the gate harness runs it after
      the build and stops with PREFLIGHT FAIL instead of running the tests without their tools
      (docs/tools-ostools.md).
+     *Fmt preflight (2026-11-13):* gate inv152 ran its full hour and failed only on fmt-repo-clean (a comment
+     block indented against the formatter). The harness now runs `build/fmt --check` over every repo file right
+     after the toolchain preflight and stops with `FMT PREFLIGHT FAIL` (listing the files) before any test runs;
+     the same check is run by hand before a batch is handed to the gate.
 3. **Optimizer correctness gate.** Measure the compiler's test coverage, extend the differential fuzzer
    (tools/fsfuzz.forge) to every combination of optimizer flags, and require it to pass before any new optimizer
    pass lands.
